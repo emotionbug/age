@@ -2868,8 +2868,12 @@ static Form_pg_proc get_procform(FuncCall *fn, bool err_not_found)
 
         if (found)
         {
-            result = palloc(sizeof(FormData_pg_proc));
-            memcpy(result, procform, sizeof(FormData_pg_proc));
+            Size procform_size;
+
+            procform_size = offsetof(FormData_pg_proc, proargtypes.values) +
+                            sizeof(Oid) * procform->pronargs;
+            result = palloc(procform_size);
+            memcpy(result, procform, procform_size);
             break;
         }
 

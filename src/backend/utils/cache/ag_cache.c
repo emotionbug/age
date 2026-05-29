@@ -1401,10 +1401,11 @@ const char *get_label_cache_relation_name(label_cache_data *label_cache)
     relname = get_rel_name(label_cache->relation);
     if (relname == NULL)
     {
+        invalidate_label_cache();
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_TABLE),
-                 errmsg("label relation %u does not exist",
-                        label_cache->relation)));
+                 errmsg("rel_name not found for label \"%s\"",
+                        NameStr(label_cache->name))));
     }
 
     namestrcpy(&label_cache->relation_name, relname);

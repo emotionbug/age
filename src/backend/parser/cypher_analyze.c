@@ -19,6 +19,8 @@
 
 #include "postgres.h"
 
+#include "catalog/namespace.h"
+#include "catalog/pg_proc.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/analyze.h"
@@ -383,6 +385,8 @@ static bool is_func_cypher(FuncExpr *funcexpr)
 
 static Oid get_cypher_func_oid(void)
 {
+    oidvector *arg_types;
+
     if (!cypher_func_oid_callback_registered)
     {
         CacheRegisterSyscacheCallback(PROCOID, invalidate_cypher_func_oid,
@@ -395,8 +399,19 @@ static Oid get_cypher_func_oid(void)
 
     if (!OidIsValid(cypher_func_oid))
     {
-        cypher_func_oid = get_ag_func_oid("cypher", 3, NAMEOID, CSTRINGOID,
-                                          AGTYPEOID);
+        Oid namespace_oid = get_namespace_oid("ag_catalog", true);
+
+        if (!OidIsValid(namespace_oid))
+        {
+            return InvalidOid;
+        }
+
+        arg_types = buildoidvector((Oid[]){NAMEOID, CSTRINGOID, AGTYPEOID}, 3);
+        cypher_func_oid = GetSysCacheOid3(PROCNAMEARGSNSP, Anum_pg_proc_oid,
+                                          CStringGetDatum("cypher"),
+                                          PointerGetDatum(arg_types),
+                                          ObjectIdGetDatum(namespace_oid));
+        pfree(arg_types);
     }
 
     return cypher_func_oid;
