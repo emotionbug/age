@@ -1664,10 +1664,13 @@ static graphid get_next_vertex_from_source(VLE_local_context *vlelctx,
                 return get_edge_entry_start_vertex_id(ee);
             }
             elog(ERROR, "get_next_vertex_from_source: no parent match");
+            break;
 
         default:
             elog(ERROR, "get_next_vertex_from_source: unknown edge direction");
     }
+
+    return 0;
 }
 
 static cypher_rel_dir reverse_edge_direction(cypher_rel_dir edge_direction)

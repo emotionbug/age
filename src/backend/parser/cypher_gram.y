@@ -54,6 +54,11 @@
 %parse-param {ag_scanner_t scanner}
 %parse-param {cypher_yy_extra *extra}
 
+%initial-action
+{
+    (void)yynerrs;
+}
+
 %union {
     /* types in cypher_yylex() */
     int integer;
