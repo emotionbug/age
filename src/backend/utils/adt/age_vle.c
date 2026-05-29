@@ -55,8 +55,8 @@
  *
  * Implementation pointer
  *
- *   Cycle prevention is enforced by edge_state_entry.used_in_path, set
- *   and cleared during DFS traversal in dfs_find_a_path_between() and
+ *   Cycle prevention is enforced by dense edge-state flags, set and cleared
+ *   during DFS traversal in dfs_find_a_path_between() and
  *   dfs_find_a_path_from(). The helper is_edge_in_path() inspects the
  *   current path stack. See those functions for the enforcement site.
  */
@@ -78,23 +78,15 @@
 /* defines */
 #define GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc) \
             (graphid *) (&vpc->graphid_array_data)
-#define EDGE_STATE_HTAB_NAME "Edge state "
-#define EDGE_STATE_HTAB_MIN_SIZE 16
 #define EXISTS_HTAB_NAME "known edges"
 #define EXISTS_HTAB_NAME_MIN_SIZE 16
 #define EDGE_UNIQUENESS_FAST_ARGS 16
 #define EDGE_UNIQUENESS_NESTED_SCAN_LIMIT 64
 #define VLE_NEXT_VERTEX_UNKNOWN ((graphid)0)
 #define MAXIMUM_NUMBER_OF_CACHED_LOCAL_CONTEXTS 5
-
-/* edge state entry for the edge_state_hashtable */
-typedef struct edge_state_entry
-{
-    graphid edge_id;               /* edge id, it is also the hash key */
-    bool used_in_path;             /* like visited but more descriptive */
-    bool has_been_matched;         /* have we checked for a  match */
-    bool matched;                  /* is it a match */
-} edge_state_entry;
+#define VLE_EDGE_STATE_USED 0x01
+#define VLE_EDGE_STATE_MATCH_CHECKED 0x02
+#define VLE_EDGE_STATE_MATCHED 0x04
 
 /*
  * VLE_path_function is an enum for the path function to use. This currently can
@@ -131,13 +123,15 @@ typedef struct VLE_local_context
     int64 uidx;                    /* upper (end) bound index */
     bool uidx_infinite;            /* flag if the upper bound is omitted */
     cypher_rel_dir edge_direction; /* the direction of the edge */
-    HTAB *edge_state_hashtable;    /* local state hashtable for our edges */
-    int64 edge_state_initial_size; /* initial edge-state hash size estimate */
     GraphIdStack *dfs_vertex_stack; /* dfs stack for vertices (array-based) */
     GraphIdStack *dfs_edge_stack;   /* dfs stack for edges (array-based) */
+    GraphIdStack *dfs_edge_index_stack; /* dense edge-state indexes */
     GraphIdStack *dfs_next_vertex_stack; /* cached terminal vertices */
     GraphIdStack *dfs_path_stack;   /* dfs stack containing the path (array-based) */
+    GraphIdStack *dfs_path_edge_index_stack; /* dense indexes in path order */
     GraphIdStack *dfs_path_vertex_stack; /* vertices in current path order */
+    uint8 *edge_state_flags;        /* dense local state by edge index */
+    int64 edge_state_flags_size;    /* number of entries in flags array */
     VLE_path_function path_function; /* which path function to use */
     bool reverse_paths_to;          /* traverse paths-to from the bound end */
     bool reverse_output_path;       /* reverse traversal result before return */
@@ -204,11 +198,11 @@ static Oid get_cached_vle_graph_oid(const char *graph_name,
 static Oid get_cached_vle_label_relation(Oid graph_oid,
                                          const char *label_name,
                                          int label_name_len);
-static void create_VLE_local_state_hashtable(VLE_local_context *vlelctx);
+static void create_VLE_local_state_flags(VLE_local_context *vlelctx);
 static void free_VLE_local_context(VLE_local_context *vlelctx);
 /* VLE graph traversal functions */
-static edge_state_entry *get_edge_state(VLE_local_context *vlelctx,
-                                        graphid edge_id);
+static uint8 *get_edge_state_flags(VLE_local_context *vlelctx,
+                                   int64 edge_index);
 /* graphid data structures */
 static void load_initial_dfs_stacks(VLE_local_context *vlelctx);
 static bool dfs_find_a_path_between(VLE_local_context *vlelctx);
@@ -224,9 +218,6 @@ static void add_valid_vertex_edges(VLE_local_context *vlelctx,
 static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
                                              vertex_entry *ve);
 static graphid get_next_vertex(VLE_local_context *vlelctx, edge_entry *ee);
-static graphid get_next_vertex_from_source(VLE_local_context *vlelctx,
-                                           edge_entry *ee,
-                                           graphid source_vertex_id);
 static cypher_rel_dir reverse_edge_direction(cypher_rel_dir edge_direction);
 static bool is_zero_length_only(VLE_local_context *vlelctx);
 static bool is_empty_length_range(VLE_local_context *vlelctx);
@@ -237,6 +228,10 @@ static int64 get_initial_edge_count(VLE_local_context *vlelctx,
 static int64 get_matching_initial_edge_count(ListGraphId *edges);
 static bool is_edge_in_path(VLE_local_context *vlelctx, graphid edge_id,
                             int64 stack_size);
+static bool next_adj_entry(GraphEdgeAdjList *edge_out, int64 *edge_out_idx,
+                           GraphEdgeAdjList *edge_in, int64 *edge_in_idx,
+                           GraphEdgeAdjList *edge_self, int64 *edge_self_idx,
+                           GraphEdgeAdjEntry **adj_entry);
 /* VLE path and edge building functions */
 static VLE_path_container *create_VLE_path_container(int64 path_size);
 static VLE_path_container *build_VLE_path_container(VLE_local_context *vlelctx);
@@ -415,31 +410,15 @@ static void cache_VLE_local_context(VLE_local_context *vlelctx)
     global_vle_local_contexts = vlelctx;
 }
 
-/* helper function to create the local VLE edge state hashtable. */
-static void create_VLE_local_state_hashtable(VLE_local_context *vlelctx)
+/* helper function to create the local dense VLE edge-state flags. */
+static void create_VLE_local_state_flags(VLE_local_context *vlelctx)
 {
-    HASHCTL edge_state_ctl;
-    char *graph_name = NULL;
-    char *eshn = NULL;
-    long initial_size;
-
-    /* get the graph name */
-    graph_name = vlelctx->graph_name;
-    eshn = psprintf("%s%s", EDGE_STATE_HTAB_NAME, graph_name);
-
-    /* initialize the edge state hashtable */
-    MemSet(&edge_state_ctl, 0, sizeof(edge_state_ctl));
-    edge_state_ctl.keysize = sizeof(int64);
-    edge_state_ctl.entrysize = sizeof(edge_state_entry);
-    edge_state_ctl.hash = tag_hash;
-
-    initial_size = Max(vlelctx->edge_state_initial_size,
-                       EDGE_STATE_HTAB_MIN_SIZE);
-    initial_size = Min(initial_size, get_graph_num_loaded_edges(vlelctx->ggctx));
-    vlelctx->edge_state_hashtable = hash_create(eshn, initial_size,
-                                                &edge_state_ctl,
-                                                HASH_ELEM | HASH_FUNCTION);
-    pfree_if_not_null(eshn);
+    vlelctx->edge_state_flags_size = get_graph_num_loaded_edges(vlelctx->ggctx);
+    if (vlelctx->edge_state_flags_size > 0)
+    {
+        vlelctx->edge_state_flags =
+            palloc0(sizeof(uint8) * vlelctx->edge_state_flags_size);
+    }
 }
 
 /*
@@ -891,10 +870,8 @@ static bool get_agtype_scalar_bool_arg(agtype *agt_arg,
 /*
  * Helper function to free up the memory used by the VLE_local_context.
  *
- * Currently, the only structures that needs to be freed are the edge state
- * hashtable and the dfs stacks (vertex, edge, and path). The hashtable is easy
- * because hash_create packages everything into its own memory context. So, you
- * only need to do a destroy.
+ * Currently, the only structures that need to be freed are the dense edge-state
+ * flags and the DFS stacks.
  */
 static void free_VLE_local_context(VLE_local_context *vlelctx)
 {
@@ -919,11 +896,9 @@ static void free_VLE_local_context(VLE_local_context *vlelctx)
     }
 
     /* zero-length-only VLE never creates edge-state entries */
-    if (vlelctx->edge_state_hashtable != NULL)
-    {
-        hash_destroy(vlelctx->edge_state_hashtable);
-        vlelctx->edge_state_hashtable = NULL;
-    }
+    pfree_if_not_null(vlelctx->edge_state_flags);
+    vlelctx->edge_state_flags = NULL;
+    vlelctx->edge_state_flags_size = 0;
 
     destroy_entry_property_relation_cache(
         vlelctx->edge_property_relation_cache);
@@ -944,6 +919,10 @@ static void free_VLE_local_context(VLE_local_context *vlelctx)
     {
         free_gid_stack(vlelctx->dfs_edge_stack);
     }
+    if (vlelctx->dfs_edge_index_stack != NULL)
+    {
+        free_gid_stack(vlelctx->dfs_edge_index_stack);
+    }
     if (vlelctx->dfs_next_vertex_stack != NULL)
     {
         free_gid_stack(vlelctx->dfs_next_vertex_stack);
@@ -952,14 +931,20 @@ static void free_VLE_local_context(VLE_local_context *vlelctx)
     {
         free_gid_stack(vlelctx->dfs_path_stack);
     }
+    if (vlelctx->dfs_path_edge_index_stack != NULL)
+    {
+        free_gid_stack(vlelctx->dfs_path_edge_index_stack);
+    }
     if (vlelctx->dfs_path_vertex_stack != NULL)
     {
         free_gid_stack(vlelctx->dfs_path_vertex_stack);
     }
     vlelctx->dfs_vertex_stack = NULL;
     vlelctx->dfs_edge_stack = NULL;
+    vlelctx->dfs_edge_index_stack = NULL;
     vlelctx->dfs_next_vertex_stack = NULL;
     vlelctx->dfs_path_stack = NULL;
+    vlelctx->dfs_path_edge_index_stack = NULL;
     vlelctx->dfs_path_vertex_stack = NULL;
 
     /* and finally the context itself */
@@ -1025,7 +1010,6 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
     int64 vle_grammar_node_id = 0;
     bool use_cache = false;
     graphid vertex_id_arg;
-    int64 selected_start_edge_count = 0;
 
     /*
      * Get the VLE grammar node id, if it exists. Remember, we overload the
@@ -1357,12 +1341,6 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
         vlelctx->next_vertex = NULL;
         vlelctx->edge_direction =
             reverse_edge_direction(vlelctx->edge_direction);
-        if (!is_empty_length_range(vlelctx) &&
-            !is_zero_length_only(vlelctx))
-        {
-            selected_start_edge_count = get_initial_edge_count(
-                vlelctx, vlelctx->vsid, vlelctx->edge_direction);
-        }
     }
     /*
      * For two-bound VLE, choose the cheaper endpoint as the traversal root.
@@ -1391,31 +1369,14 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
             vlelctx->edge_direction =
                 reverse_edge_direction(vlelctx->edge_direction);
             vlelctx->reverse_output_path = true;
-            selected_start_edge_count = end_edge_count;
         }
-        else
-        {
-            selected_start_edge_count = start_edge_count;
-        }
-    }
-    else if (!is_empty_length_range(vlelctx) &&
-             !is_zero_length_only(vlelctx))
-    {
-        selected_start_edge_count = get_initial_edge_count(
-            vlelctx, vlelctx->vsid, vlelctx->edge_direction);
     }
 
     if ((!is_empty_length_range(vlelctx) &&
          !is_zero_length_only(vlelctx)) ||
         use_cache)
     {
-        vlelctx->edge_state_initial_size = Max(
-            selected_start_edge_count * Max(vlelctx->uidx_infinite ? 1 :
-                                            vlelctx->uidx, 1),
-            EDGE_STATE_HTAB_MIN_SIZE);
-
-        /* create the local state hashtable */
-        create_VLE_local_state_hashtable(vlelctx);
+        create_VLE_local_state_flags(vlelctx);
     }
 
     if (!is_empty_length_range(vlelctx))
@@ -1423,8 +1384,10 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
         /* initialize the dfs stacks */
         vlelctx->dfs_vertex_stack = new_gid_stack();
         vlelctx->dfs_edge_stack = new_gid_stack();
+        vlelctx->dfs_edge_index_stack = new_gid_stack();
         vlelctx->dfs_next_vertex_stack = new_gid_stack();
         vlelctx->dfs_path_stack = new_gid_stack();
+        vlelctx->dfs_path_edge_index_stack = new_gid_stack();
         vlelctx->dfs_path_vertex_stack = new_gid_stack();
 
         /* load in the starting edge(s) */
@@ -1561,30 +1524,16 @@ static Oid get_cached_vle_label_relation(Oid graph_oid,
     return cached_relation_oid;
 }
 
-/*
- * Helper function to get the specified edge's state. If it does not find it, it
- * creates and initializes it.
- */
-static edge_state_entry *get_edge_state(VLE_local_context *vlelctx,
-                                        graphid edge_id)
+static uint8 *get_edge_state_flags(VLE_local_context *vlelctx,
+                                   int64 edge_index)
 {
-    edge_state_entry *ese = NULL;
-    bool found = false;
-
-    /* retrieve the edge_state_entry from the edge state hashtable */
-    ese = (edge_state_entry *)hash_search(vlelctx->edge_state_hashtable,
-                                          (void *)&edge_id, HASH_ENTER, &found);
-
-    /* if it isn't found, it needs to be created and initialized */
-    if (!found)
+    if (edge_index < 0 || edge_index >= vlelctx->edge_state_flags_size ||
+        vlelctx->edge_state_flags == NULL)
     {
-        /* the edge id is also the hash key for resolving collisions */
-        ese->edge_id = edge_id;
-        ese->used_in_path = false;
-        ese->has_been_matched = false;
-        ese->matched = false;
+        elog(ERROR, "get_edge_state_flags: invalid edge index");
     }
-    return ese;
+
+    return &vlelctx->edge_state_flags[edge_index];
 }
 
 /*
@@ -1640,37 +1589,6 @@ static graphid get_next_vertex(VLE_local_context *vlelctx, edge_entry *ee)
     }
 
     return terminal_vertex_id;
-}
-
-static graphid get_next_vertex_from_source(VLE_local_context *vlelctx,
-                                           edge_entry *ee,
-                                           graphid source_vertex_id)
-{
-    switch (vlelctx->edge_direction)
-    {
-        case CYPHER_REL_DIR_RIGHT:
-            return get_edge_entry_end_vertex_id(ee);
-
-        case CYPHER_REL_DIR_LEFT:
-            return get_edge_entry_start_vertex_id(ee);
-
-        case CYPHER_REL_DIR_NONE:
-            if (get_edge_entry_start_vertex_id(ee) == source_vertex_id)
-            {
-                return get_edge_entry_end_vertex_id(ee);
-            }
-            else if (get_edge_entry_end_vertex_id(ee) == source_vertex_id)
-            {
-                return get_edge_entry_start_vertex_id(ee);
-            }
-            elog(ERROR, "get_next_vertex_from_source: no parent match");
-            break;
-
-        default:
-            elog(ERROR, "get_next_vertex_from_source: unknown edge direction");
-    }
-
-    return 0;
 }
 
 static cypher_rel_dir reverse_edge_direction(cypher_rel_dir edge_direction)
@@ -1810,8 +1728,10 @@ static bool dfs_find_a_path_between(VLE_local_context *vlelctx)
 {
     GraphIdStack *vertex_stack = NULL;
     GraphIdStack *edge_stack = NULL;
+    GraphIdStack *edge_index_stack = NULL;
     GraphIdStack *next_vertex_stack = NULL;
     GraphIdStack *path_stack = NULL;
+    GraphIdStack *path_edge_index_stack = NULL;
     GraphIdStack *path_vertex_stack = NULL;
     graphid end_vertex_id;
 
@@ -1820,8 +1740,10 @@ static bool dfs_find_a_path_between(VLE_local_context *vlelctx)
     /* for ease of reading */
     vertex_stack = vlelctx->dfs_vertex_stack;
     edge_stack = vlelctx->dfs_edge_stack;
+    edge_index_stack = vlelctx->dfs_edge_index_stack;
     next_vertex_stack = vlelctx->dfs_next_vertex_stack;
     path_stack = vlelctx->dfs_path_stack;
+    path_edge_index_stack = vlelctx->dfs_path_edge_index_stack;
     path_vertex_stack = vlelctx->dfs_path_vertex_stack;
     end_vertex_id = vlelctx->veid;
 
@@ -1829,20 +1751,23 @@ static bool dfs_find_a_path_between(VLE_local_context *vlelctx)
     while (!(gid_stack_is_empty(edge_stack)))
     {
         graphid edge_id;
+        int64 edge_index;
         graphid next_vertex_id;
-        edge_state_entry *ese = NULL;
+        uint8 *edge_flags = NULL;
         edge_entry *ee = NULL;
         graphid cached_next_vertex_id;
         bool found = false;
         int64 path_length;
 
         Assert(gid_stack_size(edge_stack) == gid_stack_size(next_vertex_stack));
+        Assert(gid_stack_size(edge_stack) == gid_stack_size(edge_index_stack));
 
         /* get an edge, but leave it on the stack for now */
         edge_id = gid_stack_peek(edge_stack);
+        edge_index = gid_stack_peek(edge_index_stack);
         cached_next_vertex_id = gid_stack_peek(next_vertex_stack);
         /* get the edge's state */
-        ese = get_edge_state(vlelctx, edge_id);
+        edge_flags = get_edge_state_flags(vlelctx, edge_index);
         /*
          * If the edge is already in use, it means that the edge is in the path.
          * So, we need to see if it is the last path entry (we are backing up -
@@ -1851,24 +1776,26 @@ static bool dfs_find_a_path_between(VLE_local_context *vlelctx)
          * in the path (loop - we need to remove the edge from the edge stack
          * and start with the next edge).
          */
-        if (ese->used_in_path)
+        if ((*edge_flags & VLE_EDGE_STATE_USED) != 0)
         {
-            graphid path_edge_id;
+            int64 path_edge_index;
 
             /* get the edge id on the top of the path stack (last edge) */
-            path_edge_id = gid_stack_peek(path_stack);
+            path_edge_index = gid_stack_peek(path_edge_index_stack);
             /*
              * If the ids are the same, we're backing up. So, remove it from the
              * path stack and reset used_in_path.
              */
-            if (edge_id == path_edge_id)
+            if (edge_index == path_edge_index)
             {
                 gid_stack_pop(path_stack);
+                gid_stack_pop(path_edge_index_stack);
                 gid_stack_pop(path_vertex_stack);
-                ese->used_in_path = false;
+                *edge_flags &= ~VLE_EDGE_STATE_USED;
             }
             /* now remove it from the edge stack */
             gid_stack_pop(edge_stack);
+            gid_stack_pop(edge_index_stack);
             gid_stack_pop(next_vertex_stack);
             /*
              * Remove its source vertex, if we are looking at edges as
@@ -1888,8 +1815,9 @@ static bool dfs_find_a_path_between(VLE_local_context *vlelctx)
          * Mark it and push it on the path stack. There is no need to push it on
          * the edge stack as it is already there.
          */
-        ese->used_in_path = true;
+        *edge_flags |= VLE_EDGE_STATE_USED;
         gid_stack_push(path_stack, edge_id);
+        gid_stack_push(path_edge_index_stack, edge_index);
         path_length = gid_stack_size(path_stack);
 
         if (cached_next_vertex_id != VLE_NEXT_VERTEX_UNKNOWN)
@@ -1960,8 +1888,10 @@ static bool dfs_find_a_path_from(VLE_local_context *vlelctx)
 {
     GraphIdStack *vertex_stack = NULL;
     GraphIdStack *edge_stack = NULL;
+    GraphIdStack *edge_index_stack = NULL;
     GraphIdStack *next_vertex_stack = NULL;
     GraphIdStack *path_stack = NULL;
+    GraphIdStack *path_edge_index_stack = NULL;
     GraphIdStack *path_vertex_stack = NULL;
 
     Assert(vlelctx != NULL);
@@ -1969,28 +1899,33 @@ static bool dfs_find_a_path_from(VLE_local_context *vlelctx)
     /* for ease of reading */
     vertex_stack = vlelctx->dfs_vertex_stack;
     edge_stack = vlelctx->dfs_edge_stack;
+    edge_index_stack = vlelctx->dfs_edge_index_stack;
     next_vertex_stack = vlelctx->dfs_next_vertex_stack;
     path_stack = vlelctx->dfs_path_stack;
+    path_edge_index_stack = vlelctx->dfs_path_edge_index_stack;
     path_vertex_stack = vlelctx->dfs_path_vertex_stack;
 
     /* while we have edges to process */
     while (!(gid_stack_is_empty(edge_stack)))
     {
         graphid edge_id;
+        int64 edge_index;
         graphid next_vertex_id;
-        edge_state_entry *ese = NULL;
+        uint8 *edge_flags = NULL;
         edge_entry *ee = NULL;
         graphid cached_next_vertex_id;
         bool found = false;
         int64 path_length;
 
         Assert(gid_stack_size(edge_stack) == gid_stack_size(next_vertex_stack));
+        Assert(gid_stack_size(edge_stack) == gid_stack_size(edge_index_stack));
 
         /* get an edge, but leave it on the stack for now */
         edge_id = gid_stack_peek(edge_stack);
+        edge_index = gid_stack_peek(edge_index_stack);
         cached_next_vertex_id = gid_stack_peek(next_vertex_stack);
         /* get the edge's state */
-        ese = get_edge_state(vlelctx, edge_id);
+        edge_flags = get_edge_state_flags(vlelctx, edge_index);
         /*
          * If the edge is already in use, it means that the edge is in the path.
          * So, we need to see if it is the last path entry (we are backing up -
@@ -1999,24 +1934,26 @@ static bool dfs_find_a_path_from(VLE_local_context *vlelctx)
          * in the path (loop - we need to remove the edge from the edge stack
          * and start with the next edge).
          */
-        if (ese->used_in_path)
+        if ((*edge_flags & VLE_EDGE_STATE_USED) != 0)
         {
-            graphid path_edge_id;
+            int64 path_edge_index;
 
             /* get the edge id on the top of the path stack (last edge) */
-            path_edge_id = gid_stack_peek(path_stack);
+            path_edge_index = gid_stack_peek(path_edge_index_stack);
             /*
              * If the ids are the same, we're backing up. So, remove it from the
              * path stack and reset used_in_path.
              */
-            if (edge_id == path_edge_id)
+            if (edge_index == path_edge_index)
             {
                 gid_stack_pop(path_stack);
+                gid_stack_pop(path_edge_index_stack);
                 gid_stack_pop(path_vertex_stack);
-                ese->used_in_path = false;
+                *edge_flags &= ~VLE_EDGE_STATE_USED;
             }
             /* now remove it from the edge stack */
             gid_stack_pop(edge_stack);
+            gid_stack_pop(edge_index_stack);
             gid_stack_pop(next_vertex_stack);
             /*
              * Remove its source vertex, if we are looking at edges as
@@ -2036,8 +1973,9 @@ static bool dfs_find_a_path_from(VLE_local_context *vlelctx)
          * Mark it and push it on the path stack. There is no need to push it on
          * the edge stack as it is already there.
          */
-        ese->used_in_path = true;
+        *edge_flags |= VLE_EDGE_STATE_USED;
         gid_stack_push(path_stack, edge_id);
+        gid_stack_push(path_edge_index_stack, edge_index);
         path_length = gid_stack_size(path_stack);
 
         if (cached_next_vertex_id != VLE_NEXT_VERTEX_UNKNOWN)
@@ -2105,6 +2043,36 @@ static bool is_edge_in_path(VLE_local_context *vlelctx, graphid edge_id,
     return false;
 }
 
+static bool next_adj_entry(GraphEdgeAdjList *edge_out, int64 *edge_out_idx,
+                           GraphEdgeAdjList *edge_in, int64 *edge_in_idx,
+                           GraphEdgeAdjList *edge_self, int64 *edge_self_idx,
+                           GraphEdgeAdjEntry **adj_entry)
+{
+    if (edge_out != NULL && *edge_out_idx < edge_out->size)
+    {
+        *adj_entry = &edge_out->items[*edge_out_idx];
+        (*edge_out_idx)++;
+        return true;
+    }
+
+    if (edge_in != NULL && *edge_in_idx < edge_in->size)
+    {
+        *adj_entry = &edge_in->items[*edge_in_idx];
+        (*edge_in_idx)++;
+        return true;
+    }
+
+    if (edge_self != NULL && *edge_self_idx < edge_self->size)
+    {
+        *adj_entry = &edge_self->items[*edge_self_idx];
+        (*edge_self_idx)++;
+        return true;
+    }
+
+    *adj_entry = NULL;
+    return false;
+}
+
 /*
  * Helper function to add in valid vertex edges as part of the dfs path
  * algorithm. What constitutes a valid edge is the following -
@@ -2136,11 +2104,14 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
 {
     GraphIdStack *vertex_stack = NULL;
     GraphIdStack *edge_stack = NULL;
+    GraphIdStack *edge_index_stack = NULL;
     GraphIdStack *next_vertex_stack = NULL;
-    ListGraphId *edges = NULL;
-    GraphIdNode *edge_in = NULL;
-    GraphIdNode *edge_out = NULL;
-    GraphIdNode *edge_self = NULL;
+    GraphEdgeAdjList *edge_in = NULL;
+    GraphEdgeAdjList *edge_out = NULL;
+    GraphEdgeAdjList *edge_self = NULL;
+    int64 edge_in_idx = 0;
+    int64 edge_out_idx = 0;
+    int64 edge_self_idx = 0;
     HTAB *relation_cache = NULL;
     graphid source_vertex_id = 0;
     int64 path_stack_size;
@@ -2151,6 +2122,7 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
     /* point to stacks */
     vertex_stack = vlelctx->dfs_vertex_stack;
     edge_stack = vlelctx->dfs_edge_stack;
+    edge_index_stack = vlelctx->dfs_edge_index_stack;
     next_vertex_stack = vlelctx->dfs_next_vertex_stack;
     path_stack_size = gid_stack_size(vlelctx->dfs_path_stack);
     source_vertex_id = get_vertex_entry_id(ve);
@@ -2161,40 +2133,37 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
     {
         if (label_constrained)
         {
-            edges = get_vertex_entry_edges_out_for_label(
+            edge_out = get_vertex_entry_adj_edges_out_for_label(
                 ve, vlelctx->edge_label_name_oid);
         }
         else
         {
-            edges = get_vertex_entry_edges_out(ve);
+            edge_out = get_vertex_entry_adj_edges_out(ve);
         }
-        edge_out = (edges != NULL) ? get_list_head(edges) : NULL;
     }
     if (vlelctx->edge_direction == CYPHER_REL_DIR_LEFT ||
         vlelctx->edge_direction == CYPHER_REL_DIR_NONE)
     {
         if (label_constrained)
         {
-            edges = get_vertex_entry_edges_in_for_label(
+            edge_in = get_vertex_entry_adj_edges_in_for_label(
                 ve, vlelctx->edge_label_name_oid);
         }
         else
         {
-            edges = get_vertex_entry_edges_in(ve);
+            edge_in = get_vertex_entry_adj_edges_in(ve);
         }
-        edge_in = (edges != NULL) ? get_list_head(edges) : NULL;
     }
     /* set to the first selfloop edge */
     if (label_constrained)
     {
-        edges = get_vertex_entry_edges_self_for_label(
+        edge_self = get_vertex_entry_adj_edges_self_for_label(
             ve, vlelctx->edge_label_name_oid);
     }
     else
     {
-        edges = get_vertex_entry_edges_self(ve);
+        edge_self = get_vertex_entry_adj_edges_self(ve);
     }
-    edge_self = (edges != NULL) ? get_list_head(edges) : NULL;
 
     if (has_property_constraints)
     {
@@ -2208,27 +2177,23 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
     }
 
     /* add in valid vertex edges */
-    while (edge_out != NULL || edge_in != NULL || edge_self != NULL)
+    while (true)
     {
+        GraphEdgeAdjEntry *adj_entry = NULL;
         edge_entry *ee = NULL;
-        edge_state_entry *ese = NULL;
+        uint8 *edge_flags = NULL;
         graphid edge_id;
-        graphid fast_next_vertex_id = VLE_NEXT_VERTEX_UNKNOWN;
+        graphid fast_next_vertex_id;
+        int64 edge_index;
 
-        /* get the edge_id from the next available edge*/
-        if (edge_out != NULL)
+        if (!next_adj_entry(edge_out, &edge_out_idx, edge_in, &edge_in_idx,
+                            edge_self, &edge_self_idx, &adj_entry))
         {
-            edge_id = get_graphid(edge_out);
+            break;
         }
-        else if (edge_in != NULL)
-        {
-            edge_id = get_graphid(edge_in);
-        }
-        else
-        {
-            edge_id = get_graphid(edge_self);
-            fast_next_vertex_id = source_vertex_id;
-        }
+        edge_id = adj_entry->edge_id;
+        fast_next_vertex_id = adj_entry->next_vertex_id;
+        edge_index = adj_entry->edge_index;
 
         /*
          * This is a fast existence check, relative to the hash search, for when
@@ -2238,19 +2203,6 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
             path_stack_size < 10 &&
             is_edge_in_path(vlelctx, edge_id, path_stack_size))
         {
-            /* set to the next available edge */
-            if (edge_out != NULL)
-            {
-                edge_out = next_GraphIdNode(edge_out);
-            }
-            else if (edge_in != NULL)
-            {
-                edge_in = next_GraphIdNode(edge_in);
-            }
-            else
-            {
-                edge_self = next_GraphIdNode(edge_self);
-            }
             continue;
         }
 
@@ -2269,39 +2221,27 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
                 gid_stack_push(vertex_stack, source_vertex_id);
             }
             gid_stack_push(edge_stack, edge_id);
+            gid_stack_push(edge_index_stack, edge_index);
             gid_stack_push(next_vertex_stack, fast_next_vertex_id);
-
-            if (edge_out != NULL)
-            {
-                edge_out = next_GraphIdNode(edge_out);
-            }
-            else if (edge_in != NULL)
-            {
-                edge_in = next_GraphIdNode(edge_in);
-            }
-            else
-            {
-                edge_self = next_GraphIdNode(edge_self);
-            }
             continue;
         }
 
         /* get its state */
-        ese = get_edge_state(vlelctx, edge_id);
+        edge_flags = get_edge_state_flags(vlelctx, edge_index);
         /*
          * Don't add any edges that we have already seen because they will
          * cause a loop to form.
          */
-        if (!ese->used_in_path)
+        if ((*edge_flags & VLE_EDGE_STATE_USED) == 0)
         {
             /* validate the edge if it hasn't been already */
-            if (!ese->has_been_matched &&
+            if ((*edge_flags & VLE_EDGE_STATE_MATCH_CHECKED) == 0 &&
                 !has_property_constraints)
             {
-                ese->has_been_matched = true;
-                ese->matched = true;
+                *edge_flags |= VLE_EDGE_STATE_MATCH_CHECKED |
+                               VLE_EDGE_STATE_MATCHED;
             }
-            else if (!ese->has_been_matched)
+            else if ((*edge_flags & VLE_EDGE_STATE_MATCH_CHECKED) == 0)
             {
                 /* get the edge entry */
                 ee = get_edge_entry(vlelctx->ggctx, edge_id);
@@ -2313,17 +2253,17 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
 
                 if (is_an_edge_match(vlelctx, ee, relation_cache))
                 {
-                    ese->matched = true;
+                    *edge_flags |= VLE_EDGE_STATE_MATCHED;
                 }
                 else
                 {
-                    ese->matched = false;
+                    *edge_flags &= ~VLE_EDGE_STATE_MATCHED;
                 }
-                ese->has_been_matched = true;
+                *edge_flags |= VLE_EDGE_STATE_MATCH_CHECKED;
             }
 
             /* if it is a match, add it */
-            if (ese->has_been_matched && ese->matched)
+            if ((*edge_flags & VLE_EDGE_STATE_MATCHED) != 0)
             {
                 graphid next_vertex_id;
 
@@ -2339,40 +2279,11 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
                 {
                     gid_stack_push(vertex_stack, source_vertex_id);
                 }
-                if (fast_next_vertex_id != VLE_NEXT_VERTEX_UNKNOWN)
-                {
-                    next_vertex_id = fast_next_vertex_id;
-                }
-                else
-                {
-                    if (ee == NULL)
-                    {
-                        ee = get_edge_entry(vlelctx->ggctx, edge_id);
-                        if (ee == NULL)
-                        {
-                            elog(ERROR,
-                                 "add_valid_vertex_edges: no edge found");
-                        }
-                    }
-                    next_vertex_id = get_next_vertex_from_source(
-                        vlelctx, ee, source_vertex_id);
-                }
+                next_vertex_id = fast_next_vertex_id;
                 gid_stack_push(edge_stack, edge_id);
+                gid_stack_push(edge_index_stack, edge_index);
                 gid_stack_push(next_vertex_stack, next_vertex_id);
             }
-        }
-        /* get the next working edge */
-        if (edge_out != NULL)
-        {
-            edge_out = next_GraphIdNode(edge_out);
-        }
-        else if (edge_in != NULL)
-        {
-            edge_in = next_GraphIdNode(edge_in);
-        }
-        else
-        {
-            edge_self = next_GraphIdNode(edge_self);
         }
     }
 

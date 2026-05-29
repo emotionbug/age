@@ -37,6 +37,20 @@ typedef struct edge_entry edge_entry;
 
 typedef struct GRAPH_global_context GRAPH_global_context;
 
+typedef struct GraphEdgeAdjEntry
+{
+    graphid edge_id;
+    graphid next_vertex_id;
+    int64 edge_index;
+} GraphEdgeAdjEntry;
+
+typedef struct GraphEdgeAdjList
+{
+    GraphEdgeAdjEntry *items;
+    int64 size;
+    int64 capacity;
+} GraphEdgeAdjList;
+
 /* GRAPH global context functions */
 GRAPH_global_context *manage_GRAPH_global_contexts(char *graph_name,
                                                    Oid graph_oid);
@@ -62,6 +76,15 @@ ListGraphId *get_vertex_entry_edges_out_for_label(vertex_entry *ve,
                                                   Oid edge_label_table_oid);
 ListGraphId *get_vertex_entry_edges_self_for_label(vertex_entry *ve,
                                                    Oid edge_label_table_oid);
+GraphEdgeAdjList *get_vertex_entry_adj_edges_in(vertex_entry *ve);
+GraphEdgeAdjList *get_vertex_entry_adj_edges_out(vertex_entry *ve);
+GraphEdgeAdjList *get_vertex_entry_adj_edges_self(vertex_entry *ve);
+GraphEdgeAdjList *get_vertex_entry_adj_edges_in_for_label(
+    vertex_entry *ve, Oid edge_label_table_oid);
+GraphEdgeAdjList *get_vertex_entry_adj_edges_out_for_label(
+    vertex_entry *ve, Oid edge_label_table_oid);
+GraphEdgeAdjList *get_vertex_entry_adj_edges_self_for_label(
+    vertex_entry *ve, Oid edge_label_table_oid);
 Oid get_vertex_entry_label_table_oid(vertex_entry *ve);
 char *get_vertex_entry_label_name(vertex_entry *ve);
 Datum get_vertex_entry_properties(vertex_entry *ve);
