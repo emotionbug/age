@@ -1300,8 +1300,8 @@ static bool parse_vle_normal_or_boundary_index(cypher_parsestate *cpstate,
 
     if (IsA(node, FuncCall))
     {
-        FuncCall *boundary_fn = (FuncCall *)node;
-        char *boundary_name = NULL;
+        boundary_fn = (FuncCall *)node;
+        boundary_name = NULL;
 
         if (list_length(boundary_fn->funcname) == 1 &&
             list_length(boundary_fn->args) == 1)
