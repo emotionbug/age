@@ -112,7 +112,6 @@ static GraphVersionState *shmem_version_state = NULL;
 typedef struct edge_label_adj_entry
 {
     Oid edge_label_table_oid;
-    ListGraphId *edges;
     GraphEdgeAdjList *adj_edges;
     struct edge_label_adj_entry *next;
 } edge_label_adj_entry;
@@ -121,9 +120,6 @@ typedef struct edge_label_adj_entry
 typedef struct vertex_entry
 {
     graphid vertex_id;             /* vertex id, it is also the hash key */
-    ListGraphId *edges_in;         /* List of entering edges graphids (int64) */
-    ListGraphId *edges_out;        /* List of exiting edges graphids (int64) */
-    ListGraphId *edges_self;       /* List of selfloop edges graphids (int64) */
     GraphEdgeAdjList *adj_edges_in;
     GraphEdgeAdjList *adj_edges_out;
     GraphEdgeAdjList *adj_edges_self;
@@ -145,6 +141,9 @@ typedef struct edge_entry
     graphid start_vertex_id;       /* start vertex */
     graphid end_vertex_id;         /* end vertex */
     int64 edge_index;              /* dense index for traversal-local state */
+    int edge_property_count;        /* top-level property pair count */
+    int edge_property_size;         /* varlena size for exact-object checks */
+    uint32 edge_property_hash;      /* datum image hash for exact-object checks */
 } edge_entry;
 
 typedef struct graph_label_entry
@@ -232,6 +231,9 @@ static bool insert_edge_entry(GRAPH_global_context *ggctx, graphid edge_id,
                               ItemPointerData tid, graphid start_vertex_id,
                               graphid end_vertex_id, Oid edge_label_table_oid,
                               const char *edge_label_name,
+                              int edge_property_count,
+                              int edge_property_size,
+                              uint32 edge_property_hash,
                               int64 *edge_index);
 static bool insert_vertex_edge(GRAPH_global_context *ggctx,
                                graphid start_vertex_id, graphid end_vertex_id,
@@ -243,8 +245,6 @@ static void append_labeled_vertex_edge(edge_label_adj_entry **head,
                                        graphid edge_id,
                                        graphid next_vertex_id,
                                        int64 edge_index);
-static ListGraphId *get_labeled_vertex_edges(edge_label_adj_entry *head,
-                                             Oid edge_label_table_oid);
 static GraphEdgeAdjList *get_labeled_vertex_adj_edges(
     edge_label_adj_entry *head, Oid edge_label_table_oid);
 static void free_labeled_vertex_edges(edge_label_adj_entry *head);
@@ -252,6 +252,8 @@ static GraphEdgeAdjList *append_graph_edge_adj(GraphEdgeAdjList *container,
                                                graphid edge_id,
                                                graphid next_vertex_id,
                                                int64 edge_index);
+static GraphEdgeAdjList *compact_graph_edge_adj(GraphEdgeAdjList *container);
+static void compact_labeled_vertex_edges(edge_label_adj_entry *head);
 static void free_graph_edge_adj(GraphEdgeAdjList *container);
 static bool insert_vertex_entry(GRAPH_global_context *ggctx, graphid vertex_id,
                                 Oid vertex_label_table_oid,
@@ -475,6 +477,9 @@ static bool insert_edge_entry(GRAPH_global_context *ggctx, graphid edge_id,
                               ItemPointerData tid, graphid start_vertex_id,
                               graphid end_vertex_id, Oid edge_label_table_oid,
                               const char *edge_label_name,
+                              int edge_property_count,
+                              int edge_property_size,
+                              uint32 edge_property_hash,
                               int64 *edge_index)
 {
     edge_entry *ee = NULL;
@@ -527,6 +532,9 @@ static bool insert_edge_entry(GRAPH_global_context *ggctx, graphid edge_id,
     ee->edge_label_table_oid = edge_label_table_oid;
     ee->edge_label_name = (char *)edge_label_name;
     ee->edge_index = new_edge_index;
+    ee->edge_property_count = edge_property_count;
+    ee->edge_property_size = edge_property_size;
+    ee->edge_property_hash = edge_property_hash;
     if (edge_index != NULL)
     {
         *edge_index = new_edge_index;
@@ -590,10 +598,6 @@ static bool insert_vertex_entry(GRAPH_global_context *ggctx, graphid vertex_id,
     ve->vertex_label_name = (char *)vertex_label_name;
     /* set the TID for lazy property fetch */
     ve->tid = tid;
-    /* set the NIL edge list */
-    ve->edges_in = NULL;
-    ve->edges_out = NULL;
-    ve->edges_self = NULL;
     ve->adj_edges_in = NULL;
     ve->adj_edges_out = NULL;
     ve->adj_edges_self = NULL;
@@ -635,11 +639,10 @@ static bool insert_vertex_edge(GRAPH_global_context *ggctx,
 
     /*
      * If we found the start_vertex_id and it is a self loop, add the edge to
-     * edges_self and we're done
+     * adj_edges_self and we're done
      */
     if (start_found && is_selfloop)
     {
-        value->edges_self = append_graphid(value->edges_self, edge_id);
         value->adj_edges_self = append_graph_edge_adj(value->adj_edges_self,
                                                       edge_id,
                                                       start_vertex_id,
@@ -650,12 +653,11 @@ static bool insert_vertex_edge(GRAPH_global_context *ggctx,
         return true;
     }
     /*
-     * Otherwise, if we found the start_vertex_id add the edge to the edges_out
-     * list of the start vertex
+     * Otherwise, if we found the start_vertex_id add the edge to the
+     * adj_edges_out list of the start vertex
      */
     else if (start_found)
     {
-        value->edges_out = append_graphid(value->edges_out, edge_id);
         value->adj_edges_out = append_graph_edge_adj(value->adj_edges_out,
                                                      edge_id,
                                                      end_vertex_id,
@@ -672,11 +674,10 @@ static bool insert_vertex_edge(GRAPH_global_context *ggctx,
 
     /*
      * If we found the start_vertex_id and the end_vertex_id add the edge to the
-     * edges_in list of the end vertex
+     * adj_edges_in list of the end vertex
      */
     if (start_found && end_found)
     {
-        value->edges_in = append_graphid(value->edges_in, edge_id);
         value->adj_edges_in = append_graph_edge_adj(value->adj_edges_in,
                                                     edge_id,
                                                     start_vertex_id,
@@ -730,7 +731,6 @@ static void append_labeled_vertex_edge(edge_label_adj_entry **head,
     {
         if (entry->edge_label_table_oid == edge_label_table_oid)
         {
-            entry->edges = append_graphid(entry->edges, edge_id);
             entry->adj_edges = append_graph_edge_adj(entry->adj_edges,
                                                      edge_id,
                                                      next_vertex_id,
@@ -741,27 +741,10 @@ static void append_labeled_vertex_edge(edge_label_adj_entry **head,
 
     entry = palloc0(sizeof(*entry));
     entry->edge_label_table_oid = edge_label_table_oid;
-    entry->edges = append_graphid(NULL, edge_id);
     entry->adj_edges = append_graph_edge_adj(NULL, edge_id, next_vertex_id,
                                              edge_index);
     entry->next = *head;
     *head = entry;
-}
-
-static ListGraphId *get_labeled_vertex_edges(edge_label_adj_entry *head,
-                                             Oid edge_label_table_oid)
-{
-    edge_label_adj_entry *entry = NULL;
-
-    for (entry = head; entry != NULL; entry = entry->next)
-    {
-        if (entry->edge_label_table_oid == edge_label_table_oid)
-        {
-            return entry->edges;
-        }
-    }
-
-    return NULL;
 }
 
 static GraphEdgeAdjList *get_labeled_vertex_adj_edges(
@@ -788,7 +771,6 @@ static void free_labeled_vertex_edges(edge_label_adj_entry *head)
     {
         edge_label_adj_entry *next = entry->next;
 
-        free_ListGraphId(entry->edges);
         free_graph_edge_adj(entry->adj_edges);
         pfree(entry);
         entry = next;
@@ -822,6 +804,42 @@ static GraphEdgeAdjList *append_graph_edge_adj(GraphEdgeAdjList *container,
     container->size++;
 
     return container;
+}
+
+static GraphEdgeAdjList *compact_graph_edge_adj(GraphEdgeAdjList *container)
+{
+    if (container == NULL)
+    {
+        return NULL;
+    }
+
+    if (container->size == 0)
+    {
+        pfree_if_not_null(container->items);
+        container->items = NULL;
+        container->capacity = 0;
+        return container;
+    }
+
+    if (container->capacity > container->size)
+    {
+        container->items = repalloc(container->items,
+                                    sizeof(GraphEdgeAdjEntry) *
+                                    container->size);
+        container->capacity = container->size;
+    }
+
+    return container;
+}
+
+static void compact_labeled_vertex_edges(edge_label_adj_entry *head)
+{
+    edge_label_adj_entry *entry = NULL;
+
+    for (entry = head; entry != NULL; entry = entry->next)
+    {
+        entry->adj_edges = compact_graph_edge_adj(entry->adj_edges);
+    }
 }
 
 static void free_graph_edge_adj(GraphEdgeAdjList *container)
@@ -973,8 +991,12 @@ static void load_edge_hashtable(GRAPH_global_context *ggctx,
             graphid edge_id;
             graphid edge_vertex_start_id;
             graphid edge_vertex_end_id;
+            Datum edge_properties;
             bool isnull;
             bool inserted = false;
+            int edge_property_count = 0;
+            int edge_property_size = 0;
+            uint32 edge_property_hash = 0;
             int64 edge_index = 0;
 
             edge_id = DatumGetInt64(heap_getattr(tuple,
@@ -1008,12 +1030,36 @@ static void load_edge_hashtable(GRAPH_global_context *ggctx,
                                 ggctx->graph_name, edge_label_name)));
             }
 
+            edge_properties = heap_getattr(
+                tuple, Anum_ag_label_edge_table_properties, tupdesc, &isnull);
+            if (isnull)
+            {
+                ereport(ERROR,
+                        (errcode(ERRCODE_UNDEFINED_TABLE),
+                         errmsg("edge properties are null for %s.%s",
+                                ggctx->graph_name, edge_label_name)));
+            }
+            else
+            {
+                agtype *agt_edge_properties =
+                    DATUM_GET_AGTYPE_P(edge_properties);
+
+                edge_property_count =
+                    AGTYPE_CONTAINER_SIZE(&agt_edge_properties->root);
+                edge_property_size = VARSIZE_ANY(agt_edge_properties);
+                edge_property_hash =
+                    datum_image_hash(edge_properties, false, -1);
+            }
+
             /* insert edge into edge hashtable with TID (no property copy) */
             inserted = insert_edge_entry(ggctx, edge_id, tuple->t_self,
                                          edge_vertex_start_id,
                                          edge_vertex_end_id,
                                          edge_label_table_oid,
                                          edge_label_name,
+                                         edge_property_count,
+                                         edge_property_size,
+                                         edge_property_hash,
                                          &edge_index);
 
             /* warn if there is a duplicate */
@@ -1052,6 +1098,33 @@ static void load_edge_hashtable(GRAPH_global_context *ggctx,
  */
 static void freeze_GRAPH_global_hashtables(GRAPH_global_context *ggctx)
 {
+    GraphIdNode *curr_vertex = NULL;
+
+    curr_vertex = peek_stack_head(ggctx->vertices);
+    while (curr_vertex != NULL)
+    {
+        vertex_entry *value = NULL;
+        bool found = false;
+        graphid vertex_id = get_graphid(curr_vertex);
+
+        value = (vertex_entry *)hash_search(ggctx->vertex_hashtable,
+                                            (void *)&vertex_id, HASH_FIND,
+                                            &found);
+        if (found == false)
+        {
+            elog(ERROR, "missing vertex entry during adjacency compaction");
+        }
+
+        value->adj_edges_in = compact_graph_edge_adj(value->adj_edges_in);
+        value->adj_edges_out = compact_graph_edge_adj(value->adj_edges_out);
+        value->adj_edges_self = compact_graph_edge_adj(value->adj_edges_self);
+        compact_labeled_vertex_edges(value->edges_in_by_label);
+        compact_labeled_vertex_edges(value->edges_out_by_label);
+        compact_labeled_vertex_edges(value->edges_self_by_label);
+
+        curr_vertex = next_GraphIdNode(curr_vertex);
+    }
+
     hash_freeze(ggctx->vertex_hashtable);
     hash_freeze(ggctx->edge_hashtable);
 }
@@ -1102,10 +1175,7 @@ static bool free_specific_GRAPH_global_context(GRAPH_global_context *ggctx)
             return false;
         }
 
-        /* free the edge list associated with this vertex */
-        free_ListGraphId(value->edges_in);
-        free_ListGraphId(value->edges_out);
-        free_ListGraphId(value->edges_self);
+        /* free the adjacency lists associated with this vertex */
         free_graph_edge_adj(value->adj_edges_in);
         free_graph_edge_adj(value->adj_edges_out);
         free_graph_edge_adj(value->adj_edges_self);
@@ -1113,9 +1183,6 @@ static bool free_specific_GRAPH_global_context(GRAPH_global_context *ggctx)
         free_labeled_vertex_edges(value->edges_out_by_label);
         free_labeled_vertex_edges(value->edges_self_by_label);
 
-        value->edges_in = NULL;
-        value->edges_out = NULL;
-        value->edges_self = NULL;
         value->adj_edges_in = NULL;
         value->adj_edges_out = NULL;
         value->adj_edges_self = NULL;
@@ -1635,42 +1702,6 @@ graphid get_vertex_entry_id(vertex_entry *ve)
     return ve->vertex_id;
 }
 
-ListGraphId *get_vertex_entry_edges_in(vertex_entry *ve)
-{
-    return ve->edges_in;
-}
-
-ListGraphId *get_vertex_entry_edges_out(vertex_entry *ve)
-{
-    return ve->edges_out;
-}
-
-ListGraphId *get_vertex_entry_edges_self(vertex_entry *ve)
-{
-    return ve->edges_self;
-}
-
-ListGraphId *get_vertex_entry_edges_in_for_label(vertex_entry *ve,
-                                                 Oid edge_label_table_oid)
-{
-    return get_labeled_vertex_edges(ve->edges_in_by_label,
-                                    edge_label_table_oid);
-}
-
-ListGraphId *get_vertex_entry_edges_out_for_label(vertex_entry *ve,
-                                                  Oid edge_label_table_oid)
-{
-    return get_labeled_vertex_edges(ve->edges_out_by_label,
-                                    edge_label_table_oid);
-}
-
-ListGraphId *get_vertex_entry_edges_self_for_label(vertex_entry *ve,
-                                                   Oid edge_label_table_oid)
-{
-    return get_labeled_vertex_edges(ve->edges_self_by_label,
-                                    edge_label_table_oid);
-}
-
 GraphEdgeAdjList *get_vertex_entry_adj_edges_in(vertex_entry *ve)
 {
     return ve->adj_edges_in;
@@ -1891,6 +1922,21 @@ graphid get_edge_entry_end_vertex_id(edge_entry *ee)
     return ee->end_vertex_id;
 }
 
+int get_edge_entry_property_count(edge_entry *ee)
+{
+    return ee->edge_property_count;
+}
+
+int get_edge_entry_property_size(edge_entry *ee)
+{
+    return ee->edge_property_size;
+}
+
+uint32 get_edge_entry_property_hash(edge_entry *ee)
+{
+    return ee->edge_property_hash;
+}
+
 /* PostgreSQL SQL facing functions */
 
 /* PG wrapper function for age_delete_global_graphs */
@@ -1945,7 +1991,7 @@ Datum age_vertex_stats(PG_FUNCTION_ARGS)
 {
     GRAPH_global_context *ggctx = NULL;
     vertex_entry *ve = NULL;
-    ListGraphId *edges = NULL;
+    GraphEdgeAdjList *edges = NULL;
     agtype_value agtv_vertex;
     agtype_value *agtv_temp = NULL;
     agtype_value graph_name_value;
@@ -2027,24 +2073,24 @@ Datum age_vertex_stats(PG_FUNCTION_ARGS)
     agtv_temp->val.int_value = 0;
 
     /* get and store the self_loops */
-    edges = get_vertex_entry_edges_self(ve);
-    self_loops = (edges != NULL) ? get_list_size(edges) : 0;
+    edges = get_vertex_entry_adj_edges_self(ve);
+    self_loops = (edges != NULL) ? edges->size : 0;
     agtv_temp->val.int_value = self_loops;
     result.res = push_agtype_value(&result.parse_state, WAGT_KEY,
                                    string_to_agtype_value("self_loops"));
     result.res = push_agtype_value(&result.parse_state, WAGT_VALUE, agtv_temp);
 
     /* get and store the in_degree */
-    edges = get_vertex_entry_edges_in(ve);
-    degree = (edges != NULL) ? get_list_size(edges) : 0;
+    edges = get_vertex_entry_adj_edges_in(ve);
+    degree = (edges != NULL) ? edges->size : 0;
     agtv_temp->val.int_value = degree + self_loops;
     result.res = push_agtype_value(&result.parse_state, WAGT_KEY,
                                    string_to_agtype_value("in_degree"));
     result.res = push_agtype_value(&result.parse_state, WAGT_VALUE, agtv_temp);
 
     /* get and store the out_degree */
-    edges = get_vertex_entry_edges_out(ve);
-    degree = (edges != NULL) ? get_list_size(edges) : 0;
+    edges = get_vertex_entry_adj_edges_out(ve);
+    degree = (edges != NULL) ? edges->size : 0;
     agtv_temp->val.int_value = degree + self_loops;
     result.res = push_agtype_value(&result.parse_state, WAGT_KEY,
                                    string_to_agtype_value("out_degree"));

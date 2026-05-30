@@ -67,15 +67,6 @@ vertex_entry *get_vertex_entry(GRAPH_global_context *ggctx,
 edge_entry *get_edge_entry(GRAPH_global_context *ggctx, graphid edge_id);
 /* vertex entry accessor functions*/
 graphid get_vertex_entry_id(vertex_entry *ve);
-ListGraphId *get_vertex_entry_edges_in(vertex_entry *ve);
-ListGraphId *get_vertex_entry_edges_out(vertex_entry *ve);
-ListGraphId *get_vertex_entry_edges_self(vertex_entry *ve);
-ListGraphId *get_vertex_entry_edges_in_for_label(vertex_entry *ve,
-                                                 Oid edge_label_table_oid);
-ListGraphId *get_vertex_entry_edges_out_for_label(vertex_entry *ve,
-                                                  Oid edge_label_table_oid);
-ListGraphId *get_vertex_entry_edges_self_for_label(vertex_entry *ve,
-                                                   Oid edge_label_table_oid);
 GraphEdgeAdjList *get_vertex_entry_adj_edges_in(vertex_entry *ve);
 GraphEdgeAdjList *get_vertex_entry_adj_edges_out(vertex_entry *ve);
 GraphEdgeAdjList *get_vertex_entry_adj_edges_self(vertex_entry *ve);
@@ -99,6 +90,9 @@ Datum get_edge_entry_properties_with_cache(edge_entry *ee,
                                            HTAB *relation_cache);
 graphid get_edge_entry_start_vertex_id(edge_entry *ee);
 graphid get_edge_entry_end_vertex_id(edge_entry *ee);
+int get_edge_entry_property_count(edge_entry *ee);
+int get_edge_entry_property_size(edge_entry *ee);
+uint32 get_edge_entry_property_hash(edge_entry *ee);
 HTAB *create_entry_property_relation_cache(const char *name);
 void destroy_entry_property_relation_cache(HTAB *relation_cache);
 
