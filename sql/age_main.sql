@@ -358,6 +358,25 @@ CREATE OPERATOR CLASS graphid_ops DEFAULT FOR TYPE graphid USING btree AS
   FUNCTION 2 ag_catalog.graphid_btree_sort (internal);
 
 --
+-- AGE adjacency index access method
+--
+
+CREATE FUNCTION ag_catalog.age_adjacency_handler(internal)
+    RETURNS index_am_handler
+    LANGUAGE c
+AS 'MODULE_PATHNAME';
+
+CREATE ACCESS METHOD age_adjacency TYPE INDEX
+HANDLER ag_catalog.age_adjacency_handler;
+
+COMMENT ON ACCESS METHOD age_adjacency IS
+'AGE adjacency index access method';
+
+CREATE OPERATOR CLASS graphid_age_adjacency_ops
+DEFAULT FOR TYPE graphid USING age_adjacency AS
+  OPERATOR 1 =;
+
+--
 -- graphid functions
 --
 

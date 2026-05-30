@@ -532,3 +532,21 @@ AS 'SELECT $1::text::agtype';
 
 CREATE CAST (jsonb AS agtype)
     WITH FUNCTION ag_catalog.jsonb_to_agtype(jsonb);
+
+--
+-- AGE adjacency index access method skeleton.
+--
+CREATE FUNCTION ag_catalog.age_adjacency_handler(internal)
+    RETURNS index_am_handler
+    LANGUAGE c
+AS 'MODULE_PATHNAME';
+
+CREATE ACCESS METHOD age_adjacency TYPE INDEX
+HANDLER ag_catalog.age_adjacency_handler;
+
+COMMENT ON ACCESS METHOD age_adjacency IS
+'AGE adjacency index access method';
+
+CREATE OPERATOR CLASS graphid_age_adjacency_ops
+DEFAULT FOR TYPE graphid USING age_adjacency AS
+  OPERATOR 1 =;

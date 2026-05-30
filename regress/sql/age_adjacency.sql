@@ -1,0 +1,41 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+LOAD 'age';
+SET search_path TO ag_catalog;
+
+COPY (
+SELECT amname || ':' || amtype::text
+FROM pg_am
+WHERE amname = 'age_adjacency'
+) TO STDOUT;
+
+COPY (
+SELECT opc.opcname || ':' || t.typname || ':' || am.amname || ':' ||
+       opc.opcdefault
+FROM pg_opclass opc
+JOIN pg_am am ON am.oid = opc.opcmethod
+JOIN pg_type t ON t.oid = opc.opcintype
+WHERE am.amname = 'age_adjacency'
+ORDER BY 1
+) TO STDOUT;
+
+CREATE TEMP TABLE age_adjacency_smoke (id graphid);
+CREATE INDEX age_adjacency_smoke_idx
+ON age_adjacency_smoke USING age_adjacency (id);

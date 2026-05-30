@@ -81,6 +81,7 @@ AGE_REAL_UPGRADE := $(shell git ls-files 'age--$(AGE_CURR_VER)--*.sql' 2>/dev/nu
 AGE_HAS_UPGRADE_TEST = $(and $(AGE_VER_COMMIT),$(AGE_UPGRADE_TEMPLATE),$(if $(AGE_REAL_UPGRADE),,yes))
 
 OBJS = src/backend/age.o \
+       src/backend/access/age_adjacency.o \
        src/backend/catalog/ag_catalog.o \
        src/backend/catalog/ag_graph.o \
        src/backend/catalog/ag_label.o \
@@ -169,6 +170,7 @@ REGRESS = scan \
           cypher_merge \
           cypher_subquery \
           age_global_graph \
+          age_adjacency \
           age_load \
           index \
           analyze \
