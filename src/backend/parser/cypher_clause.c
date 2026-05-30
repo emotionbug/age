@@ -24,8 +24,11 @@
 
 #include "postgres.h"
 
+#include "access/relation.h"
+#include "catalog/index.h"
 #include "access/heapam.h"
 #include "access/tableam.h"
+#include "commands/defrem.h"
 #include "catalog/pg_aggregate.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
@@ -41,6 +44,7 @@
 #include "parser/parse_relation.h"
 #include "rewrite/rewriteHandler.h"
 #include "utils/inval.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 
 #include "catalog/ag_graph.h"
@@ -154,11 +158,19 @@ static List *transform_match_path(cypher_parsestate *cpstate, Query *query,
 static Expr *transform_cypher_edge(cypher_parsestate *cpstate,
                                    cypher_relationship *rel,
                                    List **target_list, bool valid_label);
+static Expr *transform_cypher_adjacency_candidate_edge(
+    cypher_parsestate *cpstate, cypher_relationship *rel,
+    transform_entity *prev_entity, List **target_list, bool valid_label,
+    bool outgoing);
+static bool age_adjacency_match_endpoint_is_bound(transform_entity *entity);
 static Expr *transform_cypher_node(cypher_parsestate *cpstate,
                                    cypher_node *node, List **target_list,
                                    bool output_node, bool valid_label);
 static bool match_check_valid_label(cypher_match *match,
                                     cypher_parsestate *cpstate);
+static Oid get_age_adjacency_match_index(Oid edge_label_oid, bool outgoing);
+static bool age_adjacency_match_index_matches(Relation index_rel,
+                                              bool outgoing);
 static Node *make_vertex_expr(cypher_parsestate *cpstate,
                               ParseNamespaceItem *pnsi);
 static Node *make_edge_expr(cypher_parsestate *cpstate,
@@ -5326,8 +5338,22 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                     }
                 }
 
-                expr = transform_cypher_edge(cpstate, rel, &query->targetList,
-                                             valid_label);
+                if (list_length(path->path) == 3 &&
+                    path->var_name == NULL &&
+                    (rel->dir == CYPHER_REL_DIR_RIGHT ||
+                     rel->dir == CYPHER_REL_DIR_LEFT))
+                {
+                    expr = transform_cypher_adjacency_candidate_edge(
+                        cpstate, rel, prev_entity, &query->targetList,
+                        valid_label, rel->dir == CYPHER_REL_DIR_RIGHT);
+                }
+
+                if (expr == NULL)
+                {
+                    expr = transform_cypher_edge(cpstate, rel,
+                                                 &query->targetList,
+                                                 valid_label);
+                }
 
                 entity = make_transform_entity(cpstate, ENT_EDGE, (Node *)rel,
                                                expr);
@@ -5550,6 +5576,106 @@ static List *make_path_join_quals(cypher_parsestate *cpstate, List *entities)
             return quals;
         }
     }
+}
+
+static Oid get_age_adjacency_match_index(Oid edge_label_oid, bool outgoing)
+{
+    static Oid age_adjacency_am_oid = InvalidOid;
+    Relation edge_rel;
+    List *index_list;
+    ListCell *lc;
+    Oid result = InvalidOid;
+
+    if (!OidIsValid(edge_label_oid))
+    {
+        return InvalidOid;
+    }
+
+    if (!OidIsValid(age_adjacency_am_oid))
+    {
+        age_adjacency_am_oid = get_index_am_oid("age_adjacency", true);
+        if (!OidIsValid(age_adjacency_am_oid))
+        {
+            return InvalidOid;
+        }
+    }
+
+    edge_rel = relation_open(edge_label_oid, AccessShareLock);
+    index_list = RelationGetIndexList(edge_rel);
+
+    foreach(lc, index_list)
+    {
+        Oid index_oid = lfirst_oid(lc);
+        Relation index_rel;
+
+        index_rel = index_open(index_oid, AccessShareLock);
+        if (index_rel->rd_rel->relam == age_adjacency_am_oid &&
+            index_rel->rd_index != NULL &&
+            index_rel->rd_index->indisvalid &&
+            index_rel->rd_index->indisready &&
+            age_adjacency_match_index_matches(index_rel, outgoing))
+        {
+            result = index_oid;
+            index_close(index_rel, AccessShareLock);
+            break;
+        }
+        index_close(index_rel, AccessShareLock);
+    }
+
+    list_free(index_list);
+    relation_close(edge_rel, AccessShareLock);
+
+    return result;
+}
+
+static bool age_adjacency_match_index_matches(Relation index_rel,
+                                              bool outgoing)
+{
+    int2vector *indkey;
+
+    if (index_rel->rd_index->indnkeyatts != 3 ||
+        index_rel->rd_index->indnatts != 3)
+    {
+        return false;
+    }
+
+    indkey = &index_rel->rd_index->indkey;
+    if (outgoing)
+    {
+        return indkey->values[0] == Anum_ag_label_edge_table_start_id &&
+               indkey->values[1] == Anum_ag_label_edge_table_id &&
+               indkey->values[2] == Anum_ag_label_edge_table_end_id;
+    }
+
+    return indkey->values[0] == Anum_ag_label_edge_table_end_id &&
+           indkey->values[1] == Anum_ag_label_edge_table_id &&
+           indkey->values[2] == Anum_ag_label_edge_table_start_id;
+}
+
+static bool age_adjacency_match_endpoint_is_bound(transform_entity *entity)
+{
+    cypher_node *node;
+
+    if (entity == NULL ||
+        entity->type != ENT_VERTEX ||
+        !entity->in_join_tree)
+    {
+        return false;
+    }
+
+    /*
+     * A previous-clause vertex arrives as a Var and is already bound by the
+     * outer query row. In the current clause, only an inline property map gives
+     * the provider a selective endpoint. A merely named or label-only vertex is
+     * still an unbound scan driver and should stay on the normal join path.
+     */
+    if (entity->expr != NULL && IsA(entity->expr, Var))
+    {
+        return true;
+    }
+
+    node = entity->entity.node;
+    return node != NULL && node->props != NULL;
 }
 
 /*
@@ -5999,6 +6125,88 @@ static Expr *transform_cypher_edge(cypher_parsestate *cpstate,
         te = makeTargetEntry((Expr *)expr, resno, rel->name, false);
         *target_list = lappend(*target_list, te);
     }
+
+    return (Expr *)expr;
+}
+
+static Expr *transform_cypher_adjacency_candidate_edge(
+    cypher_parsestate *cpstate, cypher_relationship *rel,
+    transform_entity *prev_entity, List **target_list, bool valid_label,
+    bool outgoing)
+{
+    ParseState *pstate = (ParseState *)cpstate;
+    Relation label_relation;
+    Oid index_oid;
+    RangeFunction *rf;
+    FuncCall *func;
+    Alias *alias;
+    Node *index_arg;
+    Node *key_arg;
+    Const *outgoing_arg;
+    ParseNamespaceItem *pnsi;
+    TargetEntry *te;
+    Node *expr;
+
+    if (!age_enable_adjacency_match ||
+        !valid_label ||
+        rel->label == NULL ||
+        rel->varlen != NULL ||
+        !age_adjacency_match_endpoint_is_bound(prev_entity))
+    {
+        return NULL;
+    }
+
+    if (rel->name != NULL &&
+        (findTarget(*target_list, rel->name) != NULL ||
+         find_variable(cpstate, rel->name) != NULL ||
+         colNameToVar(pstate, rel->name, false, rel->location) != NULL))
+    {
+        return NULL;
+    }
+
+    label_relation = open_label_relation_with_lock(cpstate, rel->label,
+                                                   rel->location,
+                                                   AccessShareLock);
+    index_oid = get_age_adjacency_match_index(RelationGetRelid(label_relation),
+                                              outgoing);
+    table_close(label_relation, AccessShareLock);
+    if (!OidIsValid(index_oid))
+    {
+        return NULL;
+    }
+
+    if (rel->name == NULL)
+    {
+        rel->name = get_next_default_alias(cpstate);
+    }
+
+    index_arg = (Node *)makeConst(REGCLASSOID, -1, InvalidOid, sizeof(Oid),
+                                  ObjectIdGetDatum(index_oid), false, true);
+    key_arg = make_qual(cpstate, prev_entity, AG_VERTEX_COLNAME_ID);
+    outgoing_arg = makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                             BoolGetDatum(outgoing), false, true);
+
+    func = makeFuncCall(list_make2(makeString("ag_catalog"),
+                                   makeString("age_adjacency_candidate_edge_rows")),
+                        list_make3(index_arg, key_arg, outgoing_arg),
+                        COERCE_EXPLICIT_CALL, rel->location);
+
+    rf = makeNode(RangeFunction);
+    rf->lateral = true;
+    rf->ordinality = false;
+    rf->is_rowsfrom = false;
+    rf->functions = list_make1(list_make2(func, NIL));
+
+    alias = makeAlias(rel->name, NIL);
+    rf->alias = alias;
+
+    pnsi = append_VLE_Func_to_FromClause(cpstate, (Node *)rf);
+    Assert(pnsi != NULL);
+
+    expr = make_edge_expr(cpstate, pnsi);
+    te = makeTargetEntry((Expr *)expr, pstate->p_next_resno++, rel->name,
+                         false);
+    *target_list = lappend(*target_list, te);
 
     return (Expr *)expr;
 }

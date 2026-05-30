@@ -46,7 +46,7 @@ INSERT INTO age_adjacency_smoke VALUES
 (_graphid(2, 3), _graphid(1, 4), _graphid(1, 5));
 CREATE INDEX age_adjacency_smoke_bad_idx
 ON age_adjacency_smoke USING age_adjacency (start_id);
-ERROR:  age_adjacency payload v2 indexes require exactly three graphid key columns
+ERROR:  age_adjacency payload v3 indexes require exactly three graphid key columns
 HINT:  Use (endpoint_id, edge_id, next_vertex_id), such as (start_id, id, end_id) or (end_id, id, start_id).
 CREATE INDEX age_adjacency_smoke_start_idx
 ON age_adjacency_smoke USING age_adjacency (start_id, id, end_id);

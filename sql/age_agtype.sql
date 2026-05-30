@@ -65,6 +65,19 @@ CREATE TYPE agtype (
   LIKE = jsonb
 );
 
+CREATE FUNCTION ag_catalog.age_adjacency_candidate_edge_rows(index_oid regclass,
+                                                             key graphid,
+                                                             outgoing boolean)
+    RETURNS TABLE(id graphid, start_id graphid, end_id graphid,
+                  properties agtype)
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+COMMENT ON FUNCTION ag_catalog.age_adjacency_candidate_edge_rows(regclass, graphid, boolean)
+IS 'Internal age_adjacency fixed-MATCH candidate provider; only considered when age.enable_adjacency_match is on and guarded one-hop/index/bound-endpoint conditions hold.';
+
 --
 -- agtype - mathematical operators (+, -, *, /, %, ^)
 --

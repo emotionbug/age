@@ -384,8 +384,31 @@ CREATE FUNCTION ag_catalog.age_adjacency_debug_payload(index_oid regclass,
     STRICT
 AS 'MODULE_PATHNAME';
 
+CREATE FUNCTION ag_catalog.age_adjacency_candidate_edges(index_oid regclass,
+                                                         key graphid)
+    RETURNS TABLE(edge_id graphid, next_vertex_id graphid)
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+COMMENT ON FUNCTION ag_catalog.age_adjacency_candidate_edges(regclass, graphid)
+IS 'Internal age_adjacency candidate provider for bound-endpoint adjacency scans; used only by opt-in experimental planner/parser paths.';
+
 CREATE FUNCTION ag_catalog.age_adjacency_debug_stats(index_oid regclass)
-    RETURNS TABLE(num_pages bigint, postings bigint)
+    RETURNS TABLE(num_pages bigint, postings bigint,
+                  directory_entries bigint, delta_postings bigint,
+                  delta_reindex_threshold bigint,
+                  delta_reindex_recommended boolean)
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_debug_directory_probe(index_oid regclass,
+                                                               key graphid)
+    RETURNS TABLE(found boolean, directory_pages_visited bigint,
+                  directory_entries_scanned bigint)
     LANGUAGE c
     STABLE
     STRICT

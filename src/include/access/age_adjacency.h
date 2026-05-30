@@ -31,6 +31,8 @@ typedef struct AgeAdjacencyPayload
     ItemPointerData heap_tid;
     graphid edge_id;
     graphid next_vertex_id;
+    Datum properties;
+    bool properties_isnull;
 } AgeAdjacencyPayload;
 
 typedef bool (*AgeAdjacencyPayloadCallback) (const AgeAdjacencyPayload *payload,
