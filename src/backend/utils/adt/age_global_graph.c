@@ -1922,6 +1922,11 @@ graphid get_edge_entry_end_vertex_id(edge_entry *ee)
     return ee->end_vertex_id;
 }
 
+int64 get_edge_entry_index(edge_entry *ee)
+{
+    return ee->edge_index;
+}
+
 int get_edge_entry_property_count(edge_entry *ee)
 {
     return ee->edge_property_count;

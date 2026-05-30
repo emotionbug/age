@@ -277,7 +277,7 @@ FROM age_adjacency_baseline_config;
 
 SELECT pg_temp.run_age_adjacency_cypher_case(
     graph_name,
-    'vle_keep_one_bound_cold',
+    'noidx_vle_keep_one_bound_cold',
     'MATCH p=(:N {i: 0})-[:Keep*1..8]->() RETURN p',
     repeats,
     true)
@@ -285,7 +285,7 @@ FROM age_adjacency_baseline_config;
 
 SELECT pg_temp.run_age_adjacency_cypher_case(
     graph_name,
-    'vle_keep_one_bound_warm',
+    'noidx_vle_keep_one_bound_warm',
     'MATCH p=(:N {i: 0})-[:Keep*1..8]->() RETURN p',
     repeats,
     false)
@@ -293,7 +293,15 @@ FROM age_adjacency_baseline_config;
 
 SELECT pg_temp.run_age_adjacency_cypher_case(
     graph_name,
-    'vle_unlabeled_one_bound_warm',
+    'noidx_vle_keep_to_bound_warm',
+    'MATCH p=()-[:Keep*1..8]->(:N {i: 8}) RETURN p',
+    repeats,
+    false)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'noidx_vle_unlabeled_one_bound_warm',
     'MATCH p=(:N {i: 0})-[*1..2]->() RETURN p',
     repeats,
     false)
@@ -301,7 +309,93 @@ FROM age_adjacency_baseline_config;
 
 SELECT pg_temp.run_age_adjacency_cypher_case(
     graph_name,
-    'vle_keep_label_roots_warm',
+    'noidx_vle_keep_label_roots_warm',
+    'MATCH p=(:N)-[:Keep*1..2]->() RETURN p',
+    repeats,
+    false)
+FROM age_adjacency_baseline_config;
+
+DO $$
+DECLARE
+    graph_name name;
+BEGIN
+    SELECT c.graph_name INTO graph_name
+    FROM age_adjacency_baseline_config c;
+
+    EXECUTE format(
+        'CREATE INDEX %I ON %I."Keep"
+         USING age_adjacency (start_id, id, end_id)',
+        'Keep_age_adjacency_start_payload_idx', graph_name);
+    EXECUTE format(
+        'CREATE INDEX %I ON %I."Keep"
+         USING age_adjacency (end_id, id, start_id)',
+        'Keep_age_adjacency_end_payload_idx', graph_name);
+    EXECUTE format(
+        'CREATE INDEX %I ON %I."Noise"
+         USING age_adjacency (start_id, id, end_id)',
+        'Noise_age_adjacency_start_payload_idx', graph_name);
+END
+$$;
+
+SELECT pg_temp.run_age_adjacency_sql_case(
+    'sql_keep_start_age_adjacency_payload',
+    format(
+        'SELECT count(*)
+         FROM ag_catalog.age_adjacency_debug_payload(%L::regclass,
+              ag_catalog._graphid(%s, 1))',
+        format('%I.%I', graph_name,
+               'Keep_age_adjacency_start_payload_idx'),
+        _label_id(graph_name, 'N')),
+    repeats)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_sql_case(
+    'sql_noise_start_age_adjacency_payload',
+    format(
+        'SELECT count(*)
+         FROM ag_catalog.age_adjacency_debug_payload(%L::regclass,
+              ag_catalog._graphid(%s, 1))',
+        format('%I.%I', graph_name,
+               'Noise_age_adjacency_start_payload_idx'),
+        _label_id(graph_name, 'N')),
+    repeats)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'idx_vle_keep_one_bound_cold',
+    'MATCH p=(:N {i: 0})-[:Keep*1..8]->() RETURN p',
+    repeats,
+    true)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'idx_vle_keep_one_bound_warm',
+    'MATCH p=(:N {i: 0})-[:Keep*1..8]->() RETURN p',
+    repeats,
+    false)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'idx_vle_keep_to_bound_warm',
+    'MATCH p=()-[:Keep*1..8]->(:N {i: 8}) RETURN p',
+    repeats,
+    false)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'idx_vle_unlabeled_one_bound_warm',
+    'MATCH p=(:N {i: 0})-[*1..2]->() RETURN p',
+    repeats,
+    false)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'idx_vle_keep_label_roots_warm',
     'MATCH p=(:N)-[:Keep*1..2]->() RETURN p',
     repeats,
     false)
@@ -320,9 +414,9 @@ GROUP BY case_name
 ORDER BY case_name;
 
 SELECT 'decision_gate' AS note,
-       'Do not connect age_adjacency to VLE until a custom path can beat the '
-       || 'existing endpoint btree baseline or avoid heap fetches through a '
-       || 'measured direct payload scan.' AS guidance;
+       'Keep age_adjacency as an opt-in VLE candidate source. Do not make it '
+       || 'the default label path until it consistently beats the endpoint '
+       || 'btree/global-cache baseline on representative workloads.' AS guidance;
 
 SELECT drop_graph(graph_name, true)
 FROM age_adjacency_baseline_config;

@@ -376,6 +376,21 @@ CREATE OPERATOR CLASS graphid_age_adjacency_ops
 DEFAULT FOR TYPE graphid USING age_adjacency AS
   OPERATOR 1 =;
 
+CREATE FUNCTION ag_catalog.age_adjacency_debug_payload(index_oid regclass,
+                                                       key graphid)
+    RETURNS TABLE(heap_tid tid, edge_id graphid, next_vertex_id graphid)
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_debug_stats(index_oid regclass)
+    RETURNS TABLE(num_pages bigint, postings bigint)
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
 --
 -- graphid functions
 --

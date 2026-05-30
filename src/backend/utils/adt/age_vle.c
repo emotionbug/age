@@ -63,8 +63,15 @@
 
 #include "postgres.h"
 
+#include "access/age_adjacency.h"
+#include "access/genam.h"
+#include "access/relation.h"
 #include "common/hashfn.h"
+#include "commands/defrem.h"
 #include "funcapi.h"
+#include "utils/rel.h"
+#include "utils/relcache.h"
+#include "utils/snapmgr.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
@@ -144,6 +151,8 @@ typedef struct VLE_local_context
     GraphIdStack *dfs_path_vertex_stack; /* vertices in current path order */
     uint8 *edge_state_flags;        /* dense local state by edge index */
     int64 edge_state_flags_size;    /* number of entries in flags array */
+    Oid age_adjacency_out_index_oid; /* optional (start_id,id,end_id) index */
+    Oid age_adjacency_in_index_oid; /* optional (end_id,id,start_id) index */
     VLE_path_function path_function; /* which path function to use */
     bool reverse_paths_to;          /* traverse paths-to from the bound end */
     bool reverse_output_path;       /* reverse traversal result before return */
@@ -175,6 +184,18 @@ typedef struct edge_uniqueness_argtype_cache
     int nargs;
     Oid types[FLEXIBLE_ARRAY_MEMBER];
 } edge_uniqueness_argtype_cache;
+
+typedef struct VLEAgeAdjacencyScanState
+{
+    VLE_local_context *vlelctx;
+    VLETraversalFrameStack *frame_stack;
+    HTAB *relation_cache;
+    graphid source_vertex_id;
+    int64 path_stack_size;
+    bool has_property_constraints;
+    bool outgoing;
+    bool skip_self_loops;
+} VLEAgeAdjacencyScanState;
 
 /* declarations */
 
@@ -210,6 +231,10 @@ static Oid get_cached_vle_graph_oid(const char *graph_name,
 static Oid get_cached_vle_label_relation(Oid graph_oid,
                                          const char *label_name,
                                          int label_name_len);
+static Oid get_age_adjacency_index_for_label(Oid edge_label_oid,
+                                             bool outgoing);
+static bool age_adjacency_index_matches(Relation index_rel, bool outgoing);
+static void refresh_vle_age_adjacency_indexes(VLE_local_context *vlelctx);
 static void create_VLE_local_state_flags(VLE_local_context *vlelctx);
 static void free_VLE_local_context(VLE_local_context *vlelctx);
 /* VLE graph traversal functions */
@@ -238,6 +263,11 @@ static void add_valid_vertex_edges(VLE_local_context *vlelctx,
                                    graphid vertex_id);
 static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
                                              vertex_entry *ve);
+static bool add_valid_vertex_edges_from_age_adjacency(
+    VLE_local_context *vlelctx, vertex_entry *ve, HTAB *relation_cache,
+    bool outgoing, bool skip_self_loops, bool has_property_constraints);
+static bool add_age_adjacency_payload(const AgeAdjacencyPayload *payload,
+                                      void *callback_state);
 static cypher_rel_dir reverse_edge_direction(cypher_rel_dir edge_direction);
 static bool is_zero_length_only(VLE_local_context *vlelctx);
 static bool is_empty_length_range(VLE_local_context *vlelctx);
@@ -1190,6 +1220,8 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
         /* we need the SRF context to add in the edges to the stacks */
         oldctx = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 
+        refresh_vle_age_adjacency_indexes(vlelctx);
+
         if (!is_empty_length_range(vlelctx))
         {
             /* load the initial edges into the dfs stacks */
@@ -1371,6 +1403,8 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
         pfree_agtype_value_content(&agtv_temp);
         agtv_temp_needs_free = false;
     }
+
+    refresh_vle_age_adjacency_indexes(vlelctx);
 
     /* get the left range index */
     if (PG_ARGISNULL(4))
@@ -1614,6 +1648,95 @@ static Oid get_cached_vle_label_relation(Oid graph_oid,
     }
 
     return cached_relation_oid;
+}
+
+static Oid get_age_adjacency_index_for_label(Oid edge_label_oid,
+                                             bool outgoing)
+{
+    static Oid age_adjacency_am_oid = InvalidOid;
+    Relation edge_rel;
+    List *index_list;
+    ListCell *lc;
+    Oid result = InvalidOid;
+
+    if (!OidIsValid(edge_label_oid))
+    {
+        return InvalidOid;
+    }
+
+    if (!OidIsValid(age_adjacency_am_oid))
+    {
+        age_adjacency_am_oid = get_index_am_oid("age_adjacency", true);
+        if (!OidIsValid(age_adjacency_am_oid))
+        {
+            return InvalidOid;
+        }
+    }
+
+    edge_rel = relation_open(edge_label_oid, AccessShareLock);
+    index_list = RelationGetIndexList(edge_rel);
+
+    foreach(lc, index_list)
+    {
+        Oid index_oid = lfirst_oid(lc);
+        Relation index_rel;
+
+        index_rel = index_open(index_oid, AccessShareLock);
+        if (index_rel->rd_rel->relam == age_adjacency_am_oid &&
+            index_rel->rd_index != NULL &&
+            index_rel->rd_index->indisvalid &&
+            index_rel->rd_index->indisready &&
+            age_adjacency_index_matches(index_rel, outgoing))
+        {
+            result = index_oid;
+            index_close(index_rel, AccessShareLock);
+            break;
+        }
+        index_close(index_rel, AccessShareLock);
+    }
+
+    list_free(index_list);
+    relation_close(edge_rel, AccessShareLock);
+
+    return result;
+}
+
+static bool age_adjacency_index_matches(Relation index_rel, bool outgoing)
+{
+    int2vector *indkey;
+
+    if (index_rel->rd_index->indnkeyatts != 3 ||
+        index_rel->rd_index->indnatts != 3)
+    {
+        return false;
+    }
+
+    indkey = &index_rel->rd_index->indkey;
+    if (outgoing)
+    {
+        return indkey->values[0] == Anum_ag_label_edge_table_start_id &&
+               indkey->values[1] == Anum_ag_label_edge_table_id &&
+               indkey->values[2] == Anum_ag_label_edge_table_end_id;
+    }
+
+    return indkey->values[0] == Anum_ag_label_edge_table_end_id &&
+           indkey->values[1] == Anum_ag_label_edge_table_id &&
+           indkey->values[2] == Anum_ag_label_edge_table_start_id;
+}
+
+static void refresh_vle_age_adjacency_indexes(VLE_local_context *vlelctx)
+{
+    if (!OidIsValid(vlelctx->edge_label_name_oid))
+    {
+        vlelctx->age_adjacency_out_index_oid = InvalidOid;
+        vlelctx->age_adjacency_in_index_oid = InvalidOid;
+        return;
+    }
+
+    vlelctx->age_adjacency_out_index_oid =
+        get_age_adjacency_index_for_label(vlelctx->edge_label_name_oid, true);
+    vlelctx->age_adjacency_in_index_oid =
+        get_age_adjacency_index_for_label(vlelctx->edge_label_name_oid, false);
 }
 
 static uint8 *get_edge_state_flags(VLE_local_context *vlelctx,
@@ -2080,6 +2203,7 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
     bool label_constrained = vlelctx->edge_label_name_oid != InvalidOid;
     bool has_property_constraints =
         vlelctx->num_edge_property_constraints > 0;
+    bool used_age_adjacency = false;
 
     /* point to stacks */
     frame_stack = vlelctx->dfs_frame_stack;
@@ -2133,6 +2257,45 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
                     "VLE edge match relation cache");
         }
         relation_cache = vlelctx->edge_property_relation_cache;
+    }
+
+    /*
+     * If a payload v2 age_adjacency index exists for this label/direction,
+     * use it as the candidate source and rejoin to the global graph edge
+     * entry for dense edge state and property checks. Missing indexes fall
+     * back to the in-memory packed adjacency lists.
+     */
+    if (label_constrained &&
+        (vlelctx->edge_direction == CYPHER_REL_DIR_RIGHT ||
+         vlelctx->edge_direction == CYPHER_REL_DIR_NONE) &&
+        OidIsValid(vlelctx->age_adjacency_out_index_oid))
+    {
+        if (add_valid_vertex_edges_from_age_adjacency(
+                vlelctx, ve, relation_cache, true, false,
+                has_property_constraints))
+        {
+            edge_out = NULL;
+            used_age_adjacency = true;
+        }
+    }
+
+    if (label_constrained &&
+        (vlelctx->edge_direction == CYPHER_REL_DIR_LEFT ||
+         vlelctx->edge_direction == CYPHER_REL_DIR_NONE) &&
+        OidIsValid(vlelctx->age_adjacency_in_index_oid))
+    {
+        if (add_valid_vertex_edges_from_age_adjacency(
+                vlelctx, ve, relation_cache, false, used_age_adjacency,
+                has_property_constraints))
+        {
+            edge_in = NULL;
+            used_age_adjacency = true;
+        }
+    }
+
+    if (used_age_adjacency)
+    {
+        edge_self = NULL;
     }
 
     /* add in valid vertex edges */
@@ -2226,6 +2389,134 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
     }
 
     /* The relation cache is owned by the VLE context and freed with it. */
+}
+
+static bool add_valid_vertex_edges_from_age_adjacency(
+    VLE_local_context *vlelctx, vertex_entry *ve, HTAB *relation_cache,
+    bool outgoing, bool skip_self_loops, bool has_property_constraints)
+{
+    VLEAgeAdjacencyScanState state;
+    Oid index_oid;
+
+    index_oid = outgoing ? vlelctx->age_adjacency_out_index_oid :
+                           vlelctx->age_adjacency_in_index_oid;
+    if (!OidIsValid(index_oid))
+    {
+        return false;
+    }
+
+    memset(&state, 0, sizeof(state));
+    state.vlelctx = vlelctx;
+    state.frame_stack = vlelctx->dfs_frame_stack;
+    state.relation_cache = relation_cache;
+    state.source_vertex_id = get_vertex_entry_id(ve);
+    state.path_stack_size = gid_stack_size(vlelctx->dfs_path_stack);
+    state.has_property_constraints = has_property_constraints;
+    state.outgoing = outgoing;
+    state.skip_self_loops = skip_self_loops;
+
+    age_adjacency_foreach_visible_payload(index_oid, state.source_vertex_id,
+                                          GetActiveSnapshot(),
+                                          add_age_adjacency_payload, &state);
+
+    return true;
+}
+
+static bool add_age_adjacency_payload(const AgeAdjacencyPayload *payload,
+                                      void *callback_state)
+{
+    VLEAgeAdjacencyScanState *state = callback_state;
+    VLE_local_context *vlelctx = state->vlelctx;
+    edge_entry *ee;
+    uint8 *edge_flags;
+    graphid edge_id = payload->edge_id;
+    graphid next_vertex_id = payload->next_vertex_id;
+    int64 edge_index;
+
+    if (state->skip_self_loops &&
+        next_vertex_id == state->source_vertex_id)
+    {
+        return true;
+    }
+
+    if (get_vertex_entry(vlelctx->ggctx, next_vertex_id) == NULL)
+    {
+        return true;
+    }
+
+    ee = get_edge_entry(vlelctx->ggctx, edge_id);
+    if (ee == NULL ||
+        get_edge_entry_label_table_oid(ee) != vlelctx->edge_label_name_oid)
+    {
+        return true;
+    }
+
+    if (state->outgoing)
+    {
+        if (get_edge_entry_start_vertex_id(ee) != state->source_vertex_id ||
+            get_edge_entry_end_vertex_id(ee) != next_vertex_id)
+        {
+            return true;
+        }
+    }
+    else
+    {
+        if (get_edge_entry_end_vertex_id(ee) != state->source_vertex_id ||
+            get_edge_entry_start_vertex_id(ee) != next_vertex_id)
+        {
+            return true;
+        }
+    }
+
+    if (state->path_stack_size > 0 &&
+        state->path_stack_size < 10 &&
+        is_edge_in_path(vlelctx, edge_id, state->path_stack_size))
+    {
+        return true;
+    }
+
+    edge_index = get_edge_entry_index(ee);
+
+    if (state->path_stack_size < 10 &&
+        !state->has_property_constraints)
+    {
+        vle_frame_stack_push(state->frame_stack, edge_id, edge_index,
+                             next_vertex_id, state->source_vertex_id);
+        return true;
+    }
+
+    edge_flags = get_edge_state_flags(vlelctx, edge_index);
+    if ((*edge_flags & VLE_EDGE_STATE_USED) != 0)
+    {
+        return true;
+    }
+
+    if ((*edge_flags & VLE_EDGE_STATE_MATCH_CHECKED) == 0 &&
+        !state->has_property_constraints)
+    {
+        *edge_flags |= VLE_EDGE_STATE_MATCH_CHECKED |
+                       VLE_EDGE_STATE_MATCHED;
+    }
+    else if ((*edge_flags & VLE_EDGE_STATE_MATCH_CHECKED) == 0)
+    {
+        if (is_an_edge_match(vlelctx, ee, state->relation_cache))
+        {
+            *edge_flags |= VLE_EDGE_STATE_MATCHED;
+        }
+        else
+        {
+            *edge_flags &= ~VLE_EDGE_STATE_MATCHED;
+        }
+        *edge_flags |= VLE_EDGE_STATE_MATCH_CHECKED;
+    }
+
+    if ((*edge_flags & VLE_EDGE_STATE_MATCHED) != 0)
+    {
+        vle_frame_stack_push(state->frame_stack, edge_id, edge_index,
+                             next_vertex_id, state->source_vertex_id);
+    }
+
+    return true;
 }
 
 /*

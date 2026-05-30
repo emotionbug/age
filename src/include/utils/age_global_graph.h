@@ -90,6 +90,7 @@ Datum get_edge_entry_properties_with_cache(edge_entry *ee,
                                            HTAB *relation_cache);
 graphid get_edge_entry_start_vertex_id(edge_entry *ee);
 graphid get_edge_entry_end_vertex_id(edge_entry *ee);
+int64 get_edge_entry_index(edge_entry *ee);
 int get_edge_entry_property_count(edge_entry *ee);
 int get_edge_entry_property_size(edge_entry *ee);
 uint32 get_edge_entry_property_hash(edge_entry *ee);
