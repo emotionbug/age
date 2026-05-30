@@ -35,6 +35,7 @@
 #include "utils/syscache.h"
 
 #include "catalog/ag_graph.h"
+#include "optimizer/cypher_paths.h"
 #include "parser/cypher_analyze.h"
 #include "parser/cypher_clause.h"
 #include "parser/cypher_parser.h"
@@ -1108,6 +1109,7 @@ static Query *analyze_cypher(List *stmt, ParseState *parent_pstate,
     cpstate->default_alias_num = 0;
     cpstate->entities = NIL;
     cpstate->subquery_where_flag = false;
+    cypher_clear_adjacency_match_candidates();
     /*
      * install error context callback to adjust an error position since
      * locations in stmt are 0 based

@@ -45,6 +45,7 @@ extern bool age_enable_containment;
  * opt-in until cost/cardinality policy and regression coverage are settled.
  */
 extern bool age_enable_adjacency_match;
+extern bool age_enable_adjacency_match_custom_path;
 
 void define_config_params(void);
 

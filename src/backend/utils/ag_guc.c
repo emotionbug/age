@@ -24,6 +24,7 @@
 
 bool age_enable_containment = true;
 bool age_enable_adjacency_match = false;
+bool age_enable_adjacency_match_custom_path = false;
 
 /*
  * Defines AGE's custom configuration parameters.
@@ -47,6 +48,16 @@ void define_config_params(void)
                              "Enable experimental age_adjacency candidate providers for guarded fixed-length MATCH shapes.",
                              "This opt-in path is off by default while its cost and cardinality policy is evaluated.",
                              &age_enable_adjacency_match,
+                             false,
+                             PGC_SUSET,
+                             0,
+                             NULL,
+                             NULL,
+                             NULL);
+    DefineCustomBoolVariable("age.enable_adjacency_match_custom_path",
+                             "Enable experimental planner CustomPath candidates for guarded age_adjacency fixed-length MATCH shapes.",
+                             "This developer opt-in keeps the normal edge RTE and adds a provider path candidate.",
+                             &age_enable_adjacency_match_custom_path,
                              false,
                              PGC_SUSET,
                              0,

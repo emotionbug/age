@@ -50,6 +50,7 @@
 #include "catalog/ag_graph.h"
 #include "catalog/ag_label.h"
 #include "commands/label_commands.h"
+#include "optimizer/cypher_paths.h"
 #include "parser/cypher_analyze.h"
 #include "parser/cypher_clause.h"
 #include "parser/cypher_expr.h"
@@ -160,8 +161,8 @@ static Expr *transform_cypher_edge(cypher_parsestate *cpstate,
                                    List **target_list, bool valid_label);
 static Expr *transform_cypher_adjacency_candidate_edge(
     cypher_parsestate *cpstate, cypher_relationship *rel,
-    transform_entity *prev_entity, List **target_list, bool valid_label,
-    bool outgoing);
+    transform_entity *prev_entity, cypher_node *next_node,
+    List **target_list, bool valid_label, bool outgoing);
 static bool age_adjacency_match_endpoint_is_bound(transform_entity *entity);
 static Expr *transform_cypher_node(cypher_parsestate *cpstate,
                                    cypher_node *node, List **target_list,
@@ -5343,9 +5344,13 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                     (rel->dir == CYPHER_REL_DIR_RIGHT ||
                      rel->dir == CYPHER_REL_DIR_LEFT))
                 {
+                    cypher_node *next_node =
+                        (cypher_node *)lfirst(lnext(path->path, lc));
+
                     expr = transform_cypher_adjacency_candidate_edge(
-                        cpstate, rel, prev_entity, &query->targetList,
-                        valid_label, rel->dir == CYPHER_REL_DIR_RIGHT);
+                        cpstate, rel, prev_entity, next_node,
+                        &query->targetList, valid_label,
+                        rel->dir == CYPHER_REL_DIR_RIGHT);
                 }
 
                 if (expr == NULL)
@@ -6131,24 +6136,26 @@ static Expr *transform_cypher_edge(cypher_parsestate *cpstate,
 
 static Expr *transform_cypher_adjacency_candidate_edge(
     cypher_parsestate *cpstate, cypher_relationship *rel,
-    transform_entity *prev_entity, List **target_list, bool valid_label,
-    bool outgoing)
+    transform_entity *prev_entity, cypher_node *next_node,
+    List **target_list, bool valid_label, bool outgoing)
 {
     ParseState *pstate = (ParseState *)cpstate;
     Relation label_relation;
+    Oid edge_label_oid;
     Oid index_oid;
     RangeFunction *rf;
     FuncCall *func;
     Alias *alias;
     Node *index_arg;
     Node *key_arg;
+    Expr *key_expr;
     Const *outgoing_arg;
     ParseNamespaceItem *pnsi;
     TargetEntry *te;
     Node *expr;
+    bool has_edge_variable_projection;
 
-    if (!age_enable_adjacency_match ||
-        !valid_label ||
+    if (!valid_label ||
         rel->label == NULL ||
         rel->varlen != NULL ||
         !age_adjacency_match_endpoint_is_bound(prev_entity))
@@ -6167,22 +6174,44 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     label_relation = open_label_relation_with_lock(cpstate, rel->label,
                                                    rel->location,
                                                    AccessShareLock);
-    index_oid = get_age_adjacency_match_index(RelationGetRelid(label_relation),
-                                              outgoing);
+    edge_label_oid = RelationGetRelid(label_relation);
+    index_oid = get_age_adjacency_match_index(edge_label_oid, outgoing);
     table_close(label_relation, AccessShareLock);
     if (!OidIsValid(index_oid))
     {
         return NULL;
     }
 
+    has_edge_variable_projection = rel->name != NULL;
+
     if (rel->name == NULL)
     {
         rel->name = get_next_default_alias(cpstate);
     }
 
+    key_arg = make_qual(cpstate, prev_entity, AG_VERTEX_COLNAME_ID);
+    key_expr = (Expr *)transformExpr(pstate, copyObject(key_arg),
+                                     EXPR_KIND_WHERE);
+
+    if (!age_enable_adjacency_match ||
+        age_enable_adjacency_match_custom_path)
+    {
+        cypher_register_adjacency_match_candidate(
+            edge_label_oid, index_oid, rel->name, get_entity_name(prev_entity),
+            (Node *)key_expr,
+            age_enable_adjacency_match_custom_path ?
+            "custom_path_opt_in" : "normal_edge_rte_preserved", outgoing,
+            has_edge_variable_projection,
+            rel->props != NULL,
+            next_node != NULL && next_node->label != NULL,
+            next_node != NULL && next_node->props != NULL,
+            outgoing ? Anum_ag_label_edge_table_start_id :
+                       Anum_ag_label_edge_table_end_id);
+        return NULL;
+    }
+
     index_arg = (Node *)makeConst(REGCLASSOID, -1, InvalidOid, sizeof(Oid),
                                   ObjectIdGetDatum(index_oid), false, true);
-    key_arg = make_qual(cpstate, prev_entity, AG_VERTEX_COLNAME_ID);
     outgoing_arg = makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
                              BoolGetDatum(outgoing), false, true);
 

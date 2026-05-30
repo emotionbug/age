@@ -38,6 +38,8 @@
 --
 --   psql -d postgres \
 --        -v run_fixed_provider_pressure=1 \
+--        -v run_custom_path_pressure=1 \
+--        -v run_custom_path_analyze=1 \
 --        -v fixed_provider_repeats=10 \
 --        -v run_adjacency_guard_matrix=1 \
 --        -v provider_function_cost=1 \
@@ -78,6 +80,14 @@
 \if :{?run_fixed_provider_pressure}
 \else
     \set run_fixed_provider_pressure 0
+\endif
+\if :{?run_custom_path_pressure}
+\else
+    \set run_custom_path_pressure 0
+\endif
+\if :{?run_custom_path_analyze}
+\else
+    \set run_custom_path_analyze 0
 \endif
 \if :{?fixed_provider_repeats}
 \else
@@ -347,6 +357,23 @@ CREATE TEMP TABLE age_adjacency_plan_lines
     PRIMARY KEY (case_name, line_no)
 );
 
+CREATE TEMP TABLE age_adjacency_plan_analyze_lines
+(
+    case_name text NOT NULL,
+    line_no int NOT NULL,
+    startup_cost numeric,
+    total_cost numeric,
+    plan_rows bigint,
+    plan_width int,
+    actual_startup_ms numeric,
+    actual_total_ms numeric,
+    actual_rows numeric,
+    actual_loops bigint,
+    mentions_provider boolean NOT NULL,
+    plan_line text NOT NULL,
+    PRIMARY KEY (case_name, line_no)
+);
+
 CREATE TEMP TABLE age_adjacency_index_stats
 (
     phase text NOT NULL,
@@ -496,7 +523,8 @@ BEGIN
     LOOP
         line_no := line_no + 1;
 
-        IF plan_text LIKE '%age_adjacency_candidate_edge_rows%' THEN
+        IF plan_text LIKE '%age_adjacency_candidate_edge_rows%' OR
+           plan_text LIKE '%Custom Scan (AGE Adjacency Match)%' THEN
             uses_provider := true;
         END IF;
 
@@ -525,7 +553,8 @@ BEGIN
                  ELSE cost_match[3]::bigint END,
             CASE WHEN cost_match IS NULL THEN NULL
                  ELSE cost_match[4]::int END,
-            plan_text LIKE '%age_adjacency_candidate_edge_rows%',
+            plan_text LIKE '%age_adjacency_candidate_edge_rows%' OR
+            plan_text LIKE '%Custom Scan (AGE Adjacency Match)%',
             plan_text
         );
     END LOOP;
@@ -552,6 +581,69 @@ BEGIN
         plan_width = EXCLUDED.plan_width,
         uses_provider = EXCLUDED.uses_provider,
         plan_line = EXCLUDED.plan_line;
+END
+$$;
+
+CREATE FUNCTION pg_temp.record_age_adjacency_plan_analyze(
+    graph_name text,
+    plan_case_name text,
+    query text)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    plan_text text;
+    cost_match text[];
+    actual_match text[];
+    line_no int;
+BEGIN
+    line_no := 0;
+
+    DELETE FROM age_adjacency_plan_analyze_lines
+    WHERE case_name = plan_case_name;
+
+    FOR plan_text IN EXECUTE format(
+        'SELECT plan::text
+         FROM ag_catalog.cypher(%L,
+              $age_adj_plan$EXPLAIN ANALYZE %s$age_adj_plan$)
+         AS (plan ag_catalog.agtype)',
+        graph_name, query)
+    LOOP
+        line_no := line_no + 1;
+
+        cost_match := regexp_match(
+            plan_text,
+            'cost=([0-9.]+)\.\.([0-9.]+) rows=([0-9]+) width=([0-9]+)');
+        actual_match := regexp_match(
+            plan_text,
+            'actual time=([0-9.]+)\.\.([0-9.]+) rows=([0-9.]+) loops=([0-9]+)');
+
+        INSERT INTO age_adjacency_plan_analyze_lines
+        VALUES
+        (
+            plan_case_name,
+            line_no,
+            CASE WHEN cost_match IS NULL THEN NULL
+                 ELSE cost_match[1]::numeric END,
+            CASE WHEN cost_match IS NULL THEN NULL
+                 ELSE cost_match[2]::numeric END,
+            CASE WHEN cost_match IS NULL THEN NULL
+                 ELSE cost_match[3]::bigint END,
+            CASE WHEN cost_match IS NULL THEN NULL
+                 ELSE cost_match[4]::int END,
+            CASE WHEN actual_match IS NULL THEN NULL
+                 ELSE actual_match[1]::numeric END,
+            CASE WHEN actual_match IS NULL THEN NULL
+                 ELSE actual_match[2]::numeric END,
+            CASE WHEN actual_match IS NULL THEN NULL
+                 ELSE actual_match[3]::numeric END,
+            CASE WHEN actual_match IS NULL THEN NULL
+                 ELSE actual_match[4]::bigint END,
+            plan_text LIKE '%age_adjacency_candidate_edge_rows%' OR
+            plan_text LIKE '%Custom Scan (AGE Adjacency Match)%',
+            plan_text
+        );
+    END LOOP;
 END
 $$;
 
@@ -1275,6 +1367,122 @@ SELECT pg_temp.run_age_adjacency_cypher_case(
 FROM age_adjacency_baseline_config;
 
 SET age.enable_adjacency_match = off;
+SET age.enable_adjacency_match_custom_path = off;
+
+\endif
+
+\if :run_custom_path_pressure
+
+SET age.enable_adjacency_match = off;
+SET age.enable_adjacency_match_custom_path = on;
+
+SELECT pg_temp.record_age_adjacency_plan_cost(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_bound_warm',
+    'MATCH (:N {i: 0})-[:Keep]->(n) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.record_age_adjacency_plan_cost(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_edge_prop_warm',
+    'MATCH (:N {i: 0})-[:Keep {kind: "keep"}]->(n) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.record_age_adjacency_plan_cost(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_edge_var_warm',
+    'MATCH (:N {i: 0})-[e:Keep {kind: "keep"}]->(n) RETURN e.kind')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.record_age_adjacency_plan_cost(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_left_direction_warm',
+    'MATCH (:N {i: 1})<-[:Keep]-(n) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.record_age_adjacency_plan_cost(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_right_label_warm',
+    'MATCH (:N {i: 0})-[:Keep]->(n:N) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.record_age_adjacency_plan_cost(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_right_prop_warm',
+    'MATCH (:N {i: 0})-[:Keep]->(n {i: 1}) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_bound_warm',
+    'MATCH (:N {i: 0})-[:Keep]->(n) RETURN n.i',
+    :fixed_provider_repeats::int,
+    false)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_edge_prop_warm',
+    'MATCH (:N {i: 0})-[:Keep {kind: "keep"}]->(n) RETURN n.i',
+    :fixed_provider_repeats::int,
+    false)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_edge_var_warm',
+    'MATCH (:N {i: 0})-[e:Keep {kind: "keep"}]->(n) RETURN e.kind',
+    :fixed_provider_repeats::int,
+    false)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_left_direction_warm',
+    'MATCH (:N {i: 1})<-[:Keep]-(n) RETURN n.i',
+    :fixed_provider_repeats::int,
+    false)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_right_label_warm',
+    'MATCH (:N {i: 0})-[:Keep]->(n:N) RETURN n.i',
+    :fixed_provider_repeats::int,
+    false)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_right_prop_warm',
+    'MATCH (:N {i: 0})-[:Keep]->(n {i: 1}) RETURN n.i',
+    :fixed_provider_repeats::int,
+    false)
+FROM age_adjacency_baseline_config;
+
+\if :run_custom_path_analyze
+
+SELECT pg_temp.record_age_adjacency_plan_analyze(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_bound_warm',
+    'MATCH (:N {i: 0})-[:Keep]->(n) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.record_age_adjacency_plan_analyze(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_left_direction_warm',
+    'MATCH (:N {i: 1})<-[:Keep]-(n) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.record_age_adjacency_plan_analyze(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_right_label_warm',
+    'MATCH (:N {i: 0})-[:Keep]->(n:N) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+\endif
+
+SET age.enable_adjacency_match_custom_path = off;
 
 \endif
 
@@ -1532,6 +1740,10 @@ ORDER BY case_name, run_no;
 
 TABLE age_adjacency_provider_function_settings;
 
+\endif
+
+\if :run_fixed_provider_pressure
+
 TABLE age_adjacency_plan_costs
 ORDER BY case_name;
 
@@ -1575,6 +1787,61 @@ SELECT case_name,
        bool_or(plan_line LIKE '  ->  Append%') AS has_other_endpoint_append
 FROM age_adjacency_plan_lines
 WHERE case_name LIKE 'fixed_pressure%'
+GROUP BY case_name
+ORDER BY case_name;
+
+\endif
+
+\if :run_custom_path_pressure
+
+TABLE age_adjacency_plan_costs
+ORDER BY case_name;
+
+TABLE age_adjacency_plan_lines
+ORDER BY case_name, line_no;
+
+SELECT case_name,
+       bool_or(plan_line LIKE '%Custom Scan (AGE Adjacency Match)%') AS has_custom_scan,
+       bool_or(plan_line LIKE '%age_adjacency_candidate_edge_rows%') AS has_srf_provider,
+       bool_or(plan_line LIKE '%start_id%'
+               AND (plan_line LIKE '%Hash Cond:%'
+                    OR plan_line LIKE '%Filter:%')) AS has_start_id_join_qual,
+       bool_or(plan_line LIKE '%end_id%'
+               AND (plan_line LIKE '%Hash Cond:%'
+                    OR plan_line LIKE '%Filter:%'
+                    OR plan_line LIKE '%Index Cond:%')) AS has_end_id_join_qual,
+       bool_or(plan_line LIKE '%properties @>%') AS has_property_filter
+FROM age_adjacency_plan_lines
+WHERE case_name LIKE 'custom_path%'
+GROUP BY case_name
+ORDER BY case_name;
+
+\endif
+
+\if :run_custom_path_analyze
+
+TABLE age_adjacency_plan_analyze_lines
+ORDER BY case_name, line_no;
+
+SELECT case_name,
+       max(total_cost) FILTER (WHERE line_no = 1) AS plan_total_cost,
+       max(plan_rows) FILTER (WHERE line_no = 1) AS plan_rows,
+       max(actual_total_ms) FILTER (WHERE line_no = 1) AS top_actual_ms,
+       max(actual_rows) FILTER (WHERE line_no = 1) AS top_actual_rows,
+       max(total_cost) FILTER (
+           WHERE mentions_provider
+       ) AS custom_scan_plan_cost,
+       max(plan_rows) FILTER (
+           WHERE mentions_provider
+       ) AS custom_scan_plan_rows,
+       max(actual_total_ms) FILTER (
+           WHERE mentions_provider
+       ) AS custom_scan_actual_ms,
+       max(actual_rows) FILTER (
+           WHERE mentions_provider
+       ) AS custom_scan_actual_rows,
+       bool_or(mentions_provider) AS has_custom_scan
+FROM age_adjacency_plan_analyze_lines
 GROUP BY case_name
 ORDER BY case_name;
 
@@ -1653,6 +1920,58 @@ JOIN result_summary p ON p.case_name = m.provider_case
 JOIN age_adjacency_plan_costs bc ON bc.case_name = m.btree_case
 JOIN age_adjacency_plan_costs pc ON pc.case_name = m.provider_case
 CROSS JOIN keep_stats k
+ORDER BY m.shape_name;
+
+\endif
+
+\if :run_custom_path_pressure
+
+WITH result_summary AS (
+    SELECT case_name,
+           min(rows_returned) AS rows_returned,
+           avg(elapsed_ms) AS avg_ms
+    FROM age_adjacency_baseline_results
+    GROUP BY case_name
+),
+shape_map(shape_name, custom_path_case) AS (
+    VALUES
+    (
+        'bound',
+        'custom_path_idx_match_keep_one_hop_bound_warm'
+    ),
+    (
+        'edge_property',
+        'custom_path_idx_match_keep_one_hop_edge_prop_warm'
+    ),
+    (
+        'edge_variable',
+        'custom_path_idx_match_keep_one_hop_edge_var_warm'
+    ),
+    (
+        'left_direction',
+        'custom_path_idx_match_keep_one_hop_left_direction_warm'
+    ),
+    (
+        'right_label',
+        'custom_path_idx_match_keep_one_hop_right_label_warm'
+    ),
+    (
+        'right_property',
+        'custom_path_idx_match_keep_one_hop_right_prop_warm'
+    )
+)
+SELECT m.shape_name,
+       c.rows_returned,
+       round(c.avg_ms, 3) AS custom_path_avg_ms,
+       pc.total_cost AS custom_path_total_cost,
+       pc.uses_provider,
+       bool_or(pl.plan_line LIKE '%Custom Scan (AGE Adjacency Match)%') AS has_custom_scan
+FROM shape_map m
+JOIN result_summary c ON c.case_name = m.custom_path_case
+JOIN age_adjacency_plan_costs pc ON pc.case_name = m.custom_path_case
+JOIN age_adjacency_plan_lines pl ON pl.case_name = m.custom_path_case
+GROUP BY m.shape_name, c.rows_returned, c.avg_ms, pc.total_cost,
+         pc.uses_provider
 ORDER BY m.shape_name;
 
 \endif
