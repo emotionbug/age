@@ -22,22 +22,31 @@ SET search_path TO ag_catalog;
 
 SELECT create_graph('cypher');
 
--- cypher() function takes only a dollar-quoted string constant as an argument.
--- All other cases throw an error.
+-- cypher() function takes a constant string argument. Dollar-quoted strings
+-- provide the best error position, and ordinary SQL string constants are
+-- accepted for driver compatibility.
 
 SELECT * FROM cypher('none', $$RETURN 0$$) as q(c agtype);
 
 SELECT * FROM cypher('cypher', $$RETURN 0$$) AS r(c agtype);
+\pset format unaligned
+SELECT * FROM cypher('cypher', 'RETURN 0') AS r(c agtype);
+SELECT * FROM cypher('cypher', 'RETURN ''ok''') AS r(c agtype);
+SELECT * FROM cypher('cypher', E'RETURN ''ok''') AS r(c agtype);
+EXPLAIN (COSTS OFF) SELECT * FROM cypher('cypher', $$RETURN 0$$) AS r(c agtype);
+EXPLAIN (COSTS OFF) SELECT * FROM cypher('cypher', 'RETURN 0') AS r(c agtype);
+\pset format aligned
 WITH r(c) AS (
   SELECT * FROM cypher('cypher', $$RETURN 0$$) AS r(c agtype)
 )
 SELECT * FROM r;
-SELECT * FROM cypher('cypher', 'RETURN 0') AS r(c text);
 SELECT * FROM cypher('cypher', NULL) AS r(c text);
+\pset format unaligned
 WITH q(s) AS (
   VALUES (textout($$RETURN 0$$))
 )
 SELECT * FROM q, cypher('cypher', q.s) AS r(c text);
+\pset format aligned
 
 -- The numbers of the attributes must match.
 

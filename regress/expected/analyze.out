@@ -40,7 +40,7 @@ ERROR:  a name constant is expected
 LINE 1: SELECT * FROM cypher(NULL, NULL) AS (result agtype);
                              ^
 SELECT * FROM cypher('analyze', NULL) AS (result agtype);
-ERROR:  a dollar-quoted string constant is expected
+ERROR:  a string constant is expected
 LINE 1: SELECT * FROM cypher('analyze', NULL) AS (result agtype);
                                         ^
 SELECT * FROM cypher(NULL, '') AS (result agtype);
@@ -48,11 +48,11 @@ ERROR:  a name constant is expected
 LINE 1: SELECT * FROM cypher(NULL, '') AS (result agtype);
                              ^
 SELECT * FROM cypher('', '') AS (result agtype);
-ERROR:  a dollar-quoted string constant is expected
+ERROR:  graph "" does not exist
 LINE 1: SELECT * FROM cypher('', '') AS (result agtype);
-                                 ^
+                             ^
 SELECT * FROM cypher('analyze', '') AS (result agtype);
-ERROR:  a dollar-quoted string constant is expected
+ERROR:  syntax error at end of input
 LINE 1: SELECT * FROM cypher('analyze', '') AS (result agtype);
                                         ^
 -- should error due to bad cypher statement

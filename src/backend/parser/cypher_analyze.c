@@ -23,11 +23,13 @@
 #include "catalog/pg_proc.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/optimizer.h"
 #include "parser/analyze.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_collate.h"
 #include "parser/parse_relation.h"
 #include "parser/parse_target.h"
+#include "parser/parsetree.h"
 #include "utils/builtins.h"
 #include "utils/inval.h"
 #include "utils/syscache.h"
@@ -39,6 +41,12 @@
 #include "utils/ag_func.h"
 
 typedef bool (*cypher_expression_condition)(Node *expr);
+
+typedef struct cypher_convert_context
+{
+    ParseState *pstate;
+    Query *query;
+} cypher_convert_context;
 
 /*
  * extra_node is a global variable to this source to store, at the moment, the
@@ -57,14 +65,21 @@ static Oid cypher_func_oid = InvalidOid;
 static bool cypher_func_oid_callback_registered = false;
 
 static void post_parse_analyze(ParseState *pstate, Query *query, JumbleState *jstate);
-static bool convert_cypher_walker(Node *node, ParseState *pstate);
+static bool convert_cypher_walker(Node *node, void *context);
 static bool is_rte_cypher(RangeTblEntry *rte);
 static bool is_func_cypher(FuncExpr *funcexpr);
 static Oid get_cypher_func_oid(void);
 static void invalidate_cypher_func_oid(Datum arg, int cache_id,
                                        uint32 hash_value);
-static void convert_cypher_to_subquery(RangeTblEntry *rte, ParseState *pstate);
+static void convert_cypher_to_subquery(RangeTblEntry *rte,
+                                       cypher_convert_context *context);
 static Name expr_get_const_name(Node *expr);
+static Node *resolve_const_cstring_arg(Node *expr,
+                                       cypher_convert_context *context);
+static Node *resolve_var_const_arg(Var *var, cypher_convert_context *context);
+static Node *get_query_target_expr(Query *query, AttrNumber attno);
+static CommonTableExpr *find_query_cte(Query *query, const char *ctename);
+static bool is_const_cstring_location(const char *p);
 static const char *expr_get_const_cstring(Node *expr, const char *source_str);
 static int get_query_location(const int location, const char *source_str);
 static Query *analyze_cypher(List *stmt, ParseState *parent_pstate,
@@ -89,6 +104,8 @@ void post_parse_analyze_fini(void)
 
 static void post_parse_analyze(ParseState *pstate, Query *query, JumbleState *jstate)
 {
+    cypher_convert_context context;
+
     if (prev_post_parse_analyze_hook)
     {
         prev_post_parse_analyze_hook(pstate, query, jstate);
@@ -100,7 +117,9 @@ static void post_parse_analyze(ParseState *pstate, Query *query, JumbleState *js
      */
     extra_node = NULL;
 
-    convert_cypher_walker((Node *)query, pstate);
+    context.pstate = pstate;
+    context.query = NULL;
+    convert_cypher_walker((Node *)query, &context);
 
     /*
      * If there is an extra_node returned, we need to check to see if
@@ -121,8 +140,10 @@ static void post_parse_analyze(ParseState *pstate, Query *query, JumbleState *js
 }
 
 /* find cypher() calls in FROM clauses and convert them to SELECT subqueries */
-static bool convert_cypher_walker(Node *node, ParseState *pstate)
+static bool convert_cypher_walker(Node *node, void *context)
 {
+    cypher_convert_context *ctx = context;
+
     if (!node)
         return false;
 
@@ -134,10 +155,10 @@ static bool convert_cypher_walker(Node *node, ParseState *pstate)
         {
         case RTE_SUBQUERY:
             /* traverse other RTE_SUBQUERYs */
-            return convert_cypher_walker((Node *)rte->subquery, pstate);
+            return convert_cypher_walker((Node *)rte->subquery, context);
         case RTE_FUNCTION:
             if (is_rte_cypher(rte))
-                convert_cypher_to_subquery(rte, pstate);
+                convert_cypher_to_subquery(rte, ctx);
             return false;
         default:
             return false;
@@ -163,7 +184,8 @@ static bool convert_cypher_walker(Node *node, ParseState *pstate)
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                      errmsg("cypher(...) in ROWS FROM is not supported"),
-                     parser_errposition(pstate, exprLocation((Node *)funcexpr))));
+                     parser_errposition(ctx->pstate,
+                                        exprLocation((Node *)funcexpr))));
         }
 
         /*
@@ -198,7 +220,7 @@ static bool convert_cypher_walker(Node *node, ParseState *pstate)
         }
 
         return expression_tree_walker((Node *)funcexpr->args,
-                                      convert_cypher_walker, pstate);
+                                      convert_cypher_walker, context);
     }
 
     /*
@@ -216,17 +238,18 @@ static bool convert_cypher_walker(Node *node, ParseState *pstate)
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                      errmsg("cypher(...) in expressions is not supported"),
                      errhint("Use subquery instead if possible."),
-                     parser_errposition(pstate, exprLocation(node))));
+                     parser_errposition(ctx->pstate, exprLocation(node))));
         }
 
         return expression_tree_walker((Node *)funcexpr->args,
-                                      convert_cypher_walker, pstate);
+                                      convert_cypher_walker, context);
     }
 
     if (IsA(node, Query))
     {
         int flags;
         bool result = false;
+        Query *saved_query = ctx->query;
         Query *query = (Query *)node;
 
         /*
@@ -236,6 +259,7 @@ static bool convert_cypher_walker(Node *node, ParseState *pstate)
          * NOTE: This code only "knows" about the following utility commands -
          *
          * CREATE TABLE AS
+         * EXPLAIN
          *
          * Others need to be added on a case by case basis.
          */
@@ -249,6 +273,18 @@ static bool convert_cypher_walker(Node *node, ParseState *pstate)
                 query = (Query *)ctas->query;
             }
         }
+        else if (query->utilityStmt != NULL &&
+                 IsA(query->utilityStmt, ExplainStmt))
+        {
+            ExplainStmt *estmt = (ExplainStmt *)query->utilityStmt;
+
+            if (IsA(estmt->query, Query))
+            {
+                query = (Query *)estmt->query;
+            }
+        }
+
+        ctx->query = query;
 
         /*
          * QTW_EXAMINE_RTES
@@ -267,12 +303,14 @@ static bool convert_cypher_walker(Node *node, ParseState *pstate)
                 QTW_IGNORE_JOINALIASES;
 
         /* recurse on query */
-        result = query_tree_walker(query, convert_cypher_walker, pstate, flags);
+        result = query_tree_walker(query, convert_cypher_walker, context, flags);
+
+        ctx->query = saved_query;
 
         return result;
     }
 
-    return expression_tree_walker(node, convert_cypher_walker, pstate);
+    return expression_tree_walker(node, convert_cypher_walker, context);
 }
 
 /*
@@ -424,20 +462,24 @@ static void invalidate_cypher_func_oid(Datum arg, int cache_id,
 }
 
 /* convert cypher() call to SELECT subquery in-place */
-static void convert_cypher_to_subquery(RangeTblEntry *rte, ParseState *pstate)
+static void convert_cypher_to_subquery(RangeTblEntry *rte,
+                                       cypher_convert_context *context)
 {
+    ParseState *pstate = context->pstate;
     RangeTblFunction *rtfunc = linitial(rte->functions);
     FuncExpr *funcexpr = (FuncExpr *)rtfunc->funcexpr;
     List *args = funcexpr->args;
     int nargs = list_length(args);
     Node *arg1 = NULL;
     Node *arg2 = NULL;
+    Node *query_arg = NULL;
     Node *arg3 = NULL;
     Name graph_name = NULL;
     char *graph_name_str = NULL;
     Oid graph_oid = InvalidOid;
     const char *query_str = NULL;
     int query_loc = -1;
+    int query_arg_loc = -1;
     Param *params = NULL;
     errpos_ecb_state ecb_state = {{0}};
     List *stmt = NULL;
@@ -480,14 +522,14 @@ static void convert_cypher_to_subquery(RangeTblEntry *rte, ParseState *pstate)
      * query, it must take a string constant as an argument so that the query
      * can be parsed and analyzed at this point to create a Query tree of it.
      *
-     * Also, only dollar-quoted string constants are allowed because of the
-     * following reasons.
-     *
-     * * If other kinds of string constants are used, the actual values of them
-     *   may differ from what they are shown. This will confuse users.
-     * * In the case above, the error position may not be accurate.
+     * Dollar-quoted strings retain the most accurate Cypher error positions.
+     * Ordinary SQL string constants are also accepted for driver
+     * compatibility, but escaped forms can only report positions relative to
+     * the SQL argument location because PostgreSQL has already de-escaped the
+     * value before AGE parses it.
      */
-    query_str = expr_get_const_cstring(arg2, pstate->p_sourcetext);
+    query_arg = resolve_const_cstring_arg(arg2, context);
+    query_str = expr_get_const_cstring(query_arg, pstate->p_sourcetext);
 
     /* get the graph name string from the passed parameters */
     if (!graph_name)
@@ -507,12 +549,14 @@ static void convert_cypher_to_subquery(RangeTblEntry *rte, ParseState *pstate)
     {
         ereport(ERROR,
                 (errcode(ERRCODE_SYNTAX_ERROR),
-                 errmsg("a dollar-quoted string constant is expected"),
+                 errmsg("a string constant is expected"),
                  parser_errposition(pstate, exprLocation(arg2))));
     }
 
-    query_loc = get_query_location(((Const *)arg2)->location,
-                                   pstate->p_sourcetext);
+    query_arg_loc = ((Const *)query_arg)->location;
+    if (query_arg_loc < 0)
+        query_arg_loc = exprLocation(arg2);
+    query_loc = get_query_location(query_arg_loc, pstate->p_sourcetext);
 
     /* validate the graph exists */
     graph_oid = get_graph_oid(graph_name_str);
@@ -641,6 +685,102 @@ static Name expr_get_const_name(Node *expr)
     return DatumGetName(con->constvalue);
 }
 
+static Node *resolve_const_cstring_arg(Node *expr,
+                                       cypher_convert_context *context)
+{
+    Node *folded;
+
+    if (IsA(expr, Var))
+        return resolve_var_const_arg((Var *)expr, context);
+
+    folded = eval_const_expressions(NULL, expr);
+    if (IsA(folded, Const))
+        return folded;
+
+    return expr;
+}
+
+static Node *resolve_var_const_arg(Var *var, cypher_convert_context *context)
+{
+    RangeTblEntry *rte;
+    Node *expr = NULL;
+
+    if (var->varlevelsup != 0 || context->query == NULL ||
+        var->varattno <= 0 || var->varno <= 0)
+        return (Node *)var;
+
+    rte = rt_fetch(var->varno, context->query->rtable);
+
+    if (rte->rtekind == RTE_CTE && rte->ctelevelsup == 0)
+    {
+        CommonTableExpr *cte = find_query_cte(context->query, rte->ctename);
+
+        if (cte != NULL && IsA(cte->ctequery, Query))
+        {
+            cypher_convert_context cte_context = *context;
+
+            cte_context.query = (Query *)cte->ctequery;
+            expr = get_query_target_expr((Query *)cte->ctequery, var->varattno);
+
+            if (expr != NULL)
+                return resolve_const_cstring_arg(expr, &cte_context);
+        }
+    }
+    else if (rte->rtekind == RTE_VALUES && list_length(rte->values_lists) == 1)
+    {
+        List *values = linitial(rte->values_lists);
+
+        expr = list_nth(values, var->varattno - 1);
+    }
+
+    if (expr == NULL)
+        return (Node *)var;
+
+    return resolve_const_cstring_arg(expr, context);
+}
+
+static Node *get_query_target_expr(Query *query, AttrNumber attno)
+{
+    ListCell *lc;
+    AttrNumber resno = 1;
+
+    foreach(lc, query->targetList)
+    {
+        TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+        if (tle->resjunk)
+            continue;
+
+        if (resno == attno)
+            return (Node *)tle->expr;
+
+        resno++;
+    }
+
+    return NULL;
+}
+
+static CommonTableExpr *find_query_cte(Query *query, const char *ctename)
+{
+    ListCell *lc;
+
+    foreach(lc, query->cteList)
+    {
+        CommonTableExpr *cte = lfirst_node(CommonTableExpr, lc);
+
+        if (strcmp(cte->ctename, ctename) == 0)
+            return cte;
+    }
+
+    return NULL;
+}
+
+static bool is_const_cstring_location(const char *p)
+{
+    return *p == '$' || *p == '\'' ||
+           ((*p == 'E' || *p == 'e') && p[1] == '\'');
+}
+
 static const char *expr_get_const_cstring(Node *expr, const char *source_str)
 {
     Const *con;
@@ -653,9 +793,11 @@ static const char *expr_get_const_cstring(Node *expr, const char *source_str)
     if (con->constisnull)
         return NULL;
 
-    Assert(con->location > -1);
+    if (con->location < 0)
+        return DatumGetCString(con->constvalue);
+
     p = source_str + con->location;
-    if (*p != '$')
+    if (!is_const_cstring_location(p))
         return NULL;
 
     return DatumGetCString(con->constvalue);
@@ -665,10 +807,12 @@ static int get_query_location(const int location, const char *source_str)
 {
     const char *p;
 
-    Assert(location > -1);
+    if (location < 0)
+        return -1;
 
     p = source_str + location;
-    Assert(*p == '$');
+    if (*p != '$')
+        return location;
 
     return strchr(p + 1, '$') - source_str + 1;
 }
