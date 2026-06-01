@@ -21,8 +21,10 @@
 
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type_d.h"
+#include "catalog/ag_label.h"
 #include "executor/cypher_adjacency_match.h"
 #include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
@@ -37,6 +39,8 @@
 #include "optimizer/cypher_paths.h"
 #include "utils/ag_func.h"
 #include "utils/ag_guc.h"
+#include "utils/agtype.h"
+#include "utils/graphid.h"
 
 typedef enum cypher_clause_kind
 {
@@ -51,6 +55,7 @@ typedef CustomPath *(*cypher_path_factory)(PlannerInfo *root, RelOptInfo *rel,
                                            List *custom_private);
 
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook;
+static set_join_pathlist_hook_type prev_set_join_pathlist_hook;
 static List *adjacency_match_candidates = NIL;
 
 static Oid cypher_create_clause_func_oid = InvalidOid;
@@ -61,6 +66,9 @@ static bool cypher_clause_func_callback_registered = false;
 
 static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
                              RangeTblEntry *rte);
+static void set_join_pathlist(PlannerInfo *root, RelOptInfo *joinrel,
+                              RelOptInfo *outerrel, RelOptInfo *innerrel,
+                              JoinType jointype, JoinPathExtraData *extra);
 static cypher_clause_kind get_cypher_clause_kind(RangeTblEntry *rte);
 static void register_cypher_clause_function_oid_callbacks(void);
 static void load_cypher_clause_function_oids(void);
@@ -72,6 +80,11 @@ static void replace_with_cypher_dml_path(PlannerInfo *root, RelOptInfo *rel,
 static void add_adjacency_match_custom_path(
     PlannerInfo *root, RelOptInfo *rel,
     CypherAdjacencyMatchCandidate *candidate);
+static Const *find_endpoint_graphid_const(PlannerInfo *root,
+                                          CypherAdjacencyMatchCandidate *candidate);
+static bool adjacency_match_bound_expr_uses_age_id(Node *node);
+static bool adjacency_match_bound_expr_uses_age_id_walker(Node *node,
+                                                          void *context);
 static void cost_adjacency_match_custom_path(PlannerInfo *root,
                                              RelOptInfo *rel,
                                              CustomPath *cp,
@@ -87,6 +100,15 @@ static CypherAdjacencyMatchCandidate *pop_adjacency_match_candidate(
     PlannerInfo *root, RangeTblEntry *rte);
 static void bind_adjacency_match_candidate_outer_relids(
     PlannerInfo *root, CypherAdjacencyMatchCandidate *candidate);
+static void log_adjacency_match_join_paths(RelOptInfo *joinrel,
+                                           RelOptInfo *outerrel,
+                                           RelOptInfo *innerrel,
+                                           JoinType jointype);
+static void adjust_adjacency_match_join_rows(RelOptInfo *joinrel,
+                                             JoinType jointype);
+static bool path_contains_adjacency_match(Path *path);
+static bool path_required_outer_is_subset(Path *path, Relids relids);
+static const char *path_param_info_string(Path *path);
 
 static const CustomPathMethods age_adjacency_match_path_methods = {
     AGE_ADJACENCY_MATCH_SCAN_NAME,
@@ -155,11 +177,14 @@ void set_rel_pathlist_init(void)
 {
     prev_set_rel_pathlist_hook = set_rel_pathlist_hook;
     set_rel_pathlist_hook = set_rel_pathlist;
+    prev_set_join_pathlist_hook = set_join_pathlist_hook;
+    set_join_pathlist_hook = set_join_pathlist;
     RegisterCustomScanMethods(&age_adjacency_match_scan_methods);
 }
 
 void set_rel_pathlist_fini(void)
 {
+    set_join_pathlist_hook = prev_set_join_pathlist_hook;
     set_rel_pathlist_hook = prev_set_rel_pathlist_hook;
 }
 
@@ -224,6 +249,225 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
     default:
         ereport(ERROR, (errmsg_internal("invalid cypher_clause_kind")));
     }
+}
+
+static void set_join_pathlist(PlannerInfo *root, RelOptInfo *joinrel,
+                              RelOptInfo *outerrel, RelOptInfo *innerrel,
+                              JoinType jointype, JoinPathExtraData *extra)
+{
+    if (prev_set_join_pathlist_hook)
+        prev_set_join_pathlist_hook(root, joinrel, outerrel, innerrel,
+                                    jointype, extra);
+
+    if (!age_enable_adjacency_match_custom_path)
+        return;
+
+    adjust_adjacency_match_join_rows(joinrel, jointype);
+    log_adjacency_match_join_paths(joinrel, outerrel, innerrel, jointype);
+}
+
+static void log_adjacency_match_join_paths(RelOptInfo *joinrel,
+                                           RelOptInfo *outerrel,
+                                           RelOptInfo *innerrel,
+                                           JoinType jointype)
+{
+    ListCell *lc;
+
+    if (joinrel == NULL ||
+        joinrel->pathlist == NIL)
+    {
+        return;
+    }
+
+    foreach(lc, joinrel->pathlist)
+    {
+        Path *path = lfirst(lc);
+        JoinPath *joinpath;
+        Path *outer_path;
+        Path *inner_path;
+
+        if (!IsA(path, NestPath))
+            continue;
+
+        joinpath = (JoinPath *)path;
+        outer_path = joinpath->outerjoinpath;
+        inner_path = joinpath->innerjoinpath;
+
+        if (!path_contains_adjacency_match(outer_path) &&
+            !path_contains_adjacency_match(inner_path))
+        {
+            continue;
+        }
+
+        ereport(DEBUG2,
+                (errmsg_internal("AGE adjacency MATCH join path visible: "
+                                 "jointype=%d joinrelids=%s outerrelids=%s "
+                                 "innerrelids=%s joinrel_rows=%.0f "
+                                 "path_rows=%.0f path_required_outer=%s "
+                                 "outer_rows=%.0f outer_required_outer=%s "
+                                 "inner_rows=%.0f inner_required_outer=%s",
+                                 (int)jointype,
+                                 bmsToString(joinrel->relids),
+                                 outerrel != NULL ?
+                                 bmsToString(outerrel->relids) : "<none>",
+                                 innerrel != NULL ?
+                                 bmsToString(innerrel->relids) : "<none>",
+                                 joinrel->rows,
+                                 path->rows,
+                                 path_param_info_string(path),
+                                 outer_path != NULL ? outer_path->rows : 0,
+                                 path_param_info_string(outer_path),
+                                 inner_path != NULL ? inner_path->rows : 0,
+                                 path_param_info_string(inner_path))));
+    }
+}
+
+static void adjust_adjacency_match_join_rows(RelOptInfo *joinrel,
+                                             JoinType jointype)
+{
+    ListCell *lc;
+
+    if (joinrel == NULL ||
+        joinrel->pathlist == NIL)
+    {
+        return;
+    }
+
+    foreach(lc, joinrel->pathlist)
+    {
+        Path *path = lfirst(lc);
+        JoinPath *joinpath;
+        Path *outer_path;
+        Path *inner_path;
+        double child_rows;
+        double adjusted_rows;
+        bool outer_has_adjacency;
+        bool inner_has_adjacency;
+
+        if (!IsA(path, NestPath))
+            continue;
+
+        joinpath = (JoinPath *)path;
+        outer_path = joinpath->outerjoinpath;
+        inner_path = joinpath->innerjoinpath;
+
+        outer_has_adjacency = path_contains_adjacency_match(outer_path);
+        inner_has_adjacency = path_contains_adjacency_match(inner_path);
+
+        if (outer_path == NULL ||
+            inner_path == NULL ||
+            (!outer_has_adjacency && !inner_has_adjacency))
+        {
+            continue;
+        }
+
+        /*
+         * Do not mutate shared joinrel or ParamPathInfo estimates here.  This
+         * only tightens the opt-in NestPath that contains the adjacency
+         * CustomPath after core join path creation has finished.
+         */
+        child_rows = outer_path->rows * inner_path->rows;
+        adjusted_rows = clamp_row_est(Max(child_rows, 1.0));
+
+        if (outer_has_adjacency &&
+            !inner_has_adjacency &&
+            outer_path->parent != NULL &&
+            path_required_outer_is_subset(inner_path, outer_path->parent->relids))
+        {
+            adjusted_rows = Min(adjusted_rows,
+                                clamp_row_est(Max(outer_path->rows, 1.0)));
+        }
+        else if (inner_has_adjacency &&
+                 !outer_has_adjacency &&
+                 inner_path->parent != NULL &&
+                 path_required_outer_is_subset(outer_path,
+                                               inner_path->parent->relids))
+        {
+            adjusted_rows = Min(adjusted_rows,
+                                clamp_row_est(Max(inner_path->rows, 1.0)));
+        }
+
+        if (adjusted_rows >= path->rows)
+            continue;
+
+        ereport(DEBUG2,
+                (errmsg_internal("AGE adjacency MATCH join rows adjusted: "
+                                 "jointype=%d joinrelids=%s old_rows=%.0f "
+                                 "new_rows=%.0f outer_rows=%.0f "
+                                 "inner_rows=%.0f",
+                                 (int)jointype,
+                                 bmsToString(joinrel->relids),
+                                 path->rows,
+                                 adjusted_rows,
+                                 outer_path->rows,
+                                 inner_path->rows)));
+
+        path->rows = adjusted_rows;
+    }
+}
+
+static bool path_required_outer_is_subset(Path *path, Relids relids)
+{
+    Relids required_outer;
+
+    if (path == NULL ||
+        relids == NULL)
+    {
+        return false;
+    }
+
+    required_outer = PATH_REQ_OUTER(path);
+
+    return !bms_is_empty(required_outer) &&
+           bms_is_subset(required_outer, relids);
+}
+
+static bool path_contains_adjacency_match(Path *path)
+{
+    if (path == NULL)
+        return false;
+
+    if (IsA(path, CustomPath))
+    {
+        CustomPath *custom_path = (CustomPath *)path;
+
+        return custom_path->methods == &age_adjacency_match_path_methods;
+    }
+
+    if (IsA(path, NestPath) ||
+        IsA(path, MergePath) ||
+        IsA(path, HashPath))
+    {
+        JoinPath *join_path = (JoinPath *)path;
+
+        return path_contains_adjacency_match(join_path->outerjoinpath) ||
+               path_contains_adjacency_match(join_path->innerjoinpath);
+    }
+
+    if (IsA(path, MaterialPath))
+        return path_contains_adjacency_match(((MaterialPath *)path)->subpath);
+
+    if (IsA(path, MemoizePath))
+        return path_contains_adjacency_match(((MemoizePath *)path)->subpath);
+
+    if (IsA(path, ProjectionPath))
+        return path_contains_adjacency_match(((ProjectionPath *)path)->subpath);
+
+    if (IsA(path, SubqueryScanPath))
+        return path_contains_adjacency_match(((SubqueryScanPath *)path)->subpath);
+
+    return false;
+}
+
+static const char *path_param_info_string(Path *path)
+{
+    if (path == NULL ||
+        path->param_info == NULL)
+    {
+        return "<none>";
+    }
+
+    return bmsToString(PATH_REQ_OUTER(path));
 }
 
 static CypherAdjacencyMatchCandidate *pop_adjacency_match_candidate(
@@ -340,6 +584,8 @@ static void add_adjacency_match_custom_path(
     CypherAdjacencyMatchCandidate *candidate)
 {
     CustomPath *cp;
+    Expr *key_expr;
+    Const *endpoint_const;
 
     if (!age_enable_adjacency_match_custom_path ||
         candidate == NULL ||
@@ -347,10 +593,16 @@ static void add_adjacency_match_custom_path(
         candidate->required_outer == NULL ||
         candidate->has_edge_variable_projection ||
         candidate->has_edge_property_predicate ||
-        candidate->has_right_property_predicate)
+        candidate->has_right_property_predicate ||
+        adjacency_match_bound_expr_uses_age_id(candidate->bound_endpoint_expr))
     {
         return;
     }
+
+    key_expr = (Expr *)candidate->bound_endpoint_expr;
+    endpoint_const = find_endpoint_graphid_const(root, candidate);
+    if (endpoint_const != NULL)
+        key_expr = (Expr *)endpoint_const;
 
     cp = makeNode(CustomPath);
     cp->path.pathtype = T_CustomScan;
@@ -367,7 +619,7 @@ static void add_adjacency_match_custom_path(
     cp->flags = 0;
     cp->custom_paths = NIL;
     cp->custom_private = list_make3(
-        candidate->bound_endpoint_expr,
+        key_expr,
         makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
                   ObjectIdGetDatum(candidate->index_oid), false, true),
         makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
@@ -385,6 +637,106 @@ static void add_adjacency_match_custom_path(
                              bmsToString(candidate->required_outer),
                              cp->path.rows,
                              cp->path.total_cost)));
+}
+
+static Const *find_endpoint_graphid_const(PlannerInfo *root,
+                                          CypherAdjacencyMatchCandidate *candidate)
+{
+    RelOptInfo *endpoint_rel;
+    ListCell *lc;
+
+    if (candidate->bound_endpoint_rti <= 0 ||
+        candidate->bound_endpoint_rti >= root->simple_rel_array_size)
+        return NULL;
+
+    endpoint_rel = root->simple_rel_array[candidate->bound_endpoint_rti];
+    if (endpoint_rel == NULL)
+        return NULL;
+
+    /*
+     * When a previous-clause vertex has id(vertex) = const, the bound endpoint
+     * expression can still refer to a hidden raw target Var.  Use the base
+     * relation's id restriction as the CustomScan key so executor setrefs do
+     * not evaluate that hidden Var against the wrong slot.
+     */
+    foreach(lc, endpoint_rel->baserestrictinfo)
+    {
+        RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+        OpExpr *op;
+        Node *left;
+        Node *right;
+
+        if (!IsA(rinfo->clause, OpExpr))
+            continue;
+
+        op = castNode(OpExpr, rinfo->clause);
+        if (list_length(op->args) != 2)
+            continue;
+
+        left = linitial(op->args);
+        right = lsecond(op->args);
+
+        if (IsA(left, Var) && IsA(right, Const))
+        {
+            Var *var = castNode(Var, left);
+            Const *con = castNode(Const, right);
+
+            if (var->varno == candidate->bound_endpoint_rti &&
+                var->varattno == Anum_ag_label_vertex_table_id &&
+                var->vartype == GRAPHIDOID &&
+                con->consttype == GRAPHIDOID &&
+                !con->constisnull)
+                return copyObject(con);
+        }
+        else if (IsA(left, Const) && IsA(right, Var))
+        {
+            Const *con = castNode(Const, left);
+            Var *var = castNode(Var, right);
+
+            if (var->varno == candidate->bound_endpoint_rti &&
+                var->varattno == Anum_ag_label_vertex_table_id &&
+                var->vartype == GRAPHIDOID &&
+                con->consttype == GRAPHIDOID &&
+                !con->constisnull)
+                return copyObject(con);
+        }
+    }
+
+    return NULL;
+}
+
+static bool adjacency_match_bound_expr_uses_age_id(Node *node)
+{
+    bool found = false;
+
+    (void)adjacency_match_bound_expr_uses_age_id_walker(node, &found);
+
+    return found;
+}
+
+static bool adjacency_match_bound_expr_uses_age_id_walker(Node *node,
+                                                          void *context)
+{
+    bool *found = context;
+
+    if (node == NULL || *found)
+        return false;
+
+    if (IsA(node, FuncExpr))
+    {
+        FuncExpr *func = (FuncExpr *)node;
+        Oid age_id_oid = get_ag_func_oid("age_id", 1, AGTYPEOID);
+
+        if (func->funcid == age_id_oid)
+        {
+            *found = true;
+            return false;
+        }
+    }
+
+    return expression_tree_walker(node,
+                                  adjacency_match_bound_expr_uses_age_id_walker,
+                                  context);
 }
 
 static void cost_adjacency_match_custom_path(PlannerInfo *root,

@@ -31,13 +31,7 @@
  * regular Postgres parameters. See guc.h for more details.
  */
 
-/*
- * If set true, MATCH's property filter is transformed into the @>
- * (containment) operator. Otherwise, the -> operator is used. The former case
- * is useful when GIN index is desirable, the latter case is useful for Btree
- * expression index.
- */
-extern bool age_enable_containment;
+
 
 /*
  * Enables the experimental fixed-length MATCH rewrite that scans

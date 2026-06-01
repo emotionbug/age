@@ -22,7 +22,6 @@
 #include "utils/guc.h"
 #include "utils/ag_guc.h"
 
-bool age_enable_containment = true;
 bool age_enable_adjacency_match = false;
 bool age_enable_adjacency_match_custom_path = false;
 
@@ -30,20 +29,10 @@ bool age_enable_adjacency_match_custom_path = false;
  * Defines AGE's custom configuration parameters.
  *
  * The name of the parameter must be `age.*`. This name is used for setting
- * value to the parameter. For example, `SET age.enable_containment = on;`.
+ * value to the parameter. For example, `SET age.enable_adjacency_match = on;`.
  */
 void define_config_params(void)
 {
-    DefineCustomBoolVariable("age.enable_containment",
-                             "Use @> operator to transform MATCH's filter. Otherwise, use -> operator.",
-                             NULL,
-                             &age_enable_containment,
-                             true,
-                             PGC_SUSET,
-                             0,
-                             NULL,
-                             NULL,
-                             NULL);
     DefineCustomBoolVariable("age.enable_adjacency_match",
                              "Enable experimental age_adjacency candidate providers for guarded fixed-length MATCH shapes.",
                              "This opt-in path is off by default while its cost and cardinality policy is evaluated.",

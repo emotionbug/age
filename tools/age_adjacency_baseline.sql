@@ -45,6 +45,29 @@
 --        -v provider_function_cost=1 \
 --        -v provider_function_rows=1 \
 --        -v edge_property_padding_bytes=512 \
+--        -v preserve_graph=1 \
+--        -f tools/age_adjacency_baseline.sql
+--
+-- DEFAULT-ON decision mode must use a larger workload than the syntax/smoke
+-- gates. Use this profile, then repeat with at least one lower-fanout and one
+-- higher-fanout setting before changing defaults:
+--
+--   psql -d postgres \
+--        -v graph=age_adjacency_default_on_gate \
+--        -v chain_nodes=4096 \
+--        -v noise_per_vertex=64 \
+--        -v repeats=5 \
+--        -v run_warm_pressure=1 \
+--        -v warm_pressure_repeats=3 \
+--        -v run_fixed_provider_pressure=1 \
+--        -v run_custom_path_pressure=1 \
+--        -v run_custom_path_analyze=1 \
+--        -v fixed_provider_repeats=5 \
+--        -v default_on_min_speedup=1.05 \
+--        -v run_adjacency_guard_matrix=1 \
+--        -v provider_function_cost=1 \
+--        -v provider_function_rows=1 \
+--        -v edge_property_padding_bytes=512 \
 --        -f tools/age_adjacency_baseline.sql
 
 \set ON_ERROR_STOP on
@@ -93,6 +116,10 @@
 \else
     \set fixed_provider_repeats :repeats
 \endif
+\if :{?default_on_min_speedup}
+\else
+    \set default_on_min_speedup 1.05
+\endif
 \if :{?run_adjacency_guard_matrix}
 \else
     \set run_adjacency_guard_matrix 0
@@ -116,6 +143,10 @@
 \if :{?provider_function_rows}
 \else
     \set provider_function_rows 0
+\endif
+\if :{?preserve_graph}
+\else
+    \set preserve_graph 0
 \endif
 
 \timing on
@@ -1276,6 +1307,20 @@ SELECT pg_temp.record_age_adjacency_plan_cost(
     'MATCH (:N {i: 0})-[:Keep]->(n:N) RETURN n.i')
 FROM age_adjacency_baseline_config;
 
+SELECT pg_temp.record_age_adjacency_plan_cost(
+    graph_name,
+    'fixed_pressure_idx_match_keep_one_hop_left_direction_btree_warm',
+    'MATCH (:N {i: 1})<-[:Keep]-(n) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.record_age_adjacency_plan_cost(
+    graph_name,
+    'fixed_pressure_idx_match_keep_one_hop_id_bound_btree_warm',
+    format(
+        'MATCH (s:N) WHERE id(s) = %s MATCH (s)-[:Keep]->(n) RETURN n.i',
+        _graphid(_label_id(graph_name, 'N'), 1)))
+FROM age_adjacency_baseline_config;
+
 SELECT pg_temp.run_age_adjacency_cypher_case(
     graph_name,
     'fixed_pressure_idx_match_keep_one_hop_bound_btree_warm',
@@ -1307,6 +1352,54 @@ SELECT pg_temp.run_age_adjacency_cypher_case(
     :fixed_provider_repeats::int,
     false)
 FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'fixed_pressure_idx_match_keep_one_hop_id_bound_btree_warm',
+    format(
+        'MATCH (s:N) WHERE id(s) = %s MATCH (s)-[:Keep]->(n) RETURN n.i',
+        _graphid(_label_id(graph_name, 'N'), 1)),
+    :fixed_provider_repeats::int,
+    false)
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'fixed_pressure_idx_match_keep_one_hop_left_direction_btree_warm',
+    'MATCH (:N {i: 1})<-[:Keep]-(n) RETURN n.i',
+    :fixed_provider_repeats::int,
+    false)
+FROM age_adjacency_baseline_config;
+
+\if :run_custom_path_analyze
+
+SELECT pg_temp.record_age_adjacency_plan_analyze(
+    graph_name,
+    'fixed_pressure_idx_match_keep_one_hop_bound_btree_warm',
+    'MATCH (:N {i: 0})-[:Keep]->(n) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.record_age_adjacency_plan_analyze(
+    graph_name,
+    'fixed_pressure_idx_match_keep_one_hop_left_direction_btree_warm',
+    'MATCH (:N {i: 1})<-[:Keep]-(n) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.record_age_adjacency_plan_analyze(
+    graph_name,
+    'fixed_pressure_idx_match_keep_one_hop_right_label_btree_warm',
+    'MATCH (:N {i: 0})-[:Keep]->(n:N) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.record_age_adjacency_plan_analyze(
+    graph_name,
+    'fixed_pressure_idx_match_keep_one_hop_id_bound_btree_warm',
+    format(
+        'MATCH (s:N) WHERE id(s) = %s MATCH (s)-[:Keep]->(n) RETURN n.i',
+        _graphid(_label_id(graph_name, 'N'), 1)))
+FROM age_adjacency_baseline_config;
+
+\endif
 
 SET age.enable_adjacency_match = on;
 
@@ -1412,6 +1505,14 @@ SELECT pg_temp.record_age_adjacency_plan_cost(
     'MATCH (:N {i: 0})-[:Keep]->(n {i: 1}) RETURN n.i')
 FROM age_adjacency_baseline_config;
 
+SELECT pg_temp.record_age_adjacency_plan_cost(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_id_bound_warm',
+    format(
+        'MATCH (s:N) WHERE id(s) = %s MATCH (s)-[:Keep]->(n) RETURN n.i',
+        _graphid(_label_id(graph_name, 'N'), 1)))
+FROM age_adjacency_baseline_config;
+
 SELECT pg_temp.run_age_adjacency_cypher_case(
     graph_name,
     'custom_path_idx_match_keep_one_hop_bound_warm',
@@ -1460,6 +1561,16 @@ SELECT pg_temp.run_age_adjacency_cypher_case(
     false)
 FROM age_adjacency_baseline_config;
 
+SELECT pg_temp.run_age_adjacency_cypher_case(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_id_bound_warm',
+    format(
+        'MATCH (s:N) WHERE id(s) = %s MATCH (s)-[:Keep]->(n) RETURN n.i',
+        _graphid(_label_id(graph_name, 'N'), 1)),
+    :fixed_provider_repeats::int,
+    false)
+FROM age_adjacency_baseline_config;
+
 \if :run_custom_path_analyze
 
 SELECT pg_temp.record_age_adjacency_plan_analyze(
@@ -1478,6 +1589,14 @@ SELECT pg_temp.record_age_adjacency_plan_analyze(
     graph_name,
     'custom_path_idx_match_keep_one_hop_right_label_warm',
     'MATCH (:N {i: 0})-[:Keep]->(n:N) RETURN n.i')
+FROM age_adjacency_baseline_config;
+
+SELECT pg_temp.record_age_adjacency_plan_analyze(
+    graph_name,
+    'custom_path_idx_match_keep_one_hop_id_bound_warm',
+    format(
+        'MATCH (s:N) WHERE id(s) = %s MATCH (s)-[:Keep]->(n) RETURN n.i',
+        _graphid(_label_id(graph_name, 'N'), 1)))
 FROM age_adjacency_baseline_config;
 
 \endif
@@ -1856,6 +1975,55 @@ FROM age_adjacency_baseline_results
 GROUP BY case_name
 ORDER BY case_name;
 
+WITH result_summary AS (
+    SELECT case_name,
+           min(rows_returned) AS rows_returned,
+           avg(elapsed_ms) AS avg_ms
+    FROM age_adjacency_baseline_results
+    GROUP BY case_name
+),
+edge_cases(label, case_name) AS (
+    VALUES
+    (
+        'btree_start_id',
+        'sql_keep_start_btree'
+    ),
+    (
+        'age_adjacency_payload',
+        'sql_keep_start_age_adjacency_payload'
+    ),
+    (
+        'candidate_provider_join',
+        'sql_keep_one_hop_candidate_provider'
+    )
+),
+pivoted AS (
+    SELECT max(rows_returned) FILTER (
+               WHERE case_name = 'sql_keep_start_btree'
+           ) AS rows_returned,
+           max(avg_ms) FILTER (
+               WHERE case_name = 'sql_keep_start_btree'
+           ) AS btree_avg_ms,
+           max(avg_ms) FILTER (
+               WHERE case_name = 'sql_keep_start_age_adjacency_payload'
+           ) AS adjacency_payload_avg_ms,
+           max(avg_ms) FILTER (
+               WHERE case_name = 'sql_keep_one_hop_candidate_provider'
+           ) AS candidate_provider_avg_ms
+    FROM result_summary
+    WHERE case_name IN (SELECT e.case_name FROM edge_cases e)
+)
+SELECT 'edge_access_isolation' AS summary,
+       rows_returned,
+       round(btree_avg_ms, 3) AS btree_avg_ms,
+       round(adjacency_payload_avg_ms, 3) AS adjacency_payload_avg_ms,
+       round(candidate_provider_avg_ms, 3) AS candidate_provider_avg_ms,
+       round((btree_avg_ms / NULLIF(adjacency_payload_avg_ms, 0)), 3)
+           AS adjacency_payload_speedup,
+       round((btree_avg_ms / NULLIF(candidate_provider_avg_ms, 0)), 3)
+           AS candidate_provider_speedup
+FROM pivoted;
+
 \if :run_fixed_provider_pressure
 
 WITH result_summary AS (
@@ -1933,19 +2101,94 @@ WITH result_summary AS (
     FROM age_adjacency_baseline_results
     GROUP BY case_name
 ),
+shape_map(shape_name, custom_path_case, expected_custom_scan) AS (
+    VALUES
+    (
+        'bound',
+        'custom_path_idx_match_keep_one_hop_bound_warm',
+        true
+    ),
+    (
+        'edge_property',
+        'custom_path_idx_match_keep_one_hop_edge_prop_warm',
+        false
+    ),
+    (
+        'edge_variable',
+        'custom_path_idx_match_keep_one_hop_edge_var_warm',
+        false
+    ),
+    (
+        'left_direction',
+        'custom_path_idx_match_keep_one_hop_left_direction_warm',
+        true
+    ),
+    (
+        'right_label',
+        'custom_path_idx_match_keep_one_hop_right_label_warm',
+        true
+    ),
+    (
+        'id_bound',
+        'custom_path_idx_match_keep_one_hop_id_bound_warm',
+        true
+    ),
+    (
+        'right_property',
+        'custom_path_idx_match_keep_one_hop_right_prop_warm',
+        false
+    )
+)
+SELECT m.shape_name,
+       c.rows_returned,
+       round(c.avg_ms, 3) AS custom_path_avg_ms,
+       pc.plan_rows AS top_plan_rows,
+       pc.total_cost AS custom_path_total_cost,
+       pc.uses_provider,
+       max(pl.plan_rows) FILTER (
+           WHERE pl.plan_line LIKE '%Custom Scan (AGE Adjacency Match)%'
+       ) AS custom_scan_plan_rows,
+       bool_or(pl.plan_line LIKE '%Custom Scan (AGE Adjacency Match)%') AS has_custom_scan,
+       m.expected_custom_scan,
+       CASE
+           WHEN bool_or(pl.plan_line LIKE '%Custom Scan (AGE Adjacency Match)%') =
+                m.expected_custom_scan
+           THEN 'expected'
+           ELSE 'review'
+       END AS custom_path_gate_status
+FROM shape_map m
+JOIN result_summary c ON c.case_name = m.custom_path_case
+JOIN age_adjacency_plan_costs pc ON pc.case_name = m.custom_path_case
+JOIN age_adjacency_plan_lines pl ON pl.case_name = m.custom_path_case
+GROUP BY m.shape_name, c.rows_returned, c.avg_ms, pc.plan_rows,
+         pc.total_cost, pc.uses_provider, m.expected_custom_scan
+ORDER BY m.shape_name;
+
+\endif
+
+\if :run_custom_path_analyze
+
+WITH top_lines AS (
+    SELECT case_name,
+           max(plan_rows) FILTER (WHERE line_no = 1) AS top_plan_rows,
+           max(actual_rows) FILTER (WHERE line_no = 1) AS top_actual_rows,
+           max(actual_total_ms) FILTER (WHERE line_no = 1) AS top_actual_ms
+    FROM age_adjacency_plan_analyze_lines
+    GROUP BY case_name
+),
+custom_lines AS (
+    SELECT case_name,
+           max(plan_rows) FILTER (WHERE mentions_provider) AS custom_scan_plan_rows,
+           max(actual_rows) FILTER (WHERE mentions_provider) AS custom_scan_actual_rows,
+           max(actual_total_ms) FILTER (WHERE mentions_provider) AS custom_scan_actual_ms
+    FROM age_adjacency_plan_analyze_lines
+    GROUP BY case_name
+),
 shape_map(shape_name, custom_path_case) AS (
     VALUES
     (
         'bound',
         'custom_path_idx_match_keep_one_hop_bound_warm'
-    ),
-    (
-        'edge_property',
-        'custom_path_idx_match_keep_one_hop_edge_prop_warm'
-    ),
-    (
-        'edge_variable',
-        'custom_path_idx_match_keep_one_hop_edge_var_warm'
     ),
     (
         'left_direction',
@@ -1956,30 +2199,185 @@ shape_map(shape_name, custom_path_case) AS (
         'custom_path_idx_match_keep_one_hop_right_label_warm'
     ),
     (
-        'right_property',
-        'custom_path_idx_match_keep_one_hop_right_prop_warm'
+        'id_bound',
+        'custom_path_idx_match_keep_one_hop_id_bound_warm'
     )
 )
 SELECT m.shape_name,
-       c.rows_returned,
-       round(c.avg_ms, 3) AS custom_path_avg_ms,
-       pc.total_cost AS custom_path_total_cost,
-       pc.uses_provider,
-       bool_or(pl.plan_line LIKE '%Custom Scan (AGE Adjacency Match)%') AS has_custom_scan
+       t.top_plan_rows,
+       t.top_actual_rows,
+       round(t.top_actual_ms, 3) AS top_actual_ms,
+       c.custom_scan_plan_rows,
+       c.custom_scan_actual_rows,
+       round(c.custom_scan_actual_ms, 3) AS custom_scan_actual_ms,
+       CASE
+           WHEN t.top_plan_rows = t.top_actual_rows AND
+                c.custom_scan_plan_rows = c.custom_scan_actual_rows
+           THEN 'aligned'
+           ELSE 'review'
+       END AS row_estimate_status
 FROM shape_map m
-JOIN result_summary c ON c.case_name = m.custom_path_case
-JOIN age_adjacency_plan_costs pc ON pc.case_name = m.custom_path_case
-JOIN age_adjacency_plan_lines pl ON pl.case_name = m.custom_path_case
-GROUP BY m.shape_name, c.rows_returned, c.avg_ms, pc.total_cost,
-         pc.uses_provider
+JOIN top_lines t ON t.case_name = m.custom_path_case
+JOIN custom_lines c ON c.case_name = m.custom_path_case
 ORDER BY m.shape_name;
 
+\endif
+
+\if :run_fixed_provider_pressure
+\if :run_custom_path_analyze
+
+WITH shape_map(shape_name, btree_case, custom_path_case) AS (
+    VALUES
+    (
+        'bound',
+        'fixed_pressure_idx_match_keep_one_hop_bound_btree_warm',
+        'custom_path_idx_match_keep_one_hop_bound_warm'
+    ),
+    (
+        'left_direction',
+        'fixed_pressure_idx_match_keep_one_hop_left_direction_btree_warm',
+        'custom_path_idx_match_keep_one_hop_left_direction_warm'
+    ),
+    (
+        'right_label',
+        'fixed_pressure_idx_match_keep_one_hop_right_label_btree_warm',
+        'custom_path_idx_match_keep_one_hop_right_label_warm'
+    ),
+    (
+        'id_bound',
+        'fixed_pressure_idx_match_keep_one_hop_id_bound_btree_warm',
+        'custom_path_idx_match_keep_one_hop_id_bound_warm'
+    )
+),
+line_summary AS (
+    SELECT case_name,
+           max(actual_total_ms) FILTER (
+               WHERE plan_line LIKE '%Seq Scan on "N" _age_default_alias_0%'
+           ) AS endpoint_scan_ms,
+           max(actual_total_ms) FILTER (
+               WHERE plan_line LIKE '%Index Scan using "N_pkey"%'
+           ) AS endpoint_index_ms,
+           max(actual_total_ms) FILTER (
+               WHERE plan_line LIKE '%Index Scan using "Keep_start_id_idx"%'
+           ) AS btree_edge_scan_ms,
+           max(actual_total_ms) FILTER (
+               WHERE plan_line LIKE '%Custom Scan (AGE Adjacency Match)%'
+           ) AS custom_edge_scan_ms,
+           max(actual_total_ms) FILTER (WHERE line_no = 1) AS top_actual_ms
+    FROM age_adjacency_plan_analyze_lines
+    GROUP BY case_name
+)
+SELECT m.shape_name,
+       round(b.endpoint_scan_ms, 3) AS btree_endpoint_scan_ms,
+       round(b.endpoint_index_ms, 3) AS btree_endpoint_index_ms,
+       round(b.btree_edge_scan_ms, 3) AS btree_edge_scan_ms,
+       round(b.top_actual_ms, 3) AS btree_top_actual_ms,
+       round(c.endpoint_scan_ms, 3) AS custom_endpoint_scan_ms,
+       round(c.endpoint_index_ms, 3) AS custom_endpoint_index_ms,
+       round(c.custom_edge_scan_ms, 3) AS custom_edge_scan_ms,
+       round(c.top_actual_ms, 3) AS custom_top_actual_ms,
+       CASE
+           WHEN c.endpoint_scan_ms IS NOT NULL AND
+                c.custom_edge_scan_ms IS NOT NULL AND
+                c.endpoint_scan_ms > c.custom_edge_scan_ms
+           THEN 'endpoint_scan_dominates'
+           WHEN c.endpoint_index_ms IS NOT NULL AND
+                c.custom_edge_scan_ms IS NOT NULL
+           THEN 'endpoint_index_lookup'
+           ELSE 'review'
+       END AS observed_bottleneck
+FROM shape_map m
+JOIN line_summary b ON b.case_name = m.btree_case
+JOIN line_summary c ON c.case_name = m.custom_path_case
+ORDER BY m.shape_name;
+
+\endif
+\endif
+
+\if :run_fixed_provider_pressure
+\if :run_custom_path_pressure
+
+WITH result_summary AS (
+    SELECT case_name,
+           min(rows_returned) AS rows_returned,
+           avg(elapsed_ms) AS avg_ms
+    FROM age_adjacency_baseline_results
+    GROUP BY case_name
+),
+default_gate AS (
+    SELECT :default_on_min_speedup::numeric AS min_speedup
+),
+shape_map(shape_name, btree_case, custom_path_case) AS (
+    VALUES
+    (
+        'bound',
+        'fixed_pressure_idx_match_keep_one_hop_bound_btree_warm',
+        'custom_path_idx_match_keep_one_hop_bound_warm'
+    ),
+    (
+        'left_direction',
+        'fixed_pressure_idx_match_keep_one_hop_left_direction_btree_warm',
+        'custom_path_idx_match_keep_one_hop_left_direction_warm'
+    ),
+    (
+        'right_label',
+        'fixed_pressure_idx_match_keep_one_hop_right_label_btree_warm',
+        'custom_path_idx_match_keep_one_hop_right_label_warm'
+    ),
+    (
+        'id_bound',
+        'fixed_pressure_idx_match_keep_one_hop_id_bound_btree_warm',
+        'custom_path_idx_match_keep_one_hop_id_bound_warm'
+    )
+),
+custom_scan_lines AS (
+    SELECT case_name,
+           max(plan_rows) FILTER (
+               WHERE plan_line LIKE '%Custom Scan (AGE Adjacency Match)%'
+           ) AS custom_scan_plan_rows
+    FROM age_adjacency_plan_lines
+    GROUP BY case_name
+)
+SELECT m.shape_name,
+       b.rows_returned,
+       round(b.avg_ms, 3) AS btree_avg_ms,
+       round(c.avg_ms, 3) AS custom_path_avg_ms,
+       round((b.avg_ms / NULLIF(c.avg_ms, 0)), 3) AS custom_path_speedup,
+       bc.total_cost AS btree_total_cost,
+       cc.total_cost AS custom_path_total_cost,
+       round((bc.total_cost / NULLIF(cc.total_cost, 0)), 3) AS planner_cost_ratio,
+       cc.plan_rows AS custom_path_top_plan_rows,
+       cl.custom_scan_plan_rows,
+       cc.uses_provider AS has_custom_scan,
+       CASE
+           WHEN c.rows_returned = b.rows_returned THEN 'matched'
+           ELSE 'review'
+       END AS row_count_status,
+       CASE
+           WHEN cc.uses_provider AND
+                cc.plan_rows = COALESCE(cl.custom_scan_plan_rows, -1) AND
+                c.rows_returned = b.rows_returned AND
+                (b.avg_ms / NULLIF(c.avg_ms, 0)) >= g.min_speedup
+           THEN 'candidate'
+           ELSE 'review'
+       END AS default_on_signal
+FROM shape_map m
+JOIN result_summary b ON b.case_name = m.btree_case
+JOIN result_summary c ON c.case_name = m.custom_path_case
+JOIN age_adjacency_plan_costs bc ON bc.case_name = m.btree_case
+JOIN age_adjacency_plan_costs cc ON cc.case_name = m.custom_path_case
+JOIN custom_scan_lines cl ON cl.case_name = m.custom_path_case
+CROSS JOIN default_gate g
+ORDER BY m.shape_name;
+
+\endif
 \endif
 
 SELECT 'decision_gate' AS note,
        'Keep age_adjacency as an opt-in VLE candidate source. Do not make it '
        || 'the default label path until it consistently beats the endpoint '
-       || 'btree/global-cache baseline on representative workloads.' AS guidance;
+       || 'btree/global-cache baseline on representative large workloads; '
+       || 'syntax/smoke profiles only validate shape and instrumentation.' AS guidance;
 
 DO $$
 DECLARE
@@ -1999,5 +2397,11 @@ BEGIN
 END
 $$;
 
+\if :preserve_graph
+SELECT 'preserved_graph' AS note,
+       graph_name
+FROM age_adjacency_baseline_config;
+\else
 SELECT drop_graph(graph_name, true)
 FROM age_adjacency_baseline_config;
+\endif
