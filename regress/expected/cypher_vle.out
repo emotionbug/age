@@ -313,9 +313,15 @@ SELECT * FROM cypher('cypher_vle', $$EXPLAIN (COSTS OFF) MATCH p=()-[e*1..2 {nam
 QUERY PLAN
 Aggregate
   ->  Nested Loop
-        ->  Seq Scan on "end" _age_default_vle_function_end_var_36
-        ->  Function Scan on age_vle _age_default_alias_0
-(4 rows)
+        ->  Append
+              ->  Seq Scan on _ag_label_vertex _age_default_vle_function_start_var_35_1
+              ->  Seq Scan on begin _age_default_vle_function_start_var_35_2
+              ->  Seq Scan on middle _age_default_vle_function_start_var_35_3
+              ->  Seq Scan on "end" _age_default_vle_function_start_var_35_4
+        ->  Nested Loop
+              ->  Seq Scan on "end" _age_default_vle_function_end_var_36
+              ->  Function Scan on age_vle _age_default_alias_0
+(10 rows)
 SELECT * FROM cypher('cypher_vle', $$EXPLAIN (COSTS OFF) MATCH ()-[e*1..2 {name: "main edge"}]->(:end) RETURN count(*) $$) AS (plan agtype);
 QUERY PLAN
 Aggregate

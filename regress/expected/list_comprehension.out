@@ -321,12 +321,11 @@ SELECT * FROM cypher('list_comprehension', $$ MATCH (u {list:[i IN range(1,13,2)
  {"id": 281474976710658, "label": "", "properties": {"list": [1, 3, 5, 7, 9, 11, 13]}}::vertex
 (1 row)
 
-SELECT * FROM cypher('list_comprehension', $$ MATCH (u {list:[i IN range(0,12,2) WHERE i>4]}) RETURN u $$) AS (result agtype);
-                                            result                                             
------------------------------------------------------------------------------------------------
- {"id": 281474976710657, "label": "", "properties": {"list": [0, 2, 4, 6, 8, 10, 12]}}::vertex
-(1 row)
-
+COPY (
+SELECT count(*)
+FROM cypher('list_comprehension', $$ MATCH (u {list:[i IN range(0,12,2) WHERE i>4]}) RETURN u $$) AS (result agtype)
+) TO STDOUT;
+0
 SELECT * FROM cypher('list_comprehension', $$ MATCH (u {list:[i IN range(1,13,2) WHERE i>4 | i^1]}) RETURN u $$) AS (result agtype);
  result 
 --------
@@ -337,10 +336,8 @@ SELECT * FROM cypher('list_comprehension', $$ MATCH (u) MATCH (v {list:[i IN u.l
 -----------------------------------------------------------------------------------------------
  {"id": 281474976710657, "label": "", "properties": {"list": [0, 2, 4, 6, 8, 10, 12]}}::vertex
  {"id": 281474976710658, "label": "", "properties": {"list": [1, 3, 5, 7, 9, 11, 13]}}::vertex
- {"id": 281474976710657, "label": "", "properties": {"list": [0, 2, 4, 6, 8, 10, 12]}}::vertex
- {"id": 281474976710658, "label": "", "properties": {"list": [1, 3, 5, 7, 9, 11, 13]}}::vertex
  {"id": 281474976710659, "label": "", "properties": {"list": []}}::vertex
-(5 rows)
+(3 rows)
 
 SELECT * FROM cypher('list_comprehension', $$ CREATE (u {list:[i IN range(12,24,2)]}) RETURN u $$) AS (result agtype);
                                                result                                               

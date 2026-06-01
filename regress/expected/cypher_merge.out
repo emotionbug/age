@@ -655,8 +655,8 @@ $$) AS (name agtype, bornIn agtype, city agtype);
        name        |    bornin    |                                          city                                           
 -------------------+--------------+-----------------------------------------------------------------------------------------
  "Rob Reiner"      | "New York"   | {"id": 1970324836974593, "label": "City", "properties": {"name": "New York"}}::vertex
- "Michael Douglas" | "New Jersey" | {"id": 1970324836974594, "label": "City", "properties": {"name": "New Jersey"}}::vertex
- "Martin Sheen"    | "Ohio"       | {"id": 1970324836974595, "label": "City", "properties": {"name": "Ohio"}}::vertex
+ "Michael Douglas" | "New Jersey" | {"id": 1970324836974595, "label": "City", "properties": {"name": "New Jersey"}}::vertex
+ "Martin Sheen"    | "Ohio"       | {"id": 1970324836974594, "label": "City", "properties": {"name": "Ohio"}}::vertex
 (3 rows)
 
 --validate
@@ -667,8 +667,8 @@ SELECT * FROM cypher('cypher_merge', $$MATCH (a) RETURN a$$) AS (a agtype);
  {"id": 1688849860263938, "label": "Person", "properties": {"name": "Michael Douglas", "bornIn": "New Jersey"}}::vertex
  {"id": 1688849860263939, "label": "Person", "properties": {"name": "Martin Sheen", "bornIn": "Ohio"}}::vertex
  {"id": 1970324836974593, "label": "City", "properties": {"name": "New York"}}::vertex
- {"id": 1970324836974594, "label": "City", "properties": {"name": "New Jersey"}}::vertex
- {"id": 1970324836974595, "label": "City", "properties": {"name": "Ohio"}}::vertex
+ {"id": 1970324836974594, "label": "City", "properties": {"name": "Ohio"}}::vertex
+ {"id": 1970324836974595, "label": "City", "properties": {"name": "New Jersey"}}::vertex
 (6 rows)
 
 --clean up
@@ -1409,9 +1409,9 @@ SELECT * FROM cypher('issue_1691', $$ UNWIND ["foo", "bar", "foo", "foo"] as n
                                       u                                      |                                                             e                                                             |                               v                                
 -----------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------
  {"id": 281474976710657, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131969, "label": "knows", "end_id": 281474976710658, "start_id": 281474976710657, "properties": {}}::edge | {"id": 281474976710658, "label": "", "properties": {}}::vertex
+ {"id": 281474976710657, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131969, "label": "knows", "end_id": 281474976710658, "start_id": 281474976710657, "properties": {}}::edge | {"id": 281474976710658, "label": "", "properties": {}}::vertex
+ {"id": 281474976710657, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131969, "label": "knows", "end_id": 281474976710658, "start_id": 281474976710657, "properties": {}}::edge | {"id": 281474976710658, "label": "", "properties": {}}::vertex
  {"id": 281474976710659, "label": "", "properties": {"name": "bar"}}::vertex | {"id": 844424930131970, "label": "knows", "end_id": 281474976710660, "start_id": 281474976710659, "properties": {}}::edge | {"id": 281474976710660, "label": "", "properties": {}}::vertex
- {"id": 281474976710657, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131969, "label": "knows", "end_id": 281474976710658, "start_id": 281474976710657, "properties": {}}::edge | {"id": 281474976710658, "label": "", "properties": {}}::vertex
- {"id": 281474976710657, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131969, "label": "knows", "end_id": 281474976710658, "start_id": 281474976710657, "properties": {}}::edge | {"id": 281474976710658, "label": "", "properties": {}}::vertex
 (4 rows)
 
 -- should only return the same above 4 rows
@@ -1421,9 +1421,9 @@ SELECT * FROM cypher('issue_1691', $$ UNWIND ["foo", "bar", "foo", "foo"] as n
                                       u                                      |                                                             e                                                             |                               v                                
 -----------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------
  {"id": 281474976710657, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131969, "label": "knows", "end_id": 281474976710658, "start_id": 281474976710657, "properties": {}}::edge | {"id": 281474976710658, "label": "", "properties": {}}::vertex
+ {"id": 281474976710657, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131969, "label": "knows", "end_id": 281474976710658, "start_id": 281474976710657, "properties": {}}::edge | {"id": 281474976710658, "label": "", "properties": {}}::vertex
+ {"id": 281474976710657, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131969, "label": "knows", "end_id": 281474976710658, "start_id": 281474976710657, "properties": {}}::edge | {"id": 281474976710658, "label": "", "properties": {}}::vertex
  {"id": 281474976710659, "label": "", "properties": {"name": "bar"}}::vertex | {"id": 844424930131970, "label": "knows", "end_id": 281474976710660, "start_id": 281474976710659, "properties": {}}::edge | {"id": 281474976710660, "label": "", "properties": {}}::vertex
- {"id": 281474976710657, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131969, "label": "knows", "end_id": 281474976710658, "start_id": 281474976710657, "properties": {}}::edge | {"id": 281474976710658, "label": "", "properties": {}}::vertex
- {"id": 281474976710657, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131969, "label": "knows", "end_id": 281474976710658, "start_id": 281474976710657, "properties": {}}::edge | {"id": 281474976710658, "label": "", "properties": {}}::vertex
 (4 rows)
 
 -- should only return 2 distinct rows from above
@@ -1512,9 +1512,9 @@ SELECT * FROM cypher('issue_1691', $$ UNWIND ["foo", "bar", "foo", "foo", "bar"]
                                       u                                      |                                                            e1                                                             |                                      v                                      |                                                            e2                                                             |                               w                                
 -----------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------
  {"id": 281474976710661, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131972, "label": "knows", "end_id": 281474976710662, "start_id": 281474976710661, "properties": {}}::edge | {"id": 281474976710662, "label": "", "properties": {"name": "bar"}}::vertex | {"id": 844424930131971, "label": "knows", "end_id": 281474976710663, "start_id": 281474976710662, "properties": {}}::edge | {"id": 281474976710663, "label": "", "properties": {}}::vertex
+ {"id": 281474976710661, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131972, "label": "knows", "end_id": 281474976710662, "start_id": 281474976710661, "properties": {}}::edge | {"id": 281474976710662, "label": "", "properties": {"name": "bar"}}::vertex | {"id": 844424930131971, "label": "knows", "end_id": 281474976710663, "start_id": 281474976710662, "properties": {}}::edge | {"id": 281474976710663, "label": "", "properties": {}}::vertex
+ {"id": 281474976710661, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131972, "label": "knows", "end_id": 281474976710662, "start_id": 281474976710661, "properties": {}}::edge | {"id": 281474976710662, "label": "", "properties": {"name": "bar"}}::vertex | {"id": 844424930131971, "label": "knows", "end_id": 281474976710663, "start_id": 281474976710662, "properties": {}}::edge | {"id": 281474976710663, "label": "", "properties": {}}::vertex
  {"id": 281474976710664, "label": "", "properties": {"name": "bar"}}::vertex | {"id": 844424930131974, "label": "knows", "end_id": 281474976710665, "start_id": 281474976710664, "properties": {}}::edge | {"id": 281474976710665, "label": "", "properties": {"name": "bar"}}::vertex | {"id": 844424930131973, "label": "knows", "end_id": 281474976710666, "start_id": 281474976710665, "properties": {}}::edge | {"id": 281474976710666, "label": "", "properties": {}}::vertex
- {"id": 281474976710661, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131972, "label": "knows", "end_id": 281474976710662, "start_id": 281474976710661, "properties": {}}::edge | {"id": 281474976710662, "label": "", "properties": {"name": "bar"}}::vertex | {"id": 844424930131971, "label": "knows", "end_id": 281474976710663, "start_id": 281474976710662, "properties": {}}::edge | {"id": 281474976710663, "label": "", "properties": {}}::vertex
- {"id": 281474976710661, "label": "", "properties": {"name": "foo"}}::vertex | {"id": 844424930131972, "label": "knows", "end_id": 281474976710662, "start_id": 281474976710661, "properties": {}}::edge | {"id": 281474976710662, "label": "", "properties": {"name": "bar"}}::vertex | {"id": 844424930131971, "label": "knows", "end_id": 281474976710663, "start_id": 281474976710662, "properties": {}}::edge | {"id": 281474976710663, "label": "", "properties": {}}::vertex
  {"id": 281474976710664, "label": "", "properties": {"name": "bar"}}::vertex | {"id": 844424930131974, "label": "knows", "end_id": 281474976710665, "start_id": 281474976710664, "properties": {}}::edge | {"id": 281474976710665, "label": "", "properties": {"name": "bar"}}::vertex | {"id": 844424930131973, "label": "knows", "end_id": 281474976710666, "start_id": 281474976710665, "properties": {}}::edge | {"id": 281474976710666, "label": "", "properties": {}}::vertex
 (5 rows)
 
@@ -1551,15 +1551,15 @@ SELECT * FROM cypher('issue_1709', $$ UNWIND [{first: 'jon', last: 'snow'}, {fir
                                       RETURN v $$) AS (v agtype);
                                                   v                                                  
 -----------------------------------------------------------------------------------------------------
- {"id": 844424930131969, "label": "PERSON", "properties": {"last": "snow", "first": "jon"}}::vertex
- {"id": 844424930131970, "label": "PERSON", "properties": {"last": "stark", "first": "ned"}}::vertex
+ {"id": 844424930131969, "label": "PERSON", "properties": {"last": "stark", "first": "ned"}}::vertex
+ {"id": 844424930131970, "label": "PERSON", "properties": {"last": "snow", "first": "jon"}}::vertex
 (2 rows)
 
 SELECT * FROM cypher('issue_1709', $$ MATCH (u) RETURN u $$) AS (u agtype);
                                                   u                                                  
 -----------------------------------------------------------------------------------------------------
- {"id": 844424930131969, "label": "PERSON", "properties": {"last": "snow", "first": "jon"}}::vertex
- {"id": 844424930131970, "label": "PERSON", "properties": {"last": "stark", "first": "ned"}}::vertex
+ {"id": 844424930131969, "label": "PERSON", "properties": {"last": "stark", "first": "ned"}}::vertex
+ {"id": 844424930131970, "label": "PERSON", "properties": {"last": "snow", "first": "jon"}}::vertex
 (2 rows)
 
 SELECT * FROM cypher('issue_1709', $$ MATCH (u) DELETE u $$) AS (a agtype);
@@ -1573,20 +1573,20 @@ SELECT * FROM cypher('issue_1709', $$ UNWIND [{first: 'jon', last: 'snow'}, {fir
                                       RETURN v $$) AS (v agtype);
                                                           v                                                           
 ----------------------------------------------------------------------------------------------------------------------
- {"id": 844424930131971, "label": "PERSON", "properties": {"last": "snow", "first": "jon"}}::vertex
- {"id": 844424930131972, "label": "PERSON", "properties": {"last": "stark", "first": "ned", "middle": "jim"}}::vertex
- {"id": 844424930131973, "label": "PERSON", "properties": {"last": "doe", "first": "jane"}}::vertex
+ {"id": 844424930131971, "label": "PERSON", "properties": {"last": "cosmo", "first": "wanda"}}::vertex
  {"id": 844424930131972, "label": "PERSON", "properties": {"last": "flanders", "first": "ned"}}::vertex
- {"id": 844424930131974, "label": "PERSON", "properties": {"last": "cosmo", "first": "wanda"}}::vertex
+ {"id": 844424930131972, "label": "PERSON", "properties": {"last": "stark", "first": "ned", "middle": "jim"}}::vertex
+ {"id": 844424930131973, "label": "PERSON", "properties": {"last": "snow", "first": "jon"}}::vertex
+ {"id": 844424930131974, "label": "PERSON", "properties": {"last": "doe", "first": "jane"}}::vertex
 (5 rows)
 
 SELECT * FROM cypher('issue_1709', $$ MATCH (u) RETURN u $$) AS (u agtype);
-                                                   u                                                    
---------------------------------------------------------------------------------------------------------
- {"id": 844424930131971, "label": "PERSON", "properties": {"last": "snow", "first": "jon"}}::vertex
- {"id": 844424930131973, "label": "PERSON", "properties": {"last": "doe", "first": "jane"}}::vertex
- {"id": 844424930131972, "label": "PERSON", "properties": {"last": "flanders", "first": "ned"}}::vertex
- {"id": 844424930131974, "label": "PERSON", "properties": {"last": "cosmo", "first": "wanda"}}::vertex
+                                                          u                                                           
+----------------------------------------------------------------------------------------------------------------------
+ {"id": 844424930131971, "label": "PERSON", "properties": {"last": "cosmo", "first": "wanda"}}::vertex
+ {"id": 844424930131972, "label": "PERSON", "properties": {"last": "stark", "first": "ned", "middle": "jim"}}::vertex
+ {"id": 844424930131973, "label": "PERSON", "properties": {"last": "snow", "first": "jon"}}::vertex
+ {"id": 844424930131974, "label": "PERSON", "properties": {"last": "doe", "first": "jane"}}::vertex
 (4 rows)
 
 SELECT * FROM cypher('issue_1709', $$ MATCH (u) DELETE u $$) AS (a agtype);
@@ -2202,8 +2202,8 @@ SELECT * FROM cypher('merge_actions', $$
 $$) AS (n_name agtype, n_copy agtype);
  n_name | n_copy 
 --------+--------
- "U1"   | "U1"
  "U2"   | "U2"
+ "U1"   | "U1"
 (2 rows)
 
 -- Multiple SET items mixing outer-ref, self-ref, and literal RHS

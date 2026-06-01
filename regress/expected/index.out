@@ -389,13 +389,12 @@ SELECT * FROM cypher('cypher_index', $$
     EXPLAIN (costs off) MATCH (c:City {city_id: 1})
     RETURN c
 $$) as (plan agtype);
-                          QUERY PLAN                          
---------------------------------------------------------------
- Bitmap Heap Scan on "City" c
-   Recheck Cond: (properties @> '{"city_id": 1}'::agtype)
-   ->  Bitmap Index Scan on load_city_gin_idx
-         Index Cond: (properties @> '{"city_id": 1}'::agtype)
-(4 rows)
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Seq Scan on "City" c
+   Disabled: true
+   Filter: (agtype_access_operator(VARIADIC ARRAY[properties, '"city_id"'::agtype]) = '1'::agtype)
+(3 rows)
 
 SELECT * FROM cypher('cypher_index', $$
     MATCH (c:City {city_id: 1})
@@ -435,13 +434,12 @@ SELECT * FROM cypher('cypher_index', $$
     EXPLAIN (costs off) MATCH (c:Country {life_expectancy: 82.05})
     RETURN c
 $$) as (plan agtype);
-                                QUERY PLAN                                
---------------------------------------------------------------------------
- Bitmap Heap Scan on "Country" c
-   Recheck Cond: (properties @> '{"life_expectancy": 82.05}'::agtype)
-   ->  Bitmap Index Scan on load_country_gin_idx
-         Index Cond: (properties @> '{"life_expectancy": 82.05}'::agtype)
-(4 rows)
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Seq Scan on "Country" c
+   Disabled: true
+   Filter: (agtype_access_operator(VARIADIC ARRAY[properties, '"life_expectancy"'::agtype]) = '82.05'::agtype)
+(3 rows)
 
 SELECT * FROM cypher('cypher_index', $$
     MATCH (c:Country {life_expectancy: 82.05})

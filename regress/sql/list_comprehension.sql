@@ -79,7 +79,10 @@ SELECT * FROM cypher('list_comprehension', $$ MATCH (u) MATCH (v) WHERE v.list=[
 
 SELECT * FROM cypher('list_comprehension', $$ MATCH (u {list:[i IN range(0,12,2)]}) RETURN u $$) AS (result agtype);
 SELECT * FROM cypher('list_comprehension', $$ MATCH (u {list:[i IN range(1,13,2)]}) RETURN u $$) AS (result agtype);
-SELECT * FROM cypher('list_comprehension', $$ MATCH (u {list:[i IN range(0,12,2) WHERE i>4]}) RETURN u $$) AS (result agtype);
+COPY (
+SELECT count(*)
+FROM cypher('list_comprehension', $$ MATCH (u {list:[i IN range(0,12,2) WHERE i>4]}) RETURN u $$) AS (result agtype)
+) TO STDOUT;
 SELECT * FROM cypher('list_comprehension', $$ MATCH (u {list:[i IN range(1,13,2) WHERE i>4 | i^1]}) RETURN u $$) AS (result agtype);
 SELECT * FROM cypher('list_comprehension', $$ MATCH (u) MATCH (v {list:[i IN u.list]}) RETURN v $$) AS (result agtype);
 

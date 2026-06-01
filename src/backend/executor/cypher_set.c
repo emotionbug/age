@@ -873,6 +873,30 @@ bool apply_update_list(CustomScanState *node,
         scanTupleSlot->tts_values[update_item->entity_position - 1] = new_entity;
 
         /*
+         * Synchronize properties back to the hidden raw properties column
+         * inside the tuple table slot, so subsequent expressions in the same query
+         * read the updated property values.
+         */
+        if (update_item->var_name != NULL)
+        {
+            TupleDesc desc = scanTupleSlot->tts_tupleDescriptor;
+            int i_attr;
+            char raw_prop_name[NAMEDATALEN];
+
+            snprintf(raw_prop_name, sizeof(raw_prop_name), "_age_raw_%s_properties", update_item->var_name);
+
+            for (i_attr = 0; i_attr < desc->natts; i_attr++)
+            {
+                Form_pg_attribute attr = TupleDescAttr(desc, i_attr);
+                if (strcmp(NameStr(attr->attname), raw_prop_name) == 0)
+                {
+                    scanTupleSlot->tts_values[i_attr] = AGTYPE_P_GET_DATUM(agtype_value_to_agtype(altered_properties));
+                    scanTupleSlot->tts_isnull[i_attr] = false;
+                }
+            }
+        }
+
+        /*
          * If the tuple table slot has paths, we need to inspect them to see if
          * the updated entity is contained within them and replace the entity
          * if it is.

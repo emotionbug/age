@@ -70,6 +70,8 @@ cypher_parsestate *make_cypher_parsestate(cypher_parsestate *parent_cpstate)
         cpstate->graph_oid = parent_cpstate->graph_oid;
         cpstate->params = parent_cpstate->params;
         cpstate->subquery_where_flag = parent_cpstate->subquery_where_flag;
+        cpstate->in_match_clause = parent_cpstate->in_match_clause;
+        cpstate->skip_raw_targets = parent_cpstate->skip_raw_targets;
     }
 
     return cpstate;

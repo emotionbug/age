@@ -179,6 +179,25 @@ typedef struct VLE_path_container
     graphid graphid_array_data;
 } VLE_path_container;
 
+typedef struct VLESliceBoundaryMode
+{
+    bool return_id;
+    bool return_label;
+    bool return_labels;
+    bool return_properties;
+    bool return_endpoint;
+    bool return_endpoint_id;
+    bool return_endpoint_label;
+    bool return_endpoint_labels;
+    bool return_endpoint_properties;
+    bool start_endpoint;
+    bool double_tail_list;
+    bool tail_reverse_list;
+    bool reverse_list;
+    bool slice_tail_list;
+    bool slice_reverse_list;
+} VLESliceBoundaryMode;
+
 typedef struct edge_uniqueness_argtype_cache
 {
     int nargs;
@@ -307,6 +326,8 @@ static agtype_value *agtv_materialize_vle_edge_endpoint_at(
 static Datum age_vle_edge_endpoint_id_at(FunctionCallInfo fcinfo,
                                          bool start_endpoint);
 static agtype *build_empty_agtype_array(void);
+static int64 decode_vle_slice_boundary_mode(int64 mode,
+                                            VLESliceBoundaryMode *decoded);
 /* VLE_local_context cache management */
 static VLE_local_context *get_cached_VLE_local_context(int64 vle_node_id);
 static void cache_VLE_local_context(VLE_local_context *vlelctx);
@@ -4635,6 +4656,135 @@ Datum age_vle_list_slice_is_empty(PG_FUNCTION_ARGS)
 
 PG_FUNCTION_INFO_V1(age_materialize_vle_slice_boundary);
 
+static int64 decode_vle_slice_boundary_mode(int64 mode,
+                                            VLESliceBoundaryMode *decoded)
+{
+    MemSet(decoded, 0, sizeof(*decoded));
+
+    if (mode >= VLE_SLICE_BOUNDARY_SLICE_REVERSE_OFFSET)
+    {
+        decoded->slice_reverse_list = true;
+        mode -= VLE_SLICE_BOUNDARY_SLICE_REVERSE_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_SLICE_TAIL_OFFSET)
+    {
+        decoded->slice_tail_list = true;
+        mode -= VLE_SLICE_BOUNDARY_SLICE_TAIL_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_DOUBLE_TAIL_OFFSET)
+    {
+        decoded->double_tail_list = true;
+        mode -= VLE_SLICE_BOUNDARY_DOUBLE_TAIL_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_TAIL_REVERSE_OFFSET)
+    {
+        decoded->tail_reverse_list = true;
+        mode -= VLE_SLICE_BOUNDARY_TAIL_REVERSE_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_REVERSE_OFFSET)
+    {
+        decoded->reverse_list = true;
+        mode -= VLE_SLICE_BOUNDARY_REVERSE_OFFSET;
+    }
+
+    if (mode >= VLE_SLICE_BOUNDARY_ID_OFFSET &&
+        mode < VLE_SLICE_BOUNDARY_LABEL_OFFSET)
+    {
+        decoded->return_id = true;
+        mode -= VLE_SLICE_BOUNDARY_ID_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_LABEL_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_LABELS_OFFSET)
+    {
+        decoded->return_label = true;
+        mode -= VLE_SLICE_BOUNDARY_LABEL_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_LABELS_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_PROPERTIES_OFFSET)
+    {
+        decoded->return_labels = true;
+        mode -= VLE_SLICE_BOUNDARY_LABELS_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_PROPERTIES_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_START_NODE_OFFSET)
+    {
+        decoded->return_properties = true;
+        mode -= VLE_SLICE_BOUNDARY_PROPERTIES_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_START_NODE_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_END_NODE_OFFSET)
+    {
+        decoded->return_endpoint = true;
+        decoded->start_endpoint = true;
+        mode -= VLE_SLICE_BOUNDARY_START_NODE_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_END_NODE_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_START_ID_OFFSET)
+    {
+        decoded->return_endpoint = true;
+        decoded->start_endpoint = false;
+        mode -= VLE_SLICE_BOUNDARY_END_NODE_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_START_ID_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_END_ID_OFFSET)
+    {
+        decoded->return_endpoint_id = true;
+        decoded->start_endpoint = true;
+        mode -= VLE_SLICE_BOUNDARY_START_ID_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_END_ID_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_START_LABEL_OFFSET)
+    {
+        decoded->return_endpoint_id = true;
+        decoded->start_endpoint = false;
+        mode -= VLE_SLICE_BOUNDARY_END_ID_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_START_LABEL_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_END_LABEL_OFFSET)
+    {
+        decoded->return_endpoint_label = true;
+        decoded->start_endpoint = true;
+        mode -= VLE_SLICE_BOUNDARY_START_LABEL_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_END_LABEL_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_START_LABELS_OFFSET)
+    {
+        decoded->return_endpoint_label = true;
+        decoded->start_endpoint = false;
+        mode -= VLE_SLICE_BOUNDARY_END_LABEL_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_START_LABELS_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_END_LABELS_OFFSET)
+    {
+        decoded->return_endpoint_labels = true;
+        decoded->start_endpoint = true;
+        mode -= VLE_SLICE_BOUNDARY_START_LABELS_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_END_LABELS_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_START_PROPERTIES_OFFSET)
+    {
+        decoded->return_endpoint_labels = true;
+        decoded->start_endpoint = false;
+        mode -= VLE_SLICE_BOUNDARY_END_LABELS_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_START_PROPERTIES_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_END_PROPERTIES_OFFSET)
+    {
+        decoded->return_endpoint_properties = true;
+        decoded->start_endpoint = true;
+        mode -= VLE_SLICE_BOUNDARY_START_PROPERTIES_OFFSET;
+    }
+    else if (mode >= VLE_SLICE_BOUNDARY_END_PROPERTIES_OFFSET &&
+             mode < VLE_SLICE_BOUNDARY_REVERSE_OFFSET)
+    {
+        decoded->return_endpoint_properties = true;
+        decoded->start_endpoint = false;
+        mode -= VLE_SLICE_BOUNDARY_END_PROPERTIES_OFFSET;
+    }
+
+    return mode;
+}
+
 Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
 {
     GRAPH_global_context *ggctx = NULL;
@@ -4650,22 +4800,10 @@ Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
     agtype_value label_array_elem;
     agtype_in_state label_array_result;
     agtype_value *agtv_result = NULL;
+    VLESliceBoundaryMode decoded;
     bool lidx_needs_free = false;
     bool uidx_needs_free = false;
     bool mode_needs_free = false;
-    bool return_id = false;
-    bool return_label = false;
-    bool return_labels = false;
-    bool return_properties = false;
-    bool return_endpoint = false;
-    bool return_endpoint_id = false;
-    bool return_endpoint_label = false;
-    bool return_endpoint_labels = false;
-    bool return_endpoint_properties = false;
-    bool start_endpoint = false;
-    bool double_tail_list = false;
-    bool tail_reverse_list = false;
-    bool reverse_list = false;
     bool return_node = false;
     bool return_last = false;
     graphid *graphid_array = NULL;
@@ -4702,101 +4840,7 @@ Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
     {
         pfree_agtype_value_content(&mode_value);
     }
-    if (mode >= 360)
-    {
-        double_tail_list = true;
-        mode -= 360;
-    }
-    else if (mode >= 240)
-    {
-        tail_reverse_list = true;
-        mode -= 240;
-    }
-    else if (mode >= 120)
-    {
-        reverse_list = true;
-        mode -= 120;
-    }
-    if (mode >= 8 && mode <= 15)
-    {
-        return_id = true;
-        mode -= 8;
-    }
-    else if (mode >= 16 && mode <= 23)
-    {
-        return_label = true;
-        mode -= 16;
-    }
-    else if (mode >= 24 && mode <= 31)
-    {
-        return_labels = true;
-        mode -= 24;
-    }
-    else if (mode >= 32 && mode <= 39)
-    {
-        return_properties = true;
-        mode -= 32;
-    }
-    else if (mode >= 40 && mode <= 47)
-    {
-        return_endpoint = true;
-        start_endpoint = true;
-        mode -= 40;
-    }
-    else if (mode >= 48 && mode <= 55)
-    {
-        return_endpoint = true;
-        start_endpoint = false;
-        mode -= 48;
-    }
-    else if (mode >= 56 && mode <= 63)
-    {
-        return_endpoint_id = true;
-        start_endpoint = true;
-        mode -= 56;
-    }
-    else if (mode >= 64 && mode <= 71)
-    {
-        return_endpoint_id = true;
-        start_endpoint = false;
-        mode -= 64;
-    }
-    else if (mode >= 72 && mode <= 79)
-    {
-        return_endpoint_label = true;
-        start_endpoint = true;
-        mode -= 72;
-    }
-    else if (mode >= 80 && mode <= 87)
-    {
-        return_endpoint_label = true;
-        start_endpoint = false;
-        mode -= 80;
-    }
-    else if (mode >= 88 && mode <= 95)
-    {
-        return_endpoint_labels = true;
-        start_endpoint = true;
-        mode -= 88;
-    }
-    else if (mode >= 96 && mode <= 103)
-    {
-        return_endpoint_labels = true;
-        start_endpoint = false;
-        mode -= 96;
-    }
-    else if (mode >= 104 && mode <= 111)
-    {
-        return_endpoint_properties = true;
-        start_endpoint = true;
-        mode -= 104;
-    }
-    else if (mode >= 112 && mode <= 119)
-    {
-        return_endpoint_properties = true;
-        start_endpoint = false;
-        mode -= 112;
-    }
+    mode = decode_vle_slice_boundary_mode(mode, &decoded);
 
     edge_count = agtv_vle_edge_count(agt_arg_vpc);
     switch (mode)
@@ -4815,12 +4859,12 @@ Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
         break;
     case 4:
     case 5:
-        if (double_tail_list)
+        if (decoded.double_tail_list)
         {
             list_count = Max(edge_count - 2, 0);
             base_index = 2;
         }
-        else if (tail_reverse_list)
+        else if (decoded.tail_reverse_list)
         {
             list_count = Max(edge_count - 1, 0);
         }
@@ -4834,12 +4878,12 @@ Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
         break;
     case 6:
     case 7:
-        if (double_tail_list)
+        if (decoded.double_tail_list)
         {
             list_count = Max(edge_count - 1, 0);
             base_index = 2;
         }
-        else if (tail_reverse_list)
+        else if (decoded.tail_reverse_list)
         {
             list_count = edge_count;
         }
@@ -4955,8 +4999,24 @@ Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
         PG_RETURN_NULL();
     }
 
-    original_index = return_last ? upper_index - 1 : lower_index;
-    if (reverse_list || tail_reverse_list)
+    if (decoded.slice_tail_list)
+    {
+        if (upper_index <= lower_index + 1)
+        {
+            PG_RETURN_NULL();
+        }
+
+        original_index = return_last ? upper_index - 1 : lower_index + 1;
+    }
+    else if (decoded.slice_reverse_list)
+    {
+        original_index = return_last ? lower_index : upper_index - 1;
+    }
+    else
+    {
+        original_index = return_last ? upper_index - 1 : lower_index;
+    }
+    if (decoded.reverse_list || decoded.tail_reverse_list)
     {
         original_index = list_count - original_index - 1;
     }
@@ -4968,15 +5028,15 @@ Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
     {
         graphid node_id = graphid_array[original_index * 2];
 
-        if (return_endpoint || return_endpoint_id || return_endpoint_label ||
-            return_endpoint_labels || return_endpoint_properties)
+        if (decoded.return_endpoint || decoded.return_endpoint_id || decoded.return_endpoint_label ||
+            decoded.return_endpoint_labels || decoded.return_endpoint_properties)
         {
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                      errmsg("age_materialize_vle_slice_boundary: endpoint mode is invalid for nodes")));
         }
 
-        if (return_id)
+        if (decoded.return_id)
         {
             id_result.type = AGTV_INTEGER;
             id_result.val.int_value = node_id;
@@ -4986,13 +5046,13 @@ Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
         ggctx = find_GRAPH_global_context(vpc->graph_oid);
         Assert(ggctx != NULL);
 
-        if (return_label || return_labels || return_properties)
+        if (decoded.return_label || decoded.return_labels || decoded.return_properties)
         {
             vertex_entry *ve = get_vertex_entry(ggctx, node_id);
             char *label_name = NULL;
 
             Assert(ve != NULL);
-            if (return_properties)
+            if (decoded.return_properties)
             {
                 PG_RETURN_DATUM(get_vertex_entry_properties(ve));
             }
@@ -5001,7 +5061,7 @@ Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
             label_result.type = AGTV_STRING;
             label_result.val.string.val = label_name;
             label_result.val.string.len = strlen(label_name);
-            if (return_label)
+            if (decoded.return_label)
             {
                 PG_RETURN_POINTER(agtype_value_to_agtype(&label_result));
             }
@@ -5025,7 +5085,7 @@ Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
     {
         graphid edge_id = graphid_array[(original_index * 2) + 1];
 
-        if (return_id)
+        if (decoded.return_id)
         {
             id_result.type = AGTV_INTEGER;
             id_result.val.int_value = edge_id;
@@ -5035,13 +5095,13 @@ Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
         ggctx = find_GRAPH_global_context(vpc->graph_oid);
         Assert(ggctx != NULL);
 
-        if (return_label || return_properties)
+        if (decoded.return_label || decoded.return_properties)
         {
             edge_entry *ee = get_edge_entry(ggctx, edge_id);
             char *label_name = NULL;
 
             Assert(ee != NULL);
-            if (return_properties)
+            if (decoded.return_properties)
             {
                 PG_RETURN_DATUM(get_edge_entry_properties(ee));
             }
@@ -5053,42 +5113,42 @@ Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
 
             PG_RETURN_POINTER(agtype_value_to_agtype(&label_result));
         }
-        if (return_labels)
+        if (decoded.return_labels)
         {
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                      errmsg("age_materialize_vle_slice_boundary: labels mode is invalid for relationships")));
         }
-        if (return_endpoint || return_endpoint_id || return_endpoint_label ||
-            return_endpoint_labels || return_endpoint_properties)
+        if (decoded.return_endpoint || decoded.return_endpoint_id || decoded.return_endpoint_label ||
+            decoded.return_endpoint_labels || decoded.return_endpoint_properties)
         {
             edge_entry *ee = get_edge_entry(ggctx, edge_id);
             graphid endpoint_id;
 
             Assert(ee != NULL);
-            endpoint_id = start_endpoint ?
+            endpoint_id = decoded.start_endpoint ?
                 get_edge_entry_start_vertex_id(ee) :
                 get_edge_entry_end_vertex_id(ee);
 
-            if (return_endpoint_id)
+            if (decoded.return_endpoint_id)
             {
                 id_result.type = AGTV_INTEGER;
                 id_result.val.int_value = endpoint_id;
                 PG_RETURN_POINTER(agtype_value_to_agtype(&id_result));
             }
-            if (return_endpoint)
+            if (decoded.return_endpoint)
             {
                 agtv_result = build_vle_vertex_value(ggctx, endpoint_id, NULL);
                 PG_RETURN_POINTER(agtype_value_to_agtype(agtv_result));
             }
-            if (return_endpoint_label || return_endpoint_labels ||
-                return_endpoint_properties)
+            if (decoded.return_endpoint_label || decoded.return_endpoint_labels ||
+                decoded.return_endpoint_properties)
             {
                 vertex_entry *ve = get_vertex_entry(ggctx, endpoint_id);
                 char *label_name = NULL;
 
                 Assert(ve != NULL);
-                if (return_endpoint_properties)
+                if (decoded.return_endpoint_properties)
                 {
                     PG_RETURN_DATUM(get_vertex_entry_properties(ve));
                 }
@@ -5097,7 +5157,7 @@ Datum age_materialize_vle_slice_boundary(PG_FUNCTION_ARGS)
                 label_result.type = AGTV_STRING;
                 label_result.val.string.val = label_name;
                 label_result.val.string.len = strlen(label_name);
-                if (return_endpoint_label)
+                if (decoded.return_endpoint_label)
                 {
                     PG_RETURN_POINTER(agtype_value_to_agtype(&label_result));
                 }

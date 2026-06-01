@@ -262,6 +262,7 @@ static Node *make_typecast_expr(Node *expr, Node *typname, int location);
 static Node *make_function_expr(List *func_name, List *exprs, int location);
 static Node *make_star_function_expr(List *func_name, List *exprs, int location);
 static Node *make_distinct_function_expr(List *func_name, List *exprs, int location);
+static bool is_single_func_name(FuncCall *fc);
 static bool is_count_function_name(const char *name);
 static FuncCall *node_to_agtype(Node* fnode, char *type, int location);
 
@@ -416,7 +417,7 @@ call_stmt:
              * may be unforeseen cases where we might need to remove this in
              * the future.
              */
-            if (list_length(fc->funcname) == 1)
+            if (is_single_func_name(fc))
             {
                 fc->funcname = lcons(string, fc->funcname);
                 $$ = (Node*)fc;
@@ -454,7 +455,7 @@ call_stmt:
              * may be unforeseen cases where we might need to remove this in
              * the future.
              */
-            if (list_length(fc->funcname) == 1)
+            if (is_single_func_name(fc))
             {
                 fc->funcname = lcons(string, fc->funcname);
                 $$ = (Node*)fc;
@@ -1731,7 +1732,7 @@ expr:
                  * may be unforeseen cases where we might need to remove this in
                  * the future.
                  */
-                if (list_length(fc->funcname) == 1)
+                if (is_single_func_name(fc))
                 {
                     fc->funcname = lcons(string, fc->funcname);
                     $$ = (Node*)fc;
@@ -3057,6 +3058,11 @@ static bool has_internal_default_prefix(char *str)
 {
     return strncmp(AGE_DEFAULT_PREFIX, str,
                    sizeof(AGE_DEFAULT_PREFIX) - 1) == 0;
+}
+
+static bool is_single_func_name(FuncCall *fc)
+{
+    return list_length(fc->funcname) == 1;
 }
 
 /* function to return a unique unsigned long number */

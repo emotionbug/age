@@ -75,6 +75,14 @@ typedef struct
      * declared by itself or a previous clause.
      */
     bool declared_in_current_clause;
+
+    /*
+     * True when the clause targetlist also carries hidden raw columns for this
+     * entity. Later clauses can use those columns to delay agtype
+     * materialization until a surface value is actually requested.
+     */
+    bool has_raw_targets;
+
     /* The parse data structure that we transformed */
     union
     {

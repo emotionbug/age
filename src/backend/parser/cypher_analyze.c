@@ -1172,10 +1172,15 @@ static Query *analyze_cypher_and_coerce(List *stmt, RangeTblFunction *rtfunc,
     foreach(lt, subquery->targetList)
     {
         TargetEntry *te = lfirst(lt);
-        if (!te->resjunk)
+        if (te->resjunk)
+            continue;
+        if (te->resname != NULL &&
+            strncmp(te->resname, AGE_DEFAULT_ALIAS_PREFIX "raw_",
+                    strlen(AGE_DEFAULT_ALIAS_PREFIX "raw_")) == 0)
         {
-            attr_count++;
+            continue;
         }
+        attr_count++;
     }
 
     /* check the number of attributes first */
@@ -1203,6 +1208,23 @@ static Query *analyze_cypher_and_coerce(List *stmt, RangeTblFunction *rtfunc,
     addNSItemToQuery(pstate, pnsi, true, true, true);
     query->targetList = expandNSItemAttrs(pstate, pnsi, 0, true, -1);
 
+    {
+        ListCell *lc;
+        List *filtered = NIL;
+        foreach(lc, query->targetList)
+        {
+            TargetEntry *te = lfirst(lc);
+            if (te->resname != NULL &&
+                strncmp(te->resname, AGE_DEFAULT_ALIAS_PREFIX "raw_",
+                        strlen(AGE_DEFAULT_ALIAS_PREFIX "raw_")) == 0)
+            {
+                continue;
+            }
+            filtered = lappend(filtered, te);
+        }
+        query->targetList = filtered;
+    }
+
     markTargetListOrigins(pstate, query->targetList);
 
     /* do the type coercion for each target entry */
@@ -1218,7 +1240,14 @@ static Query *analyze_cypher_and_coerce(List *stmt, RangeTblFunction *rtfunc,
         Oid target_type;
         int32 target_typmod;
 
-        Assert(!te->resjunk);
+        if (te->resjunk)
+            continue;
+        if (te->resname != NULL &&
+            strncmp(te->resname, AGE_DEFAULT_ALIAS_PREFIX "raw_",
+                    strlen(AGE_DEFAULT_ALIAS_PREFIX "raw_")) == 0)
+        {
+            continue;
+        }
 
         current_type = exprType(expr);
         current_typmod = exprTypmod(expr);

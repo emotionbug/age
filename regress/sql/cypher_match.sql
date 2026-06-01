@@ -1079,11 +1079,11 @@ SELECT * FROM cypher('cypher_match', $$ MATCH p=(x)-[]->(x:R) RETURN p, x $$) AS
 SELECT * FROM cypher('cypher_match', $$ MATCH p=(x:r)-[]->(x:R) RETURN p, x $$) AS (p agtype, x agtype);
 
 --
--- Test age.enable_containment configuration parameter
+-- Test per-key property constraint decomposition (MATCH {key:val} path)
 --
--- Test queries are run before and after switching off this parameter.
--- When  on, the containment operator should be used to filter properties.
--- When off, the access operator should be used.
+-- Verify that map property constraints are decomposed into individual
+-- per-key quals using the access operator rather than whole-document
+-- containment.
 --
 
 SELECT create_graph('test_enable_containment');
@@ -1107,21 +1107,7 @@ $$
     RETURN x
 $$) as (a agtype);
 
--- With enable_containment on
-SET age.enable_containment = on;
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer {addr:[{city:'Toronto'}]}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer {addr:[{city:'Toronto'}, {city: 'Vancouver'}]}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer {addr:[{city:'Alberta'}]}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer {school:{program:{major:'Psyc'}}}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer {name:'Bob',school:{program:{degree:'BSc'}}}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer {school:{program:{major:'Cs'}}}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer {name:'Bob',school:{program:{degree:'PHd'}}}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer {phone:[987654321]}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer {phone:[654765876]}) RETURN x $$) as (a agtype);
-SELECT * FROM cypher('test_enable_containment', $$ EXPLAIN (COSTS OFF) MATCH (x:Customer {school:{name:'XYZ',program:{degree:'BSc'}},phone:[987654321],parents:{}}) RETURN x $$) as (a agtype);
 
--- Previous set of queries, with enable_containment off
-SET age.enable_containment = off;
 SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer {addr:[{city:'Toronto'}]}) RETURN x $$) as (a agtype);
 SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer {addr:[{city:'Toronto'}, {city: 'Vancouver'}]}) RETURN x $$) as (a agtype);
 SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer {addr:[{city:'Alberta'}]}) RETURN x $$) as (a agtype);
@@ -1389,32 +1375,7 @@ $$) AS (n1 agtype, n2 agtype, n3 agtype, e1 agtype);
 -- Using the test_enable_containment graph for these tests
 SELECT * FROM cypher('test_enable_containment', $$ CREATE p=(:Customer)-[:bought {store:'Amazon', addr:{city: 'Vancouver', street: 30}}]->(y:Product) RETURN p $$) as (a agtype);
 
--- With enable_containment on
-SET age.enable_containment = on;
--- Should return 0
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={addr:[{city:'Toronto'}]}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={school:{program:{major:'Psyc'}}}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={name:'Bob',school:{program:{degree:'BSc'}}}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={school:{program:{major:'Cs'}}}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={name:'Bob',school:{program:{degree:'PHd'}}}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={phone:[987654321]}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={phone:[654765876]}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x)-[:bought ={store: 'Amazon', addr:{city: 'Vancouver'}}]->() RETURN x $$) as (a agtype);
 
--- Should return 1
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={addr: [{city: 'Vancouver', street: 30},{city: 'Toronto', street: 40}]}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={school: { name: 'XYZ College',program: { major: 'Psyc', degree: 'BSc'}}}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={phone: [ 123456789, 987654321, 456987123 ]}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={school: { name: 'XYZ College',program: { major: 'Psyc', degree: 'BSc'} },phone: [ 123456789, 987654321, 456987123 ]}) RETURN x $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH p=(x:Customer)-[:bought ={store: 'Amazon'}]->() RETURN p $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH p=(x:Customer)-[:bought ={store: 'Amazon', addr:{city: 'Vancouver', street: 30}}]->() RETURN p $$) as (a agtype);
-SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH p=(x:Customer)-[:bought {store: 'Amazon', addr:{city: 'Vancouver'}}]->() RETURN p $$) as (a agtype);
-
-SELECT * FROM cypher('test_enable_containment', $$ EXPLAIN (costs off) MATCH (x:Customer)-[:bought ={store: 'Amazon', addr:{city: 'Vancouver', street: 30}}]->(y:Product) RETURN 0 $$) as (a agtype);
-SELECT * FROM cypher('test_enable_containment', $$ EXPLAIN (costs off) MATCH (x:Customer ={school: { name: 'XYZ College',program: { major: 'Psyc', degree: 'BSc'} },phone: [ 123456789, 987654321, 456987123 ]}) RETURN 0 $$) as (a agtype);
-
--- With enable_containment off
-SET age.enable_containment = off;
 -- Should return 0
 SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={addr:[{city:'Toronto'}]}) RETURN x $$) as (a agtype);
 SELECT count(*) FROM cypher('test_enable_containment', $$ MATCH (x:Customer ={school:{program:{major:'Psyc'}}}) RETURN x $$) as (a agtype);
@@ -1494,9 +1455,8 @@ SELECT drop_graph('issue_2308', true);
 -- Issue 1964
 --
 -- PREPARE with property parameter ($props) crashed the server when
--- age.enable_containment was set to off. The crash was in
--- transform_map_to_ind_recursive which blindly cast cypher_param
--- nodes to cypher_map, accessing invalid memory.
+-- transform_map_to_ind_recursive blindly cast cypher_param nodes to
+-- cypher_map, accessing invalid memory.
 --
 
 SELECT create_graph('issue_1964');
@@ -1508,8 +1468,6 @@ SELECT * FROM cypher('issue_1964', $$
     CREATE (:Person {name: 'Alice'})-[:KNOWS {since: 2020}]->(:Person {name: 'Bob'})
 $$) AS (result agtype);
 
--- Test PREPARE with enable_containment off (was crashing)
-SET age.enable_containment = off;
 
 PREPARE issue_1964_vertex(agtype) AS
     SELECT * FROM cypher('issue_1964',
@@ -1518,15 +1476,12 @@ EXECUTE issue_1964_vertex('{"props": {"name": "Alice"}}');
 EXECUTE issue_1964_vertex('{"props": {"age": 25}}');
 DEALLOCATE issue_1964_vertex;
 
--- Test edge property parameter with enable_containment off
 PREPARE issue_1964_edge(agtype) AS
     SELECT * FROM cypher('issue_1964',
         $$MATCH ()-[r $props]->() RETURN r $$, $1) AS (p agtype);
 EXECUTE issue_1964_edge('{"props": {"since": 2020}}');
 DEALLOCATE issue_1964_edge;
 
--- Verify enable_containment on still works with PREPARE
-SET age.enable_containment = on;
 
 PREPARE issue_1964_vertex_on(agtype) AS
     SELECT * FROM cypher('issue_1964',
@@ -1534,8 +1489,6 @@ PREPARE issue_1964_vertex_on(agtype) AS
 EXECUTE issue_1964_vertex_on('{"props": {"name": "Alice"}}');
 DEALLOCATE issue_1964_vertex_on;
 
--- Test =properties form with PREPARE (uses @>> top-level containment)
-SET age.enable_containment = off;
 
 PREPARE issue_1964_vertex_eq(agtype) AS
     SELECT * FROM cypher('issue_1964',
@@ -1549,8 +1502,6 @@ PREPARE issue_1964_edge_eq(agtype) AS
 EXECUTE issue_1964_edge_eq('{"props": {"since": 2020}}');
 DEALLOCATE issue_1964_edge_eq;
 
--- Same with enable_containment on
-SET age.enable_containment = on;
 
 PREPARE issue_1964_vertex_eq_on(agtype) AS
     SELECT * FROM cypher('issue_1964',
