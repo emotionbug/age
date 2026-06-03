@@ -4001,7 +4001,6 @@ static void batch_fetch_terminal_properties(VLE_local_context *vlelctx)
     for (i = 0; i < vlelctx->terminal_property_count; i++)
     {
         VLETerminalPropertyBatchEntry *entry;
-        VLETerminalLabelBatchEntry *label_entry;
         bool found;
         graphid terminal_id = vlelctx->terminal_property_ids[i];
         int32 label_id = get_graphid_label_id(terminal_id);
