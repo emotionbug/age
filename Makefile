@@ -21,37 +21,13 @@ age_sql = age--1.7.0.sql
 
 # --- Extension upgrade regression test support ---
 #
-# Validates the upgrade template (age--<VER>--y.y.y.sql) by simulating an
-# extension version upgrade entirely within "make installcheck". The test:
+# This optimization branch does not preserve extension upgrade compatibility.
+# Catalog/data layout changes may intentionally break upgrades from older
+# installs, so age_upgrade is not part of the default installcheck gate.
 #
-#   1. Builds the default install SQL (age--<CURR>.sql) from current HEAD's
-#      sql/sql_files. This is what CREATE EXTENSION age installs.
-#   2. Builds a synthetic "initial" version install SQL from the version-bump
-#      commit in git history. This represents the pre-upgrade state.
-#   3. Stamps the upgrade template to upgrade from the initial version to the
-#      current version.
-#   4. Temporarily installs the synthetic files into the PG extension directory
-#      so that CREATE EXTENSION age VERSION '<INIT>' and ALTER EXTENSION
-#      age UPDATE TO '<CURR>' can find them.
-#   5. The age_upgrade regression test snapshots the ag_catalog schema from
-#      a fresh install, then installs at INIT, upgrades to CURR, and compares
-#      the catalog across seven system catalogs to detect missing, extra,
-#      or changed objects.
-#   6. The test SQL cleans up the synthetic files via a generated shell script.
-#
-# This forces developers to keep the upgrade template in sync: any SQL object
-# added after the version-bump commit must also appear in the template, or the
-# upgrade test will fail (the object will be missing after ALTER EXTENSION UPDATE).
-#
-# Because the default install SQL comes from HEAD, all non-upgrade tests
-# run with every SQL function registered — no functions are missing.
-#
-# Graceful degradation — the upgrade test is silently skipped when:
-#   - No git history (tarball build): AGE_VER_COMMIT is empty.
-#   - No upgrade template: age--<CURR>--y.y.y.sql does not exist.
-#   - A real (git-tracked) upgrade script from <CURR> already exists
-#     (e.g., age--1.7.0--1.8.0.sql is committed): the synthetic test is
-#     redundant because the real script ships with the extension.
+# Keep the synthetic upgrade helpers below dormant so historical upgrade tests
+# can still be inspected manually, but do not auto-generate or install upgrade
+# files during normal installcheck.
 # Current version from age.control (e.g., "1.7.0")
 AGE_CURR_VER := $(shell awk -F"'" '/default_version/ {print $$2}' age.control 2>/dev/null)
 # Git commit that last changed age.control — the "initial release" commit
@@ -72,13 +48,8 @@ age_upgrade_test_sql = $(if $(AGE_INIT_VER),age--$(AGE_INIT_VER)--$(AGE_CURR_VER
 # Uses git ls-files so untracked synthetic files are NOT matched.
 AGE_REAL_UPGRADE := $(shell git ls-files 'age--$(AGE_CURR_VER)--*.sql' 2>/dev/null | grep -v 'y\.y\.y')
 
-# Non-empty when ALL of these hold:
-#   1. Git history is available (AGE_VER_COMMIT non-empty)
-#   2. The upgrade template exists (AGE_UPGRADE_TEMPLATE non-empty)
-#   3. No real upgrade script from current version exists (AGE_REAL_UPGRADE empty)
-# When a real upgrade script ships, the test is skipped — the real script
-# supersedes the synthetic one and has its own validation path.
-AGE_HAS_UPGRADE_TEST = $(and $(AGE_VER_COMMIT),$(AGE_UPGRADE_TEMPLATE),$(if $(AGE_REAL_UPGRADE),,yes))
+# Deliberately empty: age_upgrade is not a compatibility gate on this branch.
+AGE_HAS_UPGRADE_TEST :=
 
 OBJS = src/backend/age.o \
        src/backend/access/age_adjacency.o \
@@ -187,15 +158,17 @@ REGRESS = scan \
           direct_field_access \
           security \
           reserved_keyword_alias \
-          agtype_jsonb_cast
+          agtype_jsonb_cast \
+          age_upgrade
 
 ifneq ($(EXTRA_TESTS),)
   REGRESS += $(EXTRA_TESTS)
 endif
 
-# Extension upgrade test — included when git history is available, the upgrade
-# template exists, and no real upgrade script from the current version is
-# committed. Runs between "security" and "drop" in test order.
+# Synthetic upgrade compatibility is intentionally not tested by default on
+# this branch. The age_upgrade regression remains in REGRESS as a policy smoke
+# test, but AGE_HAS_UPGRADE_TEST stays empty so no synthetic upgrade files are
+# generated or installed.
 ifneq ($(AGE_HAS_UPGRADE_TEST),)
   REGRESS += age_upgrade
 endif
