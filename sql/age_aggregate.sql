@@ -200,6 +200,118 @@ CREATE FUNCTION ag_catalog.age_collect_aggtransfn(internal, variadic "any")
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
 
+-- collect transfer function for direct property extraction
+CREATE FUNCTION ag_catalog.age_collect_property_aggtransfn(internal, agtype, agtype)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- collect transfer function for typed float8 values
+CREATE FUNCTION ag_catalog.age_collect_float8_transfn(internal, float8)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- collect final function for typed float8 values
+CREATE FUNCTION ag_catalog.age_collect_float8_finalfn(internal)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- collect transfer function for typed int8 values
+CREATE FUNCTION ag_catalog.age_collect_int8_transfn(internal, int8)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- collect final function for typed int8 values
+CREATE FUNCTION ag_catalog.age_collect_int8_finalfn(internal)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- collect transfer function for typed text values
+CREATE FUNCTION ag_catalog.age_collect_text_transfn(internal, text)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- collect final function for typed text values
+CREATE FUNCTION ag_catalog.age_collect_text_finalfn(internal)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- collect transfer function for direct numeric property extraction
+CREATE FUNCTION ag_catalog.age_collect_numeric_property_transfn(internal, agtype, agtype)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- collect final function for typed numeric values
+CREATE FUNCTION ag_catalog.age_collect_numeric_finalfn(internal)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- array_agg transfer function for direct property extraction
+CREATE FUNCTION ag_catalog.age_array_agg_property_transfn(internal, agtype, agtype)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- array_agg transfer function for two-key direct property map extraction
+CREATE FUNCTION ag_catalog.age_array_agg_map2_property_transfn(internal, agtype, text, agtype, text, agtype)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- array_agg transfer function for direct property map extraction
+CREATE FUNCTION ag_catalog.age_array_agg_map_property_transfn(internal, agtype, text[], agtype[])
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- array_agg transfer function for direct property list extraction
+CREATE FUNCTION ag_catalog.age_array_agg_list_property_transfn(internal, agtype, agtype[])
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- array_agg final function for direct property extraction
+CREATE FUNCTION ag_catalog.age_array_agg_property_finalfn(internal)
+    RETURNS agtype[]
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
 -- collect final function
 CREATE FUNCTION ag_catalog.age_collect_aggfinalfn(internal)
     RETURNS agtype
@@ -214,5 +326,86 @@ CREATE AGGREGATE ag_catalog.age_collect(variadic "any")
     stype = internal,
     sfunc = ag_catalog.age_collect_aggtransfn,
     finalfunc = ag_catalog.age_collect_aggfinalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_collect_property(agtype, agtype)
+CREATE AGGREGATE ag_catalog.age_collect_property(agtype, agtype)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_property_aggtransfn,
+    finalfunc = ag_catalog.age_collect_aggfinalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_collect_float8(float8)
+CREATE AGGREGATE ag_catalog.age_collect_float8(float8)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_float8_transfn,
+    finalfunc = ag_catalog.age_collect_float8_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_collect_int8(int8)
+CREATE AGGREGATE ag_catalog.age_collect_int8(int8)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_int8_transfn,
+    finalfunc = ag_catalog.age_collect_int8_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_collect_text(text)
+CREATE AGGREGATE ag_catalog.age_collect_text(text)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_text_transfn,
+    finalfunc = ag_catalog.age_collect_text_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_collect_numeric_property(agtype, agtype)
+CREATE AGGREGATE ag_catalog.age_collect_numeric_property(agtype, agtype)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_numeric_property_transfn,
+    finalfunc = ag_catalog.age_collect_numeric_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_array_agg_property(agtype, agtype)
+CREATE AGGREGATE ag_catalog.age_array_agg_property(agtype, agtype)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_array_agg_property_transfn,
+    finalfunc = ag_catalog.age_array_agg_property_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_array_agg_map2_property(agtype, text, agtype, text, agtype)
+CREATE AGGREGATE ag_catalog.age_array_agg_map2_property(agtype, text, agtype, text, agtype)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_array_agg_map2_property_transfn,
+    finalfunc = ag_catalog.age_array_agg_property_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_array_agg_map_property(agtype, text[], agtype[])
+CREATE AGGREGATE ag_catalog.age_array_agg_map_property(agtype, text[], agtype[])
+(
+    stype = internal,
+    sfunc = ag_catalog.age_array_agg_map_property_transfn,
+    finalfunc = ag_catalog.age_array_agg_property_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_array_agg_list_property(agtype, agtype[])
+CREATE AGGREGATE ag_catalog.age_array_agg_list_property(agtype, agtype[])
+(
+    stype = internal,
+    sfunc = ag_catalog.age_array_agg_list_property_transfn,
+    finalfunc = ag_catalog.age_array_agg_property_finalfn,
     parallel = safe
 );

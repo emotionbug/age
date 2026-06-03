@@ -1006,6 +1006,12 @@ SELECT agtype_string_match_ends_with('"abcdefghijklmnopqrstuvwxyz"', '"vwxy"');
 SELECT agtype_string_match_contains('"abcdefghijklmnopqrstuvwxyz"', '"hijl"');
 
 --Agtype BTree Comparison Function
+SELECT amprocnum, amproc::regproc
+FROM pg_amproc
+WHERE amprocfamily = (
+    SELECT opcfamily FROM pg_opclass WHERE opcname = 'agtype_ops_btree')
+ORDER BY amprocnum;
+
 SELECT agtype_btree_cmp('1'::agtype, '1'::agtype);
 SELECT agtype_btree_cmp('1'::agtype, '1.0'::agtype);
 SELECT agtype_btree_cmp('1'::agtype, '"1"'::agtype);

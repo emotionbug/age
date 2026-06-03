@@ -389,12 +389,14 @@ SELECT * FROM cypher('cypher_index', $$
     EXPLAIN (costs off) MATCH (c:City {city_id: 1})
     RETURN c
 $$) as (plan agtype);
-                                            QUERY PLAN                                             
----------------------------------------------------------------------------------------------------
- Seq Scan on "City" c
-   Disabled: true
-   Filter: (agtype_access_operator(VARIADIC ARRAY[properties, '"city_id"'::agtype]) = '1'::agtype)
-(3 rows)
+                                     QUERY PLAN                                     
+------------------------------------------------------------------------------------
+ Bitmap Heap Scan on "City" c
+   Recheck Cond: (properties @> '{"city_id": 1}'::agtype)
+   Filter: agtype_object_field_equals(properties, '"city_id"'::agtype, '1'::agtype)
+   ->  Bitmap Index Scan on load_city_gin_idx
+         Index Cond: (properties @> '{"city_id": 1}'::agtype)
+(5 rows)
 
 SELECT * FROM cypher('cypher_index', $$
     MATCH (c:City {city_id: 1})
@@ -434,12 +436,14 @@ SELECT * FROM cypher('cypher_index', $$
     EXPLAIN (costs off) MATCH (c:Country {life_expectancy: 82.05})
     RETURN c
 $$) as (plan agtype);
-                                                  QUERY PLAN                                                   
----------------------------------------------------------------------------------------------------------------
- Seq Scan on "Country" c
-   Disabled: true
-   Filter: (agtype_access_operator(VARIADIC ARRAY[properties, '"life_expectancy"'::agtype]) = '82.05'::agtype)
-(3 rows)
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on "Country" c
+   Recheck Cond: (properties @> '{"life_expectancy": 82.05}'::agtype)
+   Filter: agtype_object_field_equals(properties, '"life_expectancy"'::agtype, '82.05'::agtype)
+   ->  Bitmap Index Scan on load_country_gin_idx
+         Index Cond: (properties @> '{"life_expectancy": 82.05}'::agtype)
+(5 rows)
 
 SELECT * FROM cypher('cypher_index', $$
     MATCH (c:Country {life_expectancy: 82.05})
@@ -517,9 +521,13 @@ $$) as (name agtype);
 ------
 (0 rows)
 
--- Create expression index on city_id property
-CREATE INDEX city_id_idx ON cypher_index."City"
-(ag_catalog.agtype_access_operator(properties, '"city_id"'::agtype));
+-- Create expression index on city_id property through AGE helper
+\pset format unaligned
+SELECT create_property_index('cypher_index', 'City', 'city_id');
+create_property_index
+
+(1 row)
+\pset format aligned
 -- Verify index is used with EXPLAIN for integer property
 SELECT * FROM cypher('cypher_index', $$
     EXPLAIN (costs off) MATCH (a:City)
@@ -528,7 +536,7 @@ SELECT * FROM cypher('cypher_index', $$
 $$) as (plan agtype);
                                               QUERY PLAN                                               
 -------------------------------------------------------------------------------------------------------
- Index Scan using city_id_idx on "City" a
+ Index Scan using "City_city_id_property_idx" on "City" a
    Index Cond: (agtype_access_operator(VARIADIC ARRAY[properties, '"city_id"'::agtype]) = '1'::agtype)
 (2 rows)
 
@@ -729,7 +737,7 @@ $$) as (plan agtype);
                      Index Cond: (start_id = city.id)
    ->  Index Scan using "Country_pkey" on "Country" country
          Index Cond: (id = _age_default_alias_0.end_id)
-         Filter: (agtype_access_operator(VARIADIC ARRAY[properties, '"country_code"'::agtype]) = '"CA"'::agtype)
+         Filter: agtype_object_field_equals(properties, '"country_code"'::agtype, '"CA"'::agtype)
 (11 rows)
 
 -- Test WHERE in combination with pattern matching
@@ -748,9 +756,58 @@ $$) as (name agtype);
 
 -- Clean up indices
 DROP INDEX cypher_index.city_country_code_idx;
-DROP INDEX cypher_index.city_id_idx;
+DROP INDEX cypher_index."City_city_id_property_idx";
 DROP INDEX cypher_index.city_west_coast_idx;
 DROP INDEX cypher_index.country_life_exp_idx;
+--
+-- Section 5: Agtype path-hash GIN opclass
+--
+CREATE TEMP TABLE agtype_path_idx_probe (id int, doc agtype);
+INSERT INTO agtype_path_idx_probe VALUES
+    (1, '{"a": {"x": 42}, "b": {"x": 7}}'::agtype),
+    (2, '{"a": {"x": 7}, "b": {"x": 42}}'::agtype),
+    (3, '{"a": {"x": 42}, "b": {"x": 42}}'::agtype);
+CREATE INDEX agtype_path_idx_probe_gin
+ON agtype_path_idx_probe USING gin (doc gin_agtype_path_ops);
+ANALYZE agtype_path_idx_probe;
+SELECT opc.opcname, opc.opckeytype::regtype
+FROM pg_opclass opc
+JOIN pg_am am ON am.oid = opc.opcmethod
+WHERE am.amname = 'gin' AND opc.opcname = 'gin_agtype_path_ops';
+       opcname       | opckeytype 
+---------------------+------------
+ gin_agtype_path_ops | integer
+(1 row)
+
+SELECT * FROM agtype_path_idx_probe
+WHERE doc @> '{"a": {"x": 42}}'::agtype
+ORDER BY id;
+ id |               doc                
+----+----------------------------------
+  1 | {"a": {"x": 42}, "b": {"x": 7}}
+  3 | {"a": {"x": 42}, "b": {"x": 42}}
+(2 rows)
+
+SELECT * FROM agtype_path_idx_probe
+WHERE doc @> '{"b": {"x": 42}}'::agtype
+ORDER BY id;
+ id |               doc                
+----+----------------------------------
+  2 | {"a": {"x": 7}, "b": {"x": 42}}
+  3 | {"a": {"x": 42}, "b": {"x": 42}}
+(2 rows)
+
+EXPLAIN (costs off)
+SELECT * FROM agtype_path_idx_probe
+WHERE doc @> '{"a": {"x": 42}}'::agtype;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Bitmap Heap Scan on agtype_path_idx_probe
+   Recheck Cond: (doc @> '{"a": {"x": 42}}'::agtype)
+   ->  Bitmap Index Scan on agtype_path_idx_probe_gin
+         Index Cond: (doc @> '{"a": {"x": 42}}'::agtype)
+(4 rows)
+
 --
 -- General Cleanup
 --

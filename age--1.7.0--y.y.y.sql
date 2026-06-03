@@ -412,6 +412,11 @@ COMMENT ON FUNCTION ag_catalog.age_pg_upgrade_status() IS
 --
 -- VLE materialization and accessor helpers added after the initial 1.7.0 SQL.
 CREATE FUNCTION ag_catalog.age_vle_path_length(agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
+CREATE FUNCTION ag_catalog.age_vle_terminal_id(agtype) RETURNS graphid LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
+CREATE FUNCTION ag_catalog.age_vle_terminal_vertex(agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
+CREATE FUNCTION ag_catalog.age_vle_terminal_vertex_properties(agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
+CREATE FUNCTION ag_catalog.age_vle_terminal_vertex_property(agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
+CREATE FUNCTION ag_catalog.age_vle_terminal_vertex_property_from_path(agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_vle_path_node_count(agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_vle_edge_tail_count(agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_vle_list_is_empty(agtype, agtype) RETURNS boolean LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
@@ -424,6 +429,7 @@ CREATE FUNCTION ag_catalog.age_vle_node_id_at(agtype, agtype) RETURNS agtype LAN
 CREATE FUNCTION ag_catalog.age_vle_node_label_at(agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_vle_node_labels_at(agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_vle_node_properties_at(agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
+CREATE FUNCTION ag_catalog.age_vle_node_property_at(agtype, agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_materialize_vle_nodes_slice(agtype, agtype, agtype) RETURNS agtype LANGUAGE C STABLE PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_materialize_vle_list_slice(agtype, agtype, agtype, agtype) RETURNS agtype LANGUAGE C STABLE PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_vle_list_slice_count(agtype, agtype, agtype, agtype) RETURNS agtype LANGUAGE C STABLE PARALLEL SAFE AS 'MODULE_PATHNAME';
@@ -444,6 +450,7 @@ CREATE FUNCTION ag_catalog.age_vle_edge_indices_equal(agtype, agtype, agtype) RE
 CREATE FUNCTION ag_catalog.age_vle_edge_reversed_index_equal(agtype, agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_vle_edge_label_at(agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_vle_edge_properties_at(agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
+CREATE FUNCTION ag_catalog.age_vle_edge_property_at(agtype, agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_vle_edge_start_node_at(agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_vle_edge_end_node_at(agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_vle_edge_endpoint_field_at(agtype, agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
@@ -451,6 +458,337 @@ CREATE FUNCTION ag_catalog.age_vle_edge_start_id_at(agtype, agtype) RETURNS agty
 CREATE FUNCTION ag_catalog.age_vle_edge_end_id_at(agtype, agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_materialize_vle_edges_tail(agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
 CREATE FUNCTION ag_catalog.age_materialize_vle_edges_reversed(agtype) RETURNS agtype LANGUAGE C STABLE RETURNS NULL ON NULL INPUT PARALLEL SAFE AS 'MODULE_PATHNAME';
+
+--
+-- Objects added to the 1.7.0 extension body after the initial 1.7.0 SQL.
+--
+CREATE FUNCTION ag_catalog.create_property_index(graph_name cstring,
+                                                 label_name cstring,
+                                                 property_name cstring)
+    RETURNS void
+    LANGUAGE c
+AS 'MODULE_PATHNAME';
+
+CREATE DOMAIN ag_catalog.age_auto_column AS ag_catalog.agtype;
+
+CREATE FUNCTION ag_catalog.agtype_sortsupport(internal)
+    RETURNS void
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_ctid_field_agtype(oid, tid, agtype)
+    RETURNS agtype
+    LANGUAGE c
+    STABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL RESTRICTED
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_object_field_exists_nonnull(agtype, agtype)
+    RETURNS bool
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_object_field_equals(agtype, agtype, agtype)
+    RETURNS bool
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_object_field_cmp(agtype, agtype, agtype)
+    RETURNS int4
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_object_field_int8(agtype, agtype)
+    RETURNS int8
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_object_field_float8(agtype, agtype)
+    RETURNS float8
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_object_field_numeric_agtype(agtype, agtype)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.gin_extract_agtype_path(agtype, internal)
+    RETURNS internal
+AS 'MODULE_PATHNAME'
+LANGUAGE C
+IMMUTABLE
+STRICT
+PARALLEL SAFE;
+
+CREATE FUNCTION ag_catalog.gin_extract_agtype_query_path(agtype, internal, int2,
+                                                         internal, internal)
+    RETURNS internal
+AS 'MODULE_PATHNAME'
+LANGUAGE C
+IMMUTABLE
+STRICT
+PARALLEL SAFE;
+
+CREATE FUNCTION ag_catalog.gin_consistent_agtype_path(internal, int2, agtype,
+                                                      int4, internal, internal)
+    RETURNS bool
+AS 'MODULE_PATHNAME'
+LANGUAGE C
+IMMUTABLE
+STRICT
+PARALLEL SAFE;
+
+CREATE FUNCTION ag_catalog.gin_triconsistent_agtype_path(internal, int2, agtype,
+                                                         int4, internal,
+                                                         internal, internal)
+    RETURNS bool
+AS 'MODULE_PATHNAME'
+LANGUAGE C
+IMMUTABLE
+STRICT
+PARALLEL SAFE;
+
+CREATE OPERATOR CLASS ag_catalog.gin_agtype_path_ops
+FOR TYPE agtype USING gin AS
+  OPERATOR 7 @>(agtype, agtype),
+  FUNCTION 1 pg_catalog.btint4cmp(int4, int4),
+  FUNCTION 2 ag_catalog.gin_extract_agtype_path(agtype, internal),
+  FUNCTION 3 ag_catalog.gin_extract_agtype_query_path(agtype, internal, int2,
+                                                      internal, internal),
+  FUNCTION 4 ag_catalog.gin_consistent_agtype_path(internal, int2, agtype,
+                                                   int4, internal, internal),
+  FUNCTION 6 ag_catalog.gin_triconsistent_agtype_path(internal, int2, agtype,
+                                                      int4, internal, internal,
+                                                      internal),
+STORAGE int4;
+
+CREATE FUNCTION ag_catalog._agtype_build_path_raw(VARIADIC "any")
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+CALLED ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog._agtype_build_vertex_label(oid, graphid, agtype)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+CALLED ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog._agtype_build_edge_label(oid, graphid, graphid,
+                                                    graphid, agtype)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+CALLED ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_collect_property_aggtransfn(internal, agtype, agtype)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_collect_float8_transfn(internal, float8)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_collect_float8_finalfn(internal)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_collect_int8_transfn(internal, int8)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_collect_int8_finalfn(internal)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_collect_text_transfn(internal, text)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_collect_text_finalfn(internal)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_collect_numeric_property_transfn(internal, agtype, agtype)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_collect_numeric_finalfn(internal)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_array_agg_property_transfn(internal, agtype, agtype)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_array_agg_map2_property_transfn(internal, agtype, text, agtype, text, agtype)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_array_agg_map_property_transfn(internal, agtype, text[], agtype[])
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_array_agg_list_property_transfn(internal, agtype, agtype[])
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_array_agg_property_finalfn(internal)
+    RETURNS agtype[]
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE AGGREGATE ag_catalog.age_collect_property(agtype, agtype)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_property_aggtransfn,
+    finalfunc = ag_catalog.age_collect_aggfinalfn,
+    parallel = safe
+);
+
+CREATE AGGREGATE ag_catalog.age_collect_float8(float8)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_float8_transfn,
+    finalfunc = ag_catalog.age_collect_float8_finalfn,
+    parallel = safe
+);
+
+CREATE AGGREGATE ag_catalog.age_collect_int8(int8)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_int8_transfn,
+    finalfunc = ag_catalog.age_collect_int8_finalfn,
+    parallel = safe
+);
+
+CREATE AGGREGATE ag_catalog.age_collect_text(text)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_text_transfn,
+    finalfunc = ag_catalog.age_collect_text_finalfn,
+    parallel = safe
+);
+
+CREATE AGGREGATE ag_catalog.age_collect_numeric_property(agtype, agtype)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_numeric_property_transfn,
+    finalfunc = ag_catalog.age_collect_numeric_finalfn,
+    parallel = safe
+);
+
+CREATE AGGREGATE ag_catalog.age_array_agg_property(agtype, agtype)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_array_agg_property_transfn,
+    finalfunc = ag_catalog.age_array_agg_property_finalfn,
+    parallel = safe
+);
+
+CREATE AGGREGATE ag_catalog.age_array_agg_map2_property(agtype, text, agtype, text, agtype)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_array_agg_map2_property_transfn,
+    finalfunc = ag_catalog.age_array_agg_property_finalfn,
+    parallel = safe
+);
+
+CREATE AGGREGATE ag_catalog.age_array_agg_map_property(agtype, text[], agtype[])
+(
+    stype = internal,
+    sfunc = ag_catalog.age_array_agg_map_property_transfn,
+    finalfunc = ag_catalog.age_array_agg_property_finalfn,
+    parallel = safe
+);
+
+CREATE AGGREGATE ag_catalog.age_array_agg_list_property(agtype, agtype[])
+(
+    stype = internal,
+    sfunc = ag_catalog.age_array_agg_list_property_transfn,
+    finalfunc = ag_catalog.age_array_agg_property_finalfn,
+    parallel = safe
+);
+
+CREATE FUNCTION ag_catalog.age_vle(IN agtype, IN agtype, IN agtype, IN agtype,
+                                   IN agtype, IN agtype, IN agtype, IN agtype,
+                                   IN agtype, OUT edges agtype)
+    RETURNS SETOF agtype
+LANGUAGE C
+STABLE
+CALLED ON NULL INPUT
+PARALLEL UNSAFE
+ROWS 100
+AS 'MODULE_PATHNAME';
 
 -- VLE cache invalidation trigger function
 -- Installed on graph label tables to catch SQL-level mutations

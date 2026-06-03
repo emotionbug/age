@@ -78,6 +78,7 @@ LANGUAGE C
 STABLE
 CALLED ON NULL INPUT
 PARALLEL UNSAFE -- might be safe
+ROWS 100
 AS 'MODULE_PATHNAME';
 
 -- This is an overloaded function definition to allow for the VLE local context
@@ -90,6 +91,20 @@ LANGUAGE C
 STABLE
 CALLED ON NULL INPUT
 PARALLEL UNSAFE -- might be safe
+ROWS 100
+AS 'MODULE_PATHNAME';
+
+-- This overload lets terminal-only VLE return one terminal vertex property
+-- directly when MATCH lowering can prove that no path container consumer remains.
+CREATE FUNCTION ag_catalog.age_vle(IN agtype, IN agtype, IN agtype, IN agtype,
+                                   IN agtype, IN agtype, IN agtype, IN agtype,
+                                   IN agtype, OUT edges agtype)
+    RETURNS SETOF agtype
+LANGUAGE C
+STABLE
+CALLED ON NULL INPUT
+PARALLEL UNSAFE -- might be safe
+ROWS 100
 AS 'MODULE_PATHNAME';
 
 -- function to build an edge for a VLE match
@@ -120,6 +135,51 @@ AS 'MODULE_PATHNAME';
 
 -- function to read the length of a VLE_path_container without materializing it
 CREATE FUNCTION ag_catalog.age_vle_path_length(agtype)
+    RETURNS agtype
+    LANGUAGE C
+    STABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- function to read the terminal vertex id of a VLE_path_container
+CREATE FUNCTION ag_catalog.age_vle_terminal_id(agtype)
+    RETURNS graphid
+    LANGUAGE C
+    STABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- function to materialize the terminal vertex of a VLE_path_container
+CREATE FUNCTION ag_catalog.age_vle_terminal_vertex(agtype)
+    RETURNS agtype
+    LANGUAGE C
+    STABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- function to read terminal vertex properties of a VLE_path_container
+CREATE FUNCTION ag_catalog.age_vle_terminal_vertex_properties(agtype)
+    RETURNS agtype
+    LANGUAGE C
+    STABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- function to read one property from terminal vertex properties
+CREATE FUNCTION ag_catalog.age_vle_terminal_vertex_property(agtype, agtype)
+    RETURNS agtype
+    LANGUAGE C
+    STABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- function to read one terminal vertex property directly from a VLE_path_container
+CREATE FUNCTION ag_catalog.age_vle_terminal_vertex_property_from_path(agtype, agtype)
     RETURNS agtype
     LANGUAGE C
     STABLE
@@ -237,6 +297,15 @@ AS 'MODULE_PATHNAME';
 
 -- function to read one vertex properties object from a VLE_path_container node index
 CREATE FUNCTION ag_catalog.age_vle_node_properties_at(agtype, agtype)
+    RETURNS agtype
+    LANGUAGE C
+    STABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- function to read one vertex property from a VLE_path_container node index
+CREATE FUNCTION ag_catalog.age_vle_node_property_at(agtype, agtype, agtype)
     RETURNS agtype
     LANGUAGE C
     STABLE
@@ -412,6 +481,15 @@ AS 'MODULE_PATHNAME';
 
 -- function to read an indexed edge's properties
 CREATE FUNCTION ag_catalog.age_vle_edge_properties_at(agtype, agtype)
+    RETURNS agtype
+    LANGUAGE C
+    STABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- function to read one indexed edge property
+CREATE FUNCTION ag_catalog.age_vle_edge_property_at(agtype, agtype, agtype)
     RETURNS agtype
     LANGUAGE C
     STABLE

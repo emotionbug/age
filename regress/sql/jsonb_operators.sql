@@ -571,6 +571,9 @@ SELECT '{"a":"b", "b":1, "c":null}'::agtype @> '{"a":"b", "c":null}';
 SELECT '{"a":"b", "b":1, "c":null}'::agtype @> '{}';
 SELECT '{"name": "Bob", "tags": ["enim", "qui"]}'::agtype @> '{"tags":["qui"]}';
 SELECT '{"name": "Bob", "tags": ["enim", "qui"]}'::agtype @> '{"tags":[]}';
+SELECT '{"a": {"x": 42}, "b": {"x": 7}}'::agtype @> '{"a": {"x": 42}}'::agtype;
+SELECT '{"a": {"x": 42, "y": 3}, "b": {"x": 7}}'::agtype @> '{"a": {"x": 42, "y": 3}}'::agtype;
+SELECT '{"a": {"b": {"c": {"d": {"e": 42}}}}}'::agtype @> '{"a": {"b": {"c": {"d": {"e": 42}}}}}'::agtype;
 
 SELECT '[1,2]'::agtype @> '[1,2,2]'::agtype;
 SELECT '[1,1,2]'::agtype @> '[1,2,2]'::agtype;
@@ -597,6 +600,9 @@ SELECT '{"a":"b", "b":1, "c":null}'::agtype @> '{"a":"c"}';
 SELECT '{"a":"b", "b":1, "c":null}'::agtype @> '{"a":"b", "c":"q"}';
 SELECT '{"a":"b", "b":1, "c":null}'::agtype @> '[]';
 SELECT '{"name": "Bob", "tags": ["enim", "qui"]}'::agtype @> '{"tags":{}}';
+SELECT '{"a": {"x": 7}, "b": {"x": 42}}'::agtype @> '{"a": {"x": 42}}'::agtype;
+SELECT '{"a": {"x": 42, "y": 4}, "b": {"x": 42}}'::agtype @> '{"a": {"x": 42, "y": 3}}'::agtype;
+SELECT '{"a": {"b": {"c": {"d": {"e": 42}}}}}'::agtype @> '{"a": {"b": {"c": {"d": {"e": 7}}}}}'::agtype;
 
 SELECT '[1,1,2]'::agtype @> '[1,2,[2]]'::agtype;
 SELECT '[1,2,2]'::agtype @> '{}'::agtype;

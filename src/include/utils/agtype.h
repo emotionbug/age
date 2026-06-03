@@ -588,6 +588,7 @@ agtype_iterator_token agtype_iterator_next(agtype_iterator **it,
                                            agtype_value *val,
                                            bool skip_nested);
 agtype *agtype_value_to_agtype(agtype_value *val);
+agtype *agtype_integer_to_agtype(int64 int_value);
 bool agtype_deep_contains(agtype_iterator **val,
                           agtype_iterator **m_contained, bool skip_nested);
 void agtype_hash_scalar_value(const agtype_value *scalar_val, uint32 *hash);

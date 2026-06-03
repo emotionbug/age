@@ -246,3 +246,33 @@ void write_extended(agtype_build_state *bstate, agtype *val, uint32 header)
 
     bstate->i++;
 }
+
+void write_agtype_scalar_payload(agtype_build_state *bstate, agtype *val)
+{
+    char *base;
+    uint32 offset;
+    int length = 0;
+
+    if (!AGT_ROOT_IS_SCALAR(val) || AGT_ROOT_COUNT(val) != 1)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("expected scalar agtype payload")));
+    }
+
+    offset = get_agtype_offset(&val->root, 0);
+
+    if (AGTE_IS_AGTYPE(val->root.children[0]))
+    {
+        length += BUFFER_WRITE_PAD();
+    }
+
+    /* scalar payload */
+    base = (char *)&val->root.children[1];
+    length += write_ptr(base + offset, get_agtype_length(&val->root, 0));
+
+    /* agtentry */
+    write_agt((val->root.children[0] & AGTENTRY_TYPEMASK) | length);
+
+    bstate->i++;
+}

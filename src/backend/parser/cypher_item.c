@@ -30,11 +30,23 @@
 
 #include "parser/cypher_expr.h"
 #include "parser/cypher_item.h"
+#include "utils/ag_func.h"
+#include "utils/agtype.h"
 
 static List *ExpandAllTables(ParseState *pstate, int location);
 static List *expand_pnsi_attrs(ParseState *pstate, ParseNamespaceItem *pnsi,
 			       int sublevels_up, bool require_col_privs,
                                int location);
+static Node *try_transform_path_count_item(cypher_parsestate *cpstate,
+                                           Node *node,
+                                           ParseExprKind expr_kind);
+static Node *try_transform_property_count_item(cypher_parsestate *cpstate,
+                                               FuncCall *fn,
+                                               FuncCall *count_arg_fn,
+                                               ParseExprKind expr_kind);
+static char *make_raw_edges_name(const char *var_name);
+static char *make_raw_path_count_anchor_name(const char *var_name);
+static char *make_raw_properties_name(const char *var_name);
 
 /* see transformTargetEntry() */
 TargetEntry *transform_cypher_item(cypher_parsestate *cpstate, Node *node,
@@ -44,13 +56,268 @@ TargetEntry *transform_cypher_item(cypher_parsestate *cpstate, Node *node,
     ParseState *pstate = (ParseState *)cpstate;
 
     if (!expr)
+    {
+        expr = try_transform_path_count_item(cpstate, node, expr_kind);
+    }
+
+    if (!expr)
+    {
         expr = transform_cypher_expr(cpstate, node, expr_kind);
+    }
 
     if (!colname && !resjunk)
         colname = FigureColname(node);
 
     return makeTargetEntry((Expr *)expr, (AttrNumber)pstate->p_next_resno++,
                            colname, resjunk);
+}
+
+static Node *try_transform_path_count_item(cypher_parsestate *cpstate,
+                                           Node *node,
+                                           ParseExprKind expr_kind)
+{
+    ParseState *pstate = (ParseState *)cpstate;
+    FuncCall *fn;
+    FuncCall *count_arg_fn = NULL;
+    Node *func_name_node;
+    ColumnRef *path_ref;
+    char *path_name;
+    char *raw_edges_name;
+    char *count_anchor_name;
+    Node *raw_edges_var;
+    Node *count_anchor_var;
+    ColumnRef *count_arg_ref;
+    FuncCall *count_fn;
+    Node *expr;
+
+    if (expr_kind != EXPR_KIND_SELECT_TARGET || node == NULL ||
+        !IsA(node, FuncCall))
+    {
+        return NULL;
+    }
+
+    fn = (FuncCall *)node;
+    if (fn->funcname == NIL)
+    {
+        return NULL;
+    }
+
+    func_name_node = llast(fn->funcname);
+    if (!IsA(func_name_node, String))
+    {
+        return NULL;
+    }
+
+    if (pg_strcasecmp(strVal(func_name_node), "int8_to_agtype") == 0 &&
+        list_length(fn->args) == 1 && IsA(linitial(fn->args), FuncCall))
+    {
+        FuncCall *inner_fn = (FuncCall *)linitial(fn->args);
+        Node *inner_name_node;
+
+        if (inner_fn->funcname == NIL)
+        {
+            return NULL;
+        }
+
+        inner_name_node = llast(inner_fn->funcname);
+        if (!IsA(inner_name_node, String) ||
+            pg_strcasecmp(strVal(inner_name_node), "count") != 0)
+        {
+            return NULL;
+        }
+
+        count_arg_fn = inner_fn;
+    }
+    else if (pg_strcasecmp(strVal(func_name_node), "count") == 0)
+    {
+        count_arg_fn = fn;
+    }
+    else
+    {
+        return NULL;
+    }
+
+    if (list_length(count_arg_fn->args) != 1 || count_arg_fn->agg_star ||
+        count_arg_fn->agg_distinct)
+    {
+        return NULL;
+    }
+
+    expr = try_transform_property_count_item(cpstate, fn, count_arg_fn,
+                                             expr_kind);
+    if (expr != NULL)
+    {
+        return expr;
+    }
+
+    if (!IsA(linitial(count_arg_fn->args), ColumnRef))
+    {
+        return NULL;
+    }
+
+    path_ref = (ColumnRef *)linitial(count_arg_fn->args);
+    if (list_length(path_ref->fields) != 1 ||
+        !IsA(linitial(path_ref->fields), String))
+    {
+        return NULL;
+    }
+
+    path_name = strVal(linitial(path_ref->fields));
+    count_anchor_name = make_raw_path_count_anchor_name(path_name);
+    count_anchor_var = colNameToVar(pstate, count_anchor_name, false,
+                                    path_ref->location);
+    if (count_anchor_var != NULL)
+    {
+        count_arg_ref = makeNode(ColumnRef);
+        count_arg_ref->fields = list_make1(makeString(count_anchor_name));
+        count_arg_ref->location = path_ref->location;
+    }
+    else
+    {
+        pfree(count_anchor_name);
+        count_anchor_name = NULL;
+    }
+
+    raw_edges_name = make_raw_edges_name(path_name);
+    raw_edges_var = colNameToVar(pstate, raw_edges_name, false,
+                                 path_ref->location);
+    if (count_anchor_name == NULL && raw_edges_var == NULL)
+    {
+        pfree(raw_edges_name);
+        return NULL;
+    }
+
+    if (count_anchor_name == NULL)
+    {
+        count_arg_ref = makeNode(ColumnRef);
+        count_arg_ref->fields = list_make1(makeString(raw_edges_name));
+        count_arg_ref->location = path_ref->location;
+    }
+
+    count_fn = copyObject(count_arg_fn);
+    count_fn->args = list_make1(count_arg_ref);
+
+    if (count_arg_fn == fn)
+    {
+        expr = transform_cypher_expr(cpstate, (Node *)count_fn, expr_kind);
+    }
+    else
+    {
+        FuncCall *wrapper_fn = copyObject(fn);
+
+        wrapper_fn->args = list_make1(count_fn);
+        expr = transform_cypher_expr(cpstate, (Node *)wrapper_fn, expr_kind);
+    }
+    if (count_anchor_name != NULL)
+        pfree(count_anchor_name);
+    pfree(raw_edges_name);
+
+    return expr;
+}
+
+static Node *try_transform_property_count_item(cypher_parsestate *cpstate,
+                                               FuncCall *fn,
+                                               FuncCall *count_arg_fn,
+                                               ParseExprKind expr_kind)
+{
+    ParseState *pstate = (ParseState *)cpstate;
+    ColumnRef *property_ref;
+    A_Indirection *property_indirection;
+    char *var_name;
+    char *property_name;
+    char *raw_props_name;
+    Node *raw_props_var;
+    Const *property_key;
+    FuncExpr *exists_expr;
+    FuncCall *count_fn;
+    Node *expr;
+
+    if (IsA(linitial(count_arg_fn->args), A_Indirection))
+    {
+        property_indirection = (A_Indirection *)linitial(count_arg_fn->args);
+        if (!IsA(property_indirection->arg, ColumnRef) ||
+            list_length(property_indirection->indirection) != 1 ||
+            !IsA(linitial(property_indirection->indirection), String))
+        {
+            return NULL;
+        }
+
+        property_ref = castNode(ColumnRef, property_indirection->arg);
+        if (list_length(property_ref->fields) != 1 ||
+            !IsA(linitial(property_ref->fields), String))
+        {
+            return NULL;
+        }
+
+        var_name = strVal(linitial(property_ref->fields));
+        property_name = strVal(linitial(property_indirection->indirection));
+    }
+    else if (IsA(linitial(count_arg_fn->args), ColumnRef))
+    {
+        property_ref = (ColumnRef *)linitial(count_arg_fn->args);
+        if (list_length(property_ref->fields) != 2 ||
+            !IsA(linitial(property_ref->fields), String) ||
+            !IsA(lsecond(property_ref->fields), String))
+        {
+            return NULL;
+        }
+
+        var_name = strVal(linitial(property_ref->fields));
+        property_name = strVal(lsecond(property_ref->fields));
+    }
+    else
+    {
+        return NULL;
+    }
+    raw_props_name = make_raw_properties_name(var_name);
+    raw_props_var = colNameToVar(pstate, raw_props_name, false,
+                                 property_ref->location);
+    pfree(raw_props_name);
+    if (raw_props_var == NULL)
+        return NULL;
+
+    property_key = makeConst(AGTYPEOID, -1, InvalidOid, -1,
+                             string_to_agtype(property_name), false, false);
+    exists_expr = makeFuncExpr(
+        get_ag_func_oid("agtype_object_field_exists_nonnull", 2,
+                        AGTYPEOID, AGTYPEOID),
+        BOOLOID,
+        list_make2(raw_props_var, property_key),
+        InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+    exists_expr->location = property_ref->location;
+
+    count_fn = copyObject(count_arg_fn);
+    count_fn->args = list_make1(exists_expr);
+
+    if (count_arg_fn == fn)
+    {
+        expr = transform_cypher_expr(cpstate, (Node *)count_fn, expr_kind);
+    }
+    else
+    {
+        FuncCall *wrapper_fn = copyObject(fn);
+
+        wrapper_fn->args = list_make1(count_fn);
+        expr = transform_cypher_expr(cpstate, (Node *)wrapper_fn, expr_kind);
+    }
+
+    return expr;
+}
+
+static char *make_raw_edges_name(const char *var_name)
+{
+    return psprintf("%sraw_%s_edges", AGE_DEFAULT_ALIAS_PREFIX, var_name);
+}
+
+static char *make_raw_path_count_anchor_name(const char *var_name)
+{
+    return psprintf("%sraw_%s_count_anchor", AGE_DEFAULT_ALIAS_PREFIX,
+                    var_name);
+}
+
+static char *make_raw_properties_name(const char *var_name)
+{
+    return psprintf("%sraw_%s_properties", AGE_DEFAULT_ALIAS_PREFIX, var_name);
 }
 
 /* see transformTargetList() */

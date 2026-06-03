@@ -292,9 +292,10 @@ SELECT * FROM cypher('cypher_index', $$
     RETURN a.name
 $$) as (name agtype);
 
--- Create expression index on city_id property
-CREATE INDEX city_id_idx ON cypher_index."City"
-(ag_catalog.agtype_access_operator(properties, '"city_id"'::agtype));
+-- Create expression index on city_id property through AGE helper
+\pset format unaligned
+SELECT create_property_index('cypher_index', 'City', 'city_id');
+\pset format aligned
 
 -- Verify index is used with EXPLAIN for integer property
 SELECT * FROM cypher('cypher_index', $$
@@ -428,9 +429,41 @@ $$) as (name agtype);
 
 -- Clean up indices
 DROP INDEX cypher_index.city_country_code_idx;
-DROP INDEX cypher_index.city_id_idx;
+DROP INDEX cypher_index."City_city_id_property_idx";
 DROP INDEX cypher_index.city_west_coast_idx;
 DROP INDEX cypher_index.country_life_exp_idx;
+
+--
+-- Section 5: Agtype path-hash GIN opclass
+--
+CREATE TEMP TABLE agtype_path_idx_probe (id int, doc agtype);
+
+INSERT INTO agtype_path_idx_probe VALUES
+    (1, '{"a": {"x": 42}, "b": {"x": 7}}'::agtype),
+    (2, '{"a": {"x": 7}, "b": {"x": 42}}'::agtype),
+    (3, '{"a": {"x": 42}, "b": {"x": 42}}'::agtype);
+
+CREATE INDEX agtype_path_idx_probe_gin
+ON agtype_path_idx_probe USING gin (doc gin_agtype_path_ops);
+
+ANALYZE agtype_path_idx_probe;
+
+SELECT opc.opcname, opc.opckeytype::regtype
+FROM pg_opclass opc
+JOIN pg_am am ON am.oid = opc.opcmethod
+WHERE am.amname = 'gin' AND opc.opcname = 'gin_agtype_path_ops';
+
+SELECT * FROM agtype_path_idx_probe
+WHERE doc @> '{"a": {"x": 42}}'::agtype
+ORDER BY id;
+
+SELECT * FROM agtype_path_idx_probe
+WHERE doc @> '{"b": {"x": 42}}'::agtype
+ORDER BY id;
+
+EXPLAIN (costs off)
+SELECT * FROM agtype_path_idx_probe
+WHERE doc @> '{"a": {"x": 42}}'::agtype;
 
 --
 -- General Cleanup

@@ -1433,6 +1433,13 @@ CREATE FUNCTION ag_catalog.agtype_btree_cmp(agtype, agtype)
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
 
+CREATE FUNCTION ag_catalog.agtype_sortsupport(internal)
+    RETURNS void
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
 CREATE OPERATOR CLASS agtype_ops_btree
   DEFAULT
   FOR TYPE agtype
@@ -1442,7 +1449,8 @@ CREATE OPERATOR CLASS agtype_ops_btree
   OPERATOR 3 =,
   OPERATOR 4 >,
   OPERATOR 5 >=,
-  FUNCTION 1 ag_catalog.agtype_btree_cmp(agtype, agtype);
+  FUNCTION 1 ag_catalog.agtype_btree_cmp(agtype, agtype),
+  FUNCTION 2 ag_catalog.agtype_sortsupport(internal);
 
 CREATE FUNCTION ag_catalog.agtype_hash_cmp(agtype)
     RETURNS INTEGER
@@ -1457,4 +1465,3 @@ CREATE OPERATOR CLASS agtype_ops_hash
   USING hash AS
   OPERATOR 1 =,
   FUNCTION 1 ag_catalog.agtype_hash_cmp(agtype);
-

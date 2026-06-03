@@ -79,6 +79,10 @@ static void convert_agtype_object(StringInfo buffer, agtentry *pheader,
                                   agtype_value *val, int level);
 static void convert_agtype_scalar(StringInfo buffer, agtentry *entry,
                                   agtype_value *scalar_val);
+static agtype *agtype_bool_to_agtype(bool boolean);
+static agtype *agtype_float_to_agtype(float8 float_value);
+static agtype *agtype_numeric_to_agtype(Numeric numeric);
+static agtype *agtype_string_to_agtype(char *string, int string_len);
 
 static void append_to_buffer(StringInfo buffer, const char *data, int len);
 static void copy_to_buffer(StringInfo buffer, int offset, const char *data,
@@ -127,6 +131,18 @@ agtype *agtype_value_to_agtype(agtype_value *val)
         agtype_value *res;
         agtype_value scalar_array;
 
+        if (val->type == AGTV_INTEGER)
+            return agtype_integer_to_agtype(val->val.int_value);
+        if (val->type == AGTV_FLOAT)
+            return agtype_float_to_agtype(val->val.float_value);
+        if (val->type == AGTV_NUMERIC)
+            return agtype_numeric_to_agtype(val->val.numeric);
+        if (val->type == AGTV_BOOL)
+            return agtype_bool_to_agtype(val->val.boolean);
+        if (val->type == AGTV_STRING)
+            return agtype_string_to_agtype(val->val.string.val,
+                                           val->val.string.len);
+
         scalar_array.type = AGTV_ARRAY;
         scalar_array.val.array.raw_scalar = true;
         scalar_array.val.array.num_elems = 1;
@@ -148,6 +164,144 @@ agtype *agtype_value_to_agtype(agtype_value *val)
         SET_VARSIZE(out, VARHDRSZ + val->val.binary.len);
         memcpy(VARDATA(out), val->val.binary.data, val->val.binary.len);
     }
+
+    return out;
+}
+
+agtype *agtype_integer_to_agtype(int64 int_value)
+{
+    agtype *out;
+    char *data;
+    agtentry entry;
+    uint32 header;
+    uint32 type_header;
+
+    out = palloc(VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                 sizeof(uint32) + sizeof(int64));
+    SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                sizeof(uint32) + sizeof(int64));
+
+    header = AGT_FARRAY | AGT_FSCALAR | 1;
+    out->root.header = header;
+
+    entry = AGTENTRY_IS_AGTYPE | AGTENTRY_HAS_OFF |
+            (sizeof(uint32) + sizeof(int64));
+    out->root.children[0] = entry;
+
+    data = (char *)&out->root.children[1];
+    type_header = AGT_HEADER_INTEGER;
+    memcpy(data, &type_header, sizeof(type_header));
+    memcpy(data + sizeof(type_header), &int_value, sizeof(int_value));
+
+    return out;
+}
+
+static agtype *agtype_bool_to_agtype(bool boolean)
+{
+    agtype *out;
+    agtentry entry;
+    uint32 header;
+
+    out = palloc(VARHDRSZ + sizeof(uint32) + sizeof(agtentry));
+    SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry));
+
+    header = AGT_FARRAY | AGT_FSCALAR | 1;
+    out->root.header = header;
+
+    entry = boolean ? AGTENTRY_IS_BOOL_TRUE : AGTENTRY_IS_BOOL_FALSE;
+    out->root.children[0] = entry;
+
+    return out;
+}
+
+static agtype *agtype_float_to_agtype(float8 float_value)
+{
+    agtype *out;
+    char *data;
+    agtentry entry;
+    uint32 header;
+    uint32 type_header;
+
+    out = palloc(VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                 sizeof(uint32) + sizeof(float8));
+    SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                sizeof(uint32) + sizeof(float8));
+
+    header = AGT_FARRAY | AGT_FSCALAR | 1;
+    out->root.header = header;
+
+    entry = AGTENTRY_IS_AGTYPE | AGTENTRY_HAS_OFF |
+            (sizeof(uint32) + sizeof(float8));
+    out->root.children[0] = entry;
+
+    data = (char *)&out->root.children[1];
+    type_header = AGT_HEADER_FLOAT;
+    memcpy(data, &type_header, sizeof(type_header));
+    memcpy(data + sizeof(type_header), &float_value, sizeof(float_value));
+
+    return out;
+}
+
+static agtype *agtype_numeric_to_agtype(Numeric numeric)
+{
+    agtype *out;
+    char *data;
+    agtentry entry;
+    int numeric_len;
+    uint32 header;
+
+    numeric_len = VARSIZE_ANY(numeric);
+    if (numeric_len > AGTENTRY_OFFLENMASK)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("numeric length exceeds the maximum of %u bytes",
+                        AGTENTRY_OFFLENMASK)));
+    }
+
+    out = palloc(VARHDRSZ + sizeof(uint32) + sizeof(agtentry) + numeric_len);
+    SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                numeric_len);
+
+    header = AGT_FARRAY | AGT_FSCALAR | 1;
+    out->root.header = header;
+
+    entry = AGTENTRY_IS_NUMERIC | AGTENTRY_HAS_OFF | numeric_len;
+    out->root.children[0] = entry;
+
+    data = (char *)&out->root.children[1];
+    memcpy(data, (char *)numeric, numeric_len);
+
+    return out;
+}
+
+static agtype *agtype_string_to_agtype(char *string, int string_len)
+{
+    agtype *out;
+    char *data;
+    agtentry entry;
+    uint32 header;
+
+    if (string_len > AGTENTRY_OFFLENMASK)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("string length exceeds the maximum of %u bytes",
+                        AGTENTRY_OFFLENMASK)));
+    }
+
+    out = palloc(VARHDRSZ + sizeof(uint32) + sizeof(agtentry) + string_len);
+    SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                string_len);
+
+    header = AGT_FARRAY | AGT_FSCALAR | 1;
+    out->root.header = header;
+
+    entry = AGTENTRY_IS_STRING | AGTENTRY_HAS_OFF | string_len;
+    out->root.children[0] = entry;
+
+    data = (char *)&out->root.children[1];
+    memcpy(data, string, string_len);
 
     return out;
 }

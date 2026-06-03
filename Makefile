@@ -90,6 +90,8 @@ OBJS = src/backend/age.o \
        src/backend/commands/label_commands.o \
        src/backend/executor/cypher_create.o \
        src/backend/executor/cypher_adjacency_match.o \
+       src/backend/executor/cypher_property_projection.o \
+       src/backend/executor/cypher_vle_stream.o \
        src/backend/executor/cypher_merge.o \
        src/backend/executor/cypher_set.o \
        src/backend/executor/cypher_utils.o \
@@ -158,6 +160,7 @@ REGRESS = scan \
           catalog \
           cypher \
           expr \
+          auto_column_conversion \
           cypher_create \
           cypher_match \
           cypher_unwind \

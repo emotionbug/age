@@ -37,14 +37,19 @@
 #include "utils/builtins.h"
 #include "utils/varlena.h"
 
-typedef struct PathHashStack
+#define AGTYPE_PATH_HASH_STACK_INLINE 32
+
+typedef struct GinEntries
 {
-    uint32 hash;
-    struct PathHashStack *parent;
-} PathHashStack;
+    Datum *buf;
+    int count;
+    int allocated;
+} GinEntries;
 
 static Datum make_text_key(char flag, const char *str, int len);
 static Datum make_scalar_key(const agtype_value *scalar_val, bool is_key);
+static void init_gin_entries(GinEntries *entries, int preallocated);
+static void add_gin_entry(GinEntries *entries, Datum datum);
 
 
 /*
@@ -464,6 +469,222 @@ Datum gin_triconsistent_agtype(PG_FUNCTION_ARGS)
 }
 
 /*
+ * agtype_path_ops GIN opclass support functions.
+ *
+ * Like PostgreSQL jsonb_path_ops, this opclass emits one uint32 hash for each
+ * scalar value and mixes all object keys leading to that scalar into the hash.
+ * It supports containment only.  The index remains lossy and must recheck heap
+ * tuples, but it distinguishes {"a": {"x": 1}} from {"b": {"x": 1}}, avoiding
+ * broad key/value false positives from gin_agtype_ops.
+ */
+PG_FUNCTION_INFO_V1(gin_extract_agtype_path);
+Datum gin_extract_agtype_path(PG_FUNCTION_ARGS)
+{
+    agtype *agt;
+    int32 *nentries;
+    int total;
+    agtype_iterator *it;
+    agtype_value v;
+    agtype_iterator_token r;
+    uint32 inline_stack[AGTYPE_PATH_HASH_STACK_INLINE];
+    uint32 *hash_stack = inline_stack;
+    int stack_allocated = AGTYPE_PATH_HASH_STACK_INLINE;
+    int stack_depth = 0;
+    GinEntries entries;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+    {
+        PG_RETURN_POINTER(NULL);
+    }
+
+    agt = AG_GET_ARG_AGTYPE_P(0);
+    nentries = (int32 *)PG_GETARG_POINTER(1);
+    total = AGT_ROOT_COUNT(agt);
+
+    if (total == 0)
+    {
+        *nentries = 0;
+        PG_RETURN_POINTER(NULL);
+    }
+
+    init_gin_entries(&entries, 2 * total);
+
+    hash_stack[0] = 0;
+
+    it = agtype_iterator_init(&agt->root);
+
+    while ((r = agtype_iterator_next(&it, &v, false)) != WAGT_DONE)
+    {
+        switch (r)
+        {
+            case WAGT_BEGIN_ARRAY:
+            case WAGT_BEGIN_OBJECT:
+                if (stack_depth + 1 >= stack_allocated)
+                {
+                    int new_allocated = stack_allocated * 2;
+                    uint32 *new_stack = palloc(sizeof(uint32) * new_allocated);
+
+                    memcpy(new_stack, hash_stack,
+                           sizeof(uint32) * stack_allocated);
+                    if (hash_stack != inline_stack)
+                        pfree(hash_stack);
+                    hash_stack = new_stack;
+                    stack_allocated = new_allocated;
+                }
+                hash_stack[stack_depth + 1] = hash_stack[stack_depth];
+                stack_depth++;
+                break;
+
+            case WAGT_KEY:
+                agtype_hash_scalar_value(&v, &hash_stack[stack_depth]);
+                break;
+
+            case WAGT_ELEM:
+            case WAGT_VALUE:
+                agtype_hash_scalar_value(&v, &hash_stack[stack_depth]);
+                add_gin_entry(&entries,
+                              UInt32GetDatum(hash_stack[stack_depth]));
+                if (stack_depth > 0)
+                    hash_stack[stack_depth] = hash_stack[stack_depth - 1];
+                else
+                    hash_stack[0] = 0;
+                break;
+
+            case WAGT_END_ARRAY:
+            case WAGT_END_OBJECT:
+                stack_depth--;
+                if (stack_depth > 0)
+                    hash_stack[stack_depth] = hash_stack[stack_depth - 1];
+                else
+                    hash_stack[0] = 0;
+                break;
+
+            default:
+                elog(ERROR, "invalid agtype iterator token: %d", r);
+        }
+    }
+
+    if (hash_stack != inline_stack)
+        pfree(hash_stack);
+
+    *nentries = entries.count;
+    PG_RETURN_POINTER(entries.buf);
+}
+
+PG_FUNCTION_INFO_V1(gin_extract_agtype_query_path);
+Datum gin_extract_agtype_query_path(PG_FUNCTION_ARGS)
+{
+    int32 *nentries;
+    StrategyNumber strategy;
+    int32 *searchMode;
+    Datum *entries;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) ||
+        PG_ARGISNULL(2) || PG_ARGISNULL(6))
+    {
+        PG_RETURN_NULL();
+    }
+
+    nentries = (int32 *)PG_GETARG_POINTER(1);
+    strategy = PG_GETARG_UINT16(2);
+    searchMode = (int32 *)PG_GETARG_POINTER(6);
+
+    if (strategy == AGTYPE_CONTAINS_STRATEGY_NUMBER)
+    {
+        entries = (Datum *)DatumGetPointer(
+            DirectFunctionCall2(gin_extract_agtype_path,
+                                PG_GETARG_DATUM(0),
+                                PointerGetDatum(nentries)));
+
+        if (*nentries == 0)
+        {
+            *searchMode = GIN_SEARCH_MODE_ALL;
+        }
+    }
+    else
+    {
+        elog(ERROR, "unrecognized strategy number: %d", strategy);
+        entries = NULL;
+    }
+
+    PG_RETURN_POINTER(entries);
+}
+
+PG_FUNCTION_INFO_V1(gin_consistent_agtype_path);
+Datum gin_consistent_agtype_path(PG_FUNCTION_ARGS)
+{
+    bool *check;
+    StrategyNumber strategy;
+    int32 nkeys;
+    bool *recheck;
+    bool res = true;
+    int32 i;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) ||
+        PG_ARGISNULL(3) || PG_ARGISNULL(5))
+    {
+        PG_RETURN_NULL();
+    }
+
+    check = (bool *)PG_GETARG_POINTER(0);
+    strategy = PG_GETARG_UINT16(1);
+    nkeys = PG_GETARG_INT32(3);
+    recheck = (bool *)PG_GETARG_POINTER(5);
+
+    if (strategy != AGTYPE_CONTAINS_STRATEGY_NUMBER)
+    {
+        elog(ERROR, "unrecognized strategy number: %d", strategy);
+    }
+
+    *recheck = true;
+    for (i = 0; i < nkeys; i++)
+    {
+        if (!check[i])
+        {
+            res = false;
+            break;
+        }
+    }
+
+    PG_RETURN_BOOL(res);
+}
+
+PG_FUNCTION_INFO_V1(gin_triconsistent_agtype_path);
+Datum gin_triconsistent_agtype_path(PG_FUNCTION_ARGS)
+{
+    GinTernaryValue *check;
+    StrategyNumber strategy;
+    int32 nkeys;
+    GinTernaryValue res = GIN_MAYBE;
+    int32 i;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(3))
+    {
+        PG_RETURN_NULL();
+    }
+
+    check = (GinTernaryValue *)PG_GETARG_POINTER(0);
+    strategy = PG_GETARG_UINT16(1);
+    nkeys = PG_GETARG_INT32(3);
+
+    if (strategy != AGTYPE_CONTAINS_STRATEGY_NUMBER)
+    {
+        elog(ERROR, "unrecognized strategy number: %d", strategy);
+    }
+
+    for (i = 0; i < nkeys; i++)
+    {
+        if (check[i] == GIN_FALSE)
+        {
+            res = GIN_FALSE;
+            break;
+        }
+    }
+
+    PG_RETURN_GIN_TERNARY_VALUE(res);
+}
+
+/*
  * Construct a agtype_ops GIN key from a flag byte and a textual representation
  * (which need not be null-terminated).  This function is responsible
  * for hashing overlength text representations; it will add the
@@ -569,4 +790,23 @@ static Datum make_scalar_key(const agtype_value *scalarVal, bool is_key)
     }
 
     return item;
+}
+
+static void init_gin_entries(GinEntries *entries, int preallocated)
+{
+    entries->allocated = preallocated;
+    entries->count = 0;
+    entries->buf = palloc(sizeof(Datum) * entries->allocated);
+}
+
+static void add_gin_entry(GinEntries *entries, Datum datum)
+{
+    if (entries->count >= entries->allocated)
+    {
+        entries->allocated *= 2;
+        entries->buf = repalloc(entries->buf,
+                                sizeof(Datum) * entries->allocated);
+    }
+
+    entries->buf[entries->count++] = datum;
 }

@@ -26,11 +26,14 @@
 #include <math.h>
 #include <limits.h>
 
+#include "catalog/pg_collation_d.h"
 #include "utils/agtype.h"
 #include "utils/array.h"
 #include "utils/datum.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
+#include "utils/varlena.h"
+#include "utils/varlena.h"
 
 static agtype *agtype_concat_impl(agtype *agt1, agtype *agt2);
 static agtype_value *iterator_concat(agtype_iterator **it1,
@@ -53,6 +56,38 @@ static agtype_value *find_agtype_value_from_agtype_value_object(
 static agtype_container *get_entity_properties_container_no_copy(
     agtype *agt, bool error_on_scalar, agtype_value *scalar_value,
     bool *scalar_needs_free, agtype **owned_properties);
+static bool try_single_pair_object_contains(agtype_container *properties,
+                                            agtype_container *constraints,
+                                            bool *result);
+static bool try_cached_single_pair_object_contains(FunctionCallInfo fcinfo,
+                                                   agtype_container *properties,
+                                                   agtype_container *constraints,
+                                                   bool *result);
+static bool parse_single_pair_contains_constraint(agtype_container *constraints,
+                                                  agtype_value **path,
+                                                  int *path_len,
+                                                  int *path_allocated,
+                                                  agtype_value *inline_path,
+                                                  agtype_value *value);
+static bool eval_single_pair_contains_constraint(agtype_container *properties,
+                                                 agtype_value *path,
+                                                 int path_len,
+                                                 agtype_value *value,
+                                                 bool *result);
+static bool is_single_pair_contains_scalar(agtype_value *value);
+static bool raw_scalar_agtype_eq(agtype *lhs, agtype *rhs, bool *result);
+
+#define AGTYPE_CONTAINS_PATH_INLINE 8
+
+typedef struct SinglePairObjectContainsCache
+{
+    agtype_container *constraints;
+    agtype_value path[AGTYPE_CONTAINS_PATH_INLINE];
+    agtype_value *overflow_path;
+    int path_len;
+    agtype_value value;
+    bool valid;
+} SinglePairObjectContainsCache;
 
 static void concat_to_agtype_string(agtype_value *result, char *lhs, int llen,
                                     char *rhs, int rlen)
@@ -1305,26 +1340,104 @@ Datum agtype_eq(PG_FUNCTION_ARGS)
     Datum rhs = PG_GETARG_DATUM(1);
     agtype *agtype_lhs = NULL;
     agtype *agtype_rhs = NULL;
-    uint32 hash_lhs = datum_image_hash(lhs, false, -1);
-    uint32 hash_rhs = datum_image_hash(rhs, false, -1);
     bool result = false;
-
-    if (hash_lhs == hash_rhs &&
-        datum_image_eq(lhs, rhs, false, -1))
-    {
-        PG_RETURN_BOOL(true);
-    }
 
     agtype_lhs = DATUM_GET_AGTYPE_P(lhs);
     agtype_rhs = DATUM_GET_AGTYPE_P(rhs);
 
-    result = (compare_agtype_containers_orderability(&agtype_lhs->root,
-                                                     &agtype_rhs->root) == 0);
+    if (AGT_ROOT_IS_SCALAR(agtype_lhs) && AGT_ROOT_IS_SCALAR(agtype_rhs))
+    {
+        if (!raw_scalar_agtype_eq(agtype_lhs, agtype_rhs, &result))
+        {
+            result = (compare_agtype_containers_orderability(
+                &agtype_lhs->root, &agtype_rhs->root) == 0);
+        }
+    }
+    else
+    {
+        uint32 hash_lhs = datum_image_hash(lhs, false, -1);
+        uint32 hash_rhs = datum_image_hash(rhs, false, -1);
+
+        if (hash_lhs == hash_rhs &&
+            datum_image_eq(lhs, rhs, false, -1))
+        {
+            PG_FREE_IF_COPY(agtype_lhs, 0);
+            PG_FREE_IF_COPY(agtype_rhs, 1);
+            PG_RETURN_BOOL(true);
+        }
+
+        result = (compare_agtype_containers_orderability(&agtype_lhs->root,
+                                                         &agtype_rhs->root) == 0);
+    }
 
     PG_FREE_IF_COPY(agtype_lhs, 0);
     PG_FREE_IF_COPY(agtype_rhs, 1);
 
     PG_RETURN_BOOL(result);
+}
+
+static bool raw_scalar_agtype_eq(agtype *lhs, agtype *rhs, bool *result)
+{
+    agtentry lhs_entry;
+    agtentry rhs_entry;
+    char *lhs_base;
+    char *rhs_base;
+
+    if (!AGT_ROOT_IS_SCALAR(lhs) || !AGT_ROOT_IS_SCALAR(rhs) ||
+        AGT_ROOT_COUNT(lhs) != 1 || AGT_ROOT_COUNT(rhs) != 1)
+    {
+        return false;
+    }
+
+    lhs_entry = lhs->root.children[0];
+    rhs_entry = rhs->root.children[0];
+    lhs_base = (char *)&lhs->root.children[1];
+    rhs_base = (char *)&rhs->root.children[1];
+
+    if (AGTE_IS_AGTYPE(lhs_entry) && AGTE_IS_AGTYPE(rhs_entry))
+    {
+        uint32 lhs_type_header = *((uint32 *)lhs_base);
+        uint32 rhs_type_header = *((uint32 *)rhs_base);
+
+        if (lhs_type_header == AGT_HEADER_INTEGER &&
+            rhs_type_header == AGT_HEADER_INTEGER)
+        {
+            int64 lhs_int = *((int64 *)(lhs_base + sizeof(uint32)));
+            int64 rhs_int = *((int64 *)(rhs_base + sizeof(uint32)));
+
+            *result = lhs_int == rhs_int;
+            return true;
+        }
+        return false;
+    }
+
+    if ((AGTE_IS_BOOL_TRUE(lhs_entry) || AGTE_IS_BOOL_FALSE(lhs_entry)) &&
+        (AGTE_IS_BOOL_TRUE(rhs_entry) || AGTE_IS_BOOL_FALSE(rhs_entry)))
+    {
+        *result = AGTE_IS_BOOL_TRUE(lhs_entry) == AGTE_IS_BOOL_TRUE(rhs_entry);
+        return true;
+    }
+
+    if (AGTE_IS_NUMERIC(lhs_entry) && AGTE_IS_NUMERIC(rhs_entry))
+    {
+        Numeric lhs_numeric = (Numeric)lhs_base;
+        Numeric rhs_numeric = (Numeric)rhs_base;
+
+        *result = DatumGetBool(DirectFunctionCall2(numeric_eq,
+                                                   NumericGetDatum(lhs_numeric),
+                                                   NumericGetDatum(rhs_numeric)));
+        return true;
+    }
+
+    if (AGTE_IS_STRING(lhs_entry) && AGTE_IS_STRING(rhs_entry))
+    {
+        *result = varstr_cmp(lhs_base, AGTE_OFFLENFLD(lhs_entry),
+                             rhs_base, AGTE_OFFLENFLD(rhs_entry),
+                             DEFAULT_COLLATION_OID) == 0;
+        return true;
+    }
+
+    return false;
 }
 
 PG_FUNCTION_INFO_V1(agtype_any_eq);
@@ -1880,6 +1993,17 @@ Datum agtype_contains(PG_FUNCTION_ARGS)
         PG_RETURN_BOOL(false);
     }
 
+    if (try_cached_single_pair_object_contains(fcinfo, properties_container,
+                                               constraints_container,
+                                               &result) ||
+        try_single_pair_object_contains(properties_container,
+                                        constraints_container, &result))
+    {
+        free_agtype_value_no_copy(&properties_scalar, properties_needs_free);
+        free_agtype_value_no_copy(&constraints_scalar, constraints_needs_free);
+        PG_RETURN_BOOL(result);
+    }
+
     property_it = agtype_iterator_init(properties_container);
     constraint_it = agtype_iterator_init(constraints_container);
     result = agtype_deep_contains(&property_it, &constraint_it, false);
@@ -1887,6 +2011,276 @@ Datum agtype_contains(PG_FUNCTION_ARGS)
     free_agtype_value_no_copy(&properties_scalar, properties_needs_free);
     free_agtype_value_no_copy(&constraints_scalar, constraints_needs_free);
     PG_RETURN_BOOL(result);
+}
+
+static bool parse_single_pair_contains_constraint(agtype_container *constraints,
+                                                  agtype_value **path,
+                                                  int *path_len,
+                                                  int *path_allocated,
+                                                  agtype_value *inline_path,
+                                                  agtype_value *value)
+{
+    agtype_value current;
+    agtype_iterator *it = NULL;
+    agtype_iterator_token token;
+
+    *path_len = 0;
+
+    it = agtype_iterator_init(constraints);
+    token = agtype_iterator_next(&it, &current, false);
+    Assert(token == WAGT_BEGIN_OBJECT);
+
+    for (;;)
+    {
+        int i;
+
+        if (*path_len >= *path_allocated)
+        {
+            int new_allocated = *path_allocated * 2;
+            agtype_value *new_path =
+                palloc(sizeof(agtype_value) * new_allocated);
+
+            memcpy(new_path, *path, sizeof(agtype_value) * *path_allocated);
+            if (*path != inline_path)
+                pfree(*path);
+            *path = new_path;
+            *path_allocated = new_allocated;
+        }
+
+        token = agtype_iterator_next(&it, &(*path)[*path_len], false);
+        if (token != WAGT_KEY || (*path)[*path_len].type != AGTV_STRING)
+            return false;
+        (*path_len)++;
+
+        token = agtype_iterator_next(&it, value, false);
+        if (token == WAGT_VALUE)
+        {
+            if (!is_single_pair_contains_scalar(value))
+                return false;
+
+            for (i = 0; i < *path_len; i++)
+            {
+                token = agtype_iterator_next(&it, &current, false);
+                if (token != WAGT_END_OBJECT)
+                    return false;
+            }
+
+            token = agtype_iterator_next(&it, &current, false);
+            if (token != WAGT_DONE)
+                return false;
+
+            return true;
+        }
+
+        if (token != WAGT_BEGIN_OBJECT ||
+            AGTYPE_CONTAINER_SIZE(value->val.binary.data) != 1)
+        {
+            return false;
+        }
+    }
+}
+
+static bool eval_single_pair_contains_constraint(agtype_container *properties,
+                                                 agtype_value *path,
+                                                 int path_len,
+                                                 agtype_value *value,
+                                                 bool *result)
+{
+    agtype_container *container = properties;
+    agtype_value property_value;
+    bool property_needs_free = false;
+    int i;
+
+    for (i = 0; i < path_len; i++)
+    {
+        bool found;
+
+        found = find_agtype_value_from_container_no_copy(
+            container, AGT_FOBJECT, &path[i], &property_value,
+            &property_needs_free);
+
+        if (!found)
+        {
+            *result = false;
+            return true;
+        }
+
+        if (i == path_len - 1)
+        {
+            break;
+        }
+
+        if (property_value.type != AGTV_BINARY ||
+            !AGTYPE_CONTAINER_IS_OBJECT(property_value.val.binary.data))
+        {
+            *result = false;
+            free_agtype_value_no_copy(&property_value, property_needs_free);
+            return true;
+        }
+
+        container = property_value.val.binary.data;
+    }
+
+    if (property_value.type != value->type)
+    {
+        *result = false;
+    }
+    else if (value->type == AGTV_NULL)
+    {
+        *result = property_value.type == AGTV_NULL;
+    }
+    else
+    {
+        Assert(IS_A_AGTYPE_SCALAR(&property_value));
+        *result = compare_agtype_scalar_values(&property_value, value) == 0;
+    }
+
+    free_agtype_value_no_copy(&property_value, property_needs_free);
+    return true;
+}
+
+static bool try_single_pair_object_contains(agtype_container *properties,
+                                            agtype_container *constraints,
+                                            bool *result)
+{
+    agtype_value inline_path[AGTYPE_CONTAINS_PATH_INLINE];
+    agtype_value *path = inline_path;
+    agtype_value constraint_value;
+    int path_len;
+    int path_allocated = AGTYPE_CONTAINS_PATH_INLINE;
+    bool parsed;
+    bool handled;
+
+    Assert(result != NULL);
+
+    if (!AGTYPE_CONTAINER_IS_OBJECT(properties) ||
+        !AGTYPE_CONTAINER_IS_OBJECT(constraints) ||
+        AGTYPE_CONTAINER_SIZE(constraints) != 1)
+    {
+        return false;
+    }
+
+    parsed = parse_single_pair_contains_constraint(constraints, &path,
+                                                   &path_len,
+                                                   &path_allocated,
+                                                   inline_path,
+                                                   &constraint_value);
+    if (!parsed)
+    {
+        if (path != inline_path)
+            pfree(path);
+        return false;
+    }
+
+    handled = eval_single_pair_contains_constraint(properties, path, path_len,
+                                                   &constraint_value, result);
+    if (path != inline_path)
+        pfree(path);
+    return handled;
+}
+
+static bool try_cached_single_pair_object_contains(FunctionCallInfo fcinfo,
+                                                   agtype_container *properties,
+                                                   agtype_container *constraints,
+                                                   bool *result)
+{
+    SinglePairObjectContainsCache *cache;
+    agtype_value inline_path[AGTYPE_CONTAINS_PATH_INLINE];
+    agtype_value *path = inline_path;
+    agtype_value constraint_value;
+    MemoryContext old_context;
+    int path_len;
+    int path_allocated = AGTYPE_CONTAINS_PATH_INLINE;
+    int i;
+
+    Assert(result != NULL);
+
+    if (!AGTYPE_CONTAINER_IS_OBJECT(properties) ||
+        !AGTYPE_CONTAINER_IS_OBJECT(constraints) ||
+        AGTYPE_CONTAINER_SIZE(constraints) != 1)
+    {
+        return false;
+    }
+
+    cache = (SinglePairObjectContainsCache *)fcinfo->flinfo->fn_extra;
+    if (cache != NULL && cache->valid && cache->constraints == constraints)
+    {
+        path = cache->overflow_path != NULL ? cache->overflow_path :
+                                              cache->path;
+        path_len = cache->path_len;
+        constraint_value = cache->value;
+    }
+    else if (cache != NULL && cache->valid)
+    {
+        return false;
+    }
+    else
+    {
+        if (!parse_single_pair_contains_constraint(constraints, &path,
+                                                   &path_len,
+                                                   &path_allocated,
+                                                   inline_path,
+                                                   &constraint_value))
+        {
+            if (path != inline_path)
+                pfree(path);
+            return false;
+        }
+
+        if (cache == NULL)
+        {
+            cache = MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt,
+                                           sizeof(SinglePairObjectContainsCache));
+            fcinfo->flinfo->fn_extra = cache;
+        }
+
+        old_context = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+        cache->constraints = constraints;
+        cache->path_len = path_len;
+        if (path_len > AGTYPE_CONTAINS_PATH_INLINE)
+        {
+            cache->overflow_path =
+                MemoryContextAlloc(fcinfo->flinfo->fn_mcxt,
+                                   sizeof(agtype_value) * path_len);
+        }
+        for (i = 0; i < path_len; i++)
+        {
+            agtype_value *dst = cache->overflow_path != NULL ?
+                                &cache->overflow_path[i] : &cache->path[i];
+
+            *dst = path[i];
+            dst->val.string.val = pnstrdup(path[i].val.string.val,
+                                           path[i].val.string.len);
+        }
+        cache->value = constraint_value;
+        if (constraint_value.type == AGTV_STRING)
+        {
+            cache->value.val.string.val =
+                pnstrdup(constraint_value.val.string.val,
+                         constraint_value.val.string.len);
+        }
+        cache->valid = true;
+        MemoryContextSwitchTo(old_context);
+
+        if (path != inline_path)
+            pfree(path);
+        path = cache->overflow_path != NULL ? cache->overflow_path :
+                                              cache->path;
+        path_len = cache->path_len;
+        constraint_value = cache->value;
+    }
+
+    return eval_single_pair_contains_constraint(properties, path, path_len,
+                                                &constraint_value, result);
+}
+
+static bool is_single_pair_contains_scalar(agtype_value *value)
+{
+    return value->type == AGTV_INTEGER ||
+           value->type == AGTV_FLOAT ||
+           value->type == AGTV_BOOL ||
+           value->type == AGTV_STRING ||
+           value->type == AGTV_NULL;
 }
 
 PG_FUNCTION_INFO_V1(agtype_contained_by_top_level);

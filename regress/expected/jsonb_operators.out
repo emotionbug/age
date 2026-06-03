@@ -838,7 +838,7 @@ SELECT i, pg_typeof(i) FROM (SELECT '[0, 1]'::agtype->>0 as i) a;
 SELECT '{"n":null,"a":1,"b":[1,2],"c":{"1":2},"d":{"1":[2,3]}}'::agtype -> '"n"'::agtype;
  ?column? 
 ----------
- null
+ 
 (1 row)
 
 SELECT '{"n":null,"a":1,"b":[1,2],"c":{"1":2},"d":{"1":[2,3]}}'::agtype -> '"a"'::agtype;
@@ -2396,6 +2396,24 @@ SELECT '{"name": "Bob", "tags": ["enim", "qui"]}'::agtype @> '{"tags":[]}';
  t
 (1 row)
 
+SELECT '{"a": {"x": 42}, "b": {"x": 7}}'::agtype @> '{"a": {"x": 42}}'::agtype;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT '{"a": {"x": 42, "y": 3}, "b": {"x": 7}}'::agtype @> '{"a": {"x": 42, "y": 3}}'::agtype;
+ ?column? 
+----------
+ t
+(1 row)
+
+SELECT '{"a": {"b": {"c": {"d": {"e": 42}}}}}'::agtype @> '{"a": {"b": {"c": {"d": {"e": 42}}}}}'::agtype;
+ ?column? 
+----------
+ t
+(1 row)
+
 SELECT '[1,2]'::agtype @> '[1,2,2]'::agtype;
  ?column? 
 ----------
@@ -2507,6 +2525,24 @@ SELECT '{"a":"b", "b":1, "c":null}'::agtype @> '[]';
 (1 row)
 
 SELECT '{"name": "Bob", "tags": ["enim", "qui"]}'::agtype @> '{"tags":{}}';
+ ?column? 
+----------
+ f
+(1 row)
+
+SELECT '{"a": {"x": 7}, "b": {"x": 42}}'::agtype @> '{"a": {"x": 42}}'::agtype;
+ ?column? 
+----------
+ f
+(1 row)
+
+SELECT '{"a": {"x": 42, "y": 4}, "b": {"x": 42}}'::agtype @> '{"a": {"x": 42, "y": 3}}'::agtype;
+ ?column? 
+----------
+ f
+(1 row)
+
+SELECT '{"a": {"b": {"c": {"d": {"e": 42}}}}}'::agtype @> '{"a": {"b": {"c": {"d": {"e": 7}}}}}'::agtype;
  ?column? 
 ----------
  f

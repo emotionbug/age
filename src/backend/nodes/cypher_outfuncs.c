@@ -73,7 +73,7 @@ static void outChar(StringInfo str, char c);
 #define WRITE_INT64_FIELD(field_name) \
     do \
     { \
-        appendStringInfo(str, " :" CppAsString(field_name) " %ld", \
+        appendStringInfo(str, " :" CppAsString(field_name) " " INT64_FORMAT, \
                          _node->field_name); \
     } while (0)
 

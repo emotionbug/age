@@ -3618,6 +3618,17 @@ SELECT agtype_string_match_contains('"abcdefghijklmnopqrstuvwxyz"', '"hijl"');
 (1 row)
 
 --Agtype BTree Comparison Function
+SELECT amprocnum, amproc::regproc
+FROM pg_amproc
+WHERE amprocfamily = (
+    SELECT opcfamily FROM pg_opclass WHERE opcname = 'agtype_ops_btree')
+ORDER BY amprocnum;
+ amprocnum |       amproc       
+-----------+--------------------
+         1 | agtype_btree_cmp
+         2 | agtype_sortsupport
+(2 rows)
+
 SELECT agtype_btree_cmp('1'::agtype, '1'::agtype);
  agtype_btree_cmp 
 ------------------

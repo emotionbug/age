@@ -42,5 +42,6 @@ void write_string(agtype_build_state *bstate, char *str);
 void write_graphid(agtype_build_state *bstate, graphid graphid);
 void write_container(agtype_build_state *bstate, agtype *agtype);
 void write_extended(agtype_build_state *bstate, agtype *val, uint32 header);
+void write_agtype_scalar_payload(agtype_build_state *bstate, agtype *val);
 
 #endif

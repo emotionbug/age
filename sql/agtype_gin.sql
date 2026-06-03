@@ -63,6 +63,42 @@ IMMUTABLE
 STRICT
 PARALLEL SAFE;
 
+CREATE FUNCTION gin_extract_agtype_path(agtype, internal)
+    RETURNS internal
+AS 'MODULE_PATHNAME'
+LANGUAGE C
+IMMUTABLE
+STRICT
+PARALLEL SAFE;
+
+CREATE FUNCTION ag_catalog.gin_extract_agtype_query_path(agtype, internal, int2,
+                                                         internal, internal)
+    RETURNS internal
+AS 'MODULE_PATHNAME'
+LANGUAGE C
+IMMUTABLE
+STRICT
+PARALLEL SAFE;
+
+CREATE FUNCTION ag_catalog.gin_consistent_agtype_path(internal, int2, agtype,
+                                                      int4, internal, internal)
+    RETURNS bool
+AS 'MODULE_PATHNAME'
+LANGUAGE C
+IMMUTABLE
+STRICT
+PARALLEL SAFE;
+
+CREATE FUNCTION ag_catalog.gin_triconsistent_agtype_path(internal, int2, agtype,
+                                                         int4, internal,
+                                                         internal, internal)
+    RETURNS bool
+AS 'MODULE_PATHNAME'
+LANGUAGE C
+IMMUTABLE
+STRICT
+PARALLEL SAFE;
+
 CREATE OPERATOR CLASS ag_catalog.gin_agtype_ops
 DEFAULT FOR TYPE agtype USING gin AS
   OPERATOR 7 @>(agtype, agtype),
@@ -81,3 +117,17 @@ DEFAULT FOR TYPE agtype USING gin AS
   FUNCTION 6 ag_catalog.gin_triconsistent_agtype(internal, int2, agtype, int4,
                                                  internal, internal, internal),
 STORAGE text;
+
+CREATE OPERATOR CLASS ag_catalog.gin_agtype_path_ops
+FOR TYPE agtype USING gin AS
+  OPERATOR 7 @>(agtype, agtype),
+  FUNCTION 1 pg_catalog.btint4cmp(int4, int4),
+  FUNCTION 2 ag_catalog.gin_extract_agtype_path(agtype, internal),
+  FUNCTION 3 ag_catalog.gin_extract_agtype_query_path(agtype, internal, int2,
+                                                      internal, internal),
+  FUNCTION 4 ag_catalog.gin_consistent_agtype_path(internal, int2, agtype,
+                                                   int4, internal, internal),
+  FUNCTION 6 ag_catalog.gin_triconsistent_agtype_path(internal, int2, agtype,
+                                                      int4, internal, internal,
+                                                      internal),
+STORAGE int4;

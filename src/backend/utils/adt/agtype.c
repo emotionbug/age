@@ -35,7 +35,9 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/tableam.h"
 #include "catalog/namespace.h"
+#include "common/hashfn.h"
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_collation_d.h"
 #include "catalog/pg_operator_d.h"
@@ -47,6 +49,7 @@
 #include "utils/acl.h"
 #include "utils/ag_cache.h"
 #include "utils/array.h"
+#include "utils/arrayaccess.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
 #include "executor/cypher_utils.h"
@@ -56,15 +59,18 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/relcache.h"
+#include "utils/sortsupport.h"
 #include "utils/syscache.h"
 #include "utils/snapmgr.h"
 #include "utils/typcache.h"
+#include "utils/varlena.h"
 #include "utils/age_vle.h"
 #include "utils/agtype_parser.h"
 #include "utils/ag_float8_supp.h"
 #include "utils/agtype_raw.h"
 #include "catalog/ag_graph.h"
 #include "catalog/ag_label.h"
+#include "commands/label_commands.h"
 #include "utils/graphid.h"
 
 /* State structure for Percentile aggregate functions */
@@ -92,6 +98,36 @@ typedef struct btree_index_attr_cache_entry
     Oid index_oid;
 } btree_index_attr_cache_entry;
 
+typedef struct agtype_ctid_field_cache
+{
+    Oid relid;
+    Relation rel;
+    TupleTableSlot *slot;
+    agtype *key_arg;
+    agtype_value key;
+    bool key_valid;
+    agtype *result_buffer;
+    Size result_buffer_size;
+    MemoryContextCallback callback;
+} agtype_ctid_field_cache;
+
+static int agtype_sortsupport_cmp(Datum x, Datum y, SortSupport ssup);
+static bool agtype_scalar_integer_value(agtype *agt, int64 *int_value);
+static bool agtype_scalar_float_value(agtype *agt, float8 *float_value);
+static bool agtype_scalar_numeric_value(agtype *agt, Numeric *numeric_value);
+static bool agtype_scalar_string_value(agtype *agt, char **string_value,
+                                       int *string_len);
+static bool agtype_scalar_bool_value(agtype *agt, bool *bool_value);
+static agtype_ctid_field_cache *get_agtype_ctid_field_cache(
+    FunctionCallInfo fcinfo, Oid relid);
+static bool get_agtype_ctid_field_key(FunctionCallInfo fcinfo,
+                                      agtype_ctid_field_cache *cache,
+                                      agtype *key,
+                                      agtype_value **lookup_key,
+                                      agtype_value *key_value,
+                                      bool *key_needs_free);
+static void destroy_agtype_ctid_field_cache(void *arg);
+
 typedef enum /* type categories for datum_to_agtype */
 {
     AGT_TYPE_NULL, /* null, so we didn't bother to identify */
@@ -118,6 +154,42 @@ typedef struct agtype_variadic_argtype_cache
     Oid types[FLEXIBLE_ARRAY_MEMBER];
 } agtype_variadic_argtype_cache;
 
+typedef struct agtype_access_operator_key_cache
+{
+    bool initialized;
+    bool has_string_key;
+    agtype_value key;
+    agtype *result_buffer;
+    Size result_buffer_size;
+} agtype_access_operator_key_cache;
+
+typedef struct agtype_map2_property_key_cache
+{
+    bool initialized;
+    bool valid;
+    agtype_value out_key1;
+    agtype_value prop_key1;
+    agtype_value out_key2;
+    agtype_value prop_key2;
+} agtype_map2_property_key_cache;
+
+typedef struct agtype_map_property_key_cache
+{
+    bool initialized;
+    bool valid;
+    int nkeys;
+    agtype_value *out_keys;
+    agtype_value *prop_keys;
+} agtype_map_property_key_cache;
+
+typedef struct agtype_list_property_key_cache
+{
+    bool initialized;
+    bool valid;
+    int nkeys;
+    agtype_value *prop_keys;
+} agtype_list_property_key_cache;
+
 static inline Datum agtype_from_cstring(char *str, int len);
 size_t check_string_length(size_t len);
 static Oid get_cached_fn_expr_argtype(FunctionCallInfo fcinfo, int argno);
@@ -133,6 +205,18 @@ static int get_variadic_args_fast(FunctionCallInfo fcinfo,
                                   bool *fast_nulls);
 static Oid get_cached_agtype_variadic_argtype(FunctionCallInfo fcinfo,
                                               int argno, int nargs);
+static agtype_value *get_cached_access_operator_string_key(
+    FunctionCallInfo fcinfo);
+static agtype *agtype_access_operator_scalar_result(FunctionCallInfo fcinfo,
+                                                    agtype_value *value);
+static agtype *agtype_scalar_result_buffer(agtype_value *value,
+                                           agtype **buffer,
+                                           Size *buffer_size,
+                                           MemoryContext context);
+static agtype *prepare_agtype_result_buffer(agtype **buffer,
+                                            Size *buffer_size,
+                                            MemoryContext context,
+                                            Size required_size);
 static void agtype_in_agtype_annotation(void *pstate, char *annotation);
 static void agtype_in_object_start(void *pstate);
 static void agtype_in_object_end(void *pstate);
@@ -196,17 +280,19 @@ static Datum agtype_object_field_impl(FunctionCallInfo fcinfo,
 static Datum agtype_array_element_impl(FunctionCallInfo fcinfo,
                                        agtype *agtype_in, int element,
                                        bool as_text);
-static Datum process_access_operator_result(FunctionCallInfo fcinfo,
-                                            agtype_value *agtv,
-                                            bool as_text);
 static Datum process_access_operator_result_no_copy(FunctionCallInfo fcinfo,
                                                     agtype_value *agtv,
                                                     bool as_text,
                                                     bool needs_free);
 static agtype *build_vertex_agtype(graphid id, const char *label,
                                    agtype *properties);
+static agtype *build_vertex_object_agtype(graphid id, const char *label,
+                                          agtype *properties);
 static agtype *build_edge_agtype(graphid id, graphid start_id, graphid end_id,
                                  const char *label, agtype *properties);
+static agtype *build_edge_object_agtype(graphid id, graphid start_id,
+                                        graphid end_id, const char *label,
+                                        agtype *properties);
 /* typecast functions */
 static void agtype_typecast_object(agtype_in_state *state, char *annotation);
 static void agtype_typecast_array(agtype_in_state *state, char *annotation);
@@ -244,6 +330,8 @@ static int extract_variadic_args_min(FunctionCallInfo fcinfo,
                                      int variadic_start, bool convert_unknown,
                                      Datum **args, Oid **types, bool **nulls,
                                      int min_num_args);
+static bool extract_fast_variadic_agtype_pair(FunctionCallInfo fcinfo,
+                                              Datum *args, bool *nulls);
 static agtype_value *agtype_build_map_as_agtype_value(FunctionCallInfo fcinfo);
 agtype_value *agtype_composite_to_agtype_value_binary(agtype *a);
 static agtype_value *tostring_helper(Datum arg, Oid type, char *msghdr);
@@ -808,6 +896,203 @@ static Oid get_cached_agtype_variadic_argtype(FunctionCallInfo fcinfo,
     }
 
     return cache->types[argno];
+}
+
+static agtype_value *get_cached_access_operator_string_key(
+    FunctionCallInfo fcinfo)
+{
+    agtype_access_operator_key_cache *cache;
+    Node *fn_expr;
+    Node *key_expr;
+    Const *key_const;
+    agtype *key_agtype;
+    agtype_value key_value;
+    bool key_needs_free = false;
+
+    cache = (agtype_access_operator_key_cache *)fcinfo->flinfo->fn_extra;
+    if (cache != NULL)
+    {
+        return cache->has_string_key ? &cache->key : NULL;
+    }
+
+    cache = MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt,
+                                   sizeof(*cache));
+    cache->initialized = true;
+    fcinfo->flinfo->fn_extra = cache;
+
+    fn_expr = (Node *)fcinfo->flinfo->fn_expr;
+    if (fn_expr == NULL || !IsA(fn_expr, FuncExpr))
+    {
+        return NULL;
+    }
+
+    if (list_length(((FuncExpr *)fn_expr)->args) < 2)
+    {
+        return NULL;
+    }
+
+    key_expr = lsecond(((FuncExpr *)fn_expr)->args);
+    if (key_expr == NULL || !IsA(key_expr, Const))
+    {
+        return NULL;
+    }
+
+    key_const = (Const *)key_expr;
+    if (key_const->constisnull || key_const->consttype != AGTYPEOID)
+    {
+        return NULL;
+    }
+
+    key_agtype = DATUM_GET_AGTYPE_P(key_const->constvalue);
+    if (!AGT_ROOT_IS_SCALAR(key_agtype))
+    {
+        return NULL;
+    }
+
+    get_scalar_agtype_value_no_copy(key_agtype, &key_value, &key_needs_free);
+    if (key_value.type != AGTV_STRING)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        return NULL;
+    }
+
+    cache->key.type = AGTV_STRING;
+    cache->key.val.string.len = key_value.val.string.len;
+    cache->key.val.string.val = MemoryContextAlloc(fcinfo->flinfo->fn_mcxt,
+                                                   key_value.val.string.len);
+    memcpy(cache->key.val.string.val, key_value.val.string.val,
+           key_value.val.string.len);
+    cache->has_string_key = true;
+    free_agtype_value_no_copy(&key_value, key_needs_free);
+
+    return &cache->key;
+}
+
+static agtype *agtype_access_operator_scalar_result(FunctionCallInfo fcinfo,
+                                                    agtype_value *value)
+{
+    agtype_access_operator_key_cache *cache =
+        (agtype_access_operator_key_cache *)fcinfo->flinfo->fn_extra;
+
+    if (cache == NULL)
+        return NULL;
+
+    return agtype_scalar_result_buffer(value, &cache->result_buffer,
+                                       &cache->result_buffer_size,
+                                       fcinfo->flinfo->fn_mcxt);
+}
+
+static agtype *prepare_agtype_result_buffer(agtype **buffer,
+                                            Size *buffer_size,
+                                            MemoryContext context,
+                                            Size required_size)
+{
+    agtype *out = *buffer;
+
+    if (out == NULL)
+    {
+        out = MemoryContextAlloc(context, required_size);
+        *buffer = out;
+        *buffer_size = required_size;
+    }
+    else if (*buffer_size < required_size)
+    {
+        out = repalloc(out, required_size);
+        *buffer = out;
+        *buffer_size = required_size;
+    }
+
+    return out;
+}
+
+static agtype *agtype_scalar_result_buffer(agtype_value *value,
+                                           agtype **buffer,
+                                           Size *buffer_size,
+                                           MemoryContext context)
+{
+    agtype *out;
+    char *data;
+    uint32 type_header;
+    Size payload_size;
+
+    switch (value->type)
+    {
+    case AGTV_INTEGER:
+        payload_size = sizeof(uint32) + sizeof(int64);
+        out = prepare_agtype_result_buffer(buffer, buffer_size, context,
+                                           VARHDRSZ + sizeof(uint32) +
+                                           sizeof(agtentry) + payload_size);
+        SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                    payload_size);
+        out->root.header = AGT_FARRAY | AGT_FSCALAR | 1;
+        out->root.children[0] = AGTENTRY_IS_AGTYPE | AGTENTRY_HAS_OFF |
+            payload_size;
+        data = (char *)&out->root.children[1];
+        type_header = AGT_HEADER_INTEGER;
+        memcpy(data, &type_header, sizeof(type_header));
+        memcpy(data + sizeof(type_header), &value->val.int_value,
+               sizeof(value->val.int_value));
+        return out;
+    case AGTV_FLOAT:
+        payload_size = sizeof(uint32) + sizeof(float8);
+        out = prepare_agtype_result_buffer(buffer, buffer_size, context,
+                                           VARHDRSZ + sizeof(uint32) +
+                                           sizeof(agtentry) + payload_size);
+        SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                    payload_size);
+        out->root.header = AGT_FARRAY | AGT_FSCALAR | 1;
+        out->root.children[0] = AGTENTRY_IS_AGTYPE | AGTENTRY_HAS_OFF |
+            payload_size;
+        data = (char *)&out->root.children[1];
+        type_header = AGT_HEADER_FLOAT;
+        memcpy(data, &type_header, sizeof(type_header));
+        memcpy(data + sizeof(type_header), &value->val.float_value,
+               sizeof(value->val.float_value));
+        return out;
+    case AGTV_BOOL:
+        out = prepare_agtype_result_buffer(buffer, buffer_size, context,
+                                           VARHDRSZ + sizeof(uint32) +
+                                           sizeof(agtentry));
+        SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry));
+        out->root.header = AGT_FARRAY | AGT_FSCALAR | 1;
+        out->root.children[0] = value->val.boolean ?
+            AGTENTRY_IS_BOOL_TRUE : AGTENTRY_IS_BOOL_FALSE;
+        return out;
+    case AGTV_STRING:
+        if (value->val.string.len > AGTENTRY_OFFLENMASK)
+            return NULL;
+        payload_size = value->val.string.len;
+        out = prepare_agtype_result_buffer(buffer, buffer_size, context,
+                                           VARHDRSZ + sizeof(uint32) +
+                                           sizeof(agtentry) + payload_size);
+        SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                    payload_size);
+        out->root.header = AGT_FARRAY | AGT_FSCALAR | 1;
+        out->root.children[0] = AGTENTRY_IS_STRING | AGTENTRY_HAS_OFF |
+            payload_size;
+        data = (char *)&out->root.children[1];
+        memcpy(data, value->val.string.val, payload_size);
+        return out;
+    case AGTV_NUMERIC:
+        payload_size = VARSIZE_ANY(value->val.numeric);
+        if (payload_size > AGTENTRY_OFFLENMASK)
+            return NULL;
+        out = prepare_agtype_result_buffer(buffer, buffer_size, context,
+                                           VARHDRSZ + sizeof(uint32) +
+                                           sizeof(agtentry) + payload_size);
+        SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                    payload_size);
+        out->root.header = AGT_FARRAY | AGT_FSCALAR | 1;
+        out->root.children[0] = AGTENTRY_IS_NUMERIC | AGTENTRY_HAS_OFF |
+            payload_size;
+        data = (char *)&out->root.children[1];
+        memcpy(data, value->val.numeric, payload_size);
+        return out;
+    default:
+        break;
+    }
+
+    return NULL;
 }
 
 size_t check_string_length(size_t len)
@@ -1713,26 +1998,98 @@ static void add_indent(StringInfo out, bool indent, int level)
     }
 }
 
+static agtype *int64_scalar_to_agtype(int64 value)
+{
+    agtype *out;
+    char *data;
+    uint32 type_header = AGT_HEADER_INTEGER;
+    Size payload_size = sizeof(uint32) + sizeof(int64);
+
+    out = palloc(VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                 payload_size);
+    SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                payload_size);
+    out->root.header = AGT_FARRAY | AGT_FSCALAR | 1;
+    out->root.children[0] = AGTENTRY_IS_AGTYPE | AGTENTRY_HAS_OFF |
+        payload_size;
+
+    data = (char *)&out->root.children[1];
+    memcpy(data, &type_header, sizeof(type_header));
+    memcpy(data + sizeof(type_header), &value, sizeof(value));
+
+    return out;
+}
+
+static agtype *float8_scalar_to_agtype(float8 value)
+{
+    agtype *out;
+    char *data;
+    uint32 type_header = AGT_HEADER_FLOAT;
+    Size payload_size = sizeof(uint32) + sizeof(float8);
+
+    out = palloc(VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                 payload_size);
+    SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                payload_size);
+    out->root.header = AGT_FARRAY | AGT_FSCALAR | 1;
+    out->root.children[0] = AGTENTRY_IS_AGTYPE | AGTENTRY_HAS_OFF |
+        payload_size;
+
+    data = (char *)&out->root.children[1];
+    memcpy(data, &type_header, sizeof(type_header));
+    memcpy(data + sizeof(type_header), &value, sizeof(value));
+
+    return out;
+}
+
+static agtype *string_scalar_to_agtype(const char *value, int len)
+{
+    agtype *out;
+    char *data;
+    Size payload_size;
+
+    payload_size = check_string_length(len);
+    out = palloc(VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                 payload_size);
+    SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+                payload_size);
+    out->root.header = AGT_FARRAY | AGT_FSCALAR | 1;
+    out->root.children[0] = AGTENTRY_IS_STRING | AGTENTRY_HAS_OFF |
+        payload_size;
+
+    data = (char *)&out->root.children[1];
+    memcpy(data, value, payload_size);
+
+    return out;
+}
+
+static agtype *bool_scalar_to_agtype(bool value)
+{
+    agtype *out;
+
+    out = palloc(VARHDRSZ + sizeof(uint32) + sizeof(agtentry));
+    SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry));
+    out->root.header = AGT_FARRAY | AGT_FSCALAR | 1;
+    out->root.children[0] = value ? AGTENTRY_IS_BOOL_TRUE :
+        AGTENTRY_IS_BOOL_FALSE;
+
+    return out;
+}
+
 Datum integer_to_agtype(int64 i)
 {
-    agtype_value agtv;
     agtype *agt;
 
-    agtv.type = AGTV_INTEGER;
-    agtv.val.int_value = i;
-    agt = agtype_value_to_agtype(&agtv);
+    agt = int64_scalar_to_agtype(i);
 
     return AGTYPE_P_GET_DATUM(agt);
 }
 
 Datum float_to_agtype(float8 f)
 {
-    agtype_value agtv;
     agtype *agt;
 
-    agtv.type = AGTV_FLOAT;
-    agtv.val.float_value = f;
-    agt = agtype_value_to_agtype(&agtv);
+    agt = float8_scalar_to_agtype(f);
 
     return AGTYPE_P_GET_DATUM(agt);
 }
@@ -1743,25 +2100,18 @@ Datum float_to_agtype(float8 f)
  */
 Datum string_to_agtype(char *s)
 {
-    agtype_value agtv;
     agtype *agt;
 
-    agtv.type = AGTV_STRING;
-    agtv.val.string.len = check_string_length(strlen(s));
-    agtv.val.string.val = s;
-    agt = agtype_value_to_agtype(&agtv);
+    agt = string_scalar_to_agtype(s, strlen(s));
 
     return AGTYPE_P_GET_DATUM(agt);
 }
 
 Datum boolean_to_agtype(bool b)
 {
-    agtype_value agtv;
     agtype *agt;
 
-    agtv.type = AGTV_BOOL;
-    agtv.val.boolean = b;
-    agt = agtype_value_to_agtype(&agtv);
+    agt = bool_scalar_to_agtype(b);
 
     return AGTYPE_P_GET_DATUM(agt);
 }
@@ -2424,13 +2774,7 @@ agtype_value *string_to_agtype_value(char *s)
 
 static agtype *text_to_agtype_string_value(text *txt)
 {
-    agtype_value agtv;
-
-    agtv.type = AGTV_STRING;
-    agtv.val.string.len = check_string_length(VARSIZE_ANY_EXHDR(txt));
-    agtv.val.string.val = VARDATA_ANY(txt);
-
-    return agtype_value_to_agtype(&agtv);
+    return string_scalar_to_agtype(VARDATA_ANY(txt), VARSIZE_ANY_EXHDR(txt));
 }
 
 /* helper function to create an agtype_value integer from an integer */
@@ -2445,6 +2789,34 @@ agtype_value *integer_to_agtype_value(int64 int_value)
 }
 
 PG_FUNCTION_INFO_V1(_agtype_build_path);
+PG_FUNCTION_INFO_V1(_agtype_build_path_raw);
+
+static agtype *build_vertex_agtype(graphid id, const char *label,
+                                   agtype *properties);
+static agtype *build_edge_agtype(graphid id, graphid start_id, graphid end_id,
+                                 const char *label, agtype *properties);
+
+static char *get_graphid_label_name(Oid graph, graphid id)
+{
+    label_cache_data *label_cache;
+    char *label_name;
+    uint32 label_id;
+
+    label_id = (int32)(((uint64)id) >> ENTRY_ID_BITS);
+    label_cache = search_label_graph_oid_cache_cached(graph, label_id);
+    if (label_cache == NULL)
+    {
+        ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
+                        errmsg("label with id %d does not exist in graph %u",
+                               label_id, graph)));
+    }
+
+    label_name = NameStr(label_cache->name);
+    if (IS_AG_DEFAULT_LABEL(label_name))
+        return "";
+
+    return label_name;
+}
 
 /*
  * SQL function agtype_build_path(VARIADIC agtype)
@@ -2452,7 +2824,10 @@ PG_FUNCTION_INFO_V1(_agtype_build_path);
 Datum _agtype_build_path(PG_FUNCTION_ARGS)
 {
     agtype_in_state result;
+    agtype_build_state *path_state = NULL;
+    agtype_build_state *scalar_state = NULL;
     agtype *agt_result;
+    agtype *path_result;
     Datum *args = NULL;
     Datum fast_args[16];
     bool *nulls = NULL;
@@ -2511,6 +2886,63 @@ Datum _agtype_build_path(PG_FUNCTION_ARGS)
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("a path is of the form: [vertex, (edge, vertex)*i] where i >= 0")));
+    }
+
+    for (i = 0; i < nargs; i++)
+    {
+        agtype *agt = NULL;
+
+        if (nulls[i] || types[i] != AGTYPEOID)
+        {
+            break;
+        }
+
+        agt = DATUM_GET_AGTYPE_P(args[i]);
+
+        if (i % 2 == 1 &&
+            AGT_ROOT_IS_BINARY(agt) &&
+            AGT_ROOT_BINARY_FLAGS(agt) == AGT_FBINARY_TYPE_VLE_PATH)
+        {
+            break;
+        }
+        else if (!AGT_ROOT_IS_SCALAR(agt) || AGT_ROOT_COUNT(agt) != 1 ||
+                 !AGTE_IS_AGTYPE(agt->root.children[0]))
+        {
+            break;
+        }
+        else if (i % 2 == 1 && agt->root.children[1] != AGT_HEADER_EDGE)
+        {
+            break;
+        }
+        else if (i % 2 == 0 && agt->root.children[1] != AGT_HEADER_VERTEX)
+        {
+            break;
+        }
+    }
+
+    if (i == nargs)
+    {
+        path_state = init_agtype_build_state(nargs, AGT_FARRAY);
+
+        for (i = 0; i < nargs; i++)
+        {
+            agtype *agt = DATUM_GET_AGTYPE_P(args[i]);
+
+            write_agtype_scalar_payload(path_state, agt);
+            PG_FREE_IF_COPY(agt, i);
+        }
+
+        path_result = build_agtype(path_state);
+        pfree_agtype_build_state(path_state);
+
+        scalar_state = init_agtype_build_state(1, AGT_FARRAY | AGT_FSCALAR);
+        write_extended(scalar_state, path_result, AGT_HEADER_PATH);
+        agt_result = build_agtype(scalar_state);
+        pfree_agtype_build_state(scalar_state);
+
+        pfree(path_result);
+
+        PG_RETURN_POINTER(agt_result);
     }
 
     /* initialize the result */
@@ -2610,6 +3042,140 @@ Datum _agtype_build_path(PG_FUNCTION_ARGS)
     PG_RETURN_POINTER(agt_result);
 }
 
+Datum _agtype_build_path_raw(PG_FUNCTION_ARGS)
+{
+    Datum *args = NULL;
+    Datum fast_args[64];
+    bool *nulls = NULL;
+    bool fast_nulls[64];
+    Oid *types = NULL;
+    Oid fast_types[64];
+    int nargs;
+    int edges;
+    int vertices;
+    int argno;
+    int i;
+    Oid graph;
+    agtype_build_state *path_state;
+    agtype_build_state *scalar_state;
+    agtype *path;
+    agtype *result;
+
+    nargs = get_variadic_args_fast(fcinfo, true, 64, &args, &types, &nulls,
+                                   fast_args, fast_types, fast_nulls);
+
+    if (nargs < 9 || ((nargs - 3) % 6) != 0)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("_agtype_build_path_raw() expects graph oid followed by fixed path raw entity arguments")));
+    }
+
+    if (nulls[0] || types[0] != OIDOID)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("_agtype_build_path_raw() graph oid cannot be NULL")));
+    }
+
+    graph = DatumGetObjectId(args[0]);
+    edges = (nargs - 3) / 6;
+    vertices = edges + 1;
+    path_state = init_agtype_build_state(edges + vertices, AGT_FARRAY);
+
+    argno = 1;
+    for (i = 0; i < vertices; i++)
+    {
+        graphid vertex_id;
+        agtype *vertex_props = NULL;
+        agtype *vertex;
+
+        if (nulls[argno] || types[argno] != GRAPHIDOID)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("_agtype_build_path_raw() vertex id arguments cannot be NULL")));
+        }
+
+        vertex_id = DatumGetInt64(args[argno++]);
+        if (!nulls[argno])
+        {
+            if (types[argno] != AGTYPEOID)
+            {
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("_agtype_build_path_raw() vertex properties must be agtype")));
+            }
+            vertex_props = DATUM_GET_AGTYPE_P(args[argno]);
+        }
+        argno++;
+
+        vertex = build_vertex_object_agtype(vertex_id,
+                                            get_graphid_label_name(graph,
+                                                                   vertex_id),
+                                            vertex_props);
+        write_extended(path_state, vertex, AGT_HEADER_VERTEX);
+        pfree(vertex);
+
+        if (vertex_props != NULL)
+            PG_FREE_IF_COPY(vertex_props, argno - 1);
+
+        if (i < edges)
+        {
+            graphid edge_id;
+            graphid start_id;
+            graphid end_id;
+            agtype *edge_props = NULL;
+            agtype *edge;
+
+            if (nulls[argno] || types[argno] != GRAPHIDOID ||
+                nulls[argno + 1] || types[argno + 1] != GRAPHIDOID ||
+                nulls[argno + 2] || types[argno + 2] != GRAPHIDOID)
+            {
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("_agtype_build_path_raw() edge graphid arguments cannot be NULL")));
+            }
+
+            edge_id = DatumGetInt64(args[argno++]);
+            start_id = DatumGetInt64(args[argno++]);
+            end_id = DatumGetInt64(args[argno++]);
+            if (!nulls[argno])
+            {
+                if (types[argno] != AGTYPEOID)
+                {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                             errmsg("_agtype_build_path_raw() edge properties must be agtype")));
+                }
+                edge_props = DATUM_GET_AGTYPE_P(args[argno]);
+            }
+            argno++;
+
+            edge = build_edge_object_agtype(edge_id, start_id, end_id,
+                                            get_graphid_label_name(graph,
+                                                                   edge_id),
+                                            edge_props);
+            write_extended(path_state, edge, AGT_HEADER_EDGE);
+            pfree(edge);
+
+            if (edge_props != NULL)
+                PG_FREE_IF_COPY(edge_props, argno - 1);
+        }
+    }
+
+    path = build_agtype(path_state);
+    pfree_agtype_build_state(path_state);
+
+    scalar_state = init_agtype_build_state(1, AGT_FARRAY | AGT_FSCALAR);
+    write_extended(scalar_state, path, AGT_HEADER_PATH);
+    result = build_agtype(scalar_state);
+    pfree_agtype_build_state(scalar_state);
+    pfree(path);
+
+    PG_RETURN_POINTER(result);
+}
+
 Datum make_path_with_length(List *path, int path_len)
 {
     agtype *agt_result;
@@ -2688,12 +3254,12 @@ Datum make_path(List *path)
 }
 
 PG_FUNCTION_INFO_V1(_agtype_build_vertex);
+PG_FUNCTION_INFO_V1(_agtype_build_vertex_label);
 
-static agtype *build_vertex_agtype(graphid id, const char *label,
-                                   agtype *properties)
+static agtype *build_vertex_object_agtype(graphid id, const char *label,
+                                          agtype *properties)
 {
     agtype_build_state *bstate;
-    agtype *rawscalar;
     agtype *vertex;
     bool properties_was_null = false;
 
@@ -2721,15 +3287,28 @@ static agtype *build_vertex_agtype(graphid id, const char *label,
     vertex = build_agtype(bstate);
     pfree_agtype_build_state(bstate);
 
-    bstate = init_agtype_build_state(1, AGT_FARRAY | AGT_FSCALAR);
-    write_extended(bstate, vertex, AGT_HEADER_VERTEX);
-    rawscalar = build_agtype(bstate);
-    pfree_agtype_build_state(bstate);
-
     if (properties_was_null)
     {
         pfree(properties);
     }
+
+    return vertex;
+}
+
+static agtype *build_vertex_agtype(graphid id, const char *label,
+                                   agtype *properties)
+{
+    agtype_build_state *bstate;
+    agtype *rawscalar;
+    agtype *vertex;
+
+    vertex = build_vertex_object_agtype(id, label, properties);
+
+    bstate = init_agtype_build_state(1, AGT_FARRAY | AGT_FSCALAR);
+    write_extended(bstate, vertex, AGT_HEADER_VERTEX);
+    rawscalar = build_agtype(bstate);
+    pfree_agtype_build_state(bstate);
+    pfree(vertex);
 
     return rawscalar;
 }
@@ -2781,6 +3360,42 @@ Datum _agtype_build_vertex(PG_FUNCTION_ARGS)
     PG_RETURN_POINTER(result);
 }
 
+Datum _agtype_build_vertex_label(PG_FUNCTION_ARGS)
+{
+    Oid graph;
+    graphid id;
+    agtype *properties;
+    agtype *result;
+    char *label_name;
+
+    if (fcinfo->args[0].isnull || fcinfo->args[1].isnull)
+    {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("_agtype_build_vertex_label() graph oid and graphid cannot be NULL")));
+    }
+
+    graph = PG_GETARG_OID(0);
+    id = AG_GETARG_GRAPHID(1);
+    label_name = get_graphid_label_name(graph, id);
+
+    if (fcinfo->args[2].isnull)
+    {
+        properties = NULL;
+    }
+    else
+    {
+        properties = AG_GET_ARG_AGTYPE_P(2);
+    }
+
+    result = build_vertex_agtype(id, label_name, properties);
+    if (properties != NULL)
+    {
+        PG_FREE_IF_COPY(properties, 2);
+    }
+
+    PG_RETURN_POINTER(result);
+}
+
 Datum make_vertex(Datum id, Datum label, Datum properties)
 {
     return PointerGetDatum(build_vertex_agtype(DATUM_GET_GRAPHID(id),
@@ -2789,13 +3404,14 @@ Datum make_vertex(Datum id, Datum label, Datum properties)
 }
 
 PG_FUNCTION_INFO_V1(_agtype_build_edge);
+PG_FUNCTION_INFO_V1(_agtype_build_edge_label);
 
-static agtype *build_edge_agtype(graphid id, graphid start_id, graphid end_id,
-                                 const char *label, agtype *properties)
+static agtype *build_edge_object_agtype(graphid id, graphid start_id,
+                                        graphid end_id, const char *label,
+                                        agtype *properties)
 {
     agtype_build_state *bstate;
     agtype *edge;
-    agtype *rawscalar;
     bool properties_was_null = false;
 
     if (properties == NULL)
@@ -2826,15 +3442,28 @@ static agtype *build_edge_agtype(graphid id, graphid start_id, graphid end_id,
     edge = build_agtype(bstate);
     pfree_agtype_build_state(bstate);
 
-    bstate = init_agtype_build_state(1, AGT_FARRAY | AGT_FSCALAR);
-    write_extended(bstate, edge, AGT_HEADER_EDGE);
-    rawscalar = build_agtype(bstate);
-    pfree_agtype_build_state(bstate);
-
     if (properties_was_null)
     {
         pfree(properties);
     }
+
+    return edge;
+}
+
+static agtype *build_edge_agtype(graphid id, graphid start_id, graphid end_id,
+                                 const char *label, agtype *properties)
+{
+    agtype_build_state *bstate;
+    agtype *edge;
+    agtype *rawscalar;
+
+    edge = build_edge_object_agtype(id, start_id, end_id, label, properties);
+
+    bstate = init_agtype_build_state(1, AGT_FARRAY | AGT_FSCALAR);
+    write_extended(bstate, edge, AGT_HEADER_EDGE);
+    rawscalar = build_agtype(bstate);
+    pfree_agtype_build_state(bstate);
+    pfree(edge);
 
     return rawscalar;
 }
@@ -2903,6 +3532,60 @@ Datum _agtype_build_edge(PG_FUNCTION_ARGS)
     result = build_edge_agtype(id, start_id, end_id, label, properties);
 
     PG_FREE_IF_COPY(label, 3);
+    if (properties != NULL)
+    {
+        PG_FREE_IF_COPY(properties, 4);
+    }
+
+    PG_RETURN_POINTER(result);
+}
+
+Datum _agtype_build_edge_label(PG_FUNCTION_ARGS)
+{
+    Oid graph;
+    graphid id;
+    graphid start_id;
+    graphid end_id;
+    agtype *properties;
+    agtype *result;
+    char *label_name;
+
+    if (fcinfo->args[0].isnull || fcinfo->args[1].isnull)
+    {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("_agtype_build_edge_label() graph oid and graphid cannot be NULL")));
+    }
+
+    graph = PG_GETARG_OID(0);
+    id = AG_GETARG_GRAPHID(1);
+    label_name = get_graphid_label_name(graph, id);
+
+    if (fcinfo->args[2].isnull)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("_agtype_build_edge_label() startid cannot be NULL")));
+    }
+    start_id = AG_GETARG_GRAPHID(2);
+
+    if (fcinfo->args[3].isnull)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("_agtype_build_edge_label() endid cannot be NULL")));
+    }
+    end_id = AG_GETARG_GRAPHID(3);
+
+    if (fcinfo->args[4].isnull)
+    {
+        properties = NULL;
+    }
+    else
+    {
+        properties = AG_GET_ARG_AGTYPE_P(4);
+    }
+
+    result = build_edge_agtype(id, start_id, end_id, label_name, properties);
     if (properties != NULL)
     {
         PG_FREE_IF_COPY(properties, 4);
@@ -3098,6 +3781,7 @@ Datum agtype_build_list(PG_FUNCTION_ARGS)
     int nargs;
     int i;
     agtype_in_state result;
+    agtype_build_state *list_state = NULL;
     Datum *args;
     Datum fast_args[16];
     bool *nulls;
@@ -3113,6 +3797,36 @@ Datum agtype_build_list(PG_FUNCTION_ARGS)
     if (nargs < 0)
     {
         PG_RETURN_NULL();
+    }
+
+    for (i = 0; i < nargs; i++)
+    {
+        agtype *agt;
+
+        if (nulls[i] || types[i] != AGTYPEOID)
+            break;
+
+        agt = DATUM_GET_AGTYPE_P(args[i]);
+        if (!AGT_ROOT_IS_SCALAR(agt) || AGT_ROOT_COUNT(agt) != 1)
+            break;
+    }
+
+    if (i == nargs)
+    {
+        list_state = init_agtype_build_state(nargs, AGT_FARRAY);
+
+        for (i = 0; i < nargs; i++)
+        {
+            agtype *agt = DATUM_GET_AGTYPE_P(args[i]);
+
+            write_agtype_scalar_payload(list_state, agt);
+            PG_FREE_IF_COPY(agt, i);
+        }
+
+        agt_result = build_agtype(list_state);
+        pfree_agtype_build_state(list_state);
+
+        PG_RETURN_POINTER(agt_result);
     }
 
     memset(&result, 0, sizeof(agtype_in_state));
@@ -4310,45 +5024,28 @@ static int extract_variadic_args_min(FunctionCallInfo fcinfo,
     return nargs;
 }
 
-static Datum process_access_operator_result(FunctionCallInfo fcinfo,
-                                            agtype_value *agtv,
-                                            bool as_text)
+static bool extract_fast_variadic_agtype_pair(FunctionCallInfo fcinfo,
+                                              Datum *args, bool *nulls)
 {
-    if (agtv != NULL)
-    {
-        if (as_text)
-        {
-            text *result;
+    ArrayType *array_in;
+    array_iter iter;
+    int nitems;
 
-            if (agtv->type == AGTV_BINARY)
-            {
-                StringInfo out = makeStringInfo();
-                agtype_container *agtc =
-                    (agtype_container *)agtv->val.binary.data;
-                char *str;
+    if (!get_fn_expr_variadic(fcinfo->flinfo) || PG_NARGS() != 1 ||
+        PG_ARGISNULL(0))
+        return false;
 
-                str = agtype_to_cstring_worker(out, agtc,
-                                               agtv->val.binary.len,
-                                               false, true);
-                result = cstring_to_text(str);
-            }
-            else
-            {
-                result = agtype_value_to_text(agtv, false);
-            }
+    array_in = PG_GETARG_ARRAYTYPE_P(0);
+    nitems = ArrayGetNItems(ARR_NDIM(array_in), ARR_DIMS(array_in));
 
-            if (result)
-            {
-                PG_RETURN_TEXT_P(result);
-            }
-        }
-        else
-        {
-            AG_RETURN_AGTYPE_P(agtype_value_to_agtype(agtv));
-        }
-    }
+    if (nitems != 2 || ARR_ELEMTYPE(array_in) != AGTYPEOID)
+        return false;
 
-    PG_RETURN_NULL();
+    array_iter_setup(&iter, (AnyArrayType *)array_in);
+    args[0] = array_iter_next(&iter, &nulls[0], 0, -1, false, 'i');
+    args[1] = array_iter_next(&iter, &nulls[1], 1, -1, false, 'i');
+
+    return true;
 }
 
 static Datum process_access_operator_result_no_copy(FunctionCallInfo fcinfo,
@@ -4531,9 +5228,27 @@ Datum agtype_object_field_impl(FunctionCallInfo fcinfo, agtype *agtype_in,
         PG_RETURN_NULL();
     }
 
-    v = execute_map_access_operator_internal(agtype_in, NULL, key, key_len);
+    {
+        agtype_value key_value;
+        agtype_value value;
+        bool value_needs_free = false;
 
-    return process_access_operator_result(fcinfo, v, as_text);
+        key_value.type = AGTV_STRING;
+        key_value.val.string.val = key;
+        key_value.val.string.len = key_len;
+
+        if (!find_agtype_value_from_container_no_copy(&agtype_in->root,
+                                                      AGT_FOBJECT,
+                                                      &key_value, &value,
+                                                      &value_needs_free) ||
+            value.type == AGTV_NULL)
+        {
+            PG_RETURN_NULL();
+        }
+
+        return process_access_operator_result_no_copy(fcinfo, &value, as_text,
+                                                      value_needs_free);
+    }
 }
 
 PG_FUNCTION_INFO_V1(agtype_object_field_agtype);
@@ -4626,6 +5341,591 @@ Datum agtype_object_field_text_agtype(PG_FUNCTION_ARGS)
 
     PG_FREE_IF_COPY(agt, 0);
     PG_FREE_IF_COPY(key, 1);
+    PG_RETURN_NULL();
+}
+
+PG_FUNCTION_INFO_V1(agtype_object_field_exists_nonnull);
+
+Datum agtype_object_field_exists_nonnull(PG_FUNCTION_ARGS)
+{
+    agtype *agt = AG_GET_ARG_AGTYPE_P(0);
+    agtype *key = AG_GET_ARG_AGTYPE_P(1);
+    agtype_value key_value;
+    agtype_value *lookup_key = NULL;
+    agtype_value value;
+    bool key_needs_free = false;
+    bool value_needs_free = false;
+
+    if (!AGT_ROOT_IS_OBJECT(agt) || !AGT_ROOT_IS_SCALAR(key))
+        PG_RETURN_NULL();
+
+    lookup_key = get_cached_access_operator_string_key(fcinfo);
+    if (lookup_key == NULL)
+    {
+        get_scalar_agtype_value_no_copy(key, &key_value, &key_needs_free);
+        lookup_key = &key_value;
+    }
+
+    if (lookup_key->type != AGTV_STRING)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    if (!find_agtype_value_from_container_no_copy(&agt->root, AGT_FOBJECT,
+                                                  lookup_key, &value,
+                                                  &value_needs_free) ||
+        value.type == AGTV_NULL)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    free_agtype_value_no_copy(&value, value_needs_free);
+    free_agtype_value_no_copy(&key_value, key_needs_free);
+
+    PG_RETURN_BOOL(true);
+}
+
+PG_FUNCTION_INFO_V1(agtype_object_field_equals);
+
+Datum agtype_object_field_equals(PG_FUNCTION_ARGS)
+{
+    agtype *agt = AG_GET_ARG_AGTYPE_P(0);
+    agtype *key = AG_GET_ARG_AGTYPE_P(1);
+    agtype *rhs = AG_GET_ARG_AGTYPE_P(2);
+    agtype_value key_value;
+    agtype_value *lookup_key = NULL;
+    agtype_value lhs_value;
+    bool key_needs_free = false;
+    bool lhs_needs_free = false;
+    int cmp;
+
+    if (!AGT_ROOT_IS_OBJECT(agt) || !AGT_ROOT_IS_SCALAR(key))
+        PG_RETURN_NULL();
+
+    lookup_key = get_cached_access_operator_string_key(fcinfo);
+    if (lookup_key == NULL)
+    {
+        get_scalar_agtype_value_no_copy(key, &key_value, &key_needs_free);
+        lookup_key = &key_value;
+    }
+
+    if (lookup_key->type != AGTV_STRING)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    if (!find_agtype_value_from_container_no_copy(&agt->root, AGT_FOBJECT,
+                                                  lookup_key, &lhs_value,
+                                                  &lhs_needs_free) ||
+        lhs_value.type == AGTV_NULL)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    if (IS_A_AGTYPE_SCALAR(&lhs_value) && AGT_ROOT_IS_SCALAR(rhs))
+    {
+        agtype_value rhs_value;
+        bool rhs_needs_free = false;
+
+        get_scalar_agtype_value_no_copy(rhs, &rhs_value, &rhs_needs_free);
+        if (lhs_value.type == rhs_value.type)
+        {
+            cmp = compare_agtype_scalar_values(&lhs_value, &rhs_value);
+            free_agtype_value_no_copy(&rhs_value, rhs_needs_free);
+        }
+        else
+        {
+            agtype *lhs = agtype_value_to_agtype(&lhs_value);
+
+            free_agtype_value_no_copy(&rhs_value, rhs_needs_free);
+            cmp = compare_agtype_containers_orderability(&lhs->root,
+                                                         &rhs->root);
+        }
+    }
+    else
+    {
+        agtype *lhs = agtype_value_to_agtype(&lhs_value);
+
+        cmp = compare_agtype_containers_orderability(&lhs->root, &rhs->root);
+    }
+
+    free_agtype_value_no_copy(&lhs_value, lhs_needs_free);
+    free_agtype_value_no_copy(&key_value, key_needs_free);
+
+    PG_RETURN_BOOL(cmp == 0);
+}
+
+PG_FUNCTION_INFO_V1(agtype_object_field_cmp);
+
+Datum agtype_object_field_cmp(PG_FUNCTION_ARGS)
+{
+    agtype *agt = AG_GET_ARG_AGTYPE_P(0);
+    agtype *key = AG_GET_ARG_AGTYPE_P(1);
+    agtype *rhs = AG_GET_ARG_AGTYPE_P(2);
+    agtype_value key_value;
+    agtype_value *lookup_key = NULL;
+    agtype_value lhs_value;
+    bool key_needs_free = false;
+    bool lhs_needs_free = false;
+    int cmp;
+
+    if (!AGT_ROOT_IS_OBJECT(agt) || !AGT_ROOT_IS_SCALAR(key))
+        PG_RETURN_NULL();
+
+    lookup_key = get_cached_access_operator_string_key(fcinfo);
+    if (lookup_key == NULL)
+    {
+        get_scalar_agtype_value_no_copy(key, &key_value, &key_needs_free);
+        lookup_key = &key_value;
+    }
+
+    if (lookup_key->type != AGTV_STRING)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    if (!find_agtype_value_from_container_no_copy(&agt->root, AGT_FOBJECT,
+                                                  lookup_key, &lhs_value,
+                                                  &lhs_needs_free) ||
+        lhs_value.type == AGTV_NULL)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    if (IS_A_AGTYPE_SCALAR(&lhs_value) && AGT_ROOT_IS_SCALAR(rhs))
+    {
+        agtype_value rhs_value;
+        bool rhs_needs_free = false;
+
+        get_scalar_agtype_value_no_copy(rhs, &rhs_value, &rhs_needs_free);
+        if (lhs_value.type == rhs_value.type)
+        {
+            cmp = compare_agtype_scalar_values(&lhs_value, &rhs_value);
+            free_agtype_value_no_copy(&rhs_value, rhs_needs_free);
+        }
+        else
+        {
+            agtype *lhs = agtype_value_to_agtype(&lhs_value);
+
+            free_agtype_value_no_copy(&rhs_value, rhs_needs_free);
+            cmp = compare_agtype_containers_orderability(&lhs->root,
+                                                         &rhs->root);
+        }
+    }
+    else
+    {
+        agtype *lhs = agtype_value_to_agtype(&lhs_value);
+
+        cmp = compare_agtype_containers_orderability(&lhs->root, &rhs->root);
+    }
+
+    free_agtype_value_no_copy(&lhs_value, lhs_needs_free);
+    free_agtype_value_no_copy(&key_value, key_needs_free);
+
+    PG_RETURN_INT32(cmp);
+}
+
+PG_FUNCTION_INFO_V1(agtype_object_field_int8);
+
+Datum agtype_object_field_int8(PG_FUNCTION_ARGS)
+{
+    agtype *agt = AG_GET_ARG_AGTYPE_P(0);
+    agtype *key = AG_GET_ARG_AGTYPE_P(1);
+    agtype_value key_value;
+    agtype_value *lookup_key = NULL;
+    agtype_value value;
+    bool key_needs_free = false;
+    bool value_needs_free = false;
+    int64 result;
+
+    if (!AGT_ROOT_IS_OBJECT(agt) || !AGT_ROOT_IS_SCALAR(key))
+        PG_RETURN_NULL();
+
+    lookup_key = get_cached_access_operator_string_key(fcinfo);
+    if (lookup_key == NULL)
+    {
+        get_scalar_agtype_value_no_copy(key, &key_value, &key_needs_free);
+        lookup_key = &key_value;
+    }
+
+    if (lookup_key->type != AGTV_STRING)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    if (!find_agtype_value_from_container_no_copy(&agt->root, AGT_FOBJECT,
+                                                  lookup_key, &value,
+                                                  &value_needs_free) ||
+        value.type == AGTV_NULL)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    if (value.type == AGTV_INTEGER)
+    {
+        result = value.val.int_value;
+    }
+    else if (value.type == AGTV_FLOAT)
+    {
+        result = DatumGetInt64(DirectFunctionCall1(dtoi8,
+                         Float8GetDatum(value.val.float_value)));
+    }
+    else if (value.type == AGTV_NUMERIC)
+    {
+        result = DatumGetInt64(DirectFunctionCall1(numeric_int8,
+                         NumericGetDatum(value.val.numeric)));
+    }
+    else if (value.type == AGTV_BOOL)
+    {
+        result = value.val.boolean ? 1 : 0;
+    }
+    else
+    {
+        cannot_cast_agtype_value(value.type, "int");
+        result = 0;
+    }
+
+    free_agtype_value_no_copy(&value, value_needs_free);
+    free_agtype_value_no_copy(&key_value, key_needs_free);
+
+    PG_RETURN_INT64(result);
+}
+
+PG_FUNCTION_INFO_V1(agtype_object_field_float8);
+
+Datum agtype_object_field_float8(PG_FUNCTION_ARGS)
+{
+    agtype *agt = AG_GET_ARG_AGTYPE_P(0);
+    agtype *key = AG_GET_ARG_AGTYPE_P(1);
+    agtype_value key_value;
+    agtype_value *lookup_key = NULL;
+    agtype_value value;
+    bool key_needs_free = false;
+    bool value_needs_free = false;
+    float8 result;
+
+    if (!AGT_ROOT_IS_OBJECT(agt) || !AGT_ROOT_IS_SCALAR(key))
+        PG_RETURN_NULL();
+
+    lookup_key = get_cached_access_operator_string_key(fcinfo);
+    if (lookup_key == NULL)
+    {
+        get_scalar_agtype_value_no_copy(key, &key_value, &key_needs_free);
+        lookup_key = &key_value;
+    }
+
+    if (lookup_key->type != AGTV_STRING)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    if (!find_agtype_value_from_container_no_copy(&agt->root, AGT_FOBJECT,
+                                                  lookup_key, &value,
+                                                  &value_needs_free) ||
+        value.type == AGTV_NULL)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    if (value.type == AGTV_FLOAT)
+    {
+        result = value.val.float_value;
+    }
+    else if (value.type == AGTV_INTEGER)
+    {
+        result = (float8)value.val.int_value;
+    }
+    else if (value.type == AGTV_NUMERIC)
+    {
+        result = DatumGetFloat8(DirectFunctionCall1(numeric_float8,
+                         NumericGetDatum(value.val.numeric)));
+    }
+    else if (value.type == AGTV_STRING)
+    {
+        char *str = pnstrdup(value.val.string.val, value.val.string.len);
+
+        result = DatumGetFloat8(DirectFunctionCall1(float8in,
+                                                    CStringGetDatum(str)));
+        pfree(str);
+    }
+    else
+    {
+        cannot_cast_agtype_value(value.type, "float");
+        result = 0;
+    }
+
+    free_agtype_value_no_copy(&value, value_needs_free);
+    free_agtype_value_no_copy(&key_value, key_needs_free);
+
+    PG_RETURN_FLOAT8(result);
+}
+
+PG_FUNCTION_INFO_V1(agtype_object_field_numeric_agtype);
+
+Datum agtype_object_field_numeric_agtype(PG_FUNCTION_ARGS)
+{
+    agtype *agt = AG_GET_ARG_AGTYPE_P(0);
+    agtype *key = AG_GET_ARG_AGTYPE_P(1);
+    agtype_value key_value;
+    agtype_value *lookup_key = NULL;
+    agtype_value value;
+    agtype_value result_value;
+    bool key_needs_free = false;
+    bool value_needs_free = false;
+    Datum numd;
+    char *str = NULL;
+    agtype *result;
+
+    if (!AGT_ROOT_IS_OBJECT(agt) || !AGT_ROOT_IS_SCALAR(key))
+        PG_RETURN_NULL();
+
+    lookup_key = get_cached_access_operator_string_key(fcinfo);
+    if (lookup_key == NULL)
+    {
+        get_scalar_agtype_value_no_copy(key, &key_value, &key_needs_free);
+        lookup_key = &key_value;
+    }
+
+    if (lookup_key->type != AGTV_STRING)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    if (!find_agtype_value_from_container_no_copy(&agt->root, AGT_FOBJECT,
+                                                  lookup_key, &value,
+                                                  &value_needs_free) ||
+        value.type == AGTV_NULL)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    switch (value.type)
+    {
+    case AGTV_INTEGER:
+        numd = DirectFunctionCall1(int8_numeric,
+                                   Int64GetDatum(value.val.int_value));
+        break;
+    case AGTV_FLOAT:
+        numd = DirectFunctionCall1(float8_numeric,
+                                   Float8GetDatum(value.val.float_value));
+        break;
+    case AGTV_NUMERIC:
+        result = agtype_value_to_agtype(&value);
+        free_agtype_value_no_copy(&value, value_needs_free);
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        AG_RETURN_AGTYPE_P(result);
+        break;
+    case AGTV_STRING:
+        str = pnstrdup(value.val.string.val, value.val.string.len);
+        numd = DirectFunctionCall3(numeric_in,
+                                   CStringGetDatum(str),
+                                   ObjectIdGetDatum(InvalidOid),
+                                   Int32GetDatum(-1));
+        pfree(str);
+        break;
+    default:
+        free_agtype_value_no_copy(&value, value_needs_free);
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("typecast expression must be a number or a string")));
+        break;
+    }
+
+    free_agtype_value_no_copy(&value, value_needs_free);
+    free_agtype_value_no_copy(&key_value, key_needs_free);
+
+    result_value.type = AGTV_NUMERIC;
+    result_value.val.numeric = DatumGetNumeric(numd);
+    result = agtype_value_to_agtype(&result_value);
+    pfree_agtype_value_content(&result_value);
+
+    AG_RETURN_AGTYPE_P(result);
+}
+
+PG_FUNCTION_INFO_V1(agtype_ctid_field_agtype);
+
+static agtype_ctid_field_cache *get_agtype_ctid_field_cache(
+    FunctionCallInfo fcinfo, Oid relid)
+{
+    agtype_ctid_field_cache *cache;
+
+    cache = (agtype_ctid_field_cache *)fcinfo->flinfo->fn_extra;
+    if (cache == NULL)
+    {
+        cache = MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt,
+                                       sizeof(agtype_ctid_field_cache));
+        cache->callback.func = destroy_agtype_ctid_field_cache;
+        cache->callback.arg = cache;
+        MemoryContextRegisterResetCallback(fcinfo->flinfo->fn_mcxt,
+                                           &cache->callback);
+        fcinfo->flinfo->fn_extra = cache;
+    }
+
+    if (cache->rel == NULL || cache->relid != relid)
+    {
+        MemoryContext old_context;
+
+        if (cache->slot != NULL)
+        {
+            ExecDropSingleTupleTableSlot(cache->slot);
+            cache->slot = NULL;
+        }
+        if (cache->rel != NULL)
+        {
+            table_close(cache->rel, NoLock);
+            cache->rel = NULL;
+        }
+
+        cache->relid = relid;
+        cache->rel = table_open(relid, NoLock);
+        old_context = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+        cache->slot = table_slot_create(cache->rel, NULL);
+        MemoryContextSwitchTo(old_context);
+    }
+
+    return cache;
+}
+
+static bool get_agtype_ctid_field_key(FunctionCallInfo fcinfo,
+                                      agtype_ctid_field_cache *cache,
+                                      agtype *key,
+                                      agtype_value **lookup_key,
+                                      agtype_value *key_value,
+                                      bool *key_needs_free)
+{
+    MemoryContext old_context;
+
+    *key_needs_free = false;
+
+    if (cache->key_valid && cache->key_arg == key)
+    {
+        *lookup_key = &cache->key;
+        return true;
+    }
+
+    if (!AGT_ROOT_IS_SCALAR(key))
+        return false;
+
+    get_scalar_agtype_value_no_copy(key, key_value, key_needs_free);
+    if (key_value->type != AGTV_STRING)
+        return false;
+
+    if (cache->key_valid)
+    {
+        *lookup_key = key_value;
+        return true;
+    }
+
+    old_context = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+    cache->key_arg = key;
+    cache->key = *key_value;
+    cache->key.val.string.val = pnstrdup(key_value->val.string.val,
+                                         key_value->val.string.len);
+    cache->key_valid = true;
+    MemoryContextSwitchTo(old_context);
+
+    *lookup_key = &cache->key;
+    return true;
+}
+
+static void destroy_agtype_ctid_field_cache(void *arg)
+{
+    agtype_ctid_field_cache *cache = (agtype_ctid_field_cache *)arg;
+
+    if (cache->slot != NULL)
+    {
+        ExecDropSingleTupleTableSlot(cache->slot);
+        cache->slot = NULL;
+    }
+    if (cache->rel != NULL)
+    {
+        table_close(cache->rel, NoLock);
+        cache->rel = NULL;
+    }
+    cache->relid = InvalidOid;
+}
+
+Datum agtype_ctid_field_agtype(PG_FUNCTION_ARGS)
+{
+    Oid relid = PG_GETARG_OID(0);
+    ItemPointer tid = DatumGetItemPointer(PG_GETARG_DATUM(1));
+    agtype *key = AG_GET_ARG_AGTYPE_P(2);
+    agtype_ctid_field_cache *cache;
+    Datum properties_datum;
+    bool properties_isnull;
+    agtype *properties;
+    agtype_value key_value;
+    agtype_value *lookup_key = NULL;
+    agtype_value value;
+    bool key_needs_free = false;
+    bool value_needs_free = false;
+    Datum result;
+
+    cache = get_agtype_ctid_field_cache(fcinfo, relid);
+    if (!get_agtype_ctid_field_key(fcinfo, cache, key, &lookup_key,
+                                   &key_value, &key_needs_free))
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    ExecClearTuple(cache->slot);
+    if (!table_tuple_fetch_row_version(cache->rel, tid, GetActiveSnapshot(),
+                                       cache->slot))
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    properties_datum = slot_getattr(cache->slot,
+                                    Anum_ag_label_vertex_table_properties,
+                                    &properties_isnull);
+    if (!properties_isnull)
+    {
+        agtype *scalar_result;
+
+        properties = DATUM_GET_AGTYPE_P(properties_datum);
+        if (!find_agtype_value_from_container_no_copy(&properties->root,
+                                                      AGT_FOBJECT,
+                                                      lookup_key, &value,
+                                                      &value_needs_free) ||
+            value.type == AGTV_NULL)
+        {
+            free_agtype_value_no_copy(&key_value, key_needs_free);
+            PG_RETURN_NULL();
+        }
+
+        scalar_result = agtype_scalar_result_buffer(&value,
+                                                    &cache->result_buffer,
+                                                    &cache->result_buffer_size,
+                                                    fcinfo->flinfo->fn_mcxt);
+        if (scalar_result != NULL)
+        {
+            free_agtype_value_no_copy(&value, value_needs_free);
+            free_agtype_value_no_copy(&key_value, key_needs_free);
+            PG_RETURN_POINTER(scalar_result);
+        }
+
+        result = process_access_operator_result_no_copy(fcinfo, &value, false,
+                                                        value_needs_free);
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_DATUM(result);
+    }
+
+    free_agtype_value_no_copy(&key_value, key_needs_free);
     PG_RETURN_NULL();
 }
 
@@ -4722,6 +6022,7 @@ Datum agtype_access_operator(PG_FUNCTION_ARGS)
     if (PG_NARGS() == 2)
     {
         agtype *key = NULL;
+        agtype_value *cached_string_key = NULL;
         agtype *vpc_container = NULL;
 
         /* check for NULLs */
@@ -4769,6 +6070,7 @@ Datum agtype_access_operator(PG_FUNCTION_ARGS)
 
         /* get the key */
         key = DATUM_GET_AGTYPE_P(PG_GETARG_DATUM(1));
+        cached_string_key = get_cached_access_operator_string_key(fcinfo);
 
         if (!(AGT_ROOT_IS_SCALAR(key)))
         {
@@ -4818,6 +6120,44 @@ Datum agtype_access_operator(PG_FUNCTION_ARGS)
                 : &container_value->val.object.pairs[2].value;
         }
 
+        if (container != NULL && AGT_ROOT_IS_OBJECT(container))
+        {
+            agtype_value key_value;
+            agtype_value *lookup_key = cached_string_key;
+            bool key_needs_free = false;
+
+            if (lookup_key == NULL)
+            {
+                get_scalar_agtype_value_no_copy(key, &key_value,
+                                                &key_needs_free);
+                lookup_key = &key_value;
+            }
+
+            if (lookup_key->type == AGTV_STRING)
+            {
+                agtype_value value;
+                bool value_needs_free = false;
+
+                if (!find_agtype_value_from_container_no_copy(
+                        &container->root, AGT_FOBJECT, lookup_key, &value,
+                        &value_needs_free) ||
+                    value.type == AGTV_NULL)
+                {
+                    free_agtype_value_no_copy(&key_value, key_needs_free);
+                    PG_RETURN_NULL();
+                }
+
+                result = agtype_access_operator_scalar_result(fcinfo, &value);
+                if (result == NULL)
+                    result = agtype_value_to_agtype(&value);
+                free_agtype_value_no_copy(&value, value_needs_free);
+                free_agtype_value_no_copy(&key_value, key_needs_free);
+                return AGTYPE_P_GET_DATUM(result);
+            }
+
+            free_agtype_value_no_copy(&key_value, key_needs_free);
+        }
+
         /* map access */
         if ((container_value != NULL &&
              (container_value->type == AGTV_OBJECT ||
@@ -4825,8 +6165,29 @@ Datum agtype_access_operator(PG_FUNCTION_ARGS)
                AGTYPE_CONTAINER_IS_OBJECT(container_value->val.binary.data)))) ||
             (container != NULL && AGT_ROOT_IS_OBJECT(container)))
         {
-            container_value = execute_map_access_operator(container,
-                                                          container_value, key);
+            if (cached_string_key != NULL)
+            {
+                if (container_value != NULL &&
+                    container_value->type == AGTV_OBJECT)
+                {
+                    container_value = get_agtype_value_object_value(
+                        container_value, cached_string_key->val.string.val,
+                        cached_string_key->val.string.len);
+                }
+                else
+                {
+                    container_value = execute_map_access_operator_internal(
+                        container, container_value,
+                        cached_string_key->val.string.val,
+                        cached_string_key->val.string.len);
+                }
+            }
+            else
+            {
+                container_value = execute_map_access_operator(container,
+                                                              container_value,
+                                                              key);
+            }
         }
         /* array access */
         else if ((container_value != NULL &&
@@ -4852,7 +6213,10 @@ Datum agtype_access_operator(PG_FUNCTION_ARGS)
             PG_RETURN_NULL();
         }
 
-        result = agtype_value_to_agtype(container_value);
+        result = agtype_access_operator_scalar_result(fcinfo,
+                                                      container_value);
+        if (result == NULL)
+            result = agtype_value_to_agtype(container_value);
         free_agtype_value_no_copy(&scalar_container_value,
                                   scalar_container_needs_free);
         return AGTYPE_P_GET_DATUM(result);
@@ -4864,8 +6228,15 @@ Datum agtype_access_operator(PG_FUNCTION_ARGS)
      */
 
     /* extract our args, we need at least 2 */
-    if (!get_fn_expr_variadic(fcinfo->flinfo) &&
-        PG_NARGS() <= lengthof(fast_args))
+    if (extract_fast_variadic_agtype_pair(fcinfo, fast_args, fast_nulls))
+    {
+        nargs = 2;
+        args = fast_args;
+        nulls = fast_nulls;
+        using_fast_args = true;
+    }
+    else if (!get_fn_expr_variadic(fcinfo->flinfo) &&
+             PG_NARGS() <= lengthof(fast_args))
     {
         nargs = PG_NARGS();
         if (nargs >= 2)
@@ -4922,6 +6293,42 @@ Datum agtype_access_operator(PG_FUNCTION_ARGS)
                 pfree_if_not_null(nulls);
             }
             PG_RETURN_NULL();
+        }
+    }
+
+    if (using_fast_args && nargs == 2)
+    {
+        agtype *fast_container = DATUM_GET_AGTYPE_P(args[0]);
+        agtype *fast_key = DATUM_GET_AGTYPE_P(args[1]);
+
+        if (AGT_ROOT_IS_OBJECT(fast_container) && AGT_ROOT_IS_SCALAR(fast_key))
+        {
+            agtype_value key_value;
+            bool key_needs_free = false;
+
+            get_scalar_agtype_value_no_copy(fast_key, &key_value,
+                                            &key_needs_free);
+            if (key_value.type == AGTV_STRING)
+            {
+                agtype_value value;
+                bool value_needs_free = false;
+                agtype *retval;
+
+                if (!find_agtype_value_from_container_no_copy(
+                        &fast_container->root, AGT_FOBJECT, &key_value,
+                        &value, &value_needs_free) ||
+                    value.type == AGTV_NULL)
+                {
+                    free_agtype_value_no_copy(&key_value, key_needs_free);
+                    PG_RETURN_NULL();
+                }
+
+                retval = agtype_value_to_agtype(&value);
+                free_agtype_value_no_copy(&value, value_needs_free);
+                free_agtype_value_no_copy(&key_value, key_needs_free);
+                return AGTYPE_P_GET_DATUM(retval);
+            }
+            free_agtype_value_no_copy(&key_value, key_needs_free);
         }
     }
 
@@ -5671,6 +7078,102 @@ Datum agtype_string_match_contains(PG_FUNCTION_ARGS)
 #define LEFT_ROTATE(n, i) ((n << i) | (n >> (64 - i)))
 #define RIGHT_ROTATE(n, i)  ((n >> i) | (n << (64 - i)))
 
+static bool agtype_hash_scalar_container(agtype *agt, uint64 *hash)
+{
+    agtype_value scalar;
+    agtentry entry;
+    char *base;
+    uint32 type_header;
+    bool needs_free = false;
+    uint64 seed = 0xF0F0F0F0;
+    uint64 tmp = 0;
+
+    if (!AGT_ROOT_IS_SCALAR(agt) || AGT_ROOT_COUNT(agt) != 1)
+        return false;
+
+    /*
+     * Match the iterator hash contract for a raw scalar container without
+     * allocating an iterator: WAGT_BEGIN_ARRAY rotates the seed once, the
+     * contained scalar is hashed with that seed, and the WAGT_END_ARRAY token
+     * does not contribute to the hash for raw scalar arrays.
+     */
+    seed = LEFT_ROTATE(seed, 1);
+
+    entry = agt->root.children[0];
+    base = (char *)&agt->root.children[1];
+
+    if (AGTE_IS_STRING(entry))
+    {
+        tmp = DatumGetUInt64(hash_any_extended(
+            (const unsigned char *)base, AGTE_OFFLENFLD(entry), seed));
+        *hash = ROTATE_HIGH_AND_LOW_32BITS(*hash);
+        *hash ^= tmp;
+        return true;
+    }
+    if (AGTE_IS_BOOL(entry))
+    {
+        tmp = DatumGetUInt64(hash_uint32_extended(
+            AGTE_IS_BOOL_TRUE(entry) ? 1 : 0, seed));
+        *hash = ROTATE_HIGH_AND_LOW_32BITS(*hash);
+        *hash ^= tmp;
+        return true;
+    }
+    if (AGTE_IS_NUMERIC(entry))
+    {
+        tmp = DatumGetUInt64(DirectFunctionCall2(hash_numeric_extended,
+                                                 NumericGetDatum((Numeric)base),
+                                                 UInt64GetDatum(seed)));
+        *hash = ROTATE_HIGH_AND_LOW_32BITS(*hash);
+        *hash ^= tmp;
+        return true;
+    }
+    if (AGTE_IS_AGTYPE(entry))
+    {
+        type_header = *((uint32 *)base);
+        if (type_header == AGT_HEADER_INTEGER)
+        {
+            int64 val = *((int64 *)(base + sizeof(uint32)));
+            uint32 lohalf = (uint32)val;
+            uint32 hihalf = (uint32)(val >> 32);
+
+            lohalf ^= (val >= 0) ? hihalf : ~hihalf;
+            tmp = DatumGetUInt64(hash_uint32_extended(lohalf, seed));
+            *hash = ROTATE_HIGH_AND_LOW_32BITS(*hash);
+            *hash ^= tmp;
+            return true;
+        }
+        if (type_header == AGT_HEADER_FLOAT)
+        {
+            float8 key = *((float8 *)(base + sizeof(uint32)));
+
+            if (key == (float8)0)
+                tmp = seed;
+            else
+            {
+                if (isnan(key))
+                    key = get_float8_nan();
+
+                tmp = DatumGetUInt64(hash_any_extended(
+                    (unsigned char *)&key, sizeof(key), seed));
+            }
+            *hash = ROTATE_HIGH_AND_LOW_32BITS(*hash);
+            *hash ^= tmp;
+            return true;
+        }
+    }
+
+    if (!get_ith_agtype_value_from_container_no_copy(&agt->root, 0, &scalar,
+                                                     &needs_free))
+    {
+        return false;
+    }
+
+    agtype_hash_scalar_value_extended(&scalar, hash, seed);
+    free_agtype_value_no_copy(&scalar, needs_free);
+
+    return true;
+}
+
 /* Hashing Function for Hash Indexes */
 PG_FUNCTION_INFO_V1(agtype_hash_cmp);
 
@@ -5691,21 +7194,25 @@ Datum agtype_hash_cmp(PG_FUNCTION_ARGS)
 
     agt = AG_GET_ARG_AGTYPE_P(0);
 
-    it = agtype_iterator_init(&agt->root);
-    while ((tok = agtype_iterator_next(&it, &r, false)) != WAGT_DONE)
+    if (!agtype_hash_scalar_container(agt, &hash))
     {
-        if (IS_A_AGTYPE_SCALAR(&r) && AGTYPE_ITERATOR_TOKEN_IS_HASHABLE(tok))
-            agtype_hash_scalar_value_extended(&r, &hash, seed);
-        else if (tok == WAGT_BEGIN_ARRAY && !r.val.array.raw_scalar)
-            seed = LEFT_ROTATE(seed, 4);
-        else if (tok == WAGT_BEGIN_OBJECT)
-            seed = LEFT_ROTATE(seed, 6);
-        else if (tok == WAGT_END_ARRAY && !r.val.array.raw_scalar)
-            seed = RIGHT_ROTATE(seed, 4);
-        else if (tok == WAGT_END_OBJECT)
-            seed = RIGHT_ROTATE(seed, 4);
+        it = agtype_iterator_init(&agt->root);
+        while ((tok = agtype_iterator_next(&it, &r, false)) != WAGT_DONE)
+        {
+            if (IS_A_AGTYPE_SCALAR(&r) &&
+                AGTYPE_ITERATOR_TOKEN_IS_HASHABLE(tok))
+                agtype_hash_scalar_value_extended(&r, &hash, seed);
+            else if (tok == WAGT_BEGIN_ARRAY && !r.val.array.raw_scalar)
+                seed = LEFT_ROTATE(seed, 4);
+            else if (tok == WAGT_BEGIN_OBJECT)
+                seed = LEFT_ROTATE(seed, 6);
+            else if (tok == WAGT_END_ARRAY && !r.val.array.raw_scalar)
+                seed = RIGHT_ROTATE(seed, 4);
+            else if (tok == WAGT_END_OBJECT)
+                seed = RIGHT_ROTATE(seed, 4);
 
-        seed = LEFT_ROTATE(seed, 1);
+            seed = LEFT_ROTATE(seed, 1);
+        }
     }
 
     PG_FREE_IF_COPY(agt, 0);
@@ -5746,6 +7253,178 @@ Datum agtype_btree_cmp(PG_FUNCTION_ARGS)
     PG_FREE_IF_COPY(agtype_rhs, 1);
 
     PG_RETURN_INT32(result);
+}
+
+PG_FUNCTION_INFO_V1(agtype_sortsupport);
+
+Datum agtype_sortsupport(PG_FUNCTION_ARGS)
+{
+    SortSupport ssup = (SortSupport)PG_GETARG_POINTER(0);
+
+    ssup->comparator = agtype_sortsupport_cmp;
+    ssup->ssup_extra = NULL;
+
+    PG_RETURN_VOID();
+}
+
+static int agtype_sortsupport_cmp(Datum x, Datum y, SortSupport ssup)
+{
+    agtype *agtype_lhs = DATUM_GET_AGTYPE_P(x);
+    agtype *agtype_rhs = DATUM_GET_AGTYPE_P(y);
+    int64 lhs_int;
+    int64 rhs_int;
+    float8 lhs_float;
+    float8 rhs_float;
+    Numeric lhs_numeric;
+    Numeric rhs_numeric;
+    char *lhs_string;
+    char *rhs_string;
+    int lhs_string_len;
+    int rhs_string_len;
+    bool lhs_bool;
+    bool rhs_bool;
+    int result;
+
+    (void) ssup;
+
+    if (agtype_scalar_integer_value(agtype_lhs, &lhs_int) &&
+        agtype_scalar_integer_value(agtype_rhs, &rhs_int))
+    {
+        if (lhs_int == rhs_int)
+            return 0;
+        return lhs_int > rhs_int ? 1 : -1;
+    }
+    if (agtype_scalar_float_value(agtype_lhs, &lhs_float) &&
+        agtype_scalar_float_value(agtype_rhs, &rhs_float))
+    {
+        return float8_cmp_internal(lhs_float, rhs_float);
+    }
+    if (agtype_scalar_numeric_value(agtype_lhs, &lhs_numeric) &&
+        agtype_scalar_numeric_value(agtype_rhs, &rhs_numeric))
+    {
+        return DatumGetInt32(DirectFunctionCall2(numeric_cmp,
+                                                 NumericGetDatum(lhs_numeric),
+                                                 NumericGetDatum(rhs_numeric)));
+    }
+    if (agtype_scalar_string_value(agtype_lhs, &lhs_string, &lhs_string_len) &&
+        agtype_scalar_string_value(agtype_rhs, &rhs_string, &rhs_string_len))
+    {
+        result = varstr_cmp(lhs_string, lhs_string_len,
+                            rhs_string, rhs_string_len,
+                            DEFAULT_COLLATION_OID);
+        if (result > 0)
+            return 1;
+        if (result < 0)
+            return -1;
+        return 0;
+    }
+    if (agtype_scalar_bool_value(agtype_lhs, &lhs_bool) &&
+        agtype_scalar_bool_value(agtype_rhs, &rhs_bool))
+    {
+        if (lhs_bool == rhs_bool)
+            return 0;
+        return lhs_bool ? 1 : -1;
+    }
+
+    result = compare_agtype_containers_orderability(&agtype_lhs->root,
+                                                    &agtype_rhs->root);
+
+    return result;
+}
+
+static bool agtype_scalar_integer_value(agtype *agt, int64 *int_value)
+{
+    agtentry entry;
+    char *base;
+    uint32 type_header;
+
+    if (!AGT_ROOT_IS_SCALAR(agt) || AGT_ROOT_COUNT(agt) != 1)
+        return false;
+
+    entry = agt->root.children[0];
+    if (!AGTE_IS_AGTYPE(entry))
+        return false;
+
+    base = (char *)&agt->root.children[1];
+    type_header = *((uint32 *)base);
+    if (type_header != AGT_HEADER_INTEGER)
+        return false;
+
+    *int_value = *((int64 *)(base + sizeof(uint32)));
+    return true;
+}
+
+static bool agtype_scalar_float_value(agtype *agt, float8 *float_value)
+{
+    agtentry entry;
+    char *base;
+    uint32 type_header;
+
+    if (!AGT_ROOT_IS_SCALAR(agt) || AGT_ROOT_COUNT(agt) != 1)
+        return false;
+
+    entry = agt->root.children[0];
+    if (!AGTE_IS_AGTYPE(entry))
+        return false;
+
+    base = (char *)&agt->root.children[1];
+    type_header = *((uint32 *)base);
+    if (type_header != AGT_HEADER_FLOAT)
+        return false;
+
+    *float_value = *((float8 *)(base + sizeof(uint32)));
+    return true;
+}
+
+static bool agtype_scalar_numeric_value(agtype *agt, Numeric *numeric_value)
+{
+    agtentry entry;
+    char *base;
+
+    if (!AGT_ROOT_IS_SCALAR(agt) || AGT_ROOT_COUNT(agt) != 1)
+        return false;
+
+    entry = agt->root.children[0];
+    if (!AGTE_IS_NUMERIC(entry))
+        return false;
+
+    base = (char *)&agt->root.children[1];
+    *numeric_value = (Numeric)base;
+    return true;
+}
+
+static bool agtype_scalar_string_value(agtype *agt, char **string_value,
+                                       int *string_len)
+{
+    agtentry entry;
+    char *base;
+
+    if (!AGT_ROOT_IS_SCALAR(agt) || AGT_ROOT_COUNT(agt) != 1)
+        return false;
+
+    entry = agt->root.children[0];
+    if (!AGTE_IS_STRING(entry))
+        return false;
+
+    base = (char *)&agt->root.children[1];
+    *string_value = base;
+    *string_len = AGTE_OFFLENFLD(entry);
+    return true;
+}
+
+static bool agtype_scalar_bool_value(agtype *agt, bool *bool_value)
+{
+    agtentry entry;
+
+    if (!AGT_ROOT_IS_SCALAR(agt) || AGT_ROOT_COUNT(agt) != 1)
+        return false;
+
+    entry = agt->root.children[0];
+    if (!AGTE_IS_BOOL(entry))
+        return false;
+
+    *bool_value = AGTE_IS_BOOL_TRUE(entry);
+    return true;
 }
 
 PG_FUNCTION_INFO_V1(agtype_typecast_numeric);
@@ -6551,7 +8230,8 @@ static char *get_label_name(const char *graph_name, int graph_name_len,
     {
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_SCHEMA),
-                 errmsg("graphid %lu does not exist", element_graphid)));
+                 errmsg("graphid " INT64_FORMAT " does not exist",
+                        element_graphid)));
     }
 
     *label_relation = label_cache->relation;
@@ -6698,7 +8378,7 @@ static Datum get_vertex(const char *vertex_label, Oid vertex_label_table_oid,
         table_close(graph_vertex_label, AccessShareLock);
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_TABLE),
-                 errmsg("graphid %lu does not exist", graphid)));
+                 errmsg("graphid " INT64_FORMAT " does not exist", graphid)));
     }
 
     /* Check RLS policies - error if filtered out */
@@ -6720,7 +8400,7 @@ static Datum get_vertex(const char *vertex_label, Oid vertex_label_table_oid,
         table_close(graph_vertex_label, AccessShareLock);
         ereport(ERROR,
                 (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-                 errmsg("access to vertex %lu denied by row-level security policy on \"%s\"",
+                 errmsg("access to vertex " INT64_FORMAT " denied by row-level security policy on \"%s\"",
                         graphid, vertex_label)));
     }
 
@@ -12382,6 +14062,901 @@ Datum age_collect_aggtransfn(PG_FUNCTION_ARGS)
 
     /* return the state */
     PG_RETURN_POINTER(castate);
+}
+
+PG_FUNCTION_INFO_V1(age_collect_property_aggtransfn);
+
+Datum age_collect_property_aggtransfn(PG_FUNCTION_ARGS)
+{
+    agtype_in_state *castate;
+    MemoryContext old_mcxt;
+
+    Assert(AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_AGGREGATE);
+
+    old_mcxt = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+
+    if (PG_ARGISNULL(0))
+    {
+        castate = palloc(sizeof(agtype_in_state));
+        castate->parse_state = NULL;
+        castate->res = NULL;
+        castate->res = push_agtype_value(&castate->parse_state,
+                                         WAGT_BEGIN_ARRAY, NULL);
+    }
+    else
+    {
+        castate = (agtype_in_state *) PG_GETARG_POINTER(0);
+    }
+
+    if (!PG_ARGISNULL(1) && !PG_ARGISNULL(2))
+    {
+        agtype *properties = AG_GET_ARG_AGTYPE_P(1);
+        agtype *key = AG_GET_ARG_AGTYPE_P(2);
+        agtype_value *lookup_key = get_cached_access_operator_string_key(fcinfo);
+        agtype_value key_value;
+        agtype_value value;
+        bool key_needs_free = false;
+        bool value_needs_free = false;
+
+        if (AGT_ROOT_IS_OBJECT(properties) && AGT_ROOT_IS_SCALAR(key))
+        {
+            if (lookup_key == NULL)
+            {
+                get_scalar_agtype_value_no_copy(key, &key_value,
+                                                &key_needs_free);
+                if (key_value.type == AGTV_STRING)
+                    lookup_key = &key_value;
+            }
+
+            if (lookup_key != NULL &&
+                find_agtype_value_from_container_no_copy(
+                    &properties->root, AGT_FOBJECT, lookup_key, &value,
+                    &value_needs_free) &&
+                value.type != AGTV_NULL)
+            {
+                castate->res = push_agtype_value(&castate->parse_state,
+                                                 WAGT_ELEM, &value);
+                free_agtype_value_no_copy(&value, value_needs_free);
+            }
+
+            if (key_needs_free)
+                free_agtype_value_no_copy(&key_value, key_needs_free);
+        }
+    }
+
+    MemoryContextSwitchTo(old_mcxt);
+
+    PG_RETURN_POINTER(castate);
+}
+
+PG_FUNCTION_INFO_V1(age_collect_float8_transfn);
+
+Datum age_collect_float8_transfn(PG_FUNCTION_ARGS)
+{
+    MemoryContext aggcontext;
+    ArrayBuildState *state;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_collect_float8_transfn called in non-aggregate context");
+
+    if (PG_ARGISNULL(0))
+        state = initArrayResult(FLOAT8OID, aggcontext, false);
+    else
+        state = (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    if (!PG_ARGISNULL(1))
+    {
+        state = accumArrayResult(state, PG_GETARG_DATUM(1), false,
+                                 FLOAT8OID, aggcontext);
+    }
+
+    PG_RETURN_POINTER(state);
+}
+
+PG_FUNCTION_INFO_V1(age_collect_float8_finalfn);
+
+Datum age_collect_float8_finalfn(PG_FUNCTION_ARGS)
+{
+    ArrayBuildState *state;
+    agtype_in_state result;
+    int i;
+
+    Assert(AggCheckCallContext(fcinfo, NULL));
+
+    state = PG_ARGISNULL(0) ? NULL : (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    memset(&result, 0, sizeof(agtype_in_state));
+    result.res = push_agtype_value(&result.parse_state, WAGT_BEGIN_ARRAY,
+                                   NULL);
+
+    if (state != NULL)
+    {
+        for (i = 0; i < state->nelems; i++)
+        {
+            if (!state->dnulls[i])
+            {
+                agtype_value value;
+
+                value.type = AGTV_FLOAT;
+                value.val.float_value = DatumGetFloat8(state->dvalues[i]);
+                result.res = push_agtype_value(&result.parse_state,
+                                               WAGT_ELEM, &value);
+            }
+        }
+    }
+
+    result.res = push_agtype_value(&result.parse_state, WAGT_END_ARRAY, NULL);
+
+    AG_RETURN_AGTYPE_P(agtype_value_to_agtype(result.res));
+}
+
+PG_FUNCTION_INFO_V1(age_collect_int8_transfn);
+
+Datum age_collect_int8_transfn(PG_FUNCTION_ARGS)
+{
+    MemoryContext aggcontext;
+    ArrayBuildState *state;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_collect_int8_transfn called in non-aggregate context");
+
+    if (PG_ARGISNULL(0))
+        state = initArrayResult(INT8OID, aggcontext, false);
+    else
+        state = (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    if (!PG_ARGISNULL(1))
+    {
+        state = accumArrayResult(state, PG_GETARG_DATUM(1), false,
+                                 INT8OID, aggcontext);
+    }
+
+    PG_RETURN_POINTER(state);
+}
+
+PG_FUNCTION_INFO_V1(age_collect_int8_finalfn);
+
+Datum age_collect_int8_finalfn(PG_FUNCTION_ARGS)
+{
+    ArrayBuildState *state;
+    agtype_in_state result;
+    int i;
+
+    Assert(AggCheckCallContext(fcinfo, NULL));
+
+    state = PG_ARGISNULL(0) ? NULL : (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    memset(&result, 0, sizeof(agtype_in_state));
+    result.res = push_agtype_value(&result.parse_state, WAGT_BEGIN_ARRAY,
+                                   NULL);
+
+    if (state != NULL)
+    {
+        for (i = 0; i < state->nelems; i++)
+        {
+            if (!state->dnulls[i])
+            {
+                agtype_value value;
+
+                value.type = AGTV_INTEGER;
+                value.val.int_value = DatumGetInt64(state->dvalues[i]);
+                result.res = push_agtype_value(&result.parse_state,
+                                               WAGT_ELEM, &value);
+            }
+        }
+    }
+
+    result.res = push_agtype_value(&result.parse_state, WAGT_END_ARRAY, NULL);
+
+    AG_RETURN_AGTYPE_P(agtype_value_to_agtype(result.res));
+}
+
+PG_FUNCTION_INFO_V1(age_collect_text_transfn);
+
+Datum age_collect_text_transfn(PG_FUNCTION_ARGS)
+{
+    MemoryContext aggcontext;
+    ArrayBuildState *state;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_collect_text_transfn called in non-aggregate context");
+
+    if (PG_ARGISNULL(0))
+        state = initArrayResult(TEXTOID, aggcontext, false);
+    else
+        state = (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    if (!PG_ARGISNULL(1))
+    {
+        state = accumArrayResult(state, PG_GETARG_DATUM(1), false,
+                                 TEXTOID, aggcontext);
+    }
+
+    PG_RETURN_POINTER(state);
+}
+
+PG_FUNCTION_INFO_V1(age_collect_text_finalfn);
+
+Datum age_collect_text_finalfn(PG_FUNCTION_ARGS)
+{
+    ArrayBuildState *state;
+    agtype_in_state result;
+    int i;
+
+    Assert(AggCheckCallContext(fcinfo, NULL));
+
+    state = PG_ARGISNULL(0) ? NULL : (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    memset(&result, 0, sizeof(agtype_in_state));
+    result.res = push_agtype_value(&result.parse_state, WAGT_BEGIN_ARRAY,
+                                   NULL);
+
+    if (state != NULL)
+    {
+        for (i = 0; i < state->nelems; i++)
+        {
+            if (!state->dnulls[i])
+            {
+                text *text_value = DatumGetTextPP(state->dvalues[i]);
+                agtype_value value;
+
+                value.type = AGTV_STRING;
+                value.val.string.val = VARDATA_ANY(text_value);
+                value.val.string.len = VARSIZE_ANY_EXHDR(text_value);
+                result.res = push_agtype_value(&result.parse_state,
+                                               WAGT_ELEM, &value);
+            }
+        }
+    }
+
+    result.res = push_agtype_value(&result.parse_state, WAGT_END_ARRAY, NULL);
+
+    AG_RETURN_AGTYPE_P(agtype_value_to_agtype(result.res));
+}
+
+PG_FUNCTION_INFO_V1(age_collect_numeric_property_transfn);
+
+Datum age_collect_numeric_property_transfn(PG_FUNCTION_ARGS)
+{
+    MemoryContext aggcontext;
+    MemoryContext old_mcxt;
+    ArrayBuildState *state;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_collect_numeric_property_transfn called in non-aggregate context");
+
+    old_mcxt = MemoryContextSwitchTo(aggcontext);
+
+    if (PG_ARGISNULL(0))
+        state = initArrayResult(NUMERICOID, aggcontext, false);
+    else
+        state = (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    if (!PG_ARGISNULL(1) && !PG_ARGISNULL(2))
+    {
+        agtype *properties = AG_GET_ARG_AGTYPE_P(1);
+        agtype *key = AG_GET_ARG_AGTYPE_P(2);
+        agtype_value *lookup_key = get_cached_access_operator_string_key(fcinfo);
+        agtype_value key_value;
+        agtype_value value;
+        bool key_needs_free = false;
+        bool value_needs_free = false;
+        Datum numd = (Datum)0;
+        bool has_numeric = false;
+
+        if (AGT_ROOT_IS_OBJECT(properties) && AGT_ROOT_IS_SCALAR(key))
+        {
+            if (lookup_key == NULL)
+            {
+                get_scalar_agtype_value_no_copy(key, &key_value,
+                                                &key_needs_free);
+                if (key_value.type == AGTV_STRING)
+                    lookup_key = &key_value;
+            }
+
+            if (lookup_key != NULL &&
+                find_agtype_value_from_container_no_copy(
+                    &properties->root, AGT_FOBJECT, lookup_key, &value,
+                    &value_needs_free) &&
+                value.type != AGTV_NULL)
+            {
+                switch (value.type)
+                {
+                case AGTV_INTEGER:
+                    numd = DirectFunctionCall1(int8_numeric,
+                                               Int64GetDatum(value.val.int_value));
+                    has_numeric = true;
+                    break;
+                case AGTV_FLOAT:
+                    numd = DirectFunctionCall1(float8_numeric,
+                                               Float8GetDatum(value.val.float_value));
+                    has_numeric = true;
+                    break;
+                case AGTV_NUMERIC:
+                    numd = NumericGetDatum(value.val.numeric);
+                    has_numeric = true;
+                    break;
+                case AGTV_STRING:
+                {
+                    char *str = pnstrdup(value.val.string.val,
+                                         value.val.string.len);
+
+                    numd = DirectFunctionCall3(numeric_in,
+                                               CStringGetDatum(str),
+                                               ObjectIdGetDatum(InvalidOid),
+                                               Int32GetDatum(-1));
+                    pfree(str);
+                    has_numeric = true;
+                    break;
+                }
+                default:
+                    free_agtype_value_no_copy(&value, value_needs_free);
+                    free_agtype_value_no_copy(&key_value, key_needs_free);
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                             errmsg("typecast expression must be a number or a string")));
+                    break;
+                }
+
+                if (has_numeric)
+                {
+                    state = accumArrayResult(state, numd, false,
+                                             NUMERICOID, aggcontext);
+                }
+
+                free_agtype_value_no_copy(&value, value_needs_free);
+            }
+
+            if (key_needs_free)
+                free_agtype_value_no_copy(&key_value, key_needs_free);
+        }
+    }
+
+    MemoryContextSwitchTo(old_mcxt);
+
+    PG_RETURN_POINTER(state);
+}
+
+PG_FUNCTION_INFO_V1(age_collect_numeric_finalfn);
+
+Datum age_collect_numeric_finalfn(PG_FUNCTION_ARGS)
+{
+    ArrayBuildState *state;
+    agtype_in_state result;
+    int i;
+
+    Assert(AggCheckCallContext(fcinfo, NULL));
+
+    state = PG_ARGISNULL(0) ? NULL : (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    memset(&result, 0, sizeof(agtype_in_state));
+    result.res = push_agtype_value(&result.parse_state, WAGT_BEGIN_ARRAY,
+                                   NULL);
+
+    if (state != NULL)
+    {
+        for (i = 0; i < state->nelems; i++)
+        {
+            if (!state->dnulls[i])
+            {
+                agtype_value value;
+
+                value.type = AGTV_NUMERIC;
+                value.val.numeric = DatumGetNumeric(state->dvalues[i]);
+                result.res = push_agtype_value(&result.parse_state,
+                                               WAGT_ELEM, &value);
+            }
+        }
+    }
+
+    result.res = push_agtype_value(&result.parse_state, WAGT_END_ARRAY, NULL);
+
+    AG_RETURN_AGTYPE_P(agtype_value_to_agtype(result.res));
+}
+
+PG_FUNCTION_INFO_V1(age_array_agg_property_transfn);
+
+Datum age_array_agg_property_transfn(PG_FUNCTION_ARGS)
+{
+    MemoryContext aggcontext;
+    ArrayBuildState *state;
+    Datum elem = (Datum)0;
+    bool is_null = true;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_array_agg_property_transfn called in non-aggregate context");
+
+    if (PG_ARGISNULL(0))
+        state = initArrayResult(AGTYPEOID, aggcontext, false);
+    else
+        state = (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    if (!PG_ARGISNULL(1) && !PG_ARGISNULL(2))
+    {
+        agtype *properties = AG_GET_ARG_AGTYPE_P(1);
+        agtype *key = AG_GET_ARG_AGTYPE_P(2);
+        agtype_value *lookup_key = get_cached_access_operator_string_key(fcinfo);
+        agtype_value key_value;
+        agtype_value value;
+        bool key_needs_free = false;
+        bool value_needs_free = false;
+
+        if (AGT_ROOT_IS_OBJECT(properties) && AGT_ROOT_IS_SCALAR(key))
+        {
+            if (lookup_key == NULL)
+            {
+                get_scalar_agtype_value_no_copy(key, &key_value,
+                                                &key_needs_free);
+                if (key_value.type == AGTV_STRING)
+                    lookup_key = &key_value;
+            }
+
+            if (lookup_key != NULL &&
+                find_agtype_value_from_container_no_copy(
+                    &properties->root, AGT_FOBJECT, lookup_key, &value,
+                    &value_needs_free))
+            {
+                elem = PointerGetDatum(agtype_value_to_agtype(&value));
+                is_null = false;
+                free_agtype_value_no_copy(&value, value_needs_free);
+            }
+
+            if (key_needs_free)
+                free_agtype_value_no_copy(&key_value, key_needs_free);
+        }
+    }
+
+    if (is_null)
+    {
+        agtype_value null_value;
+
+        null_value.type = AGTV_NULL;
+        elem = PointerGetDatum(agtype_value_to_agtype(&null_value));
+        is_null = false;
+    }
+
+    state = accumArrayResult(state, elem, is_null, AGTYPEOID, aggcontext);
+
+    PG_RETURN_POINTER(state);
+}
+
+PG_FUNCTION_INFO_V1(age_array_agg_property_finalfn);
+
+Datum age_array_agg_property_finalfn(PG_FUNCTION_ARGS)
+{
+    Datum result;
+    ArrayBuildState *state;
+    int dims[1];
+    int lbs[1];
+
+    Assert(AggCheckCallContext(fcinfo, NULL));
+
+    state = PG_ARGISNULL(0) ? NULL : (ArrayBuildState *)PG_GETARG_POINTER(0);
+    if (state == NULL)
+        PG_RETURN_NULL();
+
+    dims[0] = state->nelems;
+    lbs[0] = 1;
+
+    result = makeMdArrayResult(state, 1, dims, lbs, CurrentMemoryContext,
+                               false);
+
+    PG_RETURN_DATUM(result);
+}
+
+static bool init_map2_cache_text_key(FunctionCallInfo fcinfo,
+                                     agtype_value *dst, int argno)
+{
+    text *key_text;
+
+    if (PG_ARGISNULL(argno))
+        return false;
+
+    key_text = PG_GETARG_TEXT_PP(argno);
+    dst->type = AGTV_STRING;
+    dst->val.string.len = VARSIZE_ANY_EXHDR(key_text);
+    dst->val.string.val = MemoryContextAlloc(fcinfo->flinfo->fn_mcxt,
+                                             dst->val.string.len);
+    memcpy(dst->val.string.val, VARDATA_ANY(key_text), dst->val.string.len);
+
+    return true;
+}
+
+static bool init_map2_cache_property_key(FunctionCallInfo fcinfo,
+                                         agtype_value *dst, int argno)
+{
+    agtype *key_agtype;
+    agtype_value key_value;
+    bool key_needs_free = false;
+
+    if (PG_ARGISNULL(argno))
+        return false;
+
+    key_agtype = AG_GET_ARG_AGTYPE_P(argno);
+    if (!AGT_ROOT_IS_SCALAR(key_agtype))
+        return false;
+
+    get_scalar_agtype_value_no_copy(key_agtype, &key_value, &key_needs_free);
+    if (key_value.type != AGTV_STRING)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        return false;
+    }
+
+    dst->type = AGTV_STRING;
+    dst->val.string.len = key_value.val.string.len;
+    dst->val.string.val = MemoryContextAlloc(fcinfo->flinfo->fn_mcxt,
+                                             key_value.val.string.len);
+    memcpy(dst->val.string.val, key_value.val.string.val,
+           key_value.val.string.len);
+    free_agtype_value_no_copy(&key_value, key_needs_free);
+
+    return true;
+}
+
+static agtype_map2_property_key_cache *get_map2_property_key_cache(
+    FunctionCallInfo fcinfo)
+{
+    agtype_map2_property_key_cache *cache;
+
+    cache = (agtype_map2_property_key_cache *)fcinfo->flinfo->fn_extra;
+    if (cache != NULL)
+        return cache->valid ? cache : NULL;
+
+    cache = MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt,
+                                   sizeof(*cache));
+    cache->initialized = true;
+    fcinfo->flinfo->fn_extra = cache;
+
+    cache->valid =
+        init_map2_cache_text_key(fcinfo, &cache->out_key1, 2) &&
+        init_map2_cache_property_key(fcinfo, &cache->prop_key1, 3) &&
+        init_map2_cache_text_key(fcinfo, &cache->out_key2, 4) &&
+        init_map2_cache_property_key(fcinfo, &cache->prop_key2, 5);
+
+    return cache->valid ? cache : NULL;
+}
+
+static void add_object_property_if_found(agtype_in_state *result,
+                                         agtype_value *output_key,
+                                         agtype *properties,
+                                         agtype_value *property_key)
+{
+    agtype_value property_value;
+    bool value_needs_free = false;
+
+    if (!AGT_ROOT_IS_OBJECT(properties))
+        return;
+
+    if (find_agtype_value_from_container_no_copy(&properties->root,
+                                                 AGT_FOBJECT, property_key,
+                                                 &property_value,
+                                                 &value_needs_free) &&
+        property_value.type != AGTV_NULL)
+    {
+        result->res = push_agtype_value(&result->parse_state, WAGT_KEY,
+                                        output_key);
+        result->res = push_agtype_value(&result->parse_state, WAGT_VALUE,
+                                        &property_value);
+        free_agtype_value_no_copy(&property_value, value_needs_free);
+    }
+}
+
+PG_FUNCTION_INFO_V1(age_array_agg_map2_property_transfn);
+
+Datum age_array_agg_map2_property_transfn(PG_FUNCTION_ARGS)
+{
+    MemoryContext aggcontext;
+    ArrayBuildState *state;
+    MemoryContext old_mcxt;
+    Datum elem;
+    agtype_in_state result;
+    agtype *properties;
+    agtype_map2_property_key_cache *key_cache;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_array_agg_map2_property_transfn called in non-aggregate context");
+
+    old_mcxt = MemoryContextSwitchTo(aggcontext);
+
+    if (PG_ARGISNULL(0))
+        state = initArrayResult(AGTYPEOID, aggcontext, false);
+    else
+        state = (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    memset(&result, 0, sizeof(agtype_in_state));
+    result.res = push_agtype_value(&result.parse_state, WAGT_BEGIN_OBJECT,
+                                   NULL);
+
+    key_cache = get_map2_property_key_cache(fcinfo);
+
+    if (!PG_ARGISNULL(1) && key_cache != NULL)
+    {
+        properties = AG_GET_ARG_AGTYPE_P(1);
+
+        add_object_property_if_found(&result, &key_cache->out_key1,
+                                     properties, &key_cache->prop_key1);
+        add_object_property_if_found(&result, &key_cache->out_key2,
+                                     properties, &key_cache->prop_key2);
+    }
+
+    result.res = push_agtype_value(&result.parse_state, WAGT_END_OBJECT, NULL);
+    elem = PointerGetDatum(agtype_value_to_agtype(result.res));
+    state = accumArrayResult(state, elem, false, AGTYPEOID, aggcontext);
+
+    MemoryContextSwitchTo(old_mcxt);
+
+    PG_RETURN_POINTER(state);
+}
+
+static bool copy_text_array_to_agtype_keys(FunctionCallInfo fcinfo,
+                                           ArrayType *array,
+                                           agtype_value **keys,
+                                           int *nkeys)
+{
+    Datum *elems;
+    bool *nulls;
+    int nelems;
+    int i;
+
+    deconstruct_array_builtin(array, TEXTOID, &elems, &nulls, &nelems);
+    if (nelems <= 0)
+        return false;
+
+    *keys = MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt,
+                                   sizeof(agtype_value) * nelems);
+    for (i = 0; i < nelems; i++)
+    {
+        text *key_text;
+
+        if (nulls[i])
+            return false;
+
+        key_text = DatumGetTextPP(elems[i]);
+        (*keys)[i].type = AGTV_STRING;
+        (*keys)[i].val.string.len = VARSIZE_ANY_EXHDR(key_text);
+        (*keys)[i].val.string.val =
+            MemoryContextAlloc(fcinfo->flinfo->fn_mcxt,
+                               (*keys)[i].val.string.len);
+        memcpy((*keys)[i].val.string.val, VARDATA_ANY(key_text),
+               (*keys)[i].val.string.len);
+    }
+
+    *nkeys = nelems;
+    return true;
+}
+
+static bool copy_agtype_array_to_string_keys(FunctionCallInfo fcinfo,
+                                             ArrayType *array,
+                                             agtype_value **keys,
+                                             int expected_nkeys)
+{
+    Datum *elems;
+    bool *nulls;
+    int nelems;
+    int i;
+    int16 typlen;
+    bool typbyval;
+    char typalign;
+
+    get_typlenbyvalalign(AGTYPEOID, &typlen, &typbyval, &typalign);
+    deconstruct_array(array, AGTYPEOID, typlen, typbyval, typalign,
+                      &elems, &nulls, &nelems);
+    if (expected_nkeys > 0 && nelems != expected_nkeys)
+        return false;
+
+    *keys = MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt,
+                                   sizeof(agtype_value) * nelems);
+    for (i = 0; i < nelems; i++)
+    {
+        agtype *key_agtype;
+        agtype_value key_value;
+        bool key_needs_free = false;
+
+        if (nulls[i])
+            return false;
+
+        key_agtype = DATUM_GET_AGTYPE_P(elems[i]);
+        if (!AGT_ROOT_IS_SCALAR(key_agtype))
+            return false;
+
+        get_scalar_agtype_value_no_copy(key_agtype, &key_value,
+                                        &key_needs_free);
+        if (key_value.type != AGTV_STRING)
+        {
+            free_agtype_value_no_copy(&key_value, key_needs_free);
+            return false;
+        }
+
+        (*keys)[i].type = AGTV_STRING;
+        (*keys)[i].val.string.len = key_value.val.string.len;
+        (*keys)[i].val.string.val =
+            MemoryContextAlloc(fcinfo->flinfo->fn_mcxt,
+                               key_value.val.string.len);
+        memcpy((*keys)[i].val.string.val, key_value.val.string.val,
+               key_value.val.string.len);
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+    }
+
+    return true;
+}
+
+static agtype_map_property_key_cache *get_map_property_key_cache(
+    FunctionCallInfo fcinfo)
+{
+    agtype_map_property_key_cache *cache;
+    ArrayType *out_key_array;
+    ArrayType *prop_key_array;
+
+    cache = (agtype_map_property_key_cache *)fcinfo->flinfo->fn_extra;
+    if (cache != NULL)
+        return cache->valid ? cache : NULL;
+
+    cache = MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt,
+                                   sizeof(*cache));
+    cache->initialized = true;
+    fcinfo->flinfo->fn_extra = cache;
+
+    if (PG_ARGISNULL(2) || PG_ARGISNULL(3))
+        return NULL;
+
+    out_key_array = PG_GETARG_ARRAYTYPE_P(2);
+    prop_key_array = PG_GETARG_ARRAYTYPE_P(3);
+
+    cache->valid =
+        copy_text_array_to_agtype_keys(fcinfo, out_key_array,
+                                       &cache->out_keys, &cache->nkeys) &&
+        copy_agtype_array_to_string_keys(fcinfo, prop_key_array,
+                                         &cache->prop_keys, cache->nkeys);
+
+    return cache->valid ? cache : NULL;
+}
+
+PG_FUNCTION_INFO_V1(age_array_agg_map_property_transfn);
+
+Datum age_array_agg_map_property_transfn(PG_FUNCTION_ARGS)
+{
+    MemoryContext aggcontext;
+    ArrayBuildState *state;
+    MemoryContext old_mcxt;
+    Datum elem;
+    agtype_in_state result;
+    agtype *properties;
+    agtype_map_property_key_cache *key_cache;
+    int i;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_array_agg_map_property_transfn called in non-aggregate context");
+
+    old_mcxt = MemoryContextSwitchTo(aggcontext);
+
+    if (PG_ARGISNULL(0))
+        state = initArrayResult(AGTYPEOID, aggcontext, false);
+    else
+        state = (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    memset(&result, 0, sizeof(agtype_in_state));
+    result.res = push_agtype_value(&result.parse_state, WAGT_BEGIN_OBJECT,
+                                   NULL);
+
+    key_cache = get_map_property_key_cache(fcinfo);
+    if (!PG_ARGISNULL(1) && key_cache != NULL)
+    {
+        properties = AG_GET_ARG_AGTYPE_P(1);
+        for (i = 0; i < key_cache->nkeys; i++)
+        {
+            add_object_property_if_found(&result, &key_cache->out_keys[i],
+                                         properties, &key_cache->prop_keys[i]);
+        }
+    }
+
+    result.res = push_agtype_value(&result.parse_state, WAGT_END_OBJECT, NULL);
+    elem = PointerGetDatum(agtype_value_to_agtype(result.res));
+    state = accumArrayResult(state, elem, false, AGTYPEOID, aggcontext);
+
+    MemoryContextSwitchTo(old_mcxt);
+
+    PG_RETURN_POINTER(state);
+}
+
+static agtype_list_property_key_cache *get_list_property_key_cache(
+    FunctionCallInfo fcinfo)
+{
+    agtype_list_property_key_cache *cache;
+    ArrayType *prop_key_array;
+
+    cache = (agtype_list_property_key_cache *)fcinfo->flinfo->fn_extra;
+    if (cache != NULL)
+        return cache->valid ? cache : NULL;
+
+    cache = MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt,
+                                   sizeof(*cache));
+    cache->initialized = true;
+    fcinfo->flinfo->fn_extra = cache;
+
+    if (PG_ARGISNULL(2))
+        return NULL;
+
+    prop_key_array = PG_GETARG_ARRAYTYPE_P(2);
+    cache->nkeys = ArrayGetNItems(ARR_NDIM(prop_key_array),
+                                  ARR_DIMS(prop_key_array));
+    cache->valid =
+        copy_agtype_array_to_string_keys(fcinfo, prop_key_array,
+                                         &cache->prop_keys, cache->nkeys);
+
+    return cache->valid ? cache : NULL;
+}
+
+static void add_list_property_value(agtype_in_state *result,
+                                    agtype *properties,
+                                    agtype_value *property_key)
+{
+    agtype_value property_value;
+    agtype_value null_value;
+    bool value_needs_free = false;
+
+    if (AGT_ROOT_IS_OBJECT(properties) &&
+        find_agtype_value_from_container_no_copy(&properties->root,
+                                                 AGT_FOBJECT, property_key,
+                                                 &property_value,
+                                                 &value_needs_free))
+    {
+        result->res = push_agtype_value(&result->parse_state, WAGT_ELEM,
+                                        &property_value);
+        free_agtype_value_no_copy(&property_value, value_needs_free);
+        return;
+    }
+
+    null_value.type = AGTV_NULL;
+    result->res = push_agtype_value(&result->parse_state, WAGT_ELEM,
+                                    &null_value);
+}
+
+PG_FUNCTION_INFO_V1(age_array_agg_list_property_transfn);
+
+Datum age_array_agg_list_property_transfn(PG_FUNCTION_ARGS)
+{
+    MemoryContext aggcontext;
+    ArrayBuildState *state;
+    MemoryContext old_mcxt;
+    Datum elem;
+    agtype_in_state result;
+    agtype *properties;
+    agtype_list_property_key_cache *key_cache;
+    int i;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_array_agg_list_property_transfn called in non-aggregate context");
+
+    old_mcxt = MemoryContextSwitchTo(aggcontext);
+
+    if (PG_ARGISNULL(0))
+        state = initArrayResult(AGTYPEOID, aggcontext, false);
+    else
+        state = (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    memset(&result, 0, sizeof(agtype_in_state));
+    result.res = push_agtype_value(&result.parse_state, WAGT_BEGIN_ARRAY,
+                                   NULL);
+
+    key_cache = get_list_property_key_cache(fcinfo);
+    if (!PG_ARGISNULL(1) && key_cache != NULL)
+    {
+        properties = AG_GET_ARG_AGTYPE_P(1);
+        for (i = 0; i < key_cache->nkeys; i++)
+        {
+            add_list_property_value(&result, properties,
+                                    &key_cache->prop_keys[i]);
+        }
+    }
+
+    result.res = push_agtype_value(&result.parse_state, WAGT_END_ARRAY, NULL);
+    elem = PointerGetDatum(agtype_value_to_agtype(result.res));
+    state = accumArrayResult(state, elem, false, AGTYPEOID, aggcontext);
+
+    MemoryContextSwitchTo(old_mcxt);
+
+    PG_RETURN_POINTER(state);
 }
 
 PG_FUNCTION_INFO_V1(age_collect_aggfinalfn);

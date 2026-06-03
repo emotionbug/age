@@ -33,6 +33,7 @@
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
+#include "parser/parsetree.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_collate.h"
 #include "parser/parse_func.h"
@@ -88,10 +89,24 @@ typedef struct function_extension_cache_entry
     NameData extension;
 } function_extension_cache_entry;
 
+typedef enum AgeSemanticSourceKind
+{
+    AGE_SEM_SOURCE_UNKNOWN,
+    AGE_SEM_SOURCE_FIXED_PATH,
+    AGE_SEM_SOURCE_COMPACT_VLE_PATH,
+    AGE_SEM_SOURCE_COMPACT_VLE_EDGE_LIST,
+    AGE_SEM_SOURCE_COMPACT_VLE_NODE_LIST,
+    AGE_SEM_SOURCE_MATERIALIZED_AGTYPE
+} AgeSemanticSourceKind;
+
 static HTAB *function_exists_cache = NULL;
 static HTAB *function_extension_cache = NULL;
 static bool function_cache_callback_registered = false;
 static Oid agtype_access_operator_oid = InvalidOid;
+static Oid agtype_object_field_int8_oid = InvalidOid;
+static Oid agtype_object_field_float8_oid = InvalidOid;
+static Oid agtype_object_field_text_agtype_oid = InvalidOid;
+static Oid agtype_object_field_numeric_agtype_oid = InvalidOid;
 static Oid agtype_access_slice_oid = InvalidOid;
 static Oid agtype_in_operator_oid = InvalidOid;
 static Oid agtype_add_oid = InvalidOid;
@@ -102,8 +117,8 @@ static Oid agtype_build_map_oid = InvalidOid;
 static Oid agtype_build_map_nonull_oid = InvalidOid;
 static Oid age_properties_oid = InvalidOid;
 static Oid age_keys_oid = InvalidOid;
-static Oid build_vertex_oid = InvalidOid;
-static Oid build_edge_oid = InvalidOid;
+static Oid build_vertex_label_oid = InvalidOid;
+static Oid build_edge_label_oid = InvalidOid;
 static Oid agtype_string_match_starts_with_oid = InvalidOid;
 static Oid agtype_string_match_ends_with_oid = InvalidOid;
 static Oid agtype_string_match_contains_oid = InvalidOid;
@@ -126,6 +141,7 @@ static Oid age_vle_node_id_at_oid = InvalidOid;
 static Oid age_vle_node_label_at_oid = InvalidOid;
 static Oid age_vle_node_labels_at_oid = InvalidOid;
 static Oid age_vle_node_properties_at_oid = InvalidOid;
+static Oid age_vle_node_property_at_oid = InvalidOid;
 static Oid age_materialize_vle_nodes_slice_oid = InvalidOid;
 static Oid age_materialize_vle_nodes_tail_oid = InvalidOid;
 static Oid age_materialize_vle_nodes_reversed_oid = InvalidOid;
@@ -142,6 +158,7 @@ static Oid age_vle_edge_indices_equal_oid = InvalidOid;
 static Oid age_vle_edge_reversed_index_equal_oid = InvalidOid;
 static Oid age_vle_edge_label_at_oid = InvalidOid;
 static Oid age_vle_edge_properties_at_oid = InvalidOid;
+static Oid age_vle_edge_property_at_oid = InvalidOid;
 static Oid age_vle_edge_start_node_at_oid = InvalidOid;
 static Oid age_vle_edge_end_node_at_oid = InvalidOid;
 static Oid age_vle_edge_endpoint_field_at_oid = InvalidOid;
@@ -149,6 +166,11 @@ static Oid age_vle_edge_start_id_at_oid = InvalidOid;
 static Oid age_vle_edge_end_id_at_oid = InvalidOid;
 static Oid age_materialize_vle_edges_tail_oid = InvalidOid;
 static Oid age_materialize_vle_edges_reversed_oid = InvalidOid;
+static Oid age_vle_terminal_vertex_oid = InvalidOid;
+static Oid age_vle_terminal_vertex_properties_oid = InvalidOid;
+static Oid age_vle_terminal_vertex_property_oid = InvalidOid;
+static Oid age_vle_terminal_vertex_property_from_path_oid = InvalidOid;
+static Oid age_vle_terminal_property_output_oid = InvalidOid;
 
 static Node *transform_cypher_expr_recurse(cypher_parsestate *cpstate,
                                            Node *expr);
@@ -226,6 +248,11 @@ static bool parse_fixed_path_cardinality_list(
     cypher_parsestate *cpstate, FuncCall *inner_fn, char **list_name,
     char **transform_name, cypher_node **start_node,
     cypher_relationship **single_rel, cypher_node **end_node);
+static bool parse_fixed_path_cardinality_metadata(
+    cypher_parsestate *cpstate, FuncCall *inner_fn, char **list_name,
+    char **transform_name, int64 *edge_count, char **first_edge_name);
+static Node *try_make_fixed_path_entity_list(cypher_parsestate *cpstate,
+                                             FuncCall *fn, bool nodes_list);
 static bool parse_path_list_slice_arg(A_Indirection *a_ind,
                                       FuncCall **list_fn,
                                       A_Indices **indices,
@@ -325,6 +352,13 @@ static Node *transform_CoalesceExpr(cypher_parsestate *cpstate,
                                     CoalesceExpr *cexpr);
 static Node *transform_SubLink(cypher_parsestate *cpstate, SubLink *sublink);
 static Node *transform_FuncCall(cypher_parsestate *cpstate, FuncCall *fn);
+static bool try_rewrite_collect_property_access(Aggref *aggref);
+static bool extract_collect_property_access_args(Expr *expr,
+                                                 Node **properties,
+                                                 Node **key);
+static Node *try_rewrite_pg_scalar_property_access(FuncExpr *func_expr,
+                                                   Oid helper_oid,
+                                                   Oid result_type);
 static Node *transform_WholeRowRef(ParseState *pstate, ParseNamespaceItem *pnsi,
                                    int location, int sublevels_up);
 static ArrayExpr *make_agtype_array_expr(List *args);
@@ -437,7 +471,6 @@ static bool parse_vle_path_boundary_list_index(cypher_parsestate *cpstate,
                                                char **list_name,
                                                int64 *index);
 static bool is_vle_direct_path_list_func(Node *node);
-static bool is_vle_path_list_derived_func(Node *node);
 static bool parse_vle_normal_or_boundary_index(cypher_parsestate *cpstate,
                                                Node *node, Expr **vle_expr,
                                                Node **index_expr);
@@ -603,6 +636,8 @@ static Node *try_transform_vle_path_relationships(cypher_parsestate *cpstate,
                                                   FuncCall *fn);
 static Node *try_transform_vle_path_nodes(cypher_parsestate *cpstate,
                                           FuncCall *fn);
+static Node *try_transform_semantic_agtype_builtin(cypher_parsestate *cpstate,
+                                                   FuncCall *fn);
 static FuncCall *make_unary_func_call(FuncCall *fn, Node *arg, int location);
 static A_Indices *make_index_indices(int64 index, int location);
 static A_Indirection *make_indexed_indirection(Node *arg, int64 index,
@@ -911,8 +946,11 @@ static Node *try_transform_vle_path_nodes_slice(cypher_parsestate *cpstate,
                                                 A_Indirection *a_ind);
 static Node *try_transform_vle_path_list_slice(cypher_parsestate *cpstate,
                                                A_Indirection *a_ind);
-static Node *try_transform_vle_path_boundary_id_access(
+static Node *try_transform_vle_terminal_vertex_property_access(
     cypher_parsestate *cpstate, A_Indirection *a_ind);
+static bool retarget_vle_terminal_property_output(cypher_parsestate *cpstate,
+                                                  Node *vle_path,
+                                                  Const *key_const);
 static FuncExpr *make_vle_index_properties_expr(cypher_parsestate *cpstate,
                                                 A_Indirection *indexed_arg,
                                                 int location);
@@ -944,6 +982,10 @@ static void invalidate_function_caches(Datum arg, int cache_id,
 static void initialize_function_extension_cache(void);
 static void initialize_function_exists_cache(void);
 static Oid get_agtype_access_operator_oid(void);
+static Oid get_agtype_object_field_int8_oid(void);
+static Oid get_agtype_object_field_float8_oid(void);
+static Oid get_agtype_object_field_text_agtype_oid(void);
+static Oid get_agtype_object_field_numeric_agtype_oid(void);
 static Oid get_agtype_access_slice_oid(void);
 static Oid get_agtype_in_operator_oid(void);
 static Oid get_agtype_add_oid(void);
@@ -954,8 +996,8 @@ static Oid get_agtype_build_map_oid(void);
 static Oid get_agtype_build_map_nonull_oid(void);
 static Oid get_age_properties_oid(void);
 static Oid get_age_keys_oid(void);
-static Oid get_build_vertex_oid(void);
-static Oid get_build_edge_oid(void);
+static Oid get_build_vertex_label_oid(void);
+static Oid get_build_edge_label_oid(void);
 static Oid get_agtype_string_match_starts_with_oid(void);
 static Oid get_agtype_string_match_ends_with_oid(void);
 static Oid get_agtype_string_match_contains_oid(void);
@@ -976,6 +1018,7 @@ static Oid get_age_materialize_vle_node_tail_last_oid(void);
 static Oid get_age_vle_node_tail_last_id_oid(void);
 static Oid get_age_vle_node_id_at_oid(void);
 static Oid get_age_vle_node_properties_at_oid(void);
+static Oid get_age_vle_node_property_at_oid(void);
 static Oid get_age_materialize_vle_nodes_slice_oid(void);
 static Oid get_age_materialize_vle_nodes_tail_oid(void);
 static Oid get_age_materialize_vle_nodes_reversed_oid(void);
@@ -992,6 +1035,7 @@ static Oid get_age_vle_edge_indices_equal_oid(void);
 static Oid get_age_vle_edge_reversed_index_equal_oid(void);
 static Oid get_age_vle_edge_label_at_oid(void);
 static Oid get_age_vle_edge_properties_at_oid(void);
+static Oid get_age_vle_edge_property_at_oid(void);
 static Oid get_age_vle_edge_start_node_at_oid(void);
 static Oid get_age_vle_edge_end_node_at_oid(void);
 static Oid get_age_vle_edge_endpoint_field_at_oid(void);
@@ -999,6 +1043,11 @@ static Oid get_age_vle_edge_start_id_at_oid(void);
 static Oid get_age_vle_edge_end_id_at_oid(void);
 static Oid get_age_materialize_vle_edges_tail_oid(void);
 static Oid get_age_materialize_vle_edges_reversed_oid(void);
+static Oid get_age_vle_terminal_vertex_oid(void);
+static Oid get_age_vle_terminal_vertex_properties_oid(void);
+static Oid get_age_vle_terminal_vertex_property_oid(void);
+static Oid get_age_vle_terminal_vertex_property_from_path_oid(void);
+static Oid get_age_vle_terminal_property_output_oid(void);
 static bool function_exists(char *funcname, char *extension);
 static Node *coerce_expr_flexible(ParseState *pstate, Node *expr,
                                   Oid source_oid, Oid target_oid,
@@ -1893,13 +1942,15 @@ static FuncExpr *make_build_edge_expr(cypher_parsestate *cpstate, Node *id,
                                       Node *start_id, Node *end_id,
                                       Node *props, int location)
 {
-    FuncExpr *label_name_expr;
+    Const *graph_oid_const;
     FuncExpr *edge_expr;
 
-    label_name_expr = make_label_name_expr(cpstate, id, location);
-    edge_expr = makeFuncExpr(get_build_edge_oid(), AGTYPEOID,
-                             list_make5(id, start_id, end_id,
-                                        label_name_expr, props),
+    graph_oid_const = makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
+                                ObjectIdGetDatum(cpstate->graph_oid), false,
+                                true);
+    edge_expr = makeFuncExpr(get_build_edge_label_oid(), AGTYPEOID,
+                             list_make5(graph_oid_const, id, start_id, end_id,
+                                        props),
                              InvalidOid, InvalidOid,
                              COERCE_EXPLICIT_CALL);
     edge_expr->location = location;
@@ -1910,12 +1961,14 @@ static FuncExpr *make_build_edge_expr(cypher_parsestate *cpstate, Node *id,
 static FuncExpr *make_build_vertex_expr(cypher_parsestate *cpstate, Node *id,
                                         Node *props, int location)
 {
-    FuncExpr *label_name_expr;
+    Const *graph_oid_const;
     FuncExpr *vertex_expr;
 
-    label_name_expr = make_label_name_expr(cpstate, id, location);
-    vertex_expr = makeFuncExpr(get_build_vertex_oid(), AGTYPEOID,
-                               list_make3(id, label_name_expr, props),
+    graph_oid_const = makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
+                                ObjectIdGetDatum(cpstate->graph_oid), false,
+                                true);
+    vertex_expr = makeFuncExpr(get_build_vertex_label_oid(), AGTYPEOID,
+                               list_make3(graph_oid_const, id, props),
                                InvalidOid, InvalidOid,
                                COERCE_EXPLICIT_CALL);
     vertex_expr->location = location;
@@ -2042,6 +2095,51 @@ static bool get_fixed_path_parts(cypher_parsestate *cpstate,
     return true;
 }
 
+static bool get_fixed_path_metadata(cypher_parsestate *cpstate,
+                                    ColumnRef *path_ref,
+                                    int64 *edge_count,
+                                    char **first_edge_name)
+{
+    transform_entity *entity;
+    cypher_path *path;
+    char *path_name = NULL;
+    ListCell *lc;
+
+    if (!parse_single_column_ref((Node *)path_ref, &path_name, NULL))
+        return false;
+
+    entity = find_variable(cpstate, path_name);
+    if (entity == NULL || entity->type != ENT_PATH)
+        return false;
+
+    path = entity->entity.path;
+    if (path == NULL || path->path == NIL)
+        return false;
+
+    *edge_count = 0;
+    *first_edge_name = NULL;
+
+    foreach(lc, path->path)
+    {
+        Node *path_node = lfirst(lc);
+
+        if (is_ag_node(path_node, cypher_relationship))
+        {
+            cypher_relationship *rel = (cypher_relationship *)path_node;
+
+            if (rel->varlen != NULL || rel->name == NULL)
+                return false;
+
+            if (*first_edge_name == NULL)
+                *first_edge_name = rel->name;
+
+            (*edge_count)++;
+        }
+    }
+
+    return *edge_count > 0 && *first_edge_name != NULL;
+}
+
 static bool parse_fixed_path_list_function(cypher_parsestate *cpstate,
                                            FuncCall *list_fn,
                                            char **list_name,
@@ -2115,6 +2213,145 @@ static bool parse_fixed_path_cardinality_list(
     return parse_fixed_path_list_function(cpstate, list_fn, list_name,
                                           start_node, single_rel, end_node,
                                           false);
+}
+
+static bool parse_fixed_path_cardinality_metadata(
+    cypher_parsestate *cpstate, FuncCall *inner_fn, char **list_name,
+    char **transform_name, int64 *edge_count, char **first_edge_name)
+{
+    FuncCall *list_fn = NULL;
+    char *inner_name = NULL;
+    Node *inner_arg = NULL;
+    Node *path_arg = NULL;
+
+    *transform_name = NULL;
+
+    if (!parse_path_list_or_tail_reverse_func_arg(inner_fn, &inner_name,
+                                                  &inner_arg))
+    {
+        return false;
+    }
+
+    if (is_path_list_name(inner_name))
+    {
+        list_fn = inner_fn;
+    }
+    else if (is_tail_reverse_name(inner_name) &&
+             IsA(inner_arg, FuncCall))
+    {
+        list_fn = (FuncCall *)inner_arg;
+        *transform_name = inner_name;
+    }
+    else
+    {
+        return false;
+    }
+
+    if (!parse_path_list_func_arg(list_fn, T_ColumnRef, list_name, &path_arg))
+        return false;
+
+    return get_fixed_path_metadata(cpstate, (ColumnRef *)path_arg, edge_count,
+                                   first_edge_name);
+}
+
+static Node *try_make_fixed_path_entity_list(cypher_parsestate *cpstate,
+                                             FuncCall *fn, bool nodes_list)
+{
+    ParseState *pstate = (ParseState *)cpstate;
+    Node *path_arg = NULL;
+    transform_entity *entity;
+    cypher_path *path;
+    char *path_name = NULL;
+    char *list_name = NULL;
+    char *first_edge_name = NULL;
+    List *elems = NIL;
+    ListCell *lc;
+    FuncExpr *list_expr;
+    Node *edge_id;
+
+    if (!parse_path_list_func_arg(fn, T_ColumnRef, &list_name, &path_arg))
+        return NULL;
+
+    if ((nodes_list && !is_nodes_list_name(list_name)) ||
+        (!nodes_list && !is_relationships_list_name(list_name)))
+    {
+        return NULL;
+    }
+
+    if (!parse_single_column_ref(path_arg, &path_name, NULL))
+        return NULL;
+
+    entity = find_variable(cpstate, path_name);
+    if (entity == NULL || entity->type != ENT_PATH)
+        return NULL;
+
+    path = entity->entity.path;
+    if (path == NULL || path->path == NIL)
+        return NULL;
+
+    foreach(lc, path->path)
+    {
+        Node *path_node = lfirst(lc);
+
+        if (nodes_list && is_ag_node(path_node, cypher_node))
+        {
+            cypher_node *node = (cypher_node *)path_node;
+            Node *vertex;
+
+            if (node->name == NULL)
+                return NULL;
+
+            vertex = try_build_vertex_from_raw_attrs(cpstate, node->name,
+                                                     fn->location);
+            if (vertex == NULL)
+                return NULL;
+
+            elems = lappend(elems, vertex);
+        }
+        else if (!nodes_list && is_ag_node(path_node, cypher_relationship))
+        {
+            cypher_relationship *rel = (cypher_relationship *)path_node;
+            Node *edge;
+
+            if (rel->varlen != NULL || rel->name == NULL)
+                return NULL;
+
+            if (first_edge_name == NULL)
+                first_edge_name = rel->name;
+
+            edge = try_build_edge_from_raw_attrs(cpstate, rel->name,
+                                                 fn->location);
+            if (edge == NULL)
+                return NULL;
+
+            elems = lappend(elems, edge);
+        }
+        else if (is_ag_node(path_node, cypher_relationship))
+        {
+            cypher_relationship *rel = (cypher_relationship *)path_node;
+
+            if (rel->varlen != NULL || rel->name == NULL)
+                return NULL;
+
+            if (first_edge_name == NULL)
+                first_edge_name = rel->name;
+        }
+    }
+
+    if (elems == NIL || first_edge_name == NULL)
+        return NULL;
+
+    edge_id = make_raw_attr_var(pstate, first_edge_name, AG_EDGE_COLNAME_ID,
+                                fn->location);
+    if (edge_id == NULL)
+        return NULL;
+
+    list_expr = makeFuncExpr(get_agtype_build_list_oid(), AGTYPEOID, elems,
+                             InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+    list_expr->location = fn->location;
+
+    return make_agtype_case_when_not_null(edge_id, (Expr *)list_expr,
+                                          fn->location);
 }
 
 static bool parse_path_list_slice_arg(A_Indirection *a_ind,
@@ -2392,9 +2629,20 @@ static Node *make_age_keys_expr(Node *properties_expr, int location)
     return (Node *)keys_expr;
 }
 
-static FuncExpr *make_agtype_access_expr(List *access_args, int location)
+static FuncExpr *make_agtype_access_expr(List *access_args, int location,
+                                         bool expand_variadic)
 {
     FuncExpr *access_expr;
+
+    if (expand_variadic && list_length(access_args) == 2)
+    {
+        access_expr = makeFuncExpr(get_agtype_access_operator_oid(), AGTYPEOID,
+                                   access_args, InvalidOid, InvalidOid,
+                                   COERCE_EXPLICIT_CALL);
+        access_expr->location = location;
+
+        return access_expr;
+    }
 
     access_expr = makeFuncExpr(get_agtype_access_operator_oid(), AGTYPEOID,
                                list_make1(make_agtype_array_expr(access_args)),
@@ -2591,27 +2839,59 @@ static Node *make_vle_indexed_list_expr(Expr *vle_expr, const char *list_name,
 static Node *make_vle_indexed_id_expr(Expr *vle_expr, const char *list_name,
                                       int64 index, int location)
 {
+    Oid func_oid;
+
+    func_oid = is_nodes_list_name(list_name) ? get_age_vle_node_id_at_oid() :
+        get_age_vle_edge_id_at_oid();
+
     return make_vle_indexed_list_expr(vle_expr, list_name, index, location,
-                                      get_age_vle_node_id_at_oid(),
-                                      get_age_vle_edge_id_at_oid());
+                                      func_oid, func_oid);
 }
 
 static Node *make_vle_indexed_properties_expr(Expr *vle_expr,
                                               const char *list_name,
                                               int64 index, int location)
 {
+    Oid func_oid;
+
+    func_oid = is_nodes_list_name(list_name) ?
+        get_age_vle_node_properties_at_oid() :
+        get_age_vle_edge_properties_at_oid();
+
     return make_vle_indexed_list_expr(vle_expr, list_name, index, location,
-                                      get_age_vle_node_properties_at_oid(),
-                                      get_age_vle_edge_properties_at_oid());
+                                      func_oid, func_oid);
+}
+
+static Node *make_vle_indexed_property_expr(Expr *vle_expr,
+                                            const char *list_name,
+                                            Node *index_expr,
+                                            Const *key_expr)
+{
+    Oid func_oid;
+
+    func_oid = is_nodes_list_name(list_name) ?
+        get_age_vle_node_property_at_oid() :
+        get_age_vle_edge_property_at_oid();
+
+    return (Node *)makeFuncExpr(func_oid, AGTYPEOID,
+                                list_make3((Node *)vle_expr, index_expr,
+                                           key_expr),
+                                InvalidOid, InvalidOid,
+                                COERCE_EXPLICIT_CALL);
 }
 
 static Node *make_vle_materialized_index_expr(Expr *vle_expr,
                                               const char *list_name,
                                               int64 index, int location)
 {
+    Oid func_oid;
+
+    func_oid = is_nodes_list_name(list_name) ?
+        get_age_materialize_vle_node_at_oid() :
+        get_age_materialize_vle_edge_at_oid();
+
     return make_vle_indexed_list_expr(vle_expr, list_name, index, location,
-                                      get_age_materialize_vle_node_at_oid(),
-                                      get_age_materialize_vle_edge_at_oid());
+                                      func_oid, func_oid);
 }
 
 static Node *make_vle_edge_endpoint_index_expr(Expr *vle_expr,
@@ -4043,7 +4323,7 @@ static Node *transform_cypher_map_projection(cypher_parsestate *cpstate,
                                        string_to_agtype(elem->key), false,
                                        false);
                 val = (Node *)make_agtype_access_expr(
-                    list_make2(orig_map_expr, key_agtype), -1);
+                    list_make2(orig_map_expr, key_agtype), -1, false);
 
                 break;
             }
@@ -4427,8 +4707,8 @@ static Node *transform_column_ref_for_indirection(cypher_parsestate *cpstate,
 
         entity = find_variable(cpstate, relname);
         if (entity != NULL &&
-            !entity->declared_in_current_clause &&
-            entity->type == ENT_EDGE)
+            entity->has_raw_targets &&
+            (entity->type == ENT_VERTEX || entity->type == ENT_EDGE))
         {
             Node *raw_props;
 
@@ -4448,6 +4728,16 @@ static Node *transform_column_ref_for_indirection(cypher_parsestate *cpstate,
     /* find the properties column of the NSI and return a var for it */
     node = scanNSItemForColumn(pstate, pnsi, levels_up, "properties",
                                cr->location);
+    if (node == NULL)
+    {
+        entity = find_variable(cpstate, relname);
+        if (entity != NULL && entity->has_raw_targets)
+        {
+            node = make_raw_attr_var(pstate, relname,
+                                     AG_VERTEX_COLNAME_PROPERTIES,
+                                     cr->location);
+        }
+    }
 
     /*
      * If there's no "properties" column, continue transforming the
@@ -4464,6 +4754,7 @@ static Node *try_transform_fast_indirection(cypher_parsestate *cpstate,
                                             A_Indirection *a_ind)
 {
     static const cypher_fast_indirection_transform fast_transforms[] = {
+        try_transform_vle_terminal_vertex_property_access,
         try_transform_fixed_path_indexed_endpoint_property_access,
         try_transform_current_edge_endpoint_property_access,
         try_transform_fixed_path_slice_endpoint_property_access,
@@ -4476,7 +4767,6 @@ static Node *try_transform_fast_indirection(cypher_parsestate *cpstate,
         try_transform_vle_path_nodes_access,
         try_transform_vle_path_nodes_slice,
         try_transform_vle_path_list_slice,
-        try_transform_vle_path_boundary_id_access,
         try_transform_vle_path_boundary_property_access,
         try_transform_vle_path_relationships_access,
         try_transform_vle_edge_reverse_access,
@@ -4518,9 +4808,6 @@ static Node *transform_A_Indirection(cypher_parsestate *cpstate,
     {
         return fast_expr;
     }
-
-    /* get the agtype_access_slice function */
-    func_slice_oid = get_agtype_access_slice_oid();
 
     /*
      * If the indirection argument is a ColumnRef, we want to pull out the
@@ -4564,7 +4851,10 @@ static Node *transform_A_Indirection(cypher_parsestate *cpstate,
             /* were we working on an access? if so, wrap and close it */
             if (is_access)
             {
-                func_expr = make_agtype_access_expr(args, location);
+                func_expr = make_agtype_access_expr(
+                    args, location,
+                    pstate->p_expr_kind == EXPR_KIND_SELECT_TARGET &&
+                    cpstate->expand_select_target_access);
 
                 /*
                  * The result of this function is the input to the next access
@@ -4607,6 +4897,8 @@ static Node *transform_A_Indirection(cypher_parsestate *cpstate,
             args = lappend(args, node);
 
             /* wrap and close it */
+            if (!OidIsValid(func_slice_oid))
+                func_slice_oid = get_agtype_access_slice_oid();
             func_expr = makeFuncExpr(func_slice_oid, AGTYPEOID, args,
                                      InvalidOid, InvalidOid,
                                      COERCE_EXPLICIT_CALL);
@@ -4650,7 +4942,10 @@ static Node *transform_A_Indirection(cypher_parsestate *cpstate,
     /* if we were doing an access, we need wrap the args with access func. */
     if (is_access)
     {
-        func_expr = make_agtype_access_expr(args, location);
+        func_expr = make_agtype_access_expr(
+            args, location,
+            pstate->p_expr_kind == EXPR_KIND_SELECT_TARGET &&
+            cpstate->expand_select_target_access);
     }
 
     Assert(func_expr != NULL);
@@ -4720,6 +5015,8 @@ static Node *transform_cypher_typecast(cypher_parsestate *cpstate,
     {
         char *typecast = strVal(linitial(target_typ->names));
         int typecast_len = strlen(typecast);
+        Oid scalar_property_helper_oid = InvalidOid;
+        Oid scalar_property_result_type = InvalidOid;
 
         /* append the name of the requested typecast function */
         if (typecast_len == 4 && pg_strcasecmp(typecast, "edge") == 0)
@@ -4737,6 +5034,9 @@ static Node *transform_cypher_typecast(cypher_parsestate *cpstate,
         else if (typecast_len == 7 && pg_strcasecmp(typecast, "numeric") == 0)
         {
             fname = lappend(fname, makeString(FUNC_AGTYPE_TYPECAST_NUMERIC));
+            scalar_property_helper_oid =
+                get_agtype_object_field_numeric_agtype_oid();
+            scalar_property_result_type = AGTYPEOID;
         }
         else if (typecast_len == 5 && pg_strcasecmp(typecast, "float") == 0)
         {
@@ -4753,11 +5053,15 @@ static Node *transform_cypher_typecast(cypher_parsestate *cpstate,
                  pg_strcasecmp(typecast, "pg_float8") == 0)
         {
             fname = lappend(fname, makeString(FUNC_AGTYPE_TYPECAST_PG_FLOAT8));
+            scalar_property_helper_oid = get_agtype_object_field_float8_oid();
+            scalar_property_result_type = FLOAT8OID;
         }
         else if (typecast_len == 9 &&
                  pg_strcasecmp(typecast, "pg_bigint") == 0)
         {
             fname = lappend(fname, makeString(FUNC_AGTYPE_TYPECAST_PG_BIGINT));
+            scalar_property_helper_oid = get_agtype_object_field_int8_oid();
+            scalar_property_result_type = INT8OID;
         }
         else if ((typecast_len == 4 &&
                   pg_strcasecmp(typecast, "bool") == 0) ||
@@ -4770,6 +5074,9 @@ static Node *transform_cypher_typecast(cypher_parsestate *cpstate,
                  pg_strcasecmp(typecast, "pg_text") == 0)
         {
             fname = lappend(fname, makeString(FUNC_AGTYPE_TYPECAST_PG_TEXT));
+            scalar_property_helper_oid =
+                get_agtype_object_field_text_agtype_oid();
+            scalar_property_result_type = TEXTOID;
         }
         else
         {
@@ -4781,7 +5088,24 @@ static Node *transform_cypher_typecast(cypher_parsestate *cpstate,
         ctypecast->location);
 
         /* return the transformed function */
-        return transform_FuncCall(cpstate, fnode);
+        {
+            Node *result = transform_FuncCall(cpstate, fnode);
+
+            if (OidIsValid(scalar_property_helper_oid) &&
+                OidIsValid(scalar_property_result_type) &&
+                IsA(result, FuncExpr))
+            {
+                Node *rewritten;
+
+                rewritten = try_rewrite_pg_scalar_property_access(
+                    castNode(FuncExpr, result), scalar_property_helper_oid,
+                    scalar_property_result_type);
+                if (rewritten != NULL)
+                    return rewritten;
+            }
+
+            return result;
+        }
     }
 
 fallback_coercion:
@@ -5357,6 +5681,10 @@ static void invalidate_function_caches(Datum arg, int cache_id,
     }
 
     agtype_access_operator_oid = InvalidOid;
+    agtype_object_field_int8_oid = InvalidOid;
+    agtype_object_field_float8_oid = InvalidOid;
+    agtype_object_field_text_agtype_oid = InvalidOid;
+    agtype_object_field_numeric_agtype_oid = InvalidOid;
     agtype_access_slice_oid = InvalidOid;
     agtype_in_operator_oid = InvalidOid;
     agtype_add_oid = InvalidOid;
@@ -5367,8 +5695,8 @@ static void invalidate_function_caches(Datum arg, int cache_id,
     agtype_build_map_nonull_oid = InvalidOid;
     age_properties_oid = InvalidOid;
     age_keys_oid = InvalidOid;
-    build_vertex_oid = InvalidOid;
-    build_edge_oid = InvalidOid;
+    build_vertex_label_oid = InvalidOid;
+    build_edge_label_oid = InvalidOid;
     agtype_string_match_starts_with_oid = InvalidOid;
     agtype_string_match_ends_with_oid = InvalidOid;
     agtype_string_match_contains_oid = InvalidOid;
@@ -5391,6 +5719,7 @@ static void invalidate_function_caches(Datum arg, int cache_id,
     age_vle_node_label_at_oid = InvalidOid;
     age_vle_node_labels_at_oid = InvalidOid;
     age_vle_node_properties_at_oid = InvalidOid;
+    age_vle_node_property_at_oid = InvalidOid;
     age_materialize_vle_nodes_slice_oid = InvalidOid;
     age_materialize_vle_nodes_tail_oid = InvalidOid;
     age_materialize_vle_nodes_reversed_oid = InvalidOid;
@@ -5407,6 +5736,7 @@ static void invalidate_function_caches(Datum arg, int cache_id,
     age_vle_edge_reversed_index_equal_oid = InvalidOid;
     age_vle_edge_label_at_oid = InvalidOid;
     age_vle_edge_properties_at_oid = InvalidOid;
+    age_vle_edge_property_at_oid = InvalidOid;
     age_vle_edge_start_node_at_oid = InvalidOid;
     age_vle_edge_end_node_at_oid = InvalidOid;
     age_vle_edge_endpoint_field_at_oid = InvalidOid;
@@ -5414,6 +5744,11 @@ static void invalidate_function_caches(Datum arg, int cache_id,
     age_vle_edge_end_id_at_oid = InvalidOid;
     age_materialize_vle_edges_tail_oid = InvalidOid;
     age_materialize_vle_edges_reversed_oid = InvalidOid;
+    age_vle_terminal_vertex_oid = InvalidOid;
+    age_vle_terminal_vertex_properties_oid = InvalidOid;
+    age_vle_terminal_vertex_property_oid = InvalidOid;
+    age_vle_terminal_vertex_property_from_path_oid = InvalidOid;
+    age_vle_terminal_property_output_oid = InvalidOid;
 }
 
 static Oid get_agtype_access_operator_oid(void)
@@ -5427,6 +5762,136 @@ static Oid get_agtype_access_operator_oid(void)
     }
 
     return agtype_access_operator_oid;
+}
+
+static Oid get_agtype_object_field_int8_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(agtype_object_field_int8_oid))
+    {
+        agtype_object_field_int8_oid =
+            get_ag_func_oid("agtype_object_field_int8", 2,
+                            AGTYPEOID, AGTYPEOID);
+    }
+
+    return agtype_object_field_int8_oid;
+}
+
+static Oid get_agtype_object_field_float8_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(agtype_object_field_float8_oid))
+    {
+        agtype_object_field_float8_oid =
+            get_ag_func_oid("agtype_object_field_float8", 2,
+                            AGTYPEOID, AGTYPEOID);
+    }
+
+    return agtype_object_field_float8_oid;
+}
+
+static Oid get_agtype_object_field_text_agtype_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(agtype_object_field_text_agtype_oid))
+    {
+        agtype_object_field_text_agtype_oid =
+            get_ag_func_oid("agtype_object_field_text_agtype", 2,
+                            AGTYPEOID, AGTYPEOID);
+    }
+
+    return agtype_object_field_text_agtype_oid;
+}
+
+static Oid get_agtype_object_field_numeric_agtype_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(agtype_object_field_numeric_agtype_oid))
+    {
+        agtype_object_field_numeric_agtype_oid =
+            get_ag_func_oid("agtype_object_field_numeric_agtype", 2,
+                            AGTYPEOID, AGTYPEOID);
+    }
+
+    return agtype_object_field_numeric_agtype_oid;
+}
+
+static bool try_rewrite_collect_property_access(Aggref *aggref)
+{
+    return false;
+}
+
+static bool extract_collect_property_access_args(Expr *expr,
+                                                 Node **properties,
+                                                 Node **key)
+{
+    FuncExpr *func;
+
+    if (expr == NULL || !IsA(expr, FuncExpr))
+        return false;
+
+    func = castNode(FuncExpr, expr);
+    if (func->funcid != get_agtype_access_operator_oid())
+        return false;
+
+    if (list_length(func->args) == 2)
+    {
+        *properties = linitial(func->args);
+        *key = lsecond(func->args);
+    }
+    else if (list_length(func->args) == 1 && IsA(linitial(func->args), ArrayExpr))
+    {
+        ArrayExpr *array = linitial_node(ArrayExpr, func->args);
+
+        if (list_length(array->elements) != 2)
+            return false;
+
+        *properties = linitial(array->elements);
+        *key = lsecond(array->elements);
+    }
+    else
+    {
+        return false;
+    }
+
+    return *properties != NULL &&
+        *key != NULL &&
+        IsA(*properties, Var) &&
+        exprType(*properties) == AGTYPEOID &&
+        exprType(*key) == AGTYPEOID;
+}
+
+static Node *try_rewrite_pg_scalar_property_access(FuncExpr *func_expr,
+                                                   Oid helper_oid,
+                                                   Oid result_type)
+{
+    Node *arg;
+    Node *properties;
+    Node *key;
+    FuncExpr *helper;
+
+    if (func_expr == NULL ||
+        !OidIsValid(helper_oid) ||
+        !OidIsValid(result_type) ||
+        list_length(func_expr->args) != 1)
+    {
+        return NULL;
+    }
+
+    arg = linitial(func_expr->args);
+    if (!extract_collect_property_access_args((Expr *)arg, &properties, &key))
+        return NULL;
+
+    helper = makeFuncExpr(helper_oid, result_type,
+                          list_make2(copyObject(properties), copyObject(key)),
+                          InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+    helper->location = func_expr->location;
+
+    return (Node *)helper;
 }
 
 static Oid get_agtype_access_slice_oid(void)
@@ -5547,42 +6012,46 @@ static Oid get_age_properties_oid(void)
 
 static Oid get_age_keys_oid(void)
 {
+    const AgeBuiltinFuncMeta *meta;
+
     initialize_function_caches();
 
     if (!OidIsValid(age_keys_oid))
     {
-        age_keys_oid = get_ag_func_oid("age_keys", 1, AGTYPEOID);
+        meta = get_age_builtin_func_meta_by_name("keys");
+        Assert(meta != NULL);
+        age_keys_oid = get_age_builtin_func_oid(meta);
     }
 
     return age_keys_oid;
 }
 
-static Oid get_build_edge_oid(void)
+static Oid get_build_edge_label_oid(void)
 {
     initialize_function_caches();
 
-    if (!OidIsValid(build_edge_oid))
+    if (!OidIsValid(build_edge_label_oid))
     {
-        build_edge_oid =
-            get_ag_func_oid("_agtype_build_edge", 5, GRAPHIDOID, GRAPHIDOID,
-                            GRAPHIDOID, CSTRINGOID, AGTYPEOID);
+        build_edge_label_oid =
+            get_ag_func_oid("_agtype_build_edge_label", 5, OIDOID, GRAPHIDOID,
+                            GRAPHIDOID, GRAPHIDOID, AGTYPEOID);
     }
 
-    return build_edge_oid;
+    return build_edge_label_oid;
 }
 
-static Oid get_build_vertex_oid(void)
+static Oid get_build_vertex_label_oid(void)
 {
     initialize_function_caches();
 
-    if (!OidIsValid(build_vertex_oid))
+    if (!OidIsValid(build_vertex_label_oid))
     {
-        build_vertex_oid =
-            get_ag_func_oid("_agtype_build_vertex", 3, GRAPHIDOID, CSTRINGOID,
-                            AGTYPEOID);
+        build_vertex_label_oid =
+            get_ag_func_oid("_agtype_build_vertex_label", 3, OIDOID,
+                            GRAPHIDOID, AGTYPEOID);
     }
 
-    return build_vertex_oid;
+    return build_vertex_label_oid;
 }
 
 static Oid get_agtype_string_match_starts_with_oid(void)
@@ -5659,7 +6128,7 @@ static Oid get_age_vle_path_length_oid(void)
     if (!OidIsValid(age_vle_path_length_oid))
     {
         age_vle_path_length_oid =
-            get_ag_func_oid("age_vle_path_length", 1, AGTYPEOID);
+            get_age_builtin_func_oid_by_name("age_vle_path_length");
     }
 
     return age_vle_path_length_oid;
@@ -5672,7 +6141,7 @@ static Oid get_age_vle_path_node_count_oid(void)
     if (!OidIsValid(age_vle_path_node_count_oid))
     {
         age_vle_path_node_count_oid =
-            get_ag_func_oid("age_vle_path_node_count", 1, AGTYPEOID);
+            get_age_builtin_func_oid_by_name("age_vle_path_node_count");
     }
 
     return age_vle_path_node_count_oid;
@@ -5685,7 +6154,7 @@ static Oid get_age_vle_edge_tail_count_oid(void)
     if (!OidIsValid(age_vle_edge_tail_count_oid))
     {
         age_vle_edge_tail_count_oid =
-            get_ag_func_oid("age_vle_edge_tail_count", 1, AGTYPEOID);
+            get_age_builtin_func_oid_by_name("age_vle_edge_tail_count");
     }
 
     return age_vle_edge_tail_count_oid;
@@ -5740,8 +6209,7 @@ static Oid get_age_materialize_vle_list_slice_oid(void)
     if (!OidIsValid(age_materialize_vle_list_slice_oid))
     {
         age_materialize_vle_list_slice_oid =
-            get_ag_func_oid("age_materialize_vle_list_slice", 4, AGTYPEOID,
-                            AGTYPEOID, AGTYPEOID, AGTYPEOID);
+            get_age_builtin_func_oid_by_name("age_materialize_vle_list_slice");
     }
 
     return age_materialize_vle_list_slice_oid;
@@ -5754,8 +6222,8 @@ static Oid get_age_materialize_vle_slice_boundary_oid(void)
     if (!OidIsValid(age_materialize_vle_slice_boundary_oid))
     {
         age_materialize_vle_slice_boundary_oid =
-            get_ag_func_oid("age_materialize_vle_slice_boundary", 4,
-                            AGTYPEOID, AGTYPEOID, AGTYPEOID, AGTYPEOID);
+            get_age_builtin_func_oid_by_name(
+                "age_materialize_vle_slice_boundary");
     }
 
     return age_materialize_vle_slice_boundary_oid;
@@ -5768,7 +6236,7 @@ static Oid get_age_materialize_vle_edges_oid(void)
     if (!OidIsValid(age_materialize_vle_edges_oid))
     {
         age_materialize_vle_edges_oid =
-            get_ag_func_oid("age_materialize_vle_edges", 1, AGTYPEOID);
+            get_age_builtin_func_oid_by_name("age_materialize_vle_edges");
     }
 
     return age_materialize_vle_edges_oid;
@@ -5781,7 +6249,7 @@ static Oid get_age_materialize_vle_nodes_oid(void)
     if (!OidIsValid(age_materialize_vle_nodes_oid))
     {
         age_materialize_vle_nodes_oid =
-            get_ag_func_oid("age_materialize_vle_nodes", 1, AGTYPEOID);
+            get_age_builtin_func_oid_by_name("age_materialize_vle_nodes");
     }
 
     return age_materialize_vle_nodes_oid;
@@ -5794,8 +6262,7 @@ static Oid get_age_materialize_vle_node_at_oid(void)
     if (!OidIsValid(age_materialize_vle_node_at_oid))
     {
         age_materialize_vle_node_at_oid =
-            get_ag_func_oid("age_materialize_vle_node_at", 2, AGTYPEOID,
-                            AGTYPEOID);
+            get_age_builtin_func_oid_by_name("age_materialize_vle_node_at");
     }
 
     return age_materialize_vle_node_at_oid;
@@ -5808,8 +6275,8 @@ static Oid get_age_materialize_vle_node_tail_last_oid(void)
     if (!OidIsValid(age_materialize_vle_node_tail_last_oid))
     {
         age_materialize_vle_node_tail_last_oid =
-            get_ag_func_oid("age_materialize_vle_node_tail_last", 1,
-                            AGTYPEOID);
+            get_age_builtin_func_oid_by_name(
+                "age_materialize_vle_node_tail_last");
     }
 
     return age_materialize_vle_node_tail_last_oid;
@@ -5883,6 +6350,20 @@ static Oid get_age_vle_node_properties_at_oid(void)
     return age_vle_node_properties_at_oid;
 }
 
+static Oid get_age_vle_node_property_at_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(age_vle_node_property_at_oid))
+    {
+        age_vle_node_property_at_oid =
+            get_ag_func_oid("age_vle_node_property_at", 3, AGTYPEOID,
+                            AGTYPEOID, AGTYPEOID);
+    }
+
+    return age_vle_node_property_at_oid;
+}
+
 static Oid get_age_materialize_vle_nodes_slice_oid(void)
 {
     initialize_function_caches();
@@ -5890,8 +6371,7 @@ static Oid get_age_materialize_vle_nodes_slice_oid(void)
     if (!OidIsValid(age_materialize_vle_nodes_slice_oid))
     {
         age_materialize_vle_nodes_slice_oid =
-            get_ag_func_oid("age_materialize_vle_nodes_slice", 3, AGTYPEOID,
-                            AGTYPEOID, AGTYPEOID);
+            get_age_builtin_func_oid_by_name("age_materialize_vle_nodes_slice");
     }
 
     return age_materialize_vle_nodes_slice_oid;
@@ -5904,7 +6384,7 @@ static Oid get_age_materialize_vle_nodes_tail_oid(void)
     if (!OidIsValid(age_materialize_vle_nodes_tail_oid))
     {
         age_materialize_vle_nodes_tail_oid =
-            get_ag_func_oid("age_materialize_vle_nodes_tail", 1, AGTYPEOID);
+            get_age_builtin_func_oid_by_name("age_materialize_vle_nodes_tail");
     }
 
     return age_materialize_vle_nodes_tail_oid;
@@ -5916,8 +6396,9 @@ static Oid get_age_materialize_vle_nodes_reversed_oid(void)
 
     if (!OidIsValid(age_materialize_vle_nodes_reversed_oid))
     {
-        age_materialize_vle_nodes_reversed_oid = get_ag_func_oid(
-            "age_materialize_vle_nodes_reversed", 1, AGTYPEOID);
+        age_materialize_vle_nodes_reversed_oid =
+            get_age_builtin_func_oid_by_name(
+                "age_materialize_vle_nodes_reversed");
     }
 
     return age_materialize_vle_nodes_reversed_oid;
@@ -5930,8 +6411,7 @@ static Oid get_age_materialize_vle_edge_at_oid(void)
     if (!OidIsValid(age_materialize_vle_edge_at_oid))
     {
         age_materialize_vle_edge_at_oid =
-            get_ag_func_oid("age_materialize_vle_edge_at", 2, AGTYPEOID,
-                            AGTYPEOID);
+            get_age_builtin_func_oid_by_name("age_materialize_vle_edge_at");
     }
 
     return age_materialize_vle_edge_at_oid;
@@ -5944,8 +6424,8 @@ static Oid get_age_materialize_vle_edge_reversed_at_oid(void)
     if (!OidIsValid(age_materialize_vle_edge_reversed_at_oid))
     {
         age_materialize_vle_edge_reversed_at_oid =
-            get_ag_func_oid("age_materialize_vle_edge_reversed_at", 2,
-                            AGTYPEOID, AGTYPEOID);
+            get_age_builtin_func_oid_by_name(
+                "age_materialize_vle_edge_reversed_at");
     }
 
     return age_materialize_vle_edge_reversed_at_oid;
@@ -5958,8 +6438,8 @@ static Oid get_age_materialize_vle_edge_tail_last_oid(void)
     if (!OidIsValid(age_materialize_vle_edge_tail_last_oid))
     {
         age_materialize_vle_edge_tail_last_oid =
-            get_ag_func_oid("age_materialize_vle_edge_tail_last", 1,
-                            AGTYPEOID);
+            get_age_builtin_func_oid_by_name(
+                "age_materialize_vle_edge_tail_last");
     }
 
     return age_materialize_vle_edge_tail_last_oid;
@@ -6103,6 +6583,20 @@ static Oid get_age_vle_edge_properties_at_oid(void)
     return age_vle_edge_properties_at_oid;
 }
 
+static Oid get_age_vle_edge_property_at_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(age_vle_edge_property_at_oid))
+    {
+        age_vle_edge_property_at_oid =
+            get_ag_func_oid("age_vle_edge_property_at", 3, AGTYPEOID,
+                            AGTYPEOID, AGTYPEOID);
+    }
+
+    return age_vle_edge_property_at_oid;
+}
+
 static Oid get_age_vle_edge_start_node_at_oid(void)
 {
     initialize_function_caches();
@@ -6180,7 +6674,7 @@ static Oid get_age_materialize_vle_edges_tail_oid(void)
     if (!OidIsValid(age_materialize_vle_edges_tail_oid))
     {
         age_materialize_vle_edges_tail_oid =
-            get_ag_func_oid("age_materialize_vle_edges_tail", 1, AGTYPEOID);
+            get_age_builtin_func_oid_by_name("age_materialize_vle_edges_tail");
     }
 
     return age_materialize_vle_edges_tail_oid;
@@ -6192,11 +6686,82 @@ static Oid get_age_materialize_vle_edges_reversed_oid(void)
 
     if (!OidIsValid(age_materialize_vle_edges_reversed_oid))
     {
-        age_materialize_vle_edges_reversed_oid = get_ag_func_oid(
-            "age_materialize_vle_edges_reversed", 1, AGTYPEOID);
+        age_materialize_vle_edges_reversed_oid =
+            get_age_builtin_func_oid_by_name(
+                "age_materialize_vle_edges_reversed");
     }
 
     return age_materialize_vle_edges_reversed_oid;
+}
+
+static Oid get_age_vle_terminal_vertex_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(age_vle_terminal_vertex_oid))
+    {
+        age_vle_terminal_vertex_oid =
+            get_ag_func_oid("age_vle_terminal_vertex", 1, AGTYPEOID);
+    }
+
+    return age_vle_terminal_vertex_oid;
+}
+
+static Oid get_age_vle_terminal_vertex_properties_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(age_vle_terminal_vertex_properties_oid))
+    {
+        age_vle_terminal_vertex_properties_oid =
+            get_ag_func_oid("age_vle_terminal_vertex_properties", 1,
+                            AGTYPEOID);
+    }
+
+    return age_vle_terminal_vertex_properties_oid;
+}
+
+static Oid get_age_vle_terminal_vertex_property_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(age_vle_terminal_vertex_property_oid))
+    {
+        age_vle_terminal_vertex_property_oid =
+            get_ag_func_oid("age_vle_terminal_vertex_property", 2,
+                            AGTYPEOID, AGTYPEOID);
+    }
+
+    return age_vle_terminal_vertex_property_oid;
+}
+
+static Oid get_age_vle_terminal_vertex_property_from_path_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(age_vle_terminal_vertex_property_from_path_oid))
+    {
+        age_vle_terminal_vertex_property_from_path_oid =
+            get_ag_func_oid("age_vle_terminal_vertex_property_from_path", 2,
+                            AGTYPEOID, AGTYPEOID);
+    }
+
+    return age_vle_terminal_vertex_property_from_path_oid;
+}
+
+static Oid get_age_vle_terminal_property_output_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(age_vle_terminal_property_output_oid))
+    {
+        age_vle_terminal_property_output_oid =
+            get_ag_func_oid("age_vle", 9, AGTYPEOID, AGTYPEOID, AGTYPEOID,
+                            AGTYPEOID, AGTYPEOID, AGTYPEOID, AGTYPEOID,
+                            AGTYPEOID, AGTYPEOID);
+    }
+
+    return age_vle_terminal_property_output_oid;
 }
 
 static Expr *get_current_single_vle_path_expr_internal(
@@ -6600,11 +7165,53 @@ static Node *try_transform_fixed_path_list_cardinality(
     Node *edge_id;
     Expr *result_expr;
     int64 cardinality;
+    int64 edge_count;
+    char *first_edge_name;
     Oid result_type;
 
     if (!parse_size_is_empty_func_arg(fn, T_FuncCall, &func_name, &inner_arg))
     {
         return NULL;
+    }
+
+    if (parse_fixed_path_cardinality_metadata(cpstate, (FuncCall *)inner_arg,
+                                              &list_name, &transform_name,
+                                              &edge_count,
+                                              &first_edge_name))
+    {
+        if (is_nodes_list_name(list_name))
+            cardinality = edge_count + 1;
+        else
+            cardinality = edge_count;
+
+        if (transform_name != NULL && is_tail_name(transform_name))
+            cardinality = Max(cardinality - 1, 0);
+
+        edge_id = make_raw_attr_var(pstate, first_edge_name,
+                                    AG_EDGE_COLNAME_ID, fn->location);
+        if (edge_id == NULL)
+            return NULL;
+
+        if (is_size_name(func_name))
+        {
+            result_expr = (Expr *)make_agtype_integer_const(cardinality,
+                                                           fn->location);
+            result_type = AGTYPEOID;
+        }
+        else
+        {
+            Const *bool_const;
+
+            bool_const = makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                                   BoolGetDatum(cardinality == 0), false,
+                                   true);
+            bool_const->location = fn->location;
+            result_expr = (Expr *)bool_const;
+            result_type = BOOLOID;
+        }
+
+        return make_case_when_not_null(edge_id, result_expr, result_type,
+                                       fn->location);
     }
 
     if (!parse_fixed_path_cardinality_list(cpstate, (FuncCall *)inner_arg,
@@ -6732,6 +7339,11 @@ static Node *try_transform_fixed_path_relationships(cypher_parsestate *cpstate,
     cypher_node *start_node;
     cypher_node *end_node;
     char *list_name = NULL;
+    Node *entity_list;
+
+    entity_list = try_make_fixed_path_entity_list(cpstate, fn, false);
+    if (entity_list != NULL)
+        return entity_list;
 
     if (!parse_fixed_path_list_node(cpstate, (Node *)fn, &list_name,
                                     &start_node, &single_rel, &end_node,
@@ -6753,6 +7365,11 @@ static Node *try_transform_fixed_path_nodes(cypher_parsestate *cpstate,
     cypher_relationship *single_rel;
     cypher_node *end_node;
     char *list_name = NULL;
+    Node *entity_list;
+
+    entity_list = try_make_fixed_path_entity_list(cpstate, fn, true);
+    if (entity_list != NULL)
+        return entity_list;
 
     if (!parse_fixed_path_list_node(cpstate, (Node *)fn, &list_name,
                                     &start_node, &single_rel, &end_node,
@@ -7612,7 +8229,8 @@ static Node *try_transform_fixed_path_indexed_property_access(
         return NULL;
     }
 
-    access_expr = make_agtype_access_expr(args, exprLocation((Node *)a_ind));
+    access_expr = make_agtype_access_expr(args, exprLocation((Node *)a_ind),
+                                          false);
 
     return make_agtype_case_when_not_null(edge_id, (Expr *)access_expr,
                                           exprLocation((Node *)a_ind));
@@ -7658,7 +8276,8 @@ static Node *try_transform_fixed_path_indexed_endpoint_property_access(
         return NULL;
     }
 
-    access_expr = make_agtype_access_expr(args, exprLocation((Node *)a_ind));
+    access_expr = make_agtype_access_expr(args, exprLocation((Node *)a_ind),
+                                          false);
 
     return make_agtype_case_when_not_null(edge_id, (Expr *)access_expr,
                                           exprLocation((Node *)a_ind));
@@ -7703,7 +8322,8 @@ static Node *try_transform_current_edge_endpoint_property_access(
         return NULL;
     }
 
-    access_expr = make_agtype_access_expr(args, exprLocation((Node *)a_ind));
+    access_expr = make_agtype_access_expr(args, exprLocation((Node *)a_ind),
+                                          false);
 
     return make_agtype_case_when_not_null(edge_id, (Expr *)access_expr,
                                           exprLocation((Node *)a_ind));
@@ -7850,7 +8470,10 @@ static Node *try_transform_vle_path_id_access(cypher_parsestate *cpstate,
     }
 
     a_ind = (A_Indirection *)indirection_arg;
-    if (!parse_vle_path_indexed_list_index(cpstate, a_ind, &vle_expr,
+    if (!parse_arbitrary_vle_path_indexed_list_index(cpstate, a_ind,
+                                                     &vle_expr, &list_name,
+                                                     &index_expr) &&
+        !parse_vle_path_indexed_list_index(cpstate, a_ind, &vle_expr,
                                            &list_name, &index_expr))
     {
         return NULL;
@@ -8160,10 +8783,22 @@ static Node *transform_vle_path_slice_boundary_endpoint(
 static Node *try_transform_vle_path_endpoint_access(cypher_parsestate *cpstate,
                                                    FuncCall *fn)
 {
-    return transform_vle_path_edge_endpoint_index(
-        cpstate, (Node *)fn,
-        get_age_vle_edge_start_node_at_oid(),
-        get_age_vle_edge_end_node_at_oid());
+    Expr *vle_expr = NULL;
+    Node *index_expr = NULL;
+    bool start_endpoint;
+    Oid func_oid;
+
+    if (!parse_vle_edge_endpoint_index(cpstate, (Node *)fn, &vle_expr,
+                                       &index_expr, &start_endpoint))
+    {
+        return NULL;
+    }
+
+    func_oid = start_endpoint ? get_age_vle_edge_start_node_at_oid() :
+        get_age_vle_edge_end_node_at_oid();
+
+    return make_vle_binary_agtype_expr(func_oid, (Node *)vle_expr,
+                                       index_expr);
 }
 
 static Node *make_vle_edge_endpoint_field_expr(const char *field_name,
@@ -8281,9 +8916,44 @@ static Node *try_transform_vle_path_nested_transform_index_endpoint_access(
 static Node *try_transform_vle_path_boundary_endpoint_access(
     cypher_parsestate *cpstate, FuncCall *fn)
 {
-    return transform_vle_path_boundary_endpoint(
-        cpstate, fn, 0, 1, get_age_vle_edge_start_node_at_oid(),
-        get_age_vle_edge_end_node_at_oid(), fn->location);
+    char *list_name = NULL;
+    Expr *vle_expr = NULL;
+    Const *index_expr = NULL;
+    Oid func_oid;
+    bool start_endpoint;
+    Node *endpoint_arg = NULL;
+    int64 index;
+    int64 mode;
+
+    if (!parse_endpoint_func_arg(fn, T_FuncCall, NULL, &endpoint_arg) ||
+        !parse_vle_endpoint_function_name(fn, NULL, &start_endpoint))
+    {
+        return NULL;
+    }
+
+    if (parse_vle_path_tail_last_list(cpstate, endpoint_arg,
+                                      &vle_expr, &list_name) &&
+        is_relationships_list_name(list_name))
+    {
+        mode = start_endpoint ? 0 : 1;
+        func_oid = get_age_vle_tail_last_edge_endpoint_oid();
+        return make_vle_binary_mode_expr(func_oid, (Node *)vle_expr, mode,
+                                         fn->location);
+    }
+
+    if (!parse_vle_path_boundary_list_index(cpstate, endpoint_arg,
+                                            &vle_expr, &list_name, &index) ||
+        !is_relationships_list_name(list_name))
+    {
+        return NULL;
+    }
+
+    index_expr = make_agtype_integer_const(index, fn->location);
+    func_oid = start_endpoint ? get_age_vle_edge_start_node_at_oid() :
+        get_age_vle_edge_end_node_at_oid();
+
+    return make_vle_binary_agtype_expr(func_oid, (Node *)vle_expr,
+                                       (Node *)index_expr);
 }
 
 static Node *try_transform_vle_path_slice_boundary_endpoint_access(
@@ -8819,9 +9489,22 @@ static Node *try_transform_vle_path_visible_boundary_endpoint_field(
 static Node *try_transform_vle_path_visible_boundary_endpoint_access(
     cypher_parsestate *cpstate, FuncCall *fn)
 {
-    return transform_visible_vle_boundary_endpoint_index(
-        cpstate, (Node *)fn, get_age_vle_edge_start_node_at_oid(),
-        get_age_vle_edge_end_node_at_oid());
+    Expr *vle_expr = NULL;
+    Node *index_expr = NULL;
+    bool start_endpoint;
+    Oid func_oid;
+
+    if (!parse_visible_vle_boundary_endpoint(cpstate, (Node *)fn, &vle_expr,
+                                             &index_expr, &start_endpoint))
+    {
+        return NULL;
+    }
+
+    func_oid = start_endpoint ? get_age_vle_edge_start_node_at_oid() :
+        get_age_vle_edge_end_node_at_oid();
+
+    return make_vle_binary_agtype_expr(func_oid, (Node *)vle_expr,
+                                       index_expr);
 }
 
 static bool parse_vle_path_boundary_list_index(cypher_parsestate *cpstate,
@@ -8850,8 +9533,8 @@ static bool parse_vle_path_boundary_list_index(cypher_parsestate *cpstate,
     }
 
     inner_arg = linitial(outer_fn->args);
-    if (parse_vle_path_or_raw_edge_list(cpstate, inner_arg, vle_expr,
-                                        list_name, true))
+    if (parse_arbitrary_vle_path_or_raw_edge_list(cpstate, inner_arg,
+                                                  vle_expr, list_name))
     {
         *index = is_head_name(outer_name) ? 0 : -1;
         return exprType((Node *)*vle_expr) == AGTYPEOID;
@@ -8903,24 +9586,6 @@ static bool is_vle_direct_path_list_func(Node *node)
 
     fn = (FuncCall *)node;
     return parse_path_list_func_name(fn, &func_name);
-}
-
-static bool is_vle_path_list_derived_func(Node *node)
-{
-    FuncCall *fn;
-    char *func_name = NULL;
-    Node *func_arg = NULL;
-
-    if (!IsA(node, FuncCall))
-        return false;
-
-    fn = (FuncCall *)node;
-    if (is_vle_direct_path_list_func(node))
-        return true;
-
-    return parse_tail_reverse_func_arg(fn, T_FuncCall, &func_name,
-                                       &func_arg) &&
-        is_vle_path_list_derived_func(func_arg);
 }
 
 static bool parse_vle_edge_endpoint_index(cypher_parsestate *cpstate,
@@ -9914,6 +10579,13 @@ static bool parse_vle_path_or_raw_edge_list(
 
     if (IsA(node, FuncCall))
     {
+        if (allow_visible_path)
+        {
+            return parse_arbitrary_vle_path_list_function(cpstate, node,
+                                                          vle_expr,
+                                                          list_name);
+        }
+
         return parse_vle_path_list_function(cpstate, node, vle_expr,
                                             list_name, allow_visible_path);
     }
@@ -10169,8 +10841,16 @@ static bool parse_vle_named_path_list_function(
 {
     char *list_name = NULL;
 
-    return parse_vle_path_list_function(cpstate, node, vle_expr, &list_name,
-                                        allow_visible) &&
+    if (allow_visible)
+    {
+        return parse_arbitrary_vle_path_list_function(cpstate, node,
+                                                      vle_expr,
+                                                      &list_name) &&
+            pg_strcasecmp(list_name, expected_name) == 0;
+    }
+
+    return parse_current_vle_path_list_function(cpstate, node, vle_expr,
+                                                &list_name) &&
         pg_strcasecmp(list_name, expected_name) == 0;
 }
 
@@ -10679,9 +11359,6 @@ static Node *try_transform_vle_path_list_tail_reverse(
 static Node *try_transform_vle_path_relationships(cypher_parsestate *cpstate,
                                                   FuncCall *fn)
 {
-    if (is_vle_path_list_derived_func((Node *)fn))
-        return NULL;
-
     return transform_vle_path_materialized_list(cpstate, fn, "relationships");
 }
 
@@ -11128,7 +11805,10 @@ static bool is_reverse_name(const char *func_name)
 
 static bool is_size_name(const char *func_name)
 {
-    return pg_strcasecmp(func_name, "size") == 0;
+    const AgeBuiltinFuncMeta *meta;
+
+    meta = get_age_builtin_func_meta_by_name(func_name);
+    return meta != NULL && meta->fast_path == AGE_FUNC_FAST_SIZE;
 }
 
 static bool is_is_empty_name(const char *func_name)
@@ -11153,12 +11833,18 @@ static bool is_tail_reverse_name(const char *func_name)
 
 static bool is_id_name(const char *func_name)
 {
-    return pg_strcasecmp(func_name, "id") == 0;
+    const AgeBuiltinFuncMeta *meta;
+
+    meta = get_age_builtin_func_meta_by_name(func_name);
+    return meta != NULL && meta->fast_path == AGE_FUNC_FAST_ID;
 }
 
 static bool is_keys_name(const char *func_name)
 {
-    return pg_strcasecmp(func_name, "keys") == 0;
+    const AgeBuiltinFuncMeta *meta;
+
+    meta = get_age_builtin_func_meta_by_name(func_name);
+    return meta != NULL && meta->fast_path == AGE_FUNC_FAST_KEYS;
 }
 
 static bool is_label_name(const char *func_name)
@@ -11450,11 +12136,14 @@ static int64 get_vle_list_is_empty_mode(const char *list_name, bool tail_mode)
 static Node *transform_vle_path_materialized_list(
     cypher_parsestate *cpstate, FuncCall *fn, const char *list_name)
 {
+    char *parsed_list_name = NULL;
     Expr *vle_expr;
     Oid func_oid;
 
-    if (!parse_vle_named_path_list_function(cpstate, (Node *)fn, list_name,
-                                            &vle_expr, true))
+    if (!parse_arbitrary_vle_path_list_function(cpstate, (Node *)fn,
+                                                &vle_expr,
+                                                &parsed_list_name) ||
+        pg_strcasecmp(parsed_list_name, list_name) != 0)
     {
         return NULL;
     }
@@ -11960,13 +12649,19 @@ static bool is_vle_func_name(FuncCall *fn)
 
 static bool is_endpoint_function_name(const char *func_name)
 {
-    return pg_strcasecmp(func_name, "startNode") == 0 ||
-        pg_strcasecmp(func_name, "endNode") == 0;
+    const AgeBuiltinFuncMeta *meta;
+
+    meta = get_age_builtin_func_meta_by_name(func_name);
+    return meta != NULL && meta->fast_path == AGE_FUNC_FAST_ENDPOINT;
 }
 
 static bool is_start_endpoint_function_name(const char *func_name)
 {
-    return pg_strcasecmp(func_name, "startNode") == 0;
+    const AgeBuiltinFuncMeta *meta;
+
+    meta = get_age_builtin_func_meta_by_name(func_name);
+    return meta != NULL && meta->fast_path == AGE_FUNC_FAST_ENDPOINT &&
+        pg_strcasecmp(meta->sql_name, "age_startnode") == 0;
 }
 
 static bool parse_vle_endpoint_function_name(FuncCall *fn,
@@ -12808,27 +13503,6 @@ static bool parse_vle_named_indirection(
         cpstate, a_ind->arg, expected_name, vle_expr, allow_visible);
 }
 
-static Node *make_vle_named_index_expr(cypher_parsestate *cpstate,
-                                       A_Indirection *a_ind,
-                                       const char *expected_name,
-                                       Oid func_oid, bool allow_visible)
-{
-    A_Indices *indices = NULL;
-    Expr *vle_expr = NULL;
-    Node *index_expr = NULL;
-
-    if (!parse_vle_named_indirection(cpstate, a_ind, expected_name, false,
-                                     &indices, &vle_expr, allow_visible))
-    {
-        return NULL;
-    }
-
-    index_expr = transform_cypher_expr_recurse(cpstate, indices->uidx);
-
-    return make_vle_binary_agtype_expr(func_oid, (Node *)vle_expr,
-                                       index_expr);
-}
-
 static Node *make_vle_list_slice_mode_bounds_expr(Oid func_oid,
                                                   Expr *vle_expr,
                                                   Node *lower_expr,
@@ -12840,41 +13514,44 @@ static Node *make_vle_list_slice_mode_bounds_expr(Oid func_oid,
                                     lower_expr, upper_expr, mode, location);
 }
 
-static Node *make_vle_named_slice_expr(cypher_parsestate *cpstate,
-                                       A_Indirection *a_ind,
-                                       const char *expected_name,
-                                       Oid func_oid, bool allow_visible)
+static Node *try_transform_vle_path_nodes_access(cypher_parsestate *cpstate,
+                                                 A_Indirection *a_ind)
+{
+    A_Indices *indices = NULL;
+    Expr *vle_expr = NULL;
+    Node *index_expr = NULL;
+
+    if (!parse_vle_named_indirection(cpstate, a_ind, "nodes", false,
+                                     &indices, &vle_expr, true))
+    {
+        return NULL;
+    }
+
+    index_expr = transform_cypher_expr_recurse(cpstate, indices->uidx);
+
+    return make_vle_binary_agtype_expr(get_age_materialize_vle_node_at_oid(),
+                                       (Node *)vle_expr, index_expr);
+}
+
+static Node *try_transform_vle_path_nodes_slice(cypher_parsestate *cpstate,
+                                                A_Indirection *a_ind)
 {
     A_Indices *indices = NULL;
     Expr *vle_expr = NULL;
     Node *lower_expr = NULL;
     Node *upper_expr = NULL;
 
-    if (!parse_vle_named_indirection(cpstate, a_ind, expected_name, true,
-                                     &indices, &vle_expr, allow_visible))
+    if (!parse_vle_named_indirection(cpstate, a_ind, "nodes", true,
+                                     &indices, &vle_expr, true))
     {
         return NULL;
     }
 
     transform_slice_bounds_or_null(cpstate, indices, &lower_expr, &upper_expr);
 
-    return make_vle_ternary_agtype_expr(func_oid, (Node *)vle_expr,
-                                        lower_expr, upper_expr);
-}
-
-static Node *try_transform_vle_path_nodes_access(cypher_parsestate *cpstate,
-                                                 A_Indirection *a_ind)
-{
-    return make_vle_named_index_expr(
-        cpstate, a_ind, "nodes", get_age_materialize_vle_node_at_oid(), true);
-}
-
-static Node *try_transform_vle_path_nodes_slice(cypher_parsestate *cpstate,
-                                                A_Indirection *a_ind)
-{
-    return make_vle_named_slice_expr(
-        cpstate, a_ind, "nodes", get_age_materialize_vle_nodes_slice_oid(),
-        true);
+    return make_vle_ternary_agtype_expr(get_age_materialize_vle_nodes_slice_oid(),
+                                        (Node *)vle_expr, lower_expr,
+                                        upper_expr);
 }
 
 static Node *try_transform_vle_path_list_slice(cypher_parsestate *cpstate,
@@ -12899,48 +13576,205 @@ static Node *try_transform_vle_path_list_slice(cypher_parsestate *cpstate,
                                                 exprLocation((Node *)a_ind));
 }
 
-static Node *try_transform_vle_path_boundary_id_access(
+static bool retarget_vle_terminal_property_output(cypher_parsestate *cpstate,
+                                                  Node *vle_path,
+                                                  Const *key_const)
+{
+    ParseState *pstate = &cpstate->pstate;
+    RangeTblEntry *outer_rte;
+    RangeTblEntry *func_rte;
+    RangeTblFunction *rtfunc;
+    TargetEntry *sub_te;
+    FuncExpr *vle_func;
+    Var *outer_var;
+    Var *inner_var;
+    Query *subquery;
+
+    if (vle_path == NULL || !IsA(vle_path, Var) ||
+        key_const == NULL || key_const->consttype != AGTYPEOID)
+    {
+        return false;
+    }
+
+    outer_var = castNode(Var, vle_path);
+    if (outer_var->varlevelsup != 0 ||
+        outer_var->varno <= 0 ||
+        outer_var->varno > list_length(pstate->p_rtable))
+    {
+        return false;
+    }
+
+    outer_rte = rt_fetch(outer_var->varno, pstate->p_rtable);
+    if (outer_rte == NULL || outer_rte->rtekind != RTE_SUBQUERY ||
+        outer_rte->subquery == NULL)
+    {
+        return false;
+    }
+
+    subquery = outer_rte->subquery;
+    sub_te = get_tle_by_resno(subquery->targetList, outer_var->varattno);
+    if (sub_te == NULL || sub_te->expr == NULL || !IsA(sub_te->expr, Var))
+    {
+        return false;
+    }
+
+    inner_var = castNode(Var, sub_te->expr);
+    if (inner_var->varlevelsup != 0 ||
+        inner_var->varno <= 0 ||
+        inner_var->varno > list_length(subquery->rtable))
+    {
+        return false;
+    }
+
+    func_rte = rt_fetch(inner_var->varno, subquery->rtable);
+    if (func_rte == NULL || func_rte->rtekind != RTE_FUNCTION ||
+        list_length(func_rte->functions) != 1)
+    {
+        return false;
+    }
+
+    rtfunc = linitial(func_rte->functions);
+    if (rtfunc == NULL || rtfunc->funcexpr == NULL ||
+        !IsA(rtfunc->funcexpr, FuncExpr))
+    {
+        return false;
+    }
+
+    vle_func = castNode(FuncExpr, rtfunc->funcexpr);
+    if (list_length(vle_func->args) == 9)
+    {
+        return vle_func->funcid == get_age_vle_terminal_property_output_oid();
+    }
+    if (list_length(vle_func->args) != 8 ||
+        exprType((Node *)vle_func) != AGTYPEOID ||
+        !vle_func->funcretset)
+    {
+        return false;
+    }
+
+    vle_func->args = lappend(vle_func->args, copyObject(key_const));
+    vle_func->funcid = get_age_vle_terminal_property_output_oid();
+
+    return true;
+}
+
+static Node *try_transform_vle_terminal_vertex_property_access(
     cypher_parsestate *cpstate, A_Indirection *a_ind)
 {
-    FuncCall *outer_fn = NULL;
-    FuncCall *inner_fn = NULL;
-    Node *inner_arg = NULL;
-    char *outer_name = NULL;
-    char *list_name = NULL;
+    char *var_name = NULL;
     char *field_name = NULL;
+    transform_entity *entity = NULL;
+    FuncExpr *terminal_expr = NULL;
+    Node *vle_path = NULL;
+    Node *properties = NULL;
+    Const *key_const = NULL;
+    int location = exprLocation((Node *)a_ind);
+
+    if (!parse_single_column_ref(a_ind->arg, &var_name, &location) ||
+        !parse_single_indirection_string(a_ind, &field_name))
+    {
+        return NULL;
+    }
+
+    entity = find_variable(cpstate, var_name);
+    if (entity == NULL || entity->type != ENT_VERTEX ||
+        entity->expr == NULL || !IsA(entity->expr, FuncExpr))
+    {
+        return NULL;
+    }
+
+    terminal_expr = castNode(FuncExpr, entity->expr);
+    if (terminal_expr->funcid != get_age_vle_terminal_vertex_oid() ||
+        list_length(terminal_expr->args) != 1)
+    {
+        return NULL;
+    }
+
+    properties = make_raw_attr_var(&cpstate->pstate, var_name,
+                                   AG_VERTEX_COLNAME_PROPERTIES, location);
+    if (properties == NULL)
+    {
+        return NULL;
+    }
+
+    key_const = make_agtype_string_key_const((Node *)makeString(field_name));
+
+    vle_path = make_raw_attr_var(&cpstate->pstate, var_name, "edges",
+                                 location);
+    if (vle_path != NULL)
+    {
+        if (retarget_vle_terminal_property_output(cpstate, vle_path,
+                                                  key_const))
+        {
+            return copyObject(vle_path);
+        }
+
+        return (Node *)makeFuncExpr(
+            get_age_vle_terminal_vertex_property_from_path_oid(),
+            AGTYPEOID, list_make2(vle_path, key_const),
+            InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+    }
+
+    if (IsA(properties, FuncExpr))
+    {
+        FuncExpr *properties_expr = castNode(FuncExpr, properties);
+
+        if (properties_expr->funcid ==
+            get_age_vle_terminal_vertex_properties_oid() &&
+            list_length(properties_expr->args) == 1)
+        {
+            return (Node *)makeFuncExpr(
+                get_age_vle_terminal_vertex_property_from_path_oid(),
+                AGTYPEOID,
+                list_make2(copyObject(linitial(properties_expr->args)),
+                           key_const),
+                InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+        }
+    }
+
+    return (Node *)makeFuncExpr(get_age_vle_terminal_vertex_property_oid(),
+                                AGTYPEOID, list_make2(properties, key_const),
+                                InvalidOid, InvalidOid,
+                                COERCE_EXPLICIT_CALL);
+}
+
+static Node *try_transform_vle_boundary_direct_property_access(
+    cypher_parsestate *cpstate, A_Indirection *a_ind)
+{
+    FuncCall *fn = NULL;
+    Node *head_last_arg = NULL;
     Expr *vle_expr = NULL;
+    Node *index_expr = NULL;
+    Const *key_expr = NULL;
+    char *field_name = NULL;
+    char *head_last_name = NULL;
+    char *list_name = NULL;
     int64 index;
     bool tail_last = false;
 
     if (!IsA(a_ind->arg, FuncCall) ||
-        !parse_single_indirection_string(a_ind, &field_name) ||
-        !is_id_name(field_name))
+        !parse_single_indirection_string(a_ind, &field_name))
     {
         return NULL;
     }
 
-    outer_fn = (FuncCall *)a_ind->arg;
-    if (!parse_head_last_func_arg(outer_fn, T_FuncCall, &outer_name,
-                                  &inner_arg))
+    fn = (FuncCall *)a_ind->arg;
+    if (!parse_head_last_func_any_arg(fn, &head_last_name, &head_last_arg) ||
+        !parse_current_vle_head_last_source(cpstate, head_last_name,
+                                            head_last_arg, true, true,
+                                            &vle_expr, &list_name, &index,
+                                            &tail_last) ||
+        vle_expr == NULL || tail_last)
     {
         return NULL;
     }
 
-    inner_fn = (FuncCall *)inner_arg;
-    if (!parse_current_vle_head_last_list(cpstate, outer_name, inner_fn,
-                                          false, false, &vle_expr, &list_name,
-                                          &index, &tail_last))
-    {
-        return NULL;
-    }
+    key_expr = make_agtype_string_key_const((Node *)makeString(field_name));
+    index_expr = (Node *)make_agtype_integer_const(index,
+                                                   exprLocation(a_ind->arg));
 
-    if (vle_expr == NULL)
-    {
-        return NULL;
-    }
-
-    return make_vle_indexed_id_expr(vle_expr, list_name, index,
-                                    outer_fn->location);
+    return make_vle_indexed_property_expr(vle_expr, list_name, index_expr,
+                                          key_expr);
 }
 
 static FuncExpr *make_vle_index_properties_expr(cypher_parsestate *cpstate,
@@ -12963,7 +13797,10 @@ static FuncExpr *make_vle_index_properties_expr(cypher_parsestate *cpstate,
     if (properties_expr != NULL)
         return properties_expr;
 
-    if (!parse_vle_path_indexed_list_index(cpstate, indexed_arg, &vle_expr,
+    if (!parse_arbitrary_vle_path_indexed_list_index(cpstate, indexed_arg,
+                                                     &vle_expr, &list_name,
+                                                     &index_expr) &&
+        !parse_vle_path_indexed_list_index(cpstate, indexed_arg, &vle_expr,
                                            &list_name, &index_expr))
     {
         return NULL;
@@ -12976,6 +13813,7 @@ static FuncExpr *make_vle_index_properties_expr(cypher_parsestate *cpstate,
 static Node *try_transform_vle_path_boundary_property_access(
     cypher_parsestate *cpstate, A_Indirection *a_ind)
 {
+    Node *direct_expr = NULL;
     FuncExpr *properties_expr = NULL;
     FuncExpr *access_expr = NULL;
     List *args = NIL;
@@ -12990,6 +13828,13 @@ static Node *try_transform_vle_path_boundary_property_access(
     bool tail_last = false;
     bool tail_last_endpoint = false;
     bool skip_first_indirection = false;
+
+    direct_expr = try_transform_vle_boundary_direct_property_access(cpstate,
+                                                                    a_ind);
+    if (direct_expr != NULL)
+    {
+        return direct_expr;
+    }
 
     if (!has_indirection_count(a_ind, 1))
     {
@@ -13148,7 +13993,8 @@ build_access:
         return NULL;
     }
 
-    access_expr = make_agtype_access_expr(args, exprLocation(a_ind->arg));
+    access_expr = make_agtype_access_expr(args, exprLocation(a_ind->arg),
+                                          false);
 
     return (Node *)access_expr;
 }
@@ -13156,12 +14002,20 @@ build_access:
 static Node *try_transform_vle_path_relationships_access(
     cypher_parsestate *cpstate, A_Indirection *a_ind)
 {
-    if (is_vle_path_list_derived_func(a_ind->arg))
-        return NULL;
+    A_Indices *indices = NULL;
+    Expr *vle_expr = NULL;
+    Node *index_expr = NULL;
 
-    return make_vle_named_index_expr(
-        cpstate, a_ind, "relationships",
-        get_age_materialize_vle_edge_at_oid(), true);
+    if (!parse_vle_named_indirection(cpstate, a_ind, "relationships", false,
+                                     &indices, &vle_expr, true))
+    {
+        return NULL;
+    }
+
+    index_expr = transform_cypher_expr_recurse(cpstate, indices->uidx);
+
+    return make_vle_binary_agtype_expr(get_age_materialize_vle_edge_at_oid(),
+                                       (Node *)vle_expr, index_expr);
 }
 
 static bool parse_current_raw_vle_reverse_source(cypher_parsestate *cpstate,
@@ -13221,6 +14075,166 @@ static Node *try_transform_vle_edge_reverse_access(cypher_parsestate *cpstate,
                                        index_expr);
 }
 
+static AgeSemanticSourceKind classify_path_length_source(
+    cypher_parsestate *cpstate, Node *arg, Expr **vle_expr)
+{
+    char *path_name = NULL;
+    transform_entity *entity;
+
+    *vle_expr = get_arbitrary_single_vle_path_expr(cpstate, arg);
+    if (*vle_expr != NULL)
+    {
+        return AGE_SEM_SOURCE_COMPACT_VLE_PATH;
+    }
+
+    if (parse_single_column_ref(arg, &path_name, NULL))
+    {
+        entity = find_variable(cpstate, path_name);
+        if (entity != NULL && entity->type == ENT_PATH)
+        {
+            return AGE_SEM_SOURCE_FIXED_PATH;
+        }
+    }
+
+    return AGE_SEM_SOURCE_UNKNOWN;
+}
+
+static AgeSemanticSourceKind classify_path_list_count_source(
+    cypher_parsestate *cpstate, FuncCall *inner_fn, Expr **vle_expr,
+    char **list_name, bool *tail_mode, bool *double_tail)
+{
+    Node *path_arg = NULL;
+    char *inner_name = NULL;
+
+    if (parse_vle_count_list_arg(cpstate, inner_fn, vle_expr, list_name,
+                                 tail_mode, double_tail))
+    {
+        if (is_nodes_list_name(*list_name))
+        {
+            return AGE_SEM_SOURCE_COMPACT_VLE_NODE_LIST;
+        }
+
+        return AGE_SEM_SOURCE_COMPACT_VLE_EDGE_LIST;
+    }
+
+    if (parse_path_list_func_arg(inner_fn, T_ColumnRef, &inner_name,
+                                 &path_arg))
+    {
+        char *path_name = NULL;
+        transform_entity *entity;
+
+        if (parse_single_column_ref(path_arg, &path_name, NULL))
+        {
+            entity = find_variable(cpstate, path_name);
+            if (entity != NULL && entity->type == ENT_PATH)
+            {
+                return AGE_SEM_SOURCE_FIXED_PATH;
+            }
+        }
+    }
+
+    return AGE_SEM_SOURCE_UNKNOWN;
+}
+
+static Node *transform_semantic_length_builtin(cypher_parsestate *cpstate,
+                                               FuncCall *fn,
+                                               const AgeBuiltinFuncMeta *meta)
+{
+    Node *path_arg = NULL;
+    Expr *vle_expr = NULL;
+    AgeSemanticSourceKind source_kind;
+
+    if (!parse_func_any_arg(fn, meta->cypher_name, &path_arg))
+    {
+        return NULL;
+    }
+
+    source_kind = classify_path_length_source(cpstate, path_arg, &vle_expr);
+    if (source_kind == AGE_SEM_SOURCE_COMPACT_VLE_PATH)
+    {
+        return make_vle_unary_agtype_expr(get_age_vle_path_length_oid(),
+                                          (Node *)vle_expr);
+    }
+    if (source_kind == AGE_SEM_SOURCE_FIXED_PATH)
+    {
+        return try_transform_fixed_path_length(cpstate, fn);
+    }
+
+    return NULL;
+}
+
+static Node *transform_semantic_size_builtin(cypher_parsestate *cpstate,
+                                             FuncCall *fn,
+                                             const AgeBuiltinFuncMeta *meta)
+{
+    Node *inner_arg = NULL;
+    FuncCall *inner_fn = NULL;
+    char *list_name = NULL;
+    Expr *vle_expr = NULL;
+    AgeSemanticSourceKind source_kind;
+    Oid func_oid;
+    bool tail_mode = false;
+    bool double_tail = false;
+
+    if (!parse_func_arg(fn, meta->cypher_name, T_FuncCall, &inner_arg))
+    {
+        return NULL;
+    }
+
+    inner_fn = (FuncCall *)inner_arg;
+    source_kind = classify_path_list_count_source(cpstate, inner_fn, &vle_expr,
+                                                  &list_name, &tail_mode,
+                                                  &double_tail);
+
+    if (source_kind == AGE_SEM_SOURCE_FIXED_PATH)
+    {
+        return try_transform_fixed_path_list_cardinality(cpstate, fn);
+    }
+
+    if (source_kind != AGE_SEM_SOURCE_COMPACT_VLE_NODE_LIST &&
+        source_kind != AGE_SEM_SOURCE_COMPACT_VLE_EDGE_LIST)
+    {
+        return NULL;
+    }
+
+    if (double_tail)
+    {
+        return make_vle_double_tail_count_expr((Node *)vle_expr, list_name,
+                                               fn->location, false);
+    }
+
+    func_oid = get_vle_list_count_oid(list_name, tail_mode);
+    return make_vle_unary_agtype_expr(func_oid, (Node *)vle_expr);
+}
+
+static Node *try_transform_semantic_agtype_builtin(cypher_parsestate *cpstate,
+                                                   FuncCall *fn)
+{
+    const AgeBuiltinFuncMeta *meta;
+    char *func_name = NULL;
+
+    if (!parse_single_func_name(fn, &func_name))
+    {
+        return NULL;
+    }
+
+    meta = get_age_builtin_func_meta_by_name(func_name);
+    if (meta == NULL)
+    {
+        return NULL;
+    }
+
+    switch (meta->fast_path)
+    {
+    case AGE_FUNC_FAST_LENGTH:
+        return transform_semantic_length_builtin(cpstate, fn, meta);
+    case AGE_FUNC_FAST_SIZE:
+        return transform_semantic_size_builtin(cpstate, fn, meta);
+    default:
+        return NULL;
+    }
+}
+
 /*
  * Code borrowed from PG's transformFuncCall and updated for AGE
  */
@@ -13230,6 +14244,7 @@ typedef Node *(*cypher_fast_func_transform)(cypher_parsestate *cpstate,
 static Node *try_transform_fast_func(cypher_parsestate *cpstate, FuncCall *fn)
 {
     static const cypher_fast_func_transform fast_transforms[] = {
+        try_transform_semantic_agtype_builtin,
         try_transform_entity_graphid_function,
         try_transform_fixed_path_head_last_consumer,
         try_transform_fixed_path_slice_head_last_consumer,
@@ -13431,6 +14446,11 @@ static Node *transform_FuncCall(cypher_parsestate *cpstate, FuncCall *fn)
     /* ... and hand off to ParseFuncOrColumn */
     retval = ParseFuncOrColumn(pstate, fname, targs, last_srf, fn, false,
                                fn->location);
+
+    if (retval != NULL && retval->type == T_Aggref)
+    {
+        try_rewrite_collect_property_access(castNode(Aggref, retval));
+    }
 
     /* flag that an aggregate was found during a transform */
     if (retval != NULL && retval->type == T_Aggref)

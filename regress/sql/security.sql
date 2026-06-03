@@ -470,6 +470,7 @@ REVOKE EXECUTE ON FUNCTION ag_catalog.create_graph(name) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ag_catalog.drop_graph(name, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ag_catalog.create_vlabel(cstring, cstring) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ag_catalog.create_elabel(cstring, cstring) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ag_catalog.create_property_index(cstring, cstring, cstring) FROM PUBLIC;
 
 SET ROLE security_test_noexec;
 
@@ -484,6 +485,9 @@ SELECT create_vlabel('security_test', 'NewLabel');
 
 -- Test: create_elabel should fail without EXECUTE permission
 SELECT create_elabel('security_test', 'NewEdge');
+
+-- Test: create_property_index should fail without EXECUTE permission
+SELECT create_property_index('security_test', 'Person', 'name');
 
 RESET ROLE;
 
@@ -505,6 +509,7 @@ GRANT EXECUTE ON FUNCTION ag_catalog.create_graph(name) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ag_catalog.drop_graph(name, boolean) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ag_catalog.create_vlabel(cstring, cstring) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ag_catalog.create_elabel(cstring, cstring) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ag_catalog.create_property_index(cstring, cstring, cstring) TO PUBLIC;
 
 -- ============================================================================
 -- PART 12: startNode/endNode Permission Tests

@@ -65,6 +65,8 @@ CREATE TYPE agtype (
   LIKE = jsonb
 );
 
+CREATE DOMAIN ag_catalog.age_auto_column AS ag_catalog.agtype;
+
 CREATE FUNCTION ag_catalog.age_adjacency_candidate_edge_rows(index_oid regclass,
                                                              key graphid,
                                                              outgoing boolean)

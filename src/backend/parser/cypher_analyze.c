@@ -21,6 +21,8 @@
 
 #include "catalog/namespace.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_type.h"
+#include "catalog/pg_type_d.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
@@ -47,6 +49,7 @@ typedef struct cypher_convert_context
 {
     ParseState *pstate;
     Query *query;
+    int query_depth;
 } cypher_convert_context;
 
 /*
@@ -63,6 +66,7 @@ static void build_explain_query(Query *query, Node *explain_node);
 
 static post_parse_analyze_hook_type prev_post_parse_analyze_hook;
 static Oid cypher_func_oid = InvalidOid;
+static Oid age_auto_column_type_oid = InvalidOid;
 static bool cypher_func_oid_callback_registered = false;
 
 static void post_parse_analyze(ParseState *pstate, Query *query, JumbleState *jstate);
@@ -88,9 +92,57 @@ static Query *analyze_cypher(List *stmt, ParseState *parent_pstate,
                              char *graph_name, uint32 graph_oid, Param *params);
 static Query *analyze_cypher_and_coerce(List *stmt, RangeTblFunction *rtfunc,
                                         ParseState *parent_pstate,
+                                        RangeTblEntry *source_rte,
+                                        cypher_convert_context *context,
                                         const char *query_str, int query_loc,
                                         char *graph_name, uint32 graph_oid,
                                         Param *params);
+static bool is_hidden_cypher_output_target(const char *resname);
+static bool is_visible_cypher_output_target(TargetEntry *te);
+static bool is_auto_column_signature(RangeTblFunction *rtfunc);
+static Oid get_age_auto_column_type_oid(void);
+static void auto_convert_cypher_columns(RangeTblFunction *rtfunc,
+                                        RangeTblEntry *source_rte,
+                                        Query *subquery,
+                                        cypher_convert_context *context);
+static int get_rte_index(Query *query, RangeTblEntry *rte);
+static void replace_auto_cypher_targetlist(Query *query, int varno,
+                                           Query *subquery);
+
+static bool
+is_hidden_cypher_output_target(const char *resname)
+{
+    if (resname == NULL)
+    {
+        return false;
+    }
+
+    return strcmp(resname, AGE_DEFAULT_VARNAME_PREFIX "create_clause") == 0 ||
+           strcmp(resname, AGE_DEFAULT_VARNAME_PREFIX "create_null_value") == 0 ||
+           strcmp(resname, AGE_DEFAULT_VARNAME_PREFIX "delete_clause") == 0 ||
+           strcmp(resname, AGE_DEFAULT_VARNAME_PREFIX "merge_clause") == 0 ||
+           strcmp(resname, AGE_DEFAULT_VARNAME_PREFIX "set_clause") == 0 ||
+           strcmp(resname, AGE_DEFAULT_VARNAME_PREFIX "set_value") == 0;
+}
+
+static bool
+is_visible_cypher_output_target(TargetEntry *te)
+{
+    if (te->resjunk)
+        return false;
+
+    if (te->resname != NULL &&
+        strncmp(te->resname, AGE_DEFAULT_ALIAS_PREFIX "raw_",
+                strlen(AGE_DEFAULT_ALIAS_PREFIX "raw_")) == 0)
+    {
+        return false;
+    }
+
+    if (is_hidden_cypher_output_target(te->resname))
+        return false;
+
+    return true;
+}
 
 void post_parse_analyze_init(void)
 {
@@ -120,6 +172,7 @@ static void post_parse_analyze(ParseState *pstate, Query *query, JumbleState *js
 
     context.pstate = pstate;
     context.query = NULL;
+    context.query_depth = 0;
     convert_cypher_walker((Node *)query, &context);
 
     /*
@@ -252,6 +305,7 @@ static bool convert_cypher_walker(Node *node, void *context)
         bool result = false;
         Query *saved_query = ctx->query;
         Query *query = (Query *)node;
+        int saved_query_depth = ctx->query_depth;
 
         /*
          * If this is a utility command, we need to unwrap the internal query
@@ -286,6 +340,7 @@ static bool convert_cypher_walker(Node *node, void *context)
         }
 
         ctx->query = query;
+        ctx->query_depth++;
 
         /*
          * QTW_EXAMINE_RTES
@@ -307,6 +362,7 @@ static bool convert_cypher_walker(Node *node, void *context)
         result = query_tree_walker(query, convert_cypher_walker, context, flags);
 
         ctx->query = saved_query;
+        ctx->query_depth = saved_query_depth;
 
         return result;
     }
@@ -656,9 +712,9 @@ static void convert_cypher_to_subquery(RangeTblEntry *rte,
     }
     else
     {
-        query = analyze_cypher_and_coerce(stmt, rtfunc, pstate, query_str,
-                                          query_loc, graph_name_str, graph_oid,
-                                          params);
+        query = analyze_cypher_and_coerce(stmt, rtfunc, pstate, rte, context,
+                                          query_str, query_loc, graph_name_str,
+                                          graph_oid, params);
     }
 
     pstate->p_lateral_active = false;
@@ -759,6 +815,167 @@ static Node *get_query_target_expr(Query *query, AttrNumber attno)
     }
 
     return NULL;
+}
+
+static bool is_auto_column_signature(RangeTblFunction *rtfunc)
+{
+    /*
+     * PostgreSQL core requires at least one column definition for cypher(),
+     * because it returns SETOF record.  A single age_auto_column definition
+     * acts as a parser signature; AGE replaces it with the visible Cypher
+     * RETURN targets.  Full multi-column mismatches remain ordinary user
+     * errors.
+     */
+    return rtfunc->funccolcount == 1 &&
+        linitial_oid(rtfunc->funccoltypes) == get_age_auto_column_type_oid();
+}
+
+static Oid get_age_auto_column_type_oid(void)
+{
+    if (!OidIsValid(age_auto_column_type_oid))
+    {
+        Oid namespace_oid = get_namespace_oid("ag_catalog", false);
+
+        age_auto_column_type_oid =
+            GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+                            CStringGetDatum("age_auto_column"),
+                            ObjectIdGetDatum(namespace_oid));
+    }
+
+    return age_auto_column_type_oid;
+}
+
+static void auto_convert_cypher_columns(RangeTblFunction *rtfunc,
+                                        RangeTblEntry *source_rte,
+                                        Query *subquery,
+                                        cypher_convert_context *context)
+{
+    ListCell *lc;
+    List *colnames = NIL;
+    int varno;
+
+    list_free(rtfunc->funccolnames);
+    list_free(rtfunc->funccoltypes);
+    list_free(rtfunc->funccoltypmods);
+    list_free(rtfunc->funccolcollations);
+
+    rtfunc->funccolnames = NIL;
+    rtfunc->funccoltypes = NIL;
+    rtfunc->funccoltypmods = NIL;
+    rtfunc->funccolcollations = NIL;
+    rtfunc->funccolcount = 0;
+
+    foreach(lc, subquery->targetList)
+    {
+        TargetEntry *te = lfirst_node(TargetEntry, lc);
+        const char *resname;
+
+        if (!is_visible_cypher_output_target(te))
+            continue;
+
+        resname = te->resname != NULL ? te->resname : "?column?";
+        rtfunc->funccolnames =
+            lappend(rtfunc->funccolnames, makeString(pstrdup(resname)));
+        rtfunc->funccoltypes =
+            lappend_oid(rtfunc->funccoltypes, exprType((Node *)te->expr));
+        rtfunc->funccoltypmods =
+            lappend_int(rtfunc->funccoltypmods, exprTypmod((Node *)te->expr));
+        rtfunc->funccolcollations =
+            lappend_oid(rtfunc->funccolcollations,
+                        exprCollation((Node *)te->expr));
+        colnames = lappend(colnames, makeString(pstrdup(resname)));
+        rtfunc->funccolcount++;
+    }
+
+    source_rte->eref->colnames = colnames;
+
+    if (context->query == NULL)
+        return;
+
+    if (context->query_depth != 1)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("age_auto_column cannot be used inside nested subqueries")));
+    }
+
+    varno = get_rte_index(context->query, source_rte);
+    if (varno > 0)
+        replace_auto_cypher_targetlist(context->query, varno, subquery);
+}
+
+static int get_rte_index(Query *query, RangeTblEntry *rte)
+{
+    ListCell *lc;
+    int varno = 1;
+
+    foreach(lc, query->rtable)
+    {
+        if ((RangeTblEntry *)lfirst(lc) == rte)
+            return varno;
+        varno++;
+    }
+
+    return 0;
+}
+
+static void replace_auto_cypher_targetlist(Query *query, int varno,
+                                           Query *subquery)
+{
+    List *new_targetlist = NIL;
+    ListCell *lc;
+    AttrNumber next_resno = 1;
+
+    foreach(lc, query->targetList)
+    {
+        TargetEntry *te = lfirst_node(TargetEntry, lc);
+        Var *var;
+
+        if (!IsA(te->expr, Var))
+        {
+            te->resno = next_resno++;
+            new_targetlist = lappend(new_targetlist, te);
+            continue;
+        }
+
+        var = castNode(Var, te->expr);
+        if (var->varno != varno || var->varattno != 1 ||
+            var->varlevelsup != 0)
+        {
+            te->resno = next_resno++;
+            new_targetlist = lappend(new_targetlist, te);
+            continue;
+        }
+
+        {
+            ListCell *lc2;
+            AttrNumber sub_attno = 1;
+
+            foreach(lc2, subquery->targetList)
+            {
+                TargetEntry *sub_te = lfirst_node(TargetEntry, lc2);
+                Var *new_var;
+                TargetEntry *new_te;
+                const char *resname;
+
+                if (!is_visible_cypher_output_target(sub_te))
+                    continue;
+
+                resname = sub_te->resname != NULL ? sub_te->resname : "?column?";
+                new_var = makeVar(varno, sub_attno,
+                                  exprType((Node *)sub_te->expr),
+                                  exprTypmod((Node *)sub_te->expr),
+                                  exprCollation((Node *)sub_te->expr), 0);
+                new_te = makeTargetEntry((Expr *)new_var, next_resno,
+                                         pstrdup(resname), false);
+                new_targetlist = lappend(new_targetlist, new_te);
+                next_resno++;
+                sub_attno++;
+            }
+        }
+    }
+
+    query->targetList = new_targetlist;
 }
 
 static CommonTableExpr *find_query_cte(Query *query, const char *ctename)
@@ -1132,6 +1349,8 @@ static Query *analyze_cypher(List *stmt, ParseState *parent_pstate,
  */
 static Query *analyze_cypher_and_coerce(List *stmt, RangeTblFunction *rtfunc,
                                         ParseState *parent_pstate,
+                                        RangeTblEntry *source_rte,
+                                        cypher_convert_context *context,
                                         const char *query_str, int query_loc,
                                         char *graph_name, uint32 graph_oid,
                                         Param *params)
@@ -1172,16 +1391,12 @@ static Query *analyze_cypher_and_coerce(List *stmt, RangeTblFunction *rtfunc,
     foreach(lt, subquery->targetList)
     {
         TargetEntry *te = lfirst(lt);
-        if (te->resjunk)
-            continue;
-        if (te->resname != NULL &&
-            strncmp(te->resname, AGE_DEFAULT_ALIAS_PREFIX "raw_",
-                    strlen(AGE_DEFAULT_ALIAS_PREFIX "raw_")) == 0)
-        {
-            continue;
-        }
-        attr_count++;
+        if (is_visible_cypher_output_target(te))
+            attr_count++;
     }
+
+    if (is_auto_column_signature(rtfunc))
+        auto_convert_cypher_columns(rtfunc, source_rte, subquery, context);
 
     /* check the number of attributes first */
     if (attr_count != rtfunc->funccolcount)
@@ -1214,13 +1429,8 @@ static Query *analyze_cypher_and_coerce(List *stmt, RangeTblFunction *rtfunc,
         foreach(lc, query->targetList)
         {
             TargetEntry *te = lfirst(lc);
-            if (te->resname != NULL &&
-                strncmp(te->resname, AGE_DEFAULT_ALIAS_PREFIX "raw_",
-                        strlen(AGE_DEFAULT_ALIAS_PREFIX "raw_")) == 0)
-            {
-                continue;
-            }
-            filtered = lappend(filtered, te);
+            if (is_visible_cypher_output_target(te))
+                filtered = lappend(filtered, te);
         }
         query->targetList = filtered;
     }
@@ -1245,6 +1455,10 @@ static Query *analyze_cypher_and_coerce(List *stmt, RangeTblFunction *rtfunc,
         if (te->resname != NULL &&
             strncmp(te->resname, AGE_DEFAULT_ALIAS_PREFIX "raw_",
                     strlen(AGE_DEFAULT_ALIAS_PREFIX "raw_")) == 0)
+        {
+            continue;
+        }
+        if (is_hidden_cypher_output_target(te->resname))
         {
             continue;
         }

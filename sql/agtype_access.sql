@@ -59,6 +59,14 @@ RETURNS NULL ON NULL INPUT
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
 
+CREATE FUNCTION ag_catalog.agtype_ctid_field_agtype(oid, tid, agtype)
+    RETURNS agtype
+    LANGUAGE c
+    STABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL RESTRICTED
+AS 'MODULE_PATHNAME';
+
 -- get agtype object field or array element
 CREATE OPERATOR -> (
   LEFTARG = agtype,
@@ -154,6 +162,54 @@ RETURNS NULL ON NULL INPUT
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
 
+CREATE FUNCTION ag_catalog.agtype_object_field_exists_nonnull(agtype, agtype)
+    RETURNS bool
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_object_field_equals(agtype, agtype, agtype)
+    RETURNS bool
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_object_field_cmp(agtype, agtype, agtype)
+    RETURNS int4
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_object_field_int8(agtype, agtype)
+    RETURNS int8
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_object_field_float8(agtype, agtype)
+    RETURNS float8
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_object_field_numeric_agtype(agtype, agtype)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
 CREATE FUNCTION ag_catalog.agtype_access_slice(agtype, agtype, agtype)
     RETURNS agtype
     LANGUAGE c
@@ -167,4 +223,3 @@ CREATE FUNCTION ag_catalog.agtype_in_operator(agtype, agtype)
     IMMUTABLE
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
-

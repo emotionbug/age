@@ -29,6 +29,7 @@
 #include "optimizer/tlist.h"
 #include "optimizer/optimizer.h"
 #include "parser/cypher_parse_agg.h"
+#include "parser/cypher_parse_node.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/agtype.h"
@@ -67,6 +68,12 @@ static bool finalize_grouping_exprs_walker(Node *node,
                                            check_ungrouped_columns_context *context);
 static List *expand_groupingset_node(GroupingSet *gs);
 static List * expand_grouping_sets(List *groupingSets, int limit);
+static bool raw_attr_var_matches_grouped_entity_var(ParseState *pstate,
+                                                    Var *raw_var,
+                                                    Var *group_var);
+static char *get_raw_attr_display_name(const char *attname);
+static bool raw_attr_has_suffix(const char *attname, const char *suffix,
+                                int *base_len);
 
 /*
  * From PG's parseCheckAggregates
@@ -409,6 +416,10 @@ static bool check_ungrouped_columns_walker(Node *node, check_ungrouped_columns_c
                     gvar->varattno == var->varattno &&
                     gvar->varlevelsup == 0)
                     return false; /* acceptable, we're okay */
+                if (IsA(gvar, Var) &&
+                    raw_attr_var_matches_grouped_entity_var(context->pstate,
+                                                            var, gvar))
+                    return false;
             }
         }
 
@@ -447,7 +458,8 @@ static bool check_ungrouped_columns_walker(Node *node, check_ungrouped_columns_c
         }
 
         /* Found an ungrouped local variable; generate error message */
-        attname = get_rte_attribute_name(rte, var->varattno);
+        attname = get_raw_attr_display_name(
+            get_rte_attribute_name(rte, var->varattno));
         if (context->sublevels_up == 0)
             ereport(ERROR, (errcode(ERRCODE_GROUPING_ERROR),
                             errmsg("\"%s\" must be either part of an explicitly listed key or used inside an aggregate function",
@@ -476,6 +488,77 @@ static bool check_ungrouped_columns_walker(Node *node, check_ungrouped_columns_c
 
     return expression_tree_walker(node, check_ungrouped_columns_walker,
                                   (void *) context);
+}
+
+static bool raw_attr_var_matches_grouped_entity_var(ParseState *pstate,
+                                                    Var *raw_var,
+                                                    Var *group_var)
+{
+    char *raw_attname;
+    char *group_attname;
+    char *raw_id_name;
+    char *raw_props_name;
+    bool result;
+
+    if (raw_var->varno != group_var->varno ||
+        raw_var->varlevelsup != group_var->varlevelsup)
+    {
+        return false;
+    }
+
+    raw_attname = get_rte_attribute_name(
+        rt_fetch(raw_var->varno, pstate->p_rtable), raw_var->varattno);
+    group_attname = get_rte_attribute_name(
+        rt_fetch(group_var->varno, pstate->p_rtable), group_var->varattno);
+    raw_id_name = psprintf("%sraw_%s_id", AGE_DEFAULT_ALIAS_PREFIX,
+                           group_attname);
+    raw_props_name = psprintf("%sraw_%s_properties", AGE_DEFAULT_ALIAS_PREFIX,
+                              group_attname);
+
+    result = strcmp(raw_attname, raw_id_name) == 0 ||
+        strcmp(raw_attname, raw_props_name) == 0;
+
+    pfree(raw_id_name);
+    pfree(raw_props_name);
+
+    return result;
+}
+
+static char *get_raw_attr_display_name(const char *attname)
+{
+    const char *prefix = AGE_DEFAULT_ALIAS_PREFIX"raw_";
+    int prefix_len = strlen(prefix);
+    int base_len = 0;
+
+    if (strncmp(attname, prefix, prefix_len) != 0)
+        return (char *)attname;
+
+    if (!raw_attr_has_suffix(attname, "_properties", &base_len) &&
+        !raw_attr_has_suffix(attname, "_id", &base_len))
+    {
+        return (char *)attname;
+    }
+
+    if (base_len <= prefix_len)
+        return (char *)attname;
+
+    return pnstrdup(attname + prefix_len, base_len - prefix_len);
+}
+
+static bool raw_attr_has_suffix(const char *attname, const char *suffix,
+                                int *base_len)
+{
+    int attname_len = strlen(attname);
+    int suffix_len = strlen(suffix);
+
+    if (attname_len <= suffix_len ||
+        strcmp(attname + attname_len - suffix_len, suffix) != 0)
+    {
+        return false;
+    }
+
+    *base_len = attname_len - suffix_len;
+    return true;
 }
 
 /*
