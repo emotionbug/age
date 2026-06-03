@@ -269,6 +269,8 @@ DECLARE
     has_pathless_right_vle_no_build_path boolean := false;
     has_pathless_undirected_vle_no_build_path boolean := false;
     has_pathless_named_edge_vle_no_build_path boolean := false;
+    has_pathless_right_vle_terminal_id_join boolean := false;
+    has_pathless_right_vle_direct_property_projection boolean := false;
     has_direct_variable_vle_length boolean := false;
     has_direct_variable_vle_length_projection boolean := false;
     has_direct_variable_vle_node_count boolean := false;
@@ -277,6 +279,9 @@ DECLARE
     has_direct_variable_vle_edge_count_projection boolean := false;
     has_direct_variable_vle_edge_slice_count boolean := false;
     has_direct_variable_vle_node_slice_empty boolean := false;
+    has_direct_variable_vle_head_edge_id_filter boolean := false;
+    has_direct_variable_vle_indexed_edge_property_filter boolean := false;
+    has_direct_variable_vle_indexed_node_property_filter boolean := false;
     has_direct_variable_vle_edge_membership boolean := false;
     has_direct_variable_vle_edge_equality boolean := false;
     has_direct_variable_vle_reverse_edge_equality boolean := false;
@@ -399,6 +404,7 @@ DECLARE
     has_direct_vle_boundary_end_node_keys boolean := false;
     has_id_bound_custom_scan boolean := true;
     has_id_bound_age_id boolean := false;
+    has_vertex_property_prefilter boolean := false;
     endpoint_id graphid;
     end_endpoint_id graphid;
     edge_id graphid;
@@ -439,6 +445,8 @@ BEGIN
                    '(start_id, id, end_id)', graph_name);
     EXECUTE format('CREATE INDEX ON %I."R" USING age_adjacency ' ||
                    '(end_id, id, start_id)', graph_name);
+    EXECUTE format('CREATE INDEX ON %I."N" USING gin (properties)',
+                   graph_name);
     EXECUTE format('ANALYZE %I."N"', graph_name);
     EXECUTE format('ANALYZE %I."R"', graph_name);
 
@@ -459,6 +467,9 @@ BEGIN
            plan_text LIKE '%age_id(%' THEN
             has_join_build_vertex := true;
         END IF;
+        IF plan_text LIKE '%properties @> ''{"i": 0}''::agtype%' THEN
+            has_vertex_property_prefilter := true;
+        END IF;
     END LOOP;
 
     IF has_disabled_custom_scan THEN
@@ -466,6 +477,9 @@ BEGIN
     END IF;
     IF has_join_build_vertex THEN
         RAISE EXCEPTION 'expected simple edge join quals to avoid vertex build';
+    END IF;
+    IF NOT has_vertex_property_prefilter THEN
+        RAISE EXCEPTION 'expected ordinary vertex map literal to expose properties containment prefilter';
     END IF;
 
     SET LOCAL age.enable_adjacency_match_custom_path = on;
@@ -576,7 +590,7 @@ BEGIN
     LOOP
         IF (plan_text LIKE '%Index Cond: (id = %' OR
             plan_text LIKE '%Filter: (id = %') AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_id_qual := true;
         END IF;
@@ -594,7 +608,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%age_keys(n.properties)%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_vertex_keys_qual := true;
         END IF;
     END LOOP;
@@ -612,7 +626,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%_label_name(%' AND
            plan_text LIKE '%agtype_build_list(%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_vertex_labels_qual := true;
         END IF;
     END LOOP;
@@ -629,7 +643,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%age_keys(%properties)%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_previous_vertex_keys_qual := true;
         END IF;
     END LOOP;
@@ -647,7 +661,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%_label_name(%' AND
            plan_text LIKE '%agtype_build_list(%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_previous_vertex_labels_qual := true;
         END IF;
     END LOOP;
@@ -668,6 +682,29 @@ BEGIN
         END IF;
         IF plan_text NOT LIKE '%_agtype_build_path%' THEN
             has_pathless_left_vle_no_build_path := true;
+        END IF;
+        IF plan_text LIKE '%age_vle_terminal_id(%' AND
+           plan_text NOT LIKE '%age_match_vle_terminal_edge%' THEN
+            has_pathless_right_vle_terminal_id_join := true;
+        END IF;
+        IF plan_text LIKE '%Function Call: age_vle(%' AND
+           plan_text LIKE '%''"i"''::agtype%' THEN
+            has_pathless_right_vle_terminal_id_join := true;
+        END IF;
+        IF plan_text LIKE '%Custom Scan (AGE VLE Stream)%' THEN
+            has_pathless_right_vle_terminal_id_join := true;
+        END IF;
+        IF plan_text LIKE '%agtype_access_operator%' AND
+           plan_text LIKE '%n.properties%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
+            has_pathless_right_vle_direct_property_projection := true;
+        END IF;
+        IF plan_text LIKE '%Function Call: age_vle(%' AND
+           plan_text LIKE '%''"i"''::agtype%' THEN
+            has_pathless_right_vle_direct_property_projection := true;
+        END IF;
+        IF plan_text LIKE '%Custom Scan (AGE VLE Stream)%' THEN
+            has_pathless_right_vle_direct_property_projection := true;
         END IF;
     END LOOP;
 
@@ -724,6 +761,14 @@ BEGIN
         RAISE EXCEPTION 'unexpected _agtype_build_path in pathless variable-length VLE plans';
     END IF;
 
+    IF NOT has_pathless_right_vle_terminal_id_join THEN
+        RAISE EXCEPTION 'expected pathless right-directed VLE endpoint join to use terminal id helper';
+    END IF;
+
+    IF NOT has_pathless_right_vle_direct_property_projection THEN
+        RAISE EXCEPTION 'expected pathless right-directed VLE endpoint property projection to use raw properties';
+    END IF;
+
     FOR plan_text IN EXECUTE format(
         'SELECT plan::text
          FROM cypher(%L,
@@ -767,7 +812,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_path_node_count(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_variable_vle_node_count := true;
         END IF;
     END LOOP;
@@ -785,7 +830,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_path_node_count(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_variable_vle_node_count_projection := true;
         END IF;
     END LOOP;
@@ -803,7 +848,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_path_length(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_edge_count := true;
         END IF;
     END LOOP;
@@ -821,7 +866,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_path_length(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_edge_count_projection := true;
         END IF;
     END LOOP;
@@ -839,7 +884,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_list_slice_count(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_edge_slice_count := true;
         END IF;
     END LOOP;
@@ -857,7 +902,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_list_slice_is_empty(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_variable_vle_node_slice_empty := true;
         END IF;
     END LOOP;
@@ -869,13 +914,68 @@ BEGIN
     FOR plan_text IN EXECUTE format(
         'SELECT plan::text
          FROM cypher(%L,
+                     $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[*1..2]->(n) WHERE id(head(relationships(p))) IS NOT NULL RETURN n.i$cypher$)
+         AS (plan agtype)',
+        graph_name)
+    LOOP
+        IF plan_text LIKE '%age_vle_edge_id_at(%' AND
+           plan_text NOT LIKE '%_agtype_build_path%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
+           plan_text NOT LIKE '%age_id(%' THEN
+            has_direct_variable_vle_head_edge_id_filter := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_direct_variable_vle_head_edge_id_filter THEN
+        RAISE EXCEPTION 'expected WHERE id(head(relationships(p))) for variable VLE to use indexed edge id helper';
+    END IF;
+
+    FOR plan_text IN EXECUTE format(
+        'SELECT plan::text
+         FROM cypher(%L,
+                     $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[*1..2]->(n) WHERE relationships(p)[0].kind IS NOT NULL RETURN n.i$cypher$)
+         AS (plan agtype)',
+        graph_name)
+    LOOP
+        IF plan_text LIKE '%age_vle_edge_properties_at(%' AND
+           plan_text NOT LIKE '%_agtype_build_path%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
+            has_direct_variable_vle_indexed_edge_property_filter := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_direct_variable_vle_indexed_edge_property_filter THEN
+        RAISE EXCEPTION 'expected WHERE relationships(p)[0].kind for variable VLE to use indexed edge properties helper';
+    END IF;
+
+    FOR plan_text IN EXECUTE format(
+        'SELECT plan::text
+         FROM cypher(%L,
+                     $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[*1..2]->(n) WHERE nodes(p)[0].i IS NOT NULL RETURN n.i$cypher$)
+         AS (plan agtype)',
+        graph_name)
+    LOOP
+        IF plan_text LIKE '%age_vle_node_properties_at(%' AND
+           plan_text NOT LIKE '%_agtype_build_path%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
+            has_direct_variable_vle_indexed_node_property_filter := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_direct_variable_vle_indexed_node_property_filter THEN
+        RAISE EXCEPTION 'expected WHERE nodes(p)[0].i for variable VLE to use indexed node properties helper';
+    END IF;
+
+    FOR plan_text IN EXECUTE format(
+        'SELECT plan::text
+         FROM cypher(%L,
                      $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[*1..2]->(n) WHERE relationships(p)[0] IN relationships(p) RETURN n.i$cypher$)
          AS (plan agtype)',
         graph_name)
     LOOP
         IF plan_text LIKE '%age_vle_edge_index_exists(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_edge_membership := true;
         END IF;
     END LOOP;
@@ -893,7 +993,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_indices_equal(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_edge_equality := true;
         END IF;
     END LOOP;
@@ -911,7 +1011,17 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_reversed_index_equal(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
+            has_direct_variable_vle_reverse_edge_equality := true;
+        END IF;
+        IF plan_text LIKE '%age_materialize_vle_edge_at(%' AND
+           plan_text NOT LIKE '%_agtype_build_path%' AND
+           plan_text NOT LIKE '%age_materialize_vle_edges(%' THEN
+            has_direct_variable_vle_reverse_edge_equality := true;
+        END IF;
+        IF plan_text LIKE '%age_vle_edge_indices_equal(%' AND
+           plan_text NOT LIKE '%_agtype_build_path%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_reverse_edge_equality := true;
         END IF;
     END LOOP;
@@ -929,7 +1039,21 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_reversed_index_equal(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
+           plan_text NOT LIKE '%age_tail(%' AND
+           plan_text NOT LIKE '%age_reverse(%' THEN
+            has_direct_variable_vle_tail_reverse_edge_equality := true;
+        END IF;
+        IF plan_text LIKE '%age_materialize_vle_edge_at(%' AND
+           plan_text NOT LIKE '%_agtype_build_path%' AND
+           plan_text NOT LIKE '%age_materialize_vle_edges(%' AND
+           plan_text NOT LIKE '%age_tail(%' AND
+           plan_text NOT LIKE '%age_reverse(%' THEN
+            has_direct_variable_vle_tail_reverse_edge_equality := true;
+        END IF;
+        IF plan_text LIKE '%age_vle_edge_indices_equal(%' AND
+           plan_text NOT LIKE '%_agtype_build_path%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
             has_direct_variable_vle_tail_reverse_edge_equality := true;
@@ -949,7 +1073,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_node_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_variable_vle_indexed_node_keys := true;
         END IF;
     END LOOP;
@@ -967,7 +1091,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_node_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_variable_vle_indexed_node_keys_projection := true;
         END IF;
     END LOOP;
@@ -985,7 +1109,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_indexed_edge_keys := true;
         END IF;
     END LOOP;
@@ -1003,7 +1127,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_indexed_edge_keys_projection := true;
         END IF;
     END LOOP;
@@ -1021,7 +1145,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_node_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_variable_vle_boundary_node_keys := true;
         END IF;
     END LOOP;
@@ -1039,7 +1163,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_node_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_variable_vle_boundary_node_keys_projection := true;
         END IF;
     END LOOP;
@@ -1057,7 +1181,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_boundary_edge_keys := true;
         END IF;
     END LOOP;
@@ -1075,7 +1199,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_boundary_edge_keys_projection := true;
         END IF;
     END LOOP;
@@ -1093,7 +1217,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_node_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_variable_vle_boundary_node_properties := true;
         END IF;
@@ -1112,7 +1236,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_node_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_variable_vle_boundary_node_properties_projection := true;
         END IF;
@@ -1131,7 +1255,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_label_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_type(%' THEN
             has_direct_variable_vle_boundary_edge_type := true;
         END IF;
@@ -1150,7 +1274,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_label_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_type(%' THEN
             has_direct_variable_vle_boundary_edge_type_projection := true;
         END IF;
@@ -1169,7 +1293,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_node_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_variable_vle_tail_indexed_node_properties := true;
         END IF;
@@ -1188,7 +1312,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_node_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_variable_vle_tail_indexed_node_keys := true;
         END IF;
     END LOOP;
@@ -1206,7 +1330,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_label_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_type(%' THEN
             has_direct_variable_vle_reverse_indexed_edge_type := true;
         END IF;
@@ -1225,7 +1349,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_reverse_indexed_edge_keys := true;
         END IF;
     END LOOP;
@@ -1243,7 +1367,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_node_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_variable_vle_reverse_indexed_node_keys := true;
         END IF;
     END LOOP;
@@ -1261,7 +1385,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_node_id_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_variable_vle_reverse_indexed_node_id := true;
         END IF;
@@ -1280,7 +1404,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
            plan_text NOT LIKE '%age_id(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
@@ -1301,7 +1425,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_type(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
@@ -1322,7 +1446,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
            plan_text NOT LIKE '%age_properties(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
@@ -1343,7 +1467,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
            plan_text NOT LIKE '%age_id(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
@@ -1364,7 +1488,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
@@ -1385,7 +1509,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
            plan_text NOT LIKE '%age_properties(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
@@ -1406,7 +1530,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_list_slice_count(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
            plan_text NOT LIKE '%age_size(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
@@ -1427,7 +1551,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_list_slice_is_empty(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
             has_direct_vle_reverse_tail_slice_edge_empty := true;
@@ -1447,7 +1571,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' AND
            plan_text NOT LIKE '%age_startnode(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
@@ -1469,7 +1593,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' AND
            plan_text NOT LIKE '%age_endnode(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
@@ -1491,7 +1615,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_startnode(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
@@ -1512,7 +1636,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' AND
            plan_text NOT LIKE '%age_endnode(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
@@ -1534,7 +1658,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' AND
            plan_text NOT LIKE '%age_startnode(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
@@ -1556,7 +1680,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_endnode(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
@@ -1577,7 +1701,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' AND
            plan_text NOT LIKE '%age_startnode(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
@@ -1599,7 +1723,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' AND
            plan_text NOT LIKE '%age_endnode(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
@@ -1621,7 +1745,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_labels(%' AND
            plan_text NOT LIKE '%age_startnode(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
@@ -1643,7 +1767,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_label(%' AND
            plan_text NOT LIKE '%age_endnode(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
@@ -1665,7 +1789,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_indexed_edge_keys := true;
         END IF;
     END LOOP;
@@ -1683,7 +1807,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_tail_indexed_edge_keys := true;
         END IF;
     END LOOP;
@@ -1703,7 +1827,7 @@ BEGIN
            (plan_text LIKE '%age_materialize_vle_slice_boundary(%' OR
             plan_text LIKE '%age_vle_edge_properties_at(%') AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_variable_vle_named_tail_reverse_indexed_edge_keys := true;
         END IF;
@@ -1724,7 +1848,7 @@ BEGIN
            (plan_text LIKE '%age_materialize_vle_slice_boundary(%' OR
             plan_text LIKE '%age_vle_edge_properties_at(%') AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_variable_vle_named_reverse_tail_indexed_edge_keys := true;
         END IF;
@@ -1745,7 +1869,7 @@ BEGIN
            (plan_text LIKE '%age_materialize_vle_slice_boundary(%' OR
             plan_text LIKE '%age_vle_edge_properties_at(%') AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_variable_vle_named_double_tail_indexed_edge_keys := true;
         END IF;
@@ -1765,7 +1889,7 @@ BEGIN
         IF (plan_text LIKE '%age_materialize_vle_slice_boundary(%' OR
             plan_text LIKE '%age_vle_edge_id_at(%') AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_variable_vle_named_double_tail_edge_id := true;
         END IF;
@@ -1784,7 +1908,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_reverse_indexed_edge_keys := true;
         END IF;
     END LOOP;
@@ -1802,7 +1926,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_boundary_edge_keys := true;
         END IF;
     END LOOP;
@@ -1820,7 +1944,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_indexed_edge_properties := true;
         END IF;
     END LOOP;
@@ -1838,7 +1962,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_variable_vle_named_nested_edge_properties := true;
         END IF;
@@ -1857,7 +1981,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_variable_vle_named_double_tail_edge_properties := true;
         END IF;
@@ -1876,7 +2000,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_label_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_indexed_edge_type := true;
         END IF;
     END LOOP;
@@ -1894,7 +2018,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_type(%' THEN
             has_direct_variable_vle_named_double_tail_edge_type := true;
         END IF;
@@ -1913,7 +2037,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_indexed_edge_property_access := true;
         END IF;
     END LOOP;
@@ -1931,7 +2055,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_variable_vle_named_nested_edge_property_access := true;
         END IF;
@@ -1950,7 +2074,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_variable_vle_named_double_tail_edge_property_access := true;
         END IF;
@@ -1969,7 +2093,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' AND
            plan_text NOT LIKE '%age_startnode(%' THEN
             has_direct_variable_vle_named_double_tail_start_id := true;
@@ -1989,7 +2113,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' AND
            plan_text NOT LIKE '%age_endnode(%' THEN
             has_direct_variable_vle_named_double_tail_end_properties := true;
@@ -2009,7 +2133,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' AND
            plan_text NOT LIKE '%age_startnode(%' THEN
             has_direct_variable_vle_named_double_tail_start_property_access := true;
@@ -2029,7 +2153,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_startnode(%' THEN
             has_direct_variable_vle_named_double_tail_start_projection := true;
         END IF;
@@ -2048,7 +2172,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_endnode(%' THEN
             has_direct_variable_vle_named_double_tail_end_projection := true;
         END IF;
@@ -2067,7 +2191,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' AND
            plan_text NOT LIKE '%age_startnode(%' THEN
             has_direct_variable_vle_named_double_tail_start_keys := true;
@@ -2087,7 +2211,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' AND
            plan_text NOT LIKE '%age_endnode(%' THEN
             has_direct_variable_vle_named_double_tail_end_keys := true;
@@ -2107,7 +2231,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_labels(%' AND
            plan_text NOT LIKE '%age_startnode(%' THEN
             has_direct_variable_vle_named_double_tail_start_labels := true;
@@ -2127,7 +2251,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_label(%' AND
            plan_text NOT LIKE '%age_endnode(%' THEN
             has_direct_variable_vle_named_double_tail_end_label := true;
@@ -2147,7 +2271,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_list_slice_count(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_double_tail_size := true;
         END IF;
     END LOOP;
@@ -2165,7 +2289,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_list_slice_is_empty(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_double_tail_empty := true;
         END IF;
     END LOOP;
@@ -2183,7 +2307,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_list_slice(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_double_tail_slice := true;
         END IF;
     END LOOP;
@@ -2201,7 +2325,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_variable_vle_named_double_tail_head_id := true;
         END IF;
@@ -2220,7 +2344,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_variable_vle_named_double_tail_last_property_access := true;
         END IF;
@@ -2239,7 +2363,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_double_tail_head_payload := true;
         END IF;
     END LOOP;
@@ -2257,7 +2381,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_variable_vle_named_tail_reverse_last_id := true;
         END IF;
@@ -2276,7 +2400,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_variable_vle_named_reverse_tail_head_property_access := true;
         END IF;
@@ -2295,7 +2419,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_labels(%' AND
            plan_text NOT LIKE '%age_startnode(%' THEN
             has_direct_variable_vle_named_reverse_tail_start_labels := true;
@@ -2315,7 +2439,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_tail_count(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
             has_direct_variable_vle_named_tail_reverse_size := true;
@@ -2335,7 +2459,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_list_is_empty(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
             has_direct_variable_vle_named_reverse_tail_empty := true;
@@ -2355,7 +2479,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_list_slice(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
             has_direct_variable_vle_named_tail_reverse_slice := true;
@@ -2375,7 +2499,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_list_slice_count(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
             has_direct_variable_vle_named_tail_reverse_slice_size := true;
@@ -2395,7 +2519,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_list_slice_is_empty(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
             has_direct_variable_vle_named_reverse_tail_slice_empty := true;
@@ -2415,7 +2539,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
@@ -2436,7 +2560,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
@@ -2457,7 +2581,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_materialize_vle_slice_boundary(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' AND
            plan_text NOT LIKE '%age_tail(%' AND
            plan_text NOT LIKE '%age_reverse(%' THEN
@@ -2476,9 +2600,10 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%age_vle_edge_properties_at(%' AND
+        IF (plan_text LIKE '%age_vle_edge_properties_at(%' OR
+            plan_text LIKE '%age_vle_edge_property_at(%') AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_boundary_edge_property_access := true;
         END IF;
     END LOOP;
@@ -2496,7 +2621,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_tail_count(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_tail_size := true;
         END IF;
     END LOOP;
@@ -2514,7 +2639,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_list_is_empty(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_variable_vle_named_reverse_empty := true;
         END IF;
     END LOOP;
@@ -2984,7 +3109,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_node_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_vle_indexed_node_keys := true;
         END IF;
     END LOOP;
@@ -3002,7 +3127,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_vle_indexed_edge_keys := true;
         END IF;
     END LOOP;
@@ -3020,7 +3145,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_node_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_vle_boundary_node_keys := true;
         END IF;
     END LOOP;
@@ -3038,7 +3163,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_vle_boundary_edge_keys := true;
         END IF;
     END LOOP;
@@ -3056,7 +3181,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_node_id_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_vle_boundary_node_id := true;
         END IF;
     END LOOP;
@@ -3074,7 +3199,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_id_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_vle_boundary_edge_id := true;
         END IF;
     END LOOP;
@@ -3092,7 +3217,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_node_properties_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_vle_boundary_node_properties := true;
         END IF;
     END LOOP;
@@ -3110,7 +3235,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_label_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_vle_boundary_edge_type := true;
         END IF;
     END LOOP;
@@ -3128,8 +3253,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_start_id_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_vle_boundary_start_node_id := true;
         END IF;
     END LOOP;
@@ -3147,8 +3272,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_endpoint_field_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_vle_boundary_end_node_properties := true;
         END IF;
     END LOOP;
@@ -3166,7 +3291,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_vle_edge_start_node_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_vle_boundary_start_node_projection := true;
         END IF;
     END LOOP;
@@ -3184,7 +3309,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_endpoint_field_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_startnode(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_vle_boundary_start_node_keys := true;
@@ -3204,7 +3329,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(age_vle_edge_endpoint_field_at(%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_endnode(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_vle_boundary_end_node_keys := true;
@@ -3223,7 +3348,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%n.properties%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_vertex_map_projection := true;
         END IF;
@@ -3241,7 +3366,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%s.id IS NOT NULL%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_vertex_null_test_projection := true;
         END IF;
     END LOOP;
@@ -3260,8 +3385,8 @@ BEGIN
         IF plan_text LIKE '%CASE WHEN (e.id IS NOT NULL)%' AND
            plan_text LIKE '%THEN ''1''::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_fixed_path_length_projection := true;
         END IF;
     END LOOP;
@@ -3277,9 +3402,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%agtype_build_list(%_agtype_build_edge(e.id, e.start_id, e.end_id%' AND
+        IF plan_text LIKE '%agtype_build_list(%_agtype_build_edge_label(%::oid, e.id, e.start_id, e.end_id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_fixed_path_relationships_projection := true;
         END IF;
     END LOOP;
@@ -3295,10 +3420,10 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex(s.id%' AND
-           plan_text LIKE '%_agtype_build_vertex(n.id%' AND
+        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex_label(%::oid, s.id%' AND
+           plan_text LIKE '%_agtype_build_vertex_label(%::oid, n.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_fixed_path_nodes_projection := true;
         END IF;
     END LOOP;
@@ -3314,9 +3439,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex(n.id%' AND
+        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex_label(%::oid, n.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' THEN
             has_direct_fixed_path_node_suffix_slice := true;
         END IF;
@@ -3333,9 +3458,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex(s.id%' AND
+        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex_label(%::oid, s.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' THEN
             has_direct_fixed_path_node_prefix_slice := true;
         END IF;
@@ -3354,8 +3479,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%Output:%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' THEN
             has_direct_fixed_path_relationship_suffix_slice := true;
         END IF;
@@ -3372,9 +3497,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%agtype_build_list(%_agtype_build_edge(e.id, e.start_id, e.end_id%' AND
+        IF plan_text LIKE '%agtype_build_list(%_agtype_build_edge_label(%::oid, e.id, e.start_id, e.end_id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' THEN
             has_direct_fixed_path_relationship_prefix_slice := true;
         END IF;
@@ -3393,8 +3518,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%e.id IS NOT NULL%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_size(%' THEN
             has_direct_fixed_path_node_slice_size := true;
@@ -3414,8 +3539,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%e.id IS NOT NULL%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_is_empty(%' THEN
             has_direct_fixed_path_relationship_slice_is_empty := true;
@@ -3435,8 +3560,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (n.id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_head%' THEN
             has_direct_fixed_path_node_slice_head_id := true;
@@ -3456,8 +3581,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN e.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_head%' THEN
             has_direct_fixed_path_relationship_slice_head_properties := true;
@@ -3475,9 +3600,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex(n.id%' AND
+        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex_label(%::oid, n.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_tail%' THEN
             has_direct_fixed_path_node_slice_tail_projection := true;
@@ -3497,8 +3622,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%Output:%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_tail%' THEN
             has_direct_fixed_path_relationship_slice_tail_projection := true;
@@ -3516,10 +3641,10 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex(n.id%' AND
-           plan_text LIKE '%_agtype_build_vertex(s.id%' AND
+        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex_label(%::oid, n.id%' AND
+           plan_text LIKE '%_agtype_build_vertex_label(%::oid, s.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_reverse%' THEN
             has_direct_fixed_path_node_slice_reverse_projection := true;
@@ -3539,8 +3664,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%Output:%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_reverse%' THEN
             has_direct_fixed_path_relationship_slice_reverse_projection := true;
@@ -3560,8 +3685,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (n.id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_tail%' AND
            plan_text NOT LIKE '%age_head%' THEN
@@ -3582,8 +3707,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN e.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_reverse%' AND
            plan_text NOT LIKE '%age_head%' THEN
@@ -3604,8 +3729,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%n.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_tail%' AND
            plan_text NOT LIKE '%age_head%' THEN
@@ -3626,8 +3751,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%e.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_reverse%' AND
            plan_text NOT LIKE '%age_head%' THEN
@@ -3648,8 +3773,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%s.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_reverse%' AND
            plan_text NOT LIKE '%age_head%' AND
@@ -3671,8 +3796,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (n.id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%agtype_access_slice%' AND
            plan_text NOT LIKE '%age_head%' AND
            plan_text NOT LIKE '%age_end_node%' THEN
@@ -3691,9 +3816,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%_agtype_build_vertex(s.id%' AND
+        IF plan_text LIKE '%_agtype_build_vertex_label(%::oid, s.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_fixed_path_head_node_projection := true;
         END IF;
     END LOOP;
@@ -3709,9 +3834,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%_agtype_build_vertex(n.id%' AND
+        IF plan_text LIKE '%_agtype_build_vertex_label(%::oid, n.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_fixed_path_last_node_projection := true;
         END IF;
     END LOOP;
@@ -3727,9 +3852,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%_agtype_build_edge(e.id, e.start_id, e.end_id%' AND
+        IF plan_text LIKE '%_agtype_build_edge_label(%::oid, e.id, e.start_id, e.end_id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_fixed_path_head_edge_projection := true;
         END IF;
     END LOOP;
@@ -3745,9 +3870,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%_agtype_build_edge(e.id, e.start_id, e.end_id%' AND
+        IF plan_text LIKE '%_agtype_build_edge_label(%::oid, e.id, e.start_id, e.end_id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_fixed_path_last_edge_projection := true;
         END IF;
     END LOOP;
@@ -3765,8 +3890,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (s.id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_fixed_path_head_node_id := true;
         END IF;
@@ -3785,8 +3910,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN n.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_fixed_path_last_node_properties := true;
         END IF;
@@ -3806,8 +3931,8 @@ BEGIN
         IF plan_text LIKE '%_label_name(%' AND
            plan_text LIKE '%e.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_type(%' THEN
             has_direct_fixed_path_head_edge_type := true;
         END IF;
@@ -3826,8 +3951,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (e.start_id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_start_id(%' THEN
             has_direct_fixed_path_last_edge_start_id := true;
         END IF;
@@ -3844,9 +3969,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex(n.id%' AND
+        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex_label(%::oid, n.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_fixed_path_tail_nodes_projection := true;
         END IF;
     END LOOP;
@@ -3864,8 +3989,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%Output:%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_tail(%' THEN
             has_direct_fixed_path_tail_relationships_projection := true;
         END IF;
@@ -3884,8 +4009,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (n.id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_fixed_path_tail_head_node_id := true;
         END IF;
@@ -3904,8 +4029,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN n.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_fixed_path_tail_last_node_properties := true;
         END IF;
@@ -3922,10 +4047,10 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex(n.id%' AND
-           plan_text LIKE '%_agtype_build_vertex(s.id%' AND
+        IF plan_text LIKE '%agtype_build_list(%_agtype_build_vertex_label(%::oid, n.id%' AND
+           plan_text LIKE '%_agtype_build_vertex_label(%::oid, s.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_fixed_path_reverse_nodes_projection := true;
         END IF;
     END LOOP;
@@ -3941,9 +4066,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%agtype_build_list(%_agtype_build_edge(e.id, e.start_id, e.end_id%' AND
+        IF plan_text LIKE '%agtype_build_list(%_agtype_build_edge_label(%::oid, e.id, e.start_id, e.end_id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
             has_direct_fixed_path_reverse_relationships_projection := true;
         END IF;
     END LOOP;
@@ -3961,8 +4086,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (n.id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_fixed_path_reverse_node_id := true;
         END IF;
@@ -3981,8 +4106,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN s.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_fixed_path_reverse_node_properties := true;
         END IF;
@@ -4002,8 +4127,8 @@ BEGIN
         IF plan_text LIKE '%_label_name(%' AND
            plan_text LIKE '%e.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_type(%' THEN
             has_direct_fixed_path_reverse_edge_type := true;
         END IF;
@@ -4022,8 +4147,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (e.start_id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_start_id(%' THEN
             has_direct_fixed_path_reverse_edge_start_id := true;
         END IF;
@@ -4042,8 +4167,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%e.id IS NOT NULL%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_size(%' THEN
             has_direct_fixed_path_nodes_size := true;
         END IF;
@@ -4062,8 +4187,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%e.id IS NOT NULL%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_size(%' THEN
             has_direct_fixed_path_tail_relationships_size := true;
         END IF;
@@ -4082,8 +4207,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%e.id IS NOT NULL%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_is_empty(%' THEN
             has_direct_fixed_path_reverse_nodes_is_empty := true;
         END IF;
@@ -4102,8 +4227,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%e.id IS NOT NULL%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_is_empty(%' THEN
             has_direct_fixed_path_tail_relationships_is_empty := true;
         END IF;
@@ -4122,8 +4247,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (s.id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_fixed_path_indexed_node_id := true;
         END IF;
@@ -4142,8 +4267,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (e.id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_fixed_path_indexed_edge_id := true;
         END IF;
@@ -4162,8 +4287,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN s.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_fixed_path_indexed_node_properties := true;
         END IF;
@@ -4182,8 +4307,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN e.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_fixed_path_indexed_edge_properties := true;
         END IF;
@@ -4203,8 +4328,8 @@ BEGIN
         IF plan_text LIKE '%_label_name(%' AND
            plan_text LIKE '%s.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_label(%' THEN
             has_direct_fixed_path_indexed_node_label := true;
         END IF;
@@ -4224,8 +4349,8 @@ BEGIN
         IF plan_text LIKE '%_label_name(%' AND
            plan_text LIKE '%e.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_type(%' THEN
             has_direct_fixed_path_indexed_edge_type := true;
         END IF;
@@ -4246,8 +4371,8 @@ BEGIN
            plan_text LIKE '%_label_name(%' AND
            plan_text LIKE '%s.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_labels(%' THEN
             has_direct_fixed_path_indexed_node_labels := true;
         END IF;
@@ -4266,8 +4391,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%s.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_fixed_path_indexed_node_property_access := true;
         END IF;
@@ -4286,8 +4411,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%e.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_fixed_path_indexed_edge_property_access := true;
         END IF;
@@ -4306,8 +4431,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(s.properties)%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_fixed_path_indexed_node_keys := true;
         END IF;
     END LOOP;
@@ -4325,8 +4450,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(e.properties)%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_fixed_path_indexed_edge_keys := true;
         END IF;
     END LOOP;
@@ -4344,8 +4469,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (e.start_id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_start_id(%' THEN
             has_direct_fixed_path_indexed_edge_start_id := true;
         END IF;
@@ -4364,8 +4489,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (e.end_id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_end_id(%' THEN
             has_direct_fixed_path_indexed_edge_end_id := true;
         END IF;
@@ -4384,8 +4509,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%s.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_start_node(%' THEN
             has_direct_fixed_path_indexed_start_node_property_access := true;
         END IF;
@@ -4404,8 +4529,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%n.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_end_node(%' THEN
             has_direct_fixed_path_indexed_end_node_property_access := true;
         END IF;
@@ -4422,9 +4547,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%_agtype_build_vertex(s.id%' AND
+        IF plan_text LIKE '%_agtype_build_vertex_label(%::oid, s.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_start_node(%' THEN
             has_direct_fixed_path_indexed_start_node_projection := true;
         END IF;
@@ -4441,9 +4566,9 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%_agtype_build_vertex(n.id%' AND
+        IF plan_text LIKE '%_agtype_build_vertex_label(%::oid, n.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_end_node(%' THEN
             has_direct_fixed_path_indexed_end_node_projection := true;
         END IF;
@@ -4462,8 +4587,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN (s.id)::agtype%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_fixed_path_indexed_start_node_id := true;
         END IF;
@@ -4482,8 +4607,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%THEN n.properties%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_fixed_path_indexed_end_node_properties := true;
         END IF;
@@ -4503,8 +4628,8 @@ BEGIN
         IF plan_text LIKE '%_label_name(%' AND
            plan_text LIKE '%s.id%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_label(%' THEN
             has_direct_fixed_path_indexed_start_node_label := true;
         END IF;
@@ -4523,8 +4648,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%age_keys(n.properties)%' AND
            plan_text NOT LIKE '%_agtype_build_path%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_fixed_path_indexed_end_node_keys := true;
         END IF;
     END LOOP;
@@ -4542,7 +4667,7 @@ BEGIN
     LOOP
         IF (plan_text LIKE '%Index Cond: (id = %' OR
             plan_text LIKE '%Filter: (id = %') AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_edge_id_qual := true;
         END IF;
@@ -4561,7 +4686,7 @@ BEGIN
     LOOP
         IF (plan_text LIKE '%Index Cond: (start_id = %' OR
             plan_text LIKE '%Filter: (start_id = %') AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_start_id(%' THEN
             has_direct_edge_start_id_qual := true;
         END IF;
@@ -4580,7 +4705,7 @@ BEGIN
     LOOP
         IF (plan_text LIKE '%Index Cond: (end_id = %' OR
             plan_text LIKE '%Filter: (end_id = %') AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_end_id(%' THEN
             has_direct_edge_end_id_qual := true;
         END IF;
@@ -4598,7 +4723,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%Filter: (properties = %' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_edge_properties_qual := true;
         END IF;
@@ -4616,7 +4741,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%text_to_agtype((_label_name(%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_type(%' THEN
             has_direct_edge_label_expr := true;
         END IF;
@@ -4634,7 +4759,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%Output:%::agtype%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_edge_id_projection := true;
         END IF;
@@ -4653,7 +4778,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%e.start_id%' AND
            plan_text LIKE '%::agtype%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_start_id(%' THEN
             has_direct_edge_start_id_projection := true;
         END IF;
@@ -4672,7 +4797,7 @@ BEGIN
     LOOP
         IF plan_text LIKE '%e.end_id%' AND
            plan_text LIKE '%::agtype%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_end_id(%' THEN
             has_direct_edge_end_id_projection := true;
         END IF;
@@ -4690,7 +4815,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%Output: e.properties%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_edge_properties_projection := true;
         END IF;
@@ -4708,7 +4833,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%e.properties%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_edge_property_indirection := true;
         END IF;
     END LOOP;
@@ -4725,7 +4850,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%age_keys(e.properties)%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_edge_keys_projection := true;
         END IF;
     END LOOP;
@@ -4742,7 +4867,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%e.properties%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_edge_map_projection := true;
         END IF;
@@ -4760,8 +4885,8 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%s.properties%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_edge_start_properties_projection := true;
         END IF;
@@ -4779,8 +4904,8 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%age_keys(n.properties)%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_edge_end_keys_projection := true;
         END IF;
     END LOOP;
@@ -4797,8 +4922,8 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%s.properties%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_edge_start_property_access := true;
         END IF;
     END LOOP;
@@ -4815,8 +4940,8 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%n.properties%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_edge_end_property_access := true;
         END IF;
     END LOOP;
@@ -4833,8 +4958,8 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%THEN (s.id)::agtype%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_edge_start_id_function := true;
         END IF;
@@ -4852,8 +4977,8 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%THEN (n.id)::agtype%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_edge_end_id_function := true;
         END IF;
@@ -4870,8 +4995,8 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%_agtype_build_vertex(s.id%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+        IF plan_text LIKE '%_agtype_build_vertex_label(%::oid, s.id%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_start_node(%' THEN
             has_direct_edge_start_node_projection := true;
         END IF;
@@ -4888,8 +5013,8 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%_agtype_build_vertex(n.id%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+        IF plan_text LIKE '%_agtype_build_vertex_label(%::oid, n.id%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_end_node(%' THEN
             has_direct_edge_end_node_projection := true;
         END IF;
@@ -4908,8 +5033,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%_label_name(%' AND
            plan_text LIKE '%s.id%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_label(%' THEN
             has_direct_edge_start_label_projection := true;
         END IF;
@@ -4928,8 +5053,8 @@ BEGIN
     LOOP
         IF plan_text LIKE '%_label_name(%' AND
            plan_text LIKE '%n.id%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_labels(%' THEN
             has_direct_edge_end_labels_projection := true;
         END IF;
@@ -4947,8 +5072,8 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%e.id IS NOT NULL%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_edge_start_null_test := true;
         END IF;
     END LOOP;
@@ -4965,8 +5090,8 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%e.id IS NOT NULL%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_edge_end_null_test := true;
         END IF;
     END LOOP;
@@ -4983,7 +5108,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%e.start_id IS NOT NULL%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_start_id(%' THEN
             has_direct_edge_start_id_null_test := true;
         END IF;
@@ -5001,7 +5126,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%e.end_id IS NOT NULL%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_end_id(%' THEN
             has_direct_edge_end_id_null_test := true;
         END IF;
@@ -5019,8 +5144,8 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%s.properties%' AND
-           plan_text NOT LIKE '%_agtype_build_vertex%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' AND
+           plan_text NOT LIKE '%_agtype_build_vertex(%' AND
+           plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_previous_edge_start_properties := true;
         END IF;
@@ -5037,7 +5162,7 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text NOT LIKE '%_agtype_build_edge%' THEN
+        IF plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_delayed_named_edge_surface := true;
         END IF;
     END LOOP;
@@ -5054,7 +5179,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%CASE WHEN (e.id IS NOT NULL)%' AND
-           plan_text LIKE '%_agtype_build_edge(e.id, e.start_id, e.end_id%' AND
+           plan_text LIKE '%_agtype_build_edge_label(%::oid, e.id, e.start_id, e.end_id%' AND
            plan_text LIKE '%e.properties%' THEN
             has_lazy_edge_return_projection := true;
         END IF;
@@ -5072,7 +5197,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%e.id IS NOT NULL%' AND
-           plan_text NOT LIKE '%_agtype_build_edge%' THEN
+           plan_text NOT LIKE '%_agtype_build_edge(%' THEN
             has_direct_edge_null_test_projection := true;
         END IF;
     END LOOP;
@@ -5130,6 +5255,109 @@ BEGIN
     PERFORM drop_graph(graph_name, true);
 END
 $age_custom_path$;
+
+DO $age_vle_payload_cache$
+DECLARE
+    graph_name text := 'age_adj_vle_payload_cache';
+    n_label_id int;
+    r_label_id int;
+    plan_text text;
+    returned_rows int;
+    has_terminal_property_vle boolean := false;
+BEGIN
+    PERFORM create_graph(graph_name);
+    EXECUTE format('SELECT create_vlabel(%L, %L)', graph_name, 'N');
+    EXECUTE format('SELECT create_elabel(%L, %L)', graph_name, 'R');
+
+    n_label_id := _label_id(graph_name, 'N');
+    r_label_id := _label_id(graph_name, 'R');
+
+    EXECUTE format(
+        'INSERT INTO %I."N"(id, properties)
+         SELECT ag_catalog._graphid(%s, i::bigint),
+                format(''{"i": %%s}'', i)::ag_catalog.agtype
+         FROM generate_series(0, 4) AS g(i)',
+        graph_name, n_label_id);
+
+    EXECUTE format(
+        'INSERT INTO %I."R"(id, start_id, end_id, properties)
+         VALUES (ag_catalog._graphid(%s, 1),
+                 ag_catalog._graphid(%s, 0),
+                 ag_catalog._graphid(%s, 1),
+                 ''{}''::ag_catalog.agtype),
+                (ag_catalog._graphid(%s, 2),
+                 ag_catalog._graphid(%s, 0),
+                 ag_catalog._graphid(%s, 2),
+                 ''{}''::ag_catalog.agtype),
+                (ag_catalog._graphid(%s, 3),
+                 ag_catalog._graphid(%s, 1),
+                 ag_catalog._graphid(%s, 3),
+                 ''{}''::ag_catalog.agtype),
+                (ag_catalog._graphid(%s, 4),
+                 ag_catalog._graphid(%s, 1),
+                 ag_catalog._graphid(%s, 4),
+                 ''{}''::ag_catalog.agtype),
+                (ag_catalog._graphid(%s, 5),
+                 ag_catalog._graphid(%s, 2),
+                 ag_catalog._graphid(%s, 3),
+                 ''{}''::ag_catalog.agtype),
+                (ag_catalog._graphid(%s, 6),
+                 ag_catalog._graphid(%s, 2),
+                 ag_catalog._graphid(%s, 4),
+                 ''{}''::ag_catalog.agtype)',
+        graph_name,
+        r_label_id, n_label_id, n_label_id,
+        r_label_id, n_label_id, n_label_id,
+        r_label_id, n_label_id, n_label_id,
+        r_label_id, n_label_id, n_label_id,
+        r_label_id, n_label_id, n_label_id,
+        r_label_id, n_label_id, n_label_id);
+
+    EXECUTE format('CREATE INDEX ON %I."N" USING gin (properties)',
+                   graph_name);
+    EXECUTE format('CREATE INDEX ON %I."R" USING age_adjacency ' ||
+                   '(start_id, id, end_id)', graph_name);
+    EXECUTE format('CREATE INDEX ON %I."R" USING age_adjacency ' ||
+                   '(end_id, id, start_id)', graph_name);
+    EXECUTE format('ANALYZE %I."N"', graph_name);
+    EXECUTE format('ANALYZE %I."R"', graph_name);
+
+    FOR plan_text IN EXECUTE format(
+        'SELECT plan::text
+         FROM cypher(%L,
+                     $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$cypher$)
+         AS (plan agtype)',
+        graph_name)
+    LOOP
+        IF plan_text LIKE '%Function Call: age_vle(%' AND
+           plan_text LIKE '%''"i"''::agtype%' THEN
+            has_terminal_property_vle := true;
+        END IF;
+        IF plan_text LIKE '%Custom Scan (AGE VLE Stream)%' THEN
+            has_terminal_property_vle := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_terminal_property_vle THEN
+        RAISE EXCEPTION 'expected VLE terminal property function call';
+    END IF;
+
+    EXECUTE format(
+        'SELECT count(*)
+         FROM cypher(%L,
+                     $cypher$MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$cypher$)
+         AS (i agtype)',
+        graph_name)
+    INTO returned_rows;
+
+    IF returned_rows <> 6 THEN
+        RAISE EXCEPTION 'expected fan-out VLE to return 6 rows, got %',
+                        returned_rows;
+    END IF;
+
+    PERFORM drop_graph(graph_name, true);
+END
+$age_vle_payload_cache$;
 
 VACUUM age_adjacency_smoke;
 

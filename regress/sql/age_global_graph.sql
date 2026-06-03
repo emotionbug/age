@@ -243,6 +243,37 @@ $$) AS (name agtype, weight agtype);
 -- Cleanup
 SELECT * FROM drop_graph('vle_cache_test2', true);
 
+-- Label-constrained VLE can load only one edge label. Verify that a later
+-- VLE needing a different label or all labels rebuilds the graph context.
+\pset format unaligned
+SELECT * FROM create_graph('vle_edge_scope_test');
+
+SELECT * FROM cypher('vle_edge_scope_test', $$
+  CREATE (a:N {name: 'a'})-[:E]->(b:N {name: 'b'})-[:F]->(c:N {name: 'c'})
+$$) AS (v agtype);
+
+SELECT * FROM cypher('vle_edge_scope_test', $$
+  MATCH (a:N {name: 'a'})-[:E*1..2]->(n:N)
+  RETURN n.name
+  ORDER BY n.name
+$$) AS (name agtype);
+
+SELECT * FROM cypher('vle_edge_scope_test', $$
+  MATCH (b:N {name: 'b'})-[:F*1..2]->(n:N)
+  RETURN n.name
+  ORDER BY n.name
+$$) AS (name agtype);
+
+SELECT * FROM cypher('vle_edge_scope_test', $$
+  MATCH (a:N {name: 'a'})-[*1..2]->(n:N)
+  RETURN n.name
+  ORDER BY n.name
+$$) AS (name agtype);
+
+-- Cleanup
+SELECT * FROM drop_graph('vle_edge_scope_test', true);
+\pset format aligned
+
 -----------------------------------------------------------------------------------------------------------------------------
 --
 -- VLE cache invalidation via direct SQL (trigger tests)
@@ -326,4 +357,3 @@ SELECT * FROM drop_graph('vle_trigger_test', true);
 --
 -- End of tests
 --
-

@@ -184,18 +184,23 @@ $$) AS (title agtype);
 -- in the upcoming queries because it produces some 
 -- hardcoded oids in sort node, which may change in
 -- future and break the tests.
-CREATE OR REPLACE FUNCTION plan_has_index_scan(sql text)
+CREATE OR REPLACE FUNCTION plan_has_index_scan(cypher_query text)
 RETURNS boolean
 LANGUAGE plpgsql AS
 $$               
 DECLARE                                                                                   
-    plan_lines text[];                                                                             
     plan_text text;
 BEGIN                
-    EXECUTE format('EXPLAIN (FORMAT JSON, COSTS OFF) %s', sql) INTO plan_text;
+    FOR plan_text IN EXECUTE format(
+        'SELECT plan::text FROM cypher(''graph'', %L) AS (plan agtype)',
+        'EXPLAIN (VERBOSE, COSTS OFF) ' || cypher_query)
+    LOOP
+        IF position('Index Scan' in plan_text) > 0 THEN
+            RETURN true;
+        END IF;
+    END LOOP;
 
-    -- Return true if 'Index Scan' appears anywhere
-    RETURN position('"Index Scan"' in plan_text) > 0;
+    RETURN false;
 END;
 $$;
 
@@ -206,38 +211,19 @@ $$) AS (title agtype);
 
 -- The index expression below matches the expression
 -- seen in the EXPLAIN plan of above query
-DO $$
-DECLARE
-    graph_oid oid;
-BEGIN
-    SELECT graphid INTO graph_oid
-    FROM ag_catalog.ag_graph
-    WHERE name = 'graph';
-
-    EXECUTE format($f$
-        CREATE INDEX movie_vector_idx ON graph."Movie"
-        USING hnsw (((
-          agtype_access_operator(
-            VARIADIC ARRAY[
-              _agtype_build_vertex(id, _label_name(%L::oid, id), properties),
-              '"embedding"'::agtype
-            ]
-          )::text
-        )::vector(4)) vector_cosine_ops);
-    $f$, graph_oid);
-END;
-$$;
+CREATE INDEX movie_vector_idx ON graph."Movie"
+USING hnsw ((((agtype_access_operator(
+  VARIADIC ARRAY[properties, '"embedding"'::agtype]))::text)::vector(4))
+  vector_cosine_ops);
 
 -- Disable seqscan just to test the index
 SET enable_seqscan = off;
-SELECT plan_has_index_scan($f$
-    SELECT * FROM cypher('graph', $$
-        MATCH (m:Movie)
-        RETURN m.title
-        ORDER BY m.embedding::vector(4) <=> [-0.07594558, 0.04081754, 0.29592122, -0.11921061]::vector(4)
-        ASC LIMIT 4
-    $$) AS (title agtype);
-$f$);
+SELECT plan_has_index_scan($$
+    MATCH (m:Movie)
+    RETURN m.title
+    ORDER BY m.embedding::vector(4) <=> [-0.07594558, 0.04081754, 0.29592122, -0.11921061]::vector(4)
+    ASC LIMIT 4
+$$);
 SELECT * FROM cypher('graph', $$ MATCH (m:Movie)
                                  RETURN m.title
                                  ORDER BY m.embedding::vector(4) <=> [-0.07594558, 0.04081754, 0.29592122, -0.11921061]::vector(4)
@@ -261,37 +247,19 @@ SELECT * FROM cypher('graph', $$ MATCH (m:Movie), (search:Movie {title: "The Mat
                                  ASC LIMIT 4
 $$) AS (title agtype);
 
-DO $$
-DECLARE
-    graph_oid oid;
-BEGIN
-    SELECT graphid INTO graph_oid
-    FROM ag_catalog.ag_graph
-    WHERE name = 'graph';
-
-    EXECUTE format($f$
-        CREATE INDEX movie_vector_idx ON graph."Movie"
-        USING hnsw ((
-          agtype_access_operator(
-            VARIADIC ARRAY[
-              _agtype_build_vertex(id, _label_name(%L::oid, id), properties),
-              '"embedding"'::agtype
-            ]
-        )::vector(4)) vector_cosine_ops);
-    $f$, graph_oid);
-END;
-$$;
+CREATE INDEX movie_vector_idx ON graph."Movie"
+USING hnsw (((agtype_access_operator(
+  VARIADIC ARRAY[properties, '"embedding"'::agtype]))::vector(4))
+  vector_cosine_ops);
 
 -- Disable seqscan just to test the index
 SET enable_seqscan = off;
-SELECT plan_has_index_scan($f$
-    SELECT * FROM cypher('graph', $$
-        MATCH (m:Movie)
-        RETURN m.title
-        ORDER BY m.embedding::vector(4) <=> [-0.07594558, 0.04081754, 0.29592122, -0.11921061]::vector(4)
-        ASC LIMIT 4
-    $$) AS (title agtype);
-$f$);
+SELECT plan_has_index_scan($$
+    MATCH (m:Movie)
+    RETURN m.title
+    ORDER BY m.embedding::vector(4) <=> [-0.07594558, 0.04081754, 0.29592122, -0.11921061]::vector(4)
+    ASC LIMIT 4
+$$);
 SELECT * FROM cypher('graph', $$ MATCH (m:Movie)
                                  RETURN m.title
                                  ORDER BY m.embedding::vector(4) <=> [-0.07594558, 0.04081754, 0.29592122, -0.11921061]::vector(4)

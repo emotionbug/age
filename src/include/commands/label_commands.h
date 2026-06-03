@@ -62,4 +62,6 @@ Datum create_vlabel(PG_FUNCTION_ARGS);
 
 Datum create_elabel(PG_FUNCTION_ARGS);
 
+Datum create_property_index(PG_FUNCTION_ARGS);
+
 #endif

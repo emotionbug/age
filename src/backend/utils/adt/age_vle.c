@@ -65,7 +65,9 @@
 
 #include "access/age_adjacency.h"
 #include "access/genam.h"
+#include "access/heapam.h"
 #include "access/relation.h"
+#include "access/table.h"
 #include "common/hashfn.h"
 #include "commands/defrem.h"
 #include "funcapi.h"
@@ -75,12 +77,14 @@
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 
 #include "utils/age_vle.h"
 #include "catalog/ag_graph.h"
 #include "catalog/ag_label.h"
 #include "nodes/cypher_nodes.h"
 #include "utils/ag_cache.h"
+#include "utils/agtype_raw.h"
 
 /* defines */
 #define GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc) \
@@ -114,6 +118,7 @@ typedef struct VLETraversalFrame
     graphid edge_id;
     int64 edge_index;
     graphid next_vertex_id;
+    vertex_entry *next_vertex_entry;
     graphid source_vertex_id;
 } VLETraversalFrame;
 
@@ -123,6 +128,88 @@ typedef struct VLETraversalFrameStack
     int64 size;
     int64 capacity;
 } VLETraversalFrameStack;
+
+typedef struct VLETerminalPropertyCache
+{
+    Oid relid;
+    Relation rel;
+    agtype *key_arg;
+    agtype_value key;
+    bool key_valid;
+    MemoryContextCallback callback;
+} VLETerminalPropertyCache;
+
+typedef struct VLEMaterializerObjectCacheEntry
+{
+    graphid id;
+    agtype *object;
+} VLEMaterializerObjectCacheEntry;
+
+typedef struct VLEMaterializerObjectCache
+{
+    Oid graph_oid;
+    MemoryContext context;
+    HTAB *vertices;
+    HTAB *edges;
+    HTAB *typed_vertices;
+    HTAB *typed_edges;
+} VLEMaterializerObjectCache;
+
+typedef struct VLECleanupCallback
+{
+    MemoryContextCallback callback;
+    struct VLE_local_context *vlelctx;
+} VLECleanupCallback;
+
+typedef struct VLEPrefetchedTerminalBlock
+{
+    Oid relid;
+    BlockNumber blockno;
+} VLEPrefetchedTerminalBlock;
+
+typedef struct VLELocalEdgeStateEntry
+{
+    graphid edge_id;
+    int64 edge_index;
+} VLELocalEdgeStateEntry;
+
+typedef struct VLETerminalPropertyBatchEntry
+{
+    graphid terminal_id;
+    Datum property;
+    bool is_null;
+    bool found;
+} VLETerminalPropertyBatchEntry;
+
+typedef struct VLETerminalLabelBatchEntry
+{
+    int32 label_id;
+    int64 needed;
+    graphid min_terminal_id;
+    graphid max_terminal_id;
+} VLETerminalLabelBatchEntry;
+
+typedef struct VLEAgeAdjacencyScanState VLEAgeAdjacencyScanState;
+
+typedef struct VLEAdjacencyPayloadCacheKey
+{
+    Oid index_oid;
+    graphid source_vertex_id;
+} VLEAdjacencyPayloadCacheKey;
+
+typedef struct VLEAdjacencyPayloadCacheEntry
+{
+    VLEAdjacencyPayloadCacheKey key;
+    int64 count;
+    int64 capacity;
+    AgeAdjacencyPayload *payloads;
+} VLEAdjacencyPayloadCacheEntry;
+
+typedef struct VLEAdjacencyPayloadCacheState
+{
+    VLEAgeAdjacencyScanState *scan_state;
+    VLEAdjacencyPayloadCacheEntry *cache_entry;
+} VLEAdjacencyPayloadCacheState;
 
 /* VLE local context per each unique age_vle function activation */
 typedef struct VLE_local_context
@@ -149,18 +236,49 @@ typedef struct VLE_local_context
     GraphIdStack *dfs_path_stack;   /* dfs stack containing the path (array-based) */
     GraphIdStack *dfs_path_edge_index_stack; /* dense indexes in path order */
     GraphIdStack *dfs_path_vertex_stack; /* vertices in current path order */
+    int64 dfs_path_depth;           /* cached depth of dfs_path_stack */
+    graphid cached_vertex_id;       /* most recent vertex entry loaded by DFS */
+    vertex_entry *cached_vertex_entry; /* cached entry for terminal output */
+    bool use_local_edge_state;      /* dense edge state is local to payloads */
+    HTAB *local_edge_index;         /* edge id -> local dense index */
     uint8 *edge_state_flags;        /* dense local state by edge index */
     int64 edge_state_flags_size;    /* number of entries in flags array */
+    int64 edge_state_flags_capacity; /* allocated entries in flags array */
     Oid age_adjacency_out_index_oid; /* optional (start_id,id,end_id) index */
     Oid age_adjacency_in_index_oid; /* optional (end_id,id,start_id) index */
+    AgeAdjacencyVisiblePayloadScan *age_adjacency_out_scan;
+    AgeAdjacencyVisiblePayloadScan *age_adjacency_in_scan;
+    HTAB *age_adjacency_payload_cache;
+    bool age_adjacency_out_payload_cache_decided;
+    bool age_adjacency_out_payload_cache_enabled;
+    bool age_adjacency_in_payload_cache_decided;
+    bool age_adjacency_in_payload_cache_enabled;
     VLE_path_function path_function; /* which path function to use */
     bool reverse_paths_to;          /* traverse paths-to from the bound end */
     bool reverse_output_path;       /* reverse traversal result before return */
+    bool emit_terminal_only;        /* result only needs the terminal vertex */
+    bool emit_terminal_property;    /* result only needs one terminal property */
+    agtype_value terminal_property_key; /* copied property key for direct emit */
+    bool terminal_property_key_is_char;
+    char terminal_property_key_char;
+    HTAB *terminal_property_prefetched_blocks; /* rel/block scalar prefetch set */
+    int64 terminal_property_prefetch_budget; /* bounded optional cache budget */
+    Datum terminal_property_result; /* last direct terminal property result */
+    bool terminal_property_result_valid;
+    bool terminal_property_result_is_null;
+    graphid *terminal_property_ids; /* materialized terminal ids in DFS order */
+    Datum *terminal_property_results; /* materialized properties in DFS order */
+    bool *terminal_property_nulls;  /* materialized NULL flags in DFS order */
+    int64 terminal_property_count;
+    int64 terminal_property_capacity;
+    int64 terminal_property_emit_index;
+    bool terminal_property_materialized;
     GraphIdNode *next_vertex;      /* for VLE_FUNCTION_PATHS_TO */
     int64 vle_grammar_node_id;     /* the unique VLE grammar assigned node id */
     bool use_cache;                /* are we using VLE_local_context cache */
     struct VLE_local_context *next;  /* the next chained VLE_local_context */
     bool is_dirty;                 /* is this VLE context reusable */
+    VLECleanupCallback *cleanup_callback;
 } VLE_local_context;
 
 /*
@@ -229,6 +347,25 @@ static void get_vle_scalar_arg_no_copy(char *funcname, agtype *agt_arg,
                                        enum agtype_value_type type, bool error,
                                        agtype_value *result,
                                        bool *needs_free);
+static VLETerminalPropertyCache *get_vle_terminal_property_cache(
+    FunctionCallInfo fcinfo);
+static Relation get_vle_terminal_property_relation(
+    FunctionCallInfo fcinfo, Oid relid);
+static void get_vle_terminal_property_key(FunctionCallInfo fcinfo,
+                                          const char *funcname,
+                                          agtype *agt_arg_key,
+                                          agtype_value *key_value,
+                                          bool *key_needs_free);
+static bool validate_vle_property_key(agtype_value *key_value,
+                                      bool key_needs_free);
+static void destroy_vle_terminal_property_cache(void *arg);
+static void cleanup_vle_local_context_resources(VLE_local_context *vlelctx);
+static void cleanup_vle_local_context_callback(void *arg);
+static void register_vle_local_context_cleanup(FuncCallContext *funcctx,
+                                               VLE_local_context *vlelctx);
+static void deactivate_vle_local_context_cleanup(VLE_local_context *vlelctx);
+static HTAB *ensure_vle_edge_property_relation_cache(
+    VLE_local_context *vlelctx, const char *cache_name);
 static graphid get_agtype_scalar_graphid_arg(agtype *agt_arg,
                                              const char *type_error_msg);
 static bool get_agtype_scalar_bool_arg(agtype *agt_arg,
@@ -254,24 +391,46 @@ static Oid get_age_adjacency_index_for_label(Oid edge_label_oid,
                                              bool outgoing);
 static bool age_adjacency_index_matches(Relation index_rel, bool outgoing);
 static void refresh_vle_age_adjacency_indexes(VLE_local_context *vlelctx);
+static void close_vle_age_adjacency_scans(VLE_local_context *vlelctx);
 static void create_VLE_local_state_flags(VLE_local_context *vlelctx);
+static void ensure_VLE_local_state_flags_capacity(VLE_local_context *vlelctx,
+                                                  int64 required);
+static int64 get_or_create_VLE_local_edge_index(VLE_local_context *vlelctx,
+                                                graphid edge_id);
 static void free_VLE_local_context(VLE_local_context *vlelctx);
 /* VLE graph traversal functions */
-static uint8 *get_edge_state_flags(VLE_local_context *vlelctx,
-                                   int64 edge_index);
 static VLETraversalFrameStack *new_vle_frame_stack(void);
 static void free_vle_frame_stack(VLETraversalFrameStack *stack);
-static void vle_frame_stack_push(VLETraversalFrameStack *stack,
-                                 graphid edge_id, int64 edge_index,
-                                 graphid next_vertex_id,
-                                 graphid source_vertex_id);
-static VLETraversalFrame *vle_frame_stack_peek(VLETraversalFrameStack *stack);
-static void vle_frame_stack_pop(VLETraversalFrameStack *stack);
-static bool vle_frame_stack_is_empty(VLETraversalFrameStack *stack);
+static inline void vle_frame_stack_push(VLETraversalFrameStack *stack,
+                                        graphid edge_id, int64 edge_index,
+                                        graphid next_vertex_id,
+                                        vertex_entry *next_vertex_entry,
+                                        graphid source_vertex_id)
+    __attribute__((always_inline));
+static inline VLETraversalFrame *vle_frame_stack_peek(
+    VLETraversalFrameStack *stack)
+    __attribute__((always_inline));
+static inline void vle_frame_stack_pop(VLETraversalFrameStack *stack)
+    __attribute__((always_inline));
+static inline bool vle_frame_stack_is_empty(VLETraversalFrameStack *stack)
+    __attribute__((always_inline));
+static inline void vle_path_stacks_push(GraphIdStack *path_stack,
+                                        GraphIdStack *path_edge_index_stack,
+                                        GraphIdStack *path_vertex_stack,
+                                        graphid edge_id, graphid edge_index,
+                                        graphid vertex_id)
+    __attribute__((always_inline));
+static inline void vle_path_stacks_pop(GraphIdStack *path_stack,
+                                       GraphIdStack *path_edge_index_stack,
+                                       GraphIdStack *path_vertex_stack)
+    __attribute__((always_inline));
 /* graphid data structures */
 static void load_initial_dfs_stacks(VLE_local_context *vlelctx);
 static bool dfs_find_a_path_between(VLE_local_context *vlelctx);
 static bool dfs_find_a_path_from(VLE_local_context *vlelctx);
+static inline bool dfs_find_terminal_property_path_from(
+    VLE_local_context *vlelctx)
+    __attribute__((always_inline));
 static int get_edge_uniqueness_args_fast(FunctionCallInfo fcinfo,
                                          Datum **args, Oid **types,
                                          bool **nulls, Datum *fast_args,
@@ -282,11 +441,24 @@ static void add_valid_vertex_edges(VLE_local_context *vlelctx,
                                    graphid vertex_id);
 static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
                                              vertex_entry *ve);
+static inline void add_valid_vertex_edges_for_entry_with_depth(
+    VLE_local_context *vlelctx, vertex_entry *ve, int64 path_stack_size)
+    __attribute__((always_inline));
 static bool add_valid_vertex_edges_from_age_adjacency(
-    VLE_local_context *vlelctx, vertex_entry *ve, HTAB *relation_cache,
+    VLE_local_context *vlelctx, graphid source_vertex_id,
+    HTAB *relation_cache,
     bool outgoing, bool skip_self_loops, bool has_property_constraints);
 static bool add_age_adjacency_payload(const AgeAdjacencyPayload *payload,
                                       void *callback_state);
+static bool cache_and_add_age_adjacency_payload(
+    const AgeAdjacencyPayload *payload, void *callback_state);
+static void replay_cached_age_adjacency_payloads(
+    VLEAdjacencyPayloadCacheEntry *cache_entry,
+    VLEAgeAdjacencyScanState *state);
+static void append_age_adjacency_payload_cache(
+    VLEAdjacencyPayloadCacheEntry *cache_entry,
+    const AgeAdjacencyPayload *payload);
+static void free_age_adjacency_payload_cache(VLE_local_context *vlelctx);
 static cypher_rel_dir reverse_edge_direction(cypher_rel_dir edge_direction);
 static bool is_zero_length_only(VLE_local_context *vlelctx);
 static bool is_empty_length_range(VLE_local_context *vlelctx);
@@ -297,15 +469,59 @@ static int64 get_initial_edge_count(VLE_local_context *vlelctx,
 static int64 get_matching_initial_edge_count(GraphEdgeAdjList *edges);
 static bool is_edge_in_path(VLE_local_context *vlelctx, graphid edge_id,
                             int64 stack_size);
-static bool next_adj_entry(GraphEdgeAdjList *edge_out, int64 *edge_out_idx,
-                           GraphEdgeAdjList *edge_in, int64 *edge_in_idx,
-                           GraphEdgeAdjList *edge_self, int64 *edge_self_idx,
-                           GraphEdgeAdjEntry **adj_entry);
+static inline bool next_adj_entry(GraphEdgeAdjList *edge_out,
+                                  int64 *edge_out_idx,
+                                  GraphEdgeAdjList *edge_in,
+                                  int64 *edge_in_idx,
+                                  GraphEdgeAdjList *edge_self,
+                                  int64 *edge_self_idx,
+                                  GraphEdgeAdjEntry **adj_entry)
+    __attribute__((always_inline));
 /* VLE path and edge building functions */
 static VLE_path_container *create_VLE_path_container(int64 path_size);
 static VLE_path_container *build_VLE_path_container(VLE_local_context *vlelctx);
 static VLE_path_container *build_reversed_VLE_path_container(
     VLE_local_context *vlelctx);
+static VLE_path_container *build_VLE_terminal_container(
+    VLE_local_context *vlelctx);
+static VLE_path_container *build_VLE_terminal_zero_container(
+    VLE_local_context *vlelctx);
+static Datum get_VLE_terminal_vertex_property(VLE_local_context *vlelctx,
+                                              graphid terminal_id,
+                                              bool *is_null);
+static Datum build_VLE_terminal_property(VLE_local_context *vlelctx,
+                                         bool *is_null);
+static void cache_terminal_property_result(VLE_local_context *vlelctx,
+                                           graphid terminal_id);
+static bool should_materialize_terminal_properties(VLE_local_context *vlelctx);
+static void materialize_terminal_property_results(VLE_local_context *vlelctx);
+static void append_terminal_property_id(VLE_local_context *vlelctx,
+                                        graphid terminal_id);
+static void batch_fetch_terminal_properties(VLE_local_context *vlelctx);
+static void scan_terminal_property_label_batch(
+    VLE_local_context *vlelctx, HTAB *terminal_map,
+    VLETerminalLabelBatchEntry *label_entry);
+static bool cache_batch_terminal_property_tuple(
+    VLE_local_context *vlelctx, HTAB *terminal_map, HeapTuple tuple,
+    TupleDesc tupdesc);
+static inline void cache_direct_terminal_property_result(
+    VLE_local_context *vlelctx, graphid terminal_id)
+    __attribute__((always_inline));
+static inline void cache_direct_terminal_property_result_for_entry(
+    VLE_local_context *vlelctx, vertex_entry *ve)
+    __attribute__((always_inline));
+static inline bool cache_terminal_property_char_hit_for_entry(
+    VLE_local_context *vlelctx, vertex_entry *ve)
+    __attribute__((always_inline));
+static inline bool get_cached_terminal_property_result(
+    VLE_local_context *vlelctx, vertex_entry *ve, Datum *property)
+    __attribute__((always_inline));
+static bool should_prefetch_terminal_property_block(
+    VLE_local_context *vlelctx);
+static bool is_terminal_property_block_prefetched(
+    VLE_local_context *vlelctx, Oid relid, BlockNumber blockno);
+static void mark_terminal_property_block_prefetched(
+    VLE_local_context *vlelctx, Oid relid, BlockNumber blockno);
 static VLE_path_container *build_VLE_zero_container(VLE_local_context *vlelctx);
 static agtype_value *build_vle_edge_value(GRAPH_global_context *ggctx,
                                           graphid edge_id,
@@ -314,18 +530,43 @@ static agtype_value *build_vle_vertex_value(GRAPH_global_context *ggctx,
                                             graphid vertex_id,
                                             HTAB *relation_cache);
 static agtype_value *build_path(VLE_path_container *vpc);
+static agtype *build_path_agtype(VLE_path_container *vpc,
+                                 VLEMaterializerObjectCache *object_cache);
+static agtype *build_edge_list_agtype(VLE_path_container *vpc,
+                                      VLEMaterializerObjectCache *object_cache);
+static agtype *build_node_list_agtype(VLE_path_container *vpc,
+                                      VLEMaterializerObjectCache *object_cache);
 static agtype_value *build_edge_list(VLE_path_container *vpc);
 static agtype_value *build_empty_agtype_value_array(void);
 static int64 agtv_vle_node_count(agtype *agt_arg_vpc);
 static bool get_vle_edge_id_at_index(agtype *agt_arg_vpc,
                                      int64 edge_index, graphid *edge_id);
-static agtype_value *agtv_materialize_vle_vertex_at(agtype *agt_arg_vpc,
-                                                    int64 node_index);
+static agtype *materialize_vle_vertex_at_agtype(
+    agtype *agt_arg_vpc, int64 node_index,
+    VLEMaterializerObjectCache *object_cache);
+static agtype *materialize_vle_edge_at_agtype(
+    agtype *agt_arg_vpc, int64 edge_index,
+    VLEMaterializerObjectCache *object_cache);
 static agtype_value *agtv_materialize_vle_edge_endpoint_at(
     agtype *agt_arg_vpc, int64 edge_index, bool start_endpoint);
 static Datum age_vle_edge_endpoint_id_at(FunctionCallInfo fcinfo,
                                          bool start_endpoint);
 static agtype *build_empty_agtype_array(void);
+static VLEMaterializerObjectCache *get_vle_materializer_object_cache(
+    FunctionCallInfo fcinfo, Oid graph_oid);
+static agtype *get_cached_vle_vertex_object(
+    VLEMaterializerObjectCache *object_cache, GRAPH_global_context *ggctx,
+    graphid vertex_id, HTAB *relation_cache);
+static agtype *get_cached_vle_edge_object(
+    VLEMaterializerObjectCache *object_cache, GRAPH_global_context *ggctx,
+    graphid edge_id, HTAB *relation_cache);
+static agtype *get_cached_vle_typed_vertex(
+    VLEMaterializerObjectCache *object_cache, GRAPH_global_context *ggctx,
+    graphid vertex_id, HTAB *relation_cache);
+static agtype *get_cached_vle_typed_edge(
+    VLEMaterializerObjectCache *object_cache, GRAPH_global_context *ggctx,
+    graphid edge_id, HTAB *relation_cache);
+static agtype *copy_agtype_to_context(agtype *source, MemoryContext context);
 static int64 decode_vle_slice_boundary_mode(int64 mode,
                                             VLESliceBoundaryMode *decoded);
 /* VLE_local_context cache management */
@@ -388,11 +629,13 @@ static VLE_local_context *get_cached_VLE_local_context(int64 vle_grammar_node_id
                 GRAPH_global_context *ggctx = NULL;
 
                 /*
-                 * Get the GRAPH global context associated with this local VLE
-                 * context. We need to verify it still exists and that the
-                 * pointer is valid.
+                 * Verify that the exact GRAPH global context associated with
+                 * this VLE context is still linked and valid. Multiple load
+                 * scopes can exist for the same graph, so graph OID alone is
+                 * not specific enough here.
                  */
-                ggctx = find_GRAPH_global_context(vlelctx->graph_oid);
+                ggctx = is_GRAPH_global_context_current(vlelctx->ggctx) ?
+                    vlelctx->ggctx : NULL;
 
                 /*
                  * If ggctx == NULL, vlelctx is bad and vlelctx needs to be
@@ -484,12 +727,82 @@ static void cache_VLE_local_context(VLE_local_context *vlelctx)
 /* helper function to create the local dense VLE edge-state flags. */
 static void create_VLE_local_state_flags(VLE_local_context *vlelctx)
 {
+    HASHCTL hash_ctl;
+
+    if (vlelctx->use_local_edge_state)
+    {
+        MemSet(&hash_ctl, 0, sizeof(hash_ctl));
+        hash_ctl.keysize = sizeof(graphid);
+        hash_ctl.entrysize = sizeof(VLELocalEdgeStateEntry);
+        hash_ctl.hcxt = CurrentMemoryContext;
+        vlelctx->local_edge_index =
+            hash_create("VLE local edge index", 1024, &hash_ctl,
+                        HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+        vlelctx->edge_state_flags_size = 0;
+        vlelctx->edge_state_flags_capacity = 0;
+        vlelctx->edge_state_flags = NULL;
+        return;
+    }
+
     vlelctx->edge_state_flags_size = get_graph_num_loaded_edges(vlelctx->ggctx);
+    vlelctx->edge_state_flags_capacity = vlelctx->edge_state_flags_size;
     if (vlelctx->edge_state_flags_size > 0)
     {
         vlelctx->edge_state_flags =
             palloc0(sizeof(uint8) * vlelctx->edge_state_flags_size);
     }
+}
+
+static void ensure_VLE_local_state_flags_capacity(VLE_local_context *vlelctx,
+                                                  int64 required)
+{
+    int64 new_capacity;
+
+    if (required <= vlelctx->edge_state_flags_capacity)
+    {
+        return;
+    }
+
+    new_capacity = vlelctx->edge_state_flags_capacity > 0 ?
+        vlelctx->edge_state_flags_capacity : 1024;
+    while (new_capacity < required)
+    {
+        new_capacity *= 2;
+    }
+
+    if (vlelctx->edge_state_flags == NULL)
+    {
+        vlelctx->edge_state_flags = palloc0(sizeof(uint8) * new_capacity);
+    }
+    else
+    {
+        vlelctx->edge_state_flags =
+            repalloc0(vlelctx->edge_state_flags,
+                      sizeof(uint8) * vlelctx->edge_state_flags_capacity,
+                      sizeof(uint8) * new_capacity);
+    }
+    vlelctx->edge_state_flags_capacity = new_capacity;
+}
+
+static int64 get_or_create_VLE_local_edge_index(VLE_local_context *vlelctx,
+                                                graphid edge_id)
+{
+    VLELocalEdgeStateEntry *entry;
+    bool found;
+
+    Assert(vlelctx->use_local_edge_state);
+    Assert(vlelctx->local_edge_index != NULL);
+
+    entry = hash_search(vlelctx->local_edge_index, &edge_id, HASH_ENTER,
+                        &found);
+    if (!found)
+    {
+        entry->edge_index = vlelctx->edge_state_flags_size++;
+        ensure_VLE_local_state_flags_capacity(vlelctx,
+                                              vlelctx->edge_state_flags_size);
+    }
+
+    return entry->edge_index;
 }
 
 static VLETraversalFrameStack *new_vle_frame_stack(void)
@@ -515,10 +828,11 @@ static void free_vle_frame_stack(VLETraversalFrameStack *stack)
     pfree(stack);
 }
 
-static void vle_frame_stack_push(VLETraversalFrameStack *stack,
-                                 graphid edge_id, int64 edge_index,
-                                 graphid next_vertex_id,
-                                 graphid source_vertex_id)
+static inline void vle_frame_stack_push(VLETraversalFrameStack *stack,
+                                        graphid edge_id, int64 edge_index,
+                                        graphid next_vertex_id,
+                                        vertex_entry *next_vertex_entry,
+                                        graphid source_vertex_id)
 {
     VLETraversalFrame *frame = NULL;
 
@@ -536,10 +850,12 @@ static void vle_frame_stack_push(VLETraversalFrameStack *stack,
     frame->edge_id = edge_id;
     frame->edge_index = edge_index;
     frame->next_vertex_id = next_vertex_id;
+    frame->next_vertex_entry = next_vertex_entry;
     frame->source_vertex_id = source_vertex_id;
 }
 
-static VLETraversalFrame *vle_frame_stack_peek(VLETraversalFrameStack *stack)
+static inline VLETraversalFrame *vle_frame_stack_peek(
+    VLETraversalFrameStack *stack)
 {
     Assert(stack != NULL);
     Assert(stack->size > 0);
@@ -547,7 +863,7 @@ static VLETraversalFrame *vle_frame_stack_peek(VLETraversalFrameStack *stack)
     return &stack->array[stack->size - 1];
 }
 
-static void vle_frame_stack_pop(VLETraversalFrameStack *stack)
+static inline void vle_frame_stack_pop(VLETraversalFrameStack *stack)
 {
     Assert(stack != NULL);
     Assert(stack->size > 0);
@@ -555,9 +871,73 @@ static void vle_frame_stack_pop(VLETraversalFrameStack *stack)
     stack->size--;
 }
 
-static bool vle_frame_stack_is_empty(VLETraversalFrameStack *stack)
+static inline bool vle_frame_stack_is_empty(VLETraversalFrameStack *stack)
 {
     return stack->size == 0;
+}
+
+static inline void vle_path_stacks_push(GraphIdStack *path_stack,
+                                        GraphIdStack *path_edge_index_stack,
+                                        GraphIdStack *path_vertex_stack,
+                                        graphid edge_id, graphid edge_index,
+                                        graphid vertex_id)
+{
+    Assert(path_stack != NULL);
+    Assert(path_edge_index_stack != NULL);
+    Assert(path_vertex_stack != NULL);
+
+    if (path_stack->size >= path_stack->capacity)
+    {
+        path_stack->capacity *= 2;
+        path_stack->array = repalloc(path_stack->array,
+                                     sizeof(graphid) *
+                                     path_stack->capacity);
+        path_edge_index_stack->capacity = path_stack->capacity;
+        path_edge_index_stack->array = repalloc(
+            path_edge_index_stack->array,
+            sizeof(graphid) * path_edge_index_stack->capacity);
+    }
+    if (path_vertex_stack->size >= path_vertex_stack->capacity)
+    {
+        path_vertex_stack->capacity *= 2;
+        path_vertex_stack->array = repalloc(path_vertex_stack->array,
+                                           sizeof(graphid) *
+                                           path_vertex_stack->capacity);
+    }
+
+    path_stack->array[path_stack->size++] = edge_id;
+    path_edge_index_stack->array[path_edge_index_stack->size++] = edge_index;
+    path_vertex_stack->array[path_vertex_stack->size++] = vertex_id;
+}
+
+static inline void vle_path_stacks_pop(GraphIdStack *path_stack,
+                                       GraphIdStack *path_edge_index_stack,
+                                       GraphIdStack *path_vertex_stack)
+{
+    Assert(path_stack != NULL);
+    Assert(path_stack->size > 0);
+    Assert(path_edge_index_stack != NULL);
+    Assert(path_edge_index_stack->size > 0);
+    Assert(path_vertex_stack != NULL);
+    Assert(path_vertex_stack->size > 0);
+
+    path_stack->size--;
+    path_edge_index_stack->size--;
+    path_vertex_stack->size--;
+}
+
+static inline bool vle_path_top_edge_index_equals(
+    GraphIdStack *path_edge_index_stack, int64 edge_index)
+    __attribute__((always_inline));
+
+static inline bool vle_path_top_edge_index_equals(
+    GraphIdStack *path_edge_index_stack, int64 edge_index)
+{
+    Assert(path_edge_index_stack != NULL);
+    Assert(path_edge_index_stack->size > 0);
+
+    return path_edge_index_stack->array[path_edge_index_stack->size - 1] ==
+           edge_index;
 }
 
 /*
@@ -1041,6 +1421,8 @@ static void free_VLE_local_context(VLE_local_context *vlelctx)
         return;
     }
 
+    deactivate_vle_local_context_cleanup(vlelctx);
+
     /* free the stored graph name */
     if (vlelctx->graph_name != NULL)
     {
@@ -1055,14 +1437,36 @@ static void free_VLE_local_context(VLE_local_context *vlelctx)
         vlelctx->edge_label_name = NULL;
     }
 
+    if (vlelctx->emit_terminal_property &&
+        vlelctx->terminal_property_key.type == AGTV_STRING)
+    {
+        pfree_if_not_null(vlelctx->terminal_property_key.val.string.val);
+        vlelctx->terminal_property_key.val.string.val = NULL;
+        vlelctx->terminal_property_key.val.string.len = 0;
+        vlelctx->emit_terminal_property = false;
+    }
+
     /* zero-length-only VLE never creates edge-state entries */
     pfree_if_not_null(vlelctx->edge_state_flags);
     vlelctx->edge_state_flags = NULL;
     vlelctx->edge_state_flags_size = 0;
+    vlelctx->edge_state_flags_capacity = 0;
+    if (vlelctx->local_edge_index != NULL)
+    {
+        hash_destroy(vlelctx->local_edge_index);
+        vlelctx->local_edge_index = NULL;
+    }
+    close_vle_age_adjacency_scans(vlelctx);
+    free_age_adjacency_payload_cache(vlelctx);
 
     destroy_entry_property_relation_cache(
         vlelctx->edge_property_relation_cache);
     vlelctx->edge_property_relation_cache = NULL;
+    if (vlelctx->terminal_property_prefetched_blocks != NULL)
+    {
+        hash_destroy(vlelctx->terminal_property_prefetched_blocks);
+        vlelctx->terminal_property_prefetched_blocks = NULL;
+    }
     free_edge_property_constraint_cache(vlelctx);
 
     /*
@@ -1091,10 +1495,99 @@ static void free_VLE_local_context(VLE_local_context *vlelctx)
     vlelctx->dfs_path_stack = NULL;
     vlelctx->dfs_path_edge_index_stack = NULL;
     vlelctx->dfs_path_vertex_stack = NULL;
+    vlelctx->dfs_path_depth = 0;
 
     /* and finally the context itself */
     pfree_if_not_null(vlelctx);
     vlelctx = NULL;
+}
+
+static void cleanup_vle_local_context_resources(VLE_local_context *vlelctx)
+{
+    if (vlelctx == NULL)
+        return;
+
+    close_vle_age_adjacency_scans(vlelctx);
+    free_age_adjacency_payload_cache(vlelctx);
+    destroy_entry_property_relation_cache(
+        vlelctx->edge_property_relation_cache);
+    vlelctx->edge_property_relation_cache = NULL;
+    if (vlelctx->terminal_property_prefetched_blocks != NULL)
+    {
+        hash_destroy(vlelctx->terminal_property_prefetched_blocks);
+        vlelctx->terminal_property_prefetched_blocks = NULL;
+    }
+}
+
+static void cleanup_vle_local_context_callback(void *arg)
+{
+    VLECleanupCallback *callback = arg;
+
+    if (callback == NULL ||
+        callback->vlelctx == NULL)
+    {
+        return;
+    }
+
+    cleanup_vle_local_context_resources(callback->vlelctx);
+    callback->vlelctx->cleanup_callback = NULL;
+    callback->vlelctx = NULL;
+}
+
+static void register_vle_local_context_cleanup(FuncCallContext *funcctx,
+                                               VLE_local_context *vlelctx)
+{
+    MemoryContext oldctx;
+    VLECleanupCallback *callback;
+
+    if (funcctx == NULL ||
+        vlelctx == NULL)
+    {
+        return;
+    }
+
+    deactivate_vle_local_context_cleanup(vlelctx);
+
+    oldctx = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+    callback = palloc0(sizeof(*callback));
+    callback->callback.func = cleanup_vle_local_context_callback;
+    callback->callback.arg = callback;
+    callback->vlelctx = vlelctx;
+    MemoryContextRegisterResetCallback(funcctx->multi_call_memory_ctx,
+                                       &callback->callback);
+    MemoryContextSwitchTo(oldctx);
+
+    vlelctx->cleanup_callback = callback;
+}
+
+static void deactivate_vle_local_context_cleanup(VLE_local_context *vlelctx)
+{
+    if (vlelctx == NULL ||
+        vlelctx->cleanup_callback == NULL)
+    {
+        return;
+    }
+
+    vlelctx->cleanup_callback->vlelctx = NULL;
+    vlelctx->cleanup_callback = NULL;
+}
+
+static HTAB *ensure_vle_edge_property_relation_cache(
+    VLE_local_context *vlelctx, const char *cache_name)
+{
+    MemoryContext oldctx;
+
+    Assert(vlelctx != NULL);
+
+    if (vlelctx->edge_property_relation_cache != NULL)
+        return vlelctx->edge_property_relation_cache;
+
+    oldctx = MemoryContextSwitchTo(TopMemoryContext);
+    vlelctx->edge_property_relation_cache =
+        create_entry_property_relation_cache(cache_name);
+    MemoryContextSwitchTo(oldctx);
+
+    return vlelctx->edge_property_relation_cache;
 }
 
 /* load the initial edges into the DFS frame stack */
@@ -1103,7 +1596,12 @@ static void load_initial_dfs_stacks(VLE_local_context *vlelctx)
     vertex_entry *start_vertex = NULL;
 
     vlelctx->dfs_frame_stack->size = 0;
+    vlelctx->dfs_path_stack->size = 0;
+    vlelctx->dfs_path_edge_index_stack->size = 0;
     vlelctx->dfs_path_vertex_stack->size = 0;
+    vlelctx->dfs_path_depth = 0;
+    vlelctx->cached_vertex_id = 0;
+    vlelctx->cached_vertex_entry = NULL;
     gid_stack_push(vlelctx->dfs_path_vertex_stack, vlelctx->vsid);
 
     /*
@@ -1119,6 +1617,12 @@ static void load_initial_dfs_stacks(VLE_local_context *vlelctx)
     start_vertex = get_vertex_entry(vlelctx->ggctx, vlelctx->vsid);
     if (start_vertex == NULL)
     {
+        if (vlelctx->use_local_edge_state &&
+            vlelctx->edge_label_name_oid != InvalidOid &&
+            vlelctx->num_edge_property_constraints == 0)
+        {
+            add_valid_vertex_edges(vlelctx, vlelctx->vsid);
+        }
         return;
     }
 
@@ -1132,7 +1636,7 @@ static void load_initial_dfs_stacks(VLE_local_context *vlelctx)
     }
 
     /* add in the edges for the start vertex */
-    add_valid_vertex_edges_for_entry(vlelctx, start_vertex);
+    add_valid_vertex_edges_for_entry_with_depth(vlelctx, start_vertex, 0);
 }
 
 /*
@@ -1148,20 +1652,29 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
     agtype_value agtv_temp;
     bool agtv_temp_needs_free = false;
     agtype_value *agtv_object = NULL;
+    agtype_value *agtv_edge_properties = NULL;
     agtype *agt_edge_property_constraint = NULL;
     agtype *agt_arg = NULL;
     Datum d_edge_property_constraint = 0;
     char *graph_name = NULL;
+    int graph_name_len = 0;
     Oid graph_oid = InvalidOid;
     int64 vle_grammar_node_id = 0;
     bool use_cache = false;
     graphid vertex_id_arg;
+    int edge_property_constraint_count = 0;
+    bool load_edge_property_metadata = true;
+    bool load_edge_metadata = true;
+    bool load_vertex_metadata = true;
+    Oid edge_label_oid_for_load = InvalidOid;
+    bool initial_start_valid = false;
+    graphid initial_vsid = 0;
 
     /*
      * Get the VLE grammar node id, if it exists. Remember, we overload the
      * age_vle function, for now, for backwards compatibility
      */
-    if (PG_NARGS() == 8)
+    if (PG_NARGS() >= 8)
     {
         /* get the VLE grammar node id */
         get_vle_scalar_arg_no_copy("age_vle", AG_GET_ARG_AGTYPE_P(7),
@@ -1236,6 +1749,16 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
             vlelctx->vsid = vlelctx->veid;
             vlelctx->veid = original_vsid;
         }
+        vlelctx->terminal_property_prefetch_budget =
+            vlelctx->uidx_infinite ? -1 : vlelctx->uidx + 1;
+        vlelctx->terminal_property_result = (Datum) 0;
+        vlelctx->terminal_property_result_valid = false;
+        vlelctx->terminal_property_result_is_null = true;
+        if (vlelctx->terminal_property_prefetched_blocks != NULL)
+        {
+            hash_destroy(vlelctx->terminal_property_prefetched_blocks);
+            vlelctx->terminal_property_prefetched_blocks = NULL;
+        }
         vlelctx->is_dirty = true;
 
         /* we need the SRF context to add in the edges to the stacks */
@@ -1280,16 +1803,61 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
     graph_oid = get_cached_vle_graph_oid(agtv_temp.val.string.val,
                                          agtv_temp.val.string.len);
 
+    graph_name_len = agtv_temp.val.string.len;
     graph_name = pnstrdup(agtv_temp.val.string.val,
-                          agtv_temp.val.string.len);
+                          graph_name_len);
+
+    /* inspect the edge prototype before loading the global graph */
+    get_vle_scalar_arg_no_copy("age_vle", AG_GET_ARG_AGTYPE_P(3),
+                               AGTV_EDGE, true, &agtv_temp,
+                               &agtv_temp_needs_free);
+    agtv_object = AGTYPE_EDGE_GET_PROPERTIES(&agtv_temp);
+    agtv_edge_properties = agtv_object;
+    edge_property_constraint_count = agtv_object->val.object.num_pairs;
+    load_edge_property_metadata = edge_property_constraint_count > 0 ||
+        vle_grammar_node_id >= 0;
+
+    agtv_object = AGTYPE_EDGE_GET_LABEL(&agtv_temp);
+    if (agtv_object->type == AGTV_STRING &&
+        agtv_object->val.string.len != 0)
+    {
+        edge_label_oid_for_load = get_cached_vle_label_relation(
+            graph_oid, agtv_object->val.string.val,
+            agtv_object->val.string.len);
+    }
+
+    if (vle_grammar_node_id < 0 &&
+        !load_edge_property_metadata &&
+        OidIsValid(edge_label_oid_for_load) &&
+        OidIsValid(get_age_adjacency_index_for_label(edge_label_oid_for_load,
+                                                     true)) &&
+        OidIsValid(get_age_adjacency_index_for_label(edge_label_oid_for_load,
+                                                     false)))
+    {
+        load_edge_metadata = false;
+    }
+
+    initial_start_valid = get_vle_vertex_or_id_arg(
+        fcinfo, 1, "start vertex argument must be a vertex or the integer id",
+        &initial_vsid);
+    if (!load_edge_metadata &&
+        initial_start_valid &&
+        (PG_NARGS() == 8 || PG_NARGS() == 9))
+    {
+        load_vertex_metadata = false;
+    }
 
     /*
      * Create or retrieve the GRAPH global context for this graph. This function
      * will also purge off invalidated contexts.
     */
-    ggctx = manage_GRAPH_global_contexts_len(agtv_temp.val.string.val,
-                                             agtv_temp.val.string.len,
-                                             graph_oid);
+    ggctx = manage_GRAPH_global_contexts_len_for_vle(graph_name,
+                                                     graph_name_len,
+                                                     graph_oid,
+                                                     load_edge_property_metadata,
+                                                     edge_label_oid_for_load,
+                                                     load_edge_metadata,
+                                                     load_vertex_metadata);
 
     /* allocate and initialize local VLE context */
     vlelctx = palloc0(sizeof(VLE_local_context));
@@ -1306,17 +1874,53 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
 
     /* set the global context referenced by this local VLE context */
     vlelctx->ggctx = ggctx;
+    vlelctx->use_local_edge_state =
+        !graph_global_context_has_edge_metadata(ggctx);
 
     /* initialize the path function */
     vlelctx->path_function = VLE_FUNCTION_PATHS_BETWEEN;
     vlelctx->reverse_paths_to = false;
     vlelctx->reverse_output_path = false;
+    vlelctx->emit_terminal_only = vle_grammar_node_id < 0;
+    vlelctx->emit_terminal_property = false;
+    vlelctx->terminal_property_key_is_char = false;
+    vlelctx->terminal_property_key_char = '\0';
+
+    if (PG_NARGS() == 9)
+    {
+        agtype *agt_arg_key;
+        agtype_value key_value;
+        bool key_needs_free = false;
+
+        agt_arg_key = AG_GET_ARG_AGTYPE_P(8);
+        get_vle_scalar_arg_no_copy("age_vle", agt_arg_key, AGTV_STRING,
+                                   false, &key_value, &key_needs_free);
+        if (key_value.type == AGTV_STRING)
+        {
+            vlelctx->terminal_property_key = key_value;
+            vlelctx->terminal_property_key.val.string.val =
+                pnstrdup(key_value.val.string.val, key_value.val.string.len);
+            if (key_value.val.string.len == 1)
+            {
+                vlelctx->terminal_property_key_is_char = true;
+                vlelctx->terminal_property_key_char =
+                    key_value.val.string.val[0];
+            }
+            vlelctx->emit_terminal_property = true;
+            vlelctx->emit_terminal_only = true;
+        }
+
+        if (key_needs_free)
+        {
+            pfree_agtype_value_content(&key_value);
+        }
+    }
 
     /* initialize the next vertex, in this case the first */
     vlelctx->next_vertex = peek_stack_head(get_graph_vertices(ggctx));
 
     /* if there isn't one, the graph is empty */
-    if (vlelctx->next_vertex == NULL)
+    if (vlelctx->next_vertex == NULL && load_vertex_metadata)
     {
         elog(ERROR, "age_vle: empty graph");
     }
@@ -1330,6 +1934,11 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
             "start vertex argument must be a vertex or the integer id",
             &vertex_id_arg))
     {
+        if (vlelctx->next_vertex == NULL)
+        {
+            elog(ERROR, "age_vle: empty graph");
+        }
+
         /* set _TO */
         vlelctx->path_function = VLE_FUNCTION_PATHS_TO;
 
@@ -1371,20 +1980,13 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
         vlelctx->veid = vertex_id_arg;
     }
 
-    /* get the VLE edge prototype */
-    get_vle_scalar_arg_no_copy("age_vle", AG_GET_ARG_AGTYPE_P(3),
-                               AGTV_EDGE, true, &agtv_temp,
-                               &agtv_temp_needs_free);
-
-    /* get the edge prototype's property conditions */
-    agtv_object = AGTYPE_EDGE_GET_PROPERTIES(&agtv_temp);
-
     vlelctx->num_edge_property_constraints =
-        agtv_object->val.object.num_pairs;
+        edge_property_constraint_count;
     vlelctx->edge_property_relation_cache = NULL;
     if (vlelctx->num_edge_property_constraints > 0)
     {
-        agt_edge_property_constraint = agtype_value_to_agtype(agtv_object);
+        agt_edge_property_constraint =
+            agtype_value_to_agtype(agtv_edge_properties);
         vlelctx->edge_property_constraint = agt_edge_property_constraint;
         d_edge_property_constraint =
             AGTYPE_P_GET_DATUM(agt_edge_property_constraint);
@@ -1403,14 +2005,9 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
         vlelctx->num_cached_edge_property_constraints = 0;
     }
 
-    /* get the edge prototype's label name */
-    agtv_object = AGTYPE_EDGE_GET_LABEL(&agtv_temp);
-    if (agtv_object->type == AGTV_STRING &&
-        agtv_object->val.string.len != 0)
+    if (OidIsValid(edge_label_oid_for_load))
     {
-        vlelctx->edge_label_name_oid = get_cached_vle_label_relation(
-            graph_oid, agtv_object->val.string.val,
-            agtv_object->val.string.len);
+        vlelctx->edge_label_name_oid = edge_label_oid_for_load;
         vlelctx->edge_label_name = NULL;
     }
     else
@@ -1471,6 +2068,9 @@ static VLE_local_context *build_local_vle_context(FunctionCallInfo fcinfo,
             vlelctx->uidx_infinite = false;
         }
     }
+    vlelctx->terminal_property_prefetch_budget =
+        vlelctx->uidx_infinite ? -1 : vlelctx->uidx + 1;
+
     /* get edge direction */
     get_vle_scalar_arg_no_copy("age_vle", AG_GET_ARG_AGTYPE_P(6),
                                AGTV_INTEGER, true, &agtv_temp,
@@ -1760,16 +2360,19 @@ static void refresh_vle_age_adjacency_indexes(VLE_local_context *vlelctx)
         get_age_adjacency_index_for_label(vlelctx->edge_label_name_oid, false);
 }
 
-static uint8 *get_edge_state_flags(VLE_local_context *vlelctx,
-                                   int64 edge_index)
+static void close_vle_age_adjacency_scans(VLE_local_context *vlelctx)
 {
-    if (edge_index < 0 || edge_index >= vlelctx->edge_state_flags_size ||
-        vlelctx->edge_state_flags == NULL)
+    if (vlelctx->age_adjacency_out_scan != NULL)
     {
-        elog(ERROR, "get_edge_state_flags: invalid edge index");
+        age_adjacency_end_visible_payload_scan(
+            vlelctx->age_adjacency_out_scan);
+        vlelctx->age_adjacency_out_scan = NULL;
     }
-
-    return &vlelctx->edge_state_flags[edge_index];
+    if (vlelctx->age_adjacency_in_scan != NULL)
+    {
+        age_adjacency_end_visible_payload_scan(vlelctx->age_adjacency_in_scan);
+        vlelctx->age_adjacency_in_scan = NULL;
+    }
 }
 
 static cypher_rel_dir reverse_edge_direction(cypher_rel_dir edge_direction)
@@ -1911,6 +2514,8 @@ static bool dfs_find_a_path_between(VLE_local_context *vlelctx)
     GraphIdStack *path_stack = NULL;
     GraphIdStack *path_edge_index_stack = NULL;
     GraphIdStack *path_vertex_stack = NULL;
+    uint8 *edge_state_flags_array = NULL;
+    int64 edge_state_flags_size;
     graphid end_vertex_id;
 
     Assert(vlelctx != NULL);
@@ -1920,6 +2525,8 @@ static bool dfs_find_a_path_between(VLE_local_context *vlelctx)
     path_stack = vlelctx->dfs_path_stack;
     path_edge_index_stack = vlelctx->dfs_path_edge_index_stack;
     path_vertex_stack = vlelctx->dfs_path_vertex_stack;
+    edge_state_flags_array = vlelctx->edge_state_flags;
+    edge_state_flags_size = vlelctx->edge_state_flags_size;
     end_vertex_id = vlelctx->veid;
 
     /* while we have edges to process */
@@ -1927,13 +2534,20 @@ static bool dfs_find_a_path_between(VLE_local_context *vlelctx)
     {
         VLETraversalFrame *frame = NULL;
         graphid next_vertex_id;
+        vertex_entry *next_vertex_entry;
         uint8 *edge_flags = NULL;
         bool found = false;
         int64 path_length;
 
         frame = vle_frame_stack_peek(frame_stack);
         /* get the edge's state */
-        edge_flags = get_edge_state_flags(vlelctx, frame->edge_index);
+        if (frame->edge_index < 0 ||
+            frame->edge_index >= edge_state_flags_size ||
+            edge_state_flags_array == NULL)
+        {
+            elog(ERROR, "dfs_find_a_path_between: invalid edge index");
+        }
+        edge_flags = &edge_state_flags_array[frame->edge_index];
         /*
          * If the edge is already in use, it means that the edge is in the path.
          * So, we need to see if it is the last path entry (we are backing up -
@@ -1944,19 +2558,17 @@ static bool dfs_find_a_path_between(VLE_local_context *vlelctx)
          */
         if ((*edge_flags & VLE_EDGE_STATE_USED) != 0)
         {
-            int64 path_edge_index;
-
-            /* get the edge id on the top of the path stack (last edge) */
-            path_edge_index = gid_stack_peek(path_edge_index_stack);
             /*
-             * If the ids are the same, we're backing up. So, remove it from the
-             * path stack and reset used_in_path.
+             * If the top edge index is the same, we're backing up. So, remove
+             * it from the path stack and reset used_in_path.
              */
-            if (frame->edge_index == path_edge_index)
+            if (vle_path_top_edge_index_equals(path_edge_index_stack,
+                                               frame->edge_index))
             {
-                gid_stack_pop(path_stack);
-                gid_stack_pop(path_edge_index_stack);
-                gid_stack_pop(path_vertex_stack);
+                vle_path_stacks_pop(path_stack, path_edge_index_stack,
+                                    path_vertex_stack);
+                Assert(vlelctx->dfs_path_depth > 0);
+                vlelctx->dfs_path_depth--;
                 *edge_flags &= ~VLE_EDGE_STATE_USED;
             }
             /* now remove it from the candidate frame stack */
@@ -1970,12 +2582,20 @@ static bool dfs_find_a_path_between(VLE_local_context *vlelctx)
          * the edge stack as it is already there.
          */
         *edge_flags |= VLE_EDGE_STATE_USED;
-        gid_stack_push(path_stack, frame->edge_id);
-        gid_stack_push(path_edge_index_stack, frame->edge_index);
-        path_length = gid_stack_size(path_stack);
+        path_length = vlelctx->dfs_path_depth;
 
         next_vertex_id = frame->next_vertex_id;
-        gid_stack_push(path_vertex_stack, next_vertex_id);
+        next_vertex_entry = frame->next_vertex_entry;
+        if (next_vertex_entry != NULL)
+        {
+            vlelctx->cached_vertex_id = next_vertex_id;
+            vlelctx->cached_vertex_entry = next_vertex_entry;
+        }
+        vle_path_stacks_push(path_stack, path_edge_index_stack,
+                             path_vertex_stack, frame->edge_id,
+                             frame->edge_index, next_vertex_id);
+        path_length++;
+        vlelctx->dfs_path_depth = path_length;
 
         /*
          * Is this the end of a path that meets our requirements? Is its length
@@ -2005,11 +2625,29 @@ static bool dfs_find_a_path_between(VLE_local_context *vlelctx)
         if (vlelctx->uidx_infinite ||
             path_length < vlelctx->uidx)
         {
-            add_valid_vertex_edges(vlelctx, next_vertex_id);
+            if (next_vertex_entry != NULL)
+            {
+                add_valid_vertex_edges_for_entry_with_depth(
+                    vlelctx, next_vertex_entry, path_length);
+            }
+            else
+            {
+                add_valid_vertex_edges(vlelctx, next_vertex_id);
+            }
         }
 
         if (found)
         {
+            if (vlelctx->emit_terminal_property &&
+                !vlelctx->reverse_output_path)
+            {
+                cache_direct_terminal_property_result(vlelctx,
+                                                      next_vertex_id);
+            }
+            else
+            {
+                cache_terminal_property_result(vlelctx, next_vertex_id);
+            }
             return true;
         }
     }
@@ -2035,6 +2673,8 @@ static bool dfs_find_a_path_from(VLE_local_context *vlelctx)
     GraphIdStack *path_stack = NULL;
     GraphIdStack *path_edge_index_stack = NULL;
     GraphIdStack *path_vertex_stack = NULL;
+    uint8 *edge_state_flags_array = NULL;
+    int64 edge_state_flags_size;
 
     Assert(vlelctx != NULL);
 
@@ -2043,19 +2683,28 @@ static bool dfs_find_a_path_from(VLE_local_context *vlelctx)
     path_stack = vlelctx->dfs_path_stack;
     path_edge_index_stack = vlelctx->dfs_path_edge_index_stack;
     path_vertex_stack = vlelctx->dfs_path_vertex_stack;
+    edge_state_flags_array = vlelctx->edge_state_flags;
+    edge_state_flags_size = vlelctx->edge_state_flags_size;
 
     /* while we have edges to process */
     while (!vle_frame_stack_is_empty(frame_stack))
     {
         VLETraversalFrame *frame = NULL;
         graphid next_vertex_id;
+        vertex_entry *next_vertex_entry;
         uint8 *edge_flags = NULL;
         bool found = false;
         int64 path_length;
 
         frame = vle_frame_stack_peek(frame_stack);
         /* get the edge's state */
-        edge_flags = get_edge_state_flags(vlelctx, frame->edge_index);
+        if (frame->edge_index < 0 ||
+            frame->edge_index >= edge_state_flags_size ||
+            edge_state_flags_array == NULL)
+        {
+            elog(ERROR, "dfs_find_a_path_from: invalid edge index");
+        }
+        edge_flags = &edge_state_flags_array[frame->edge_index];
         /*
          * If the edge is already in use, it means that the edge is in the path.
          * So, we need to see if it is the last path entry (we are backing up -
@@ -2066,19 +2715,17 @@ static bool dfs_find_a_path_from(VLE_local_context *vlelctx)
          */
         if ((*edge_flags & VLE_EDGE_STATE_USED) != 0)
         {
-            int64 path_edge_index;
-
-            /* get the edge id on the top of the path stack (last edge) */
-            path_edge_index = gid_stack_peek(path_edge_index_stack);
             /*
-             * If the ids are the same, we're backing up. So, remove it from the
-             * path stack and reset used_in_path.
+             * If the top edge index is the same, we're backing up. So, remove
+             * it from the path stack and reset used_in_path.
              */
-            if (frame->edge_index == path_edge_index)
+            if (vle_path_top_edge_index_equals(path_edge_index_stack,
+                                               frame->edge_index))
             {
-                gid_stack_pop(path_stack);
-                gid_stack_pop(path_edge_index_stack);
-                gid_stack_pop(path_vertex_stack);
+                vle_path_stacks_pop(path_stack, path_edge_index_stack,
+                                    path_vertex_stack);
+                Assert(vlelctx->dfs_path_depth > 0);
+                vlelctx->dfs_path_depth--;
                 *edge_flags &= ~VLE_EDGE_STATE_USED;
             }
             /* now remove it from the candidate frame stack */
@@ -2092,12 +2739,20 @@ static bool dfs_find_a_path_from(VLE_local_context *vlelctx)
          * the edge stack as it is already there.
          */
         *edge_flags |= VLE_EDGE_STATE_USED;
-        gid_stack_push(path_stack, frame->edge_id);
-        gid_stack_push(path_edge_index_stack, frame->edge_index);
-        path_length = gid_stack_size(path_stack);
+        path_length = vlelctx->dfs_path_depth;
 
         next_vertex_id = frame->next_vertex_id;
-        gid_stack_push(path_vertex_stack, next_vertex_id);
+        next_vertex_entry = frame->next_vertex_entry;
+        if (next_vertex_entry != NULL)
+        {
+            vlelctx->cached_vertex_id = next_vertex_id;
+            vlelctx->cached_vertex_entry = next_vertex_entry;
+        }
+        vle_path_stacks_push(path_stack, path_edge_index_stack,
+                             path_vertex_stack, frame->edge_id,
+                             frame->edge_index, next_vertex_id);
+        path_length++;
+        vlelctx->dfs_path_depth = path_length;
 
         /*
          * Is this a path that meets our requirements? Is its length within the
@@ -2115,11 +2770,140 @@ static bool dfs_find_a_path_from(VLE_local_context *vlelctx)
         if (vlelctx->uidx_infinite ||
             path_length < vlelctx->uidx)
         {
-            add_valid_vertex_edges(vlelctx, next_vertex_id);
+            if (next_vertex_entry != NULL)
+            {
+                add_valid_vertex_edges_for_entry_with_depth(
+                    vlelctx, next_vertex_entry, path_length);
+            }
+            else
+            {
+                add_valid_vertex_edges(vlelctx, next_vertex_id);
+            }
         }
 
         if (found)
         {
+            if (vlelctx->emit_terminal_property &&
+                !vlelctx->reverse_output_path)
+            {
+                cache_direct_terminal_property_result(vlelctx,
+                                                      next_vertex_id);
+            }
+            else
+            {
+                cache_terminal_property_result(vlelctx, next_vertex_id);
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static inline bool dfs_find_terminal_property_path_from(
+    VLE_local_context *vlelctx)
+{
+    VLETraversalFrameStack *frame_stack = NULL;
+    GraphIdStack *path_stack = NULL;
+    GraphIdStack *path_edge_index_stack = NULL;
+    GraphIdStack *path_vertex_stack = NULL;
+    uint8 *edge_state_flags_array = NULL;
+    int64 edge_state_flags_size;
+
+    Assert(vlelctx != NULL);
+    Assert(vlelctx->emit_terminal_property);
+    Assert(!vlelctx->reverse_output_path);
+
+    frame_stack = vlelctx->dfs_frame_stack;
+    path_stack = vlelctx->dfs_path_stack;
+    path_edge_index_stack = vlelctx->dfs_path_edge_index_stack;
+    path_vertex_stack = vlelctx->dfs_path_vertex_stack;
+    edge_state_flags_array = vlelctx->edge_state_flags;
+    edge_state_flags_size = vlelctx->edge_state_flags_size;
+
+    while (!vle_frame_stack_is_empty(frame_stack))
+    {
+        VLETraversalFrame *frame = NULL;
+        graphid next_vertex_id;
+        vertex_entry *next_vertex_entry;
+        uint8 *edge_flags = NULL;
+        int64 path_length;
+
+        frame = vle_frame_stack_peek(frame_stack);
+        if (frame->edge_index < 0 ||
+            frame->edge_index >= edge_state_flags_size ||
+            edge_state_flags_array == NULL)
+        {
+            elog(ERROR,
+                 "dfs_find_terminal_property_path_from: invalid edge index");
+        }
+        edge_flags = &edge_state_flags_array[frame->edge_index];
+        if ((*edge_flags & VLE_EDGE_STATE_USED) != 0)
+        {
+            if (vle_path_top_edge_index_equals(path_edge_index_stack,
+                                               frame->edge_index))
+            {
+                vle_path_stacks_pop(path_stack, path_edge_index_stack,
+                                    path_vertex_stack);
+                Assert(vlelctx->dfs_path_depth > 0);
+                vlelctx->dfs_path_depth--;
+                *edge_flags &= ~VLE_EDGE_STATE_USED;
+            }
+            vle_frame_stack_pop(frame_stack);
+            continue;
+        }
+
+        *edge_flags |= VLE_EDGE_STATE_USED;
+        path_length = vlelctx->dfs_path_depth;
+
+        next_vertex_id = frame->next_vertex_id;
+        next_vertex_entry = frame->next_vertex_entry;
+        if (next_vertex_entry != NULL)
+        {
+            vlelctx->cached_vertex_id = next_vertex_id;
+            vlelctx->cached_vertex_entry = next_vertex_entry;
+        }
+        vle_path_stacks_push(path_stack, path_edge_index_stack,
+                             path_vertex_stack, frame->edge_id,
+                             frame->edge_index, next_vertex_id);
+        path_length++;
+        vlelctx->dfs_path_depth = path_length;
+
+        if (vlelctx->uidx_infinite ||
+            path_length < vlelctx->uidx)
+        {
+            if (next_vertex_entry != NULL)
+            {
+                add_valid_vertex_edges_for_entry_with_depth(
+                    vlelctx, next_vertex_entry, path_length);
+            }
+            else
+            {
+                add_valid_vertex_edges(vlelctx, next_vertex_id);
+            }
+        }
+
+        if (path_length >= vlelctx->lidx &&
+            (vlelctx->uidx_infinite ||
+             path_length <= vlelctx->uidx))
+        {
+            if (next_vertex_entry != NULL)
+            {
+                if (likely(vlelctx->terminal_property_key_is_char &&
+                           cache_terminal_property_char_hit_for_entry(
+                               vlelctx, next_vertex_entry)))
+                {
+                    return true;
+                }
+
+                cache_direct_terminal_property_result_for_entry(
+                    vlelctx, next_vertex_entry);
+            }
+            else
+            {
+                cache_direct_terminal_property_result(vlelctx,
+                                                      next_vertex_id);
+            }
             return true;
         }
     }
@@ -2152,10 +2936,13 @@ static bool is_edge_in_path(VLE_local_context *vlelctx, graphid edge_id,
     return false;
 }
 
-static bool next_adj_entry(GraphEdgeAdjList *edge_out, int64 *edge_out_idx,
-                           GraphEdgeAdjList *edge_in, int64 *edge_in_idx,
-                           GraphEdgeAdjList *edge_self, int64 *edge_self_idx,
-                           GraphEdgeAdjEntry **adj_entry)
+static inline bool next_adj_entry(GraphEdgeAdjList *edge_out,
+                                  int64 *edge_out_idx,
+                                  GraphEdgeAdjList *edge_in,
+                                  int64 *edge_in_idx,
+                                  GraphEdgeAdjList *edge_self,
+                                  int64 *edge_self_idx,
+                                  GraphEdgeAdjEntry **adj_entry)
 {
     if (edge_out != NULL && *edge_out_idx < edge_out->size)
     {
@@ -2202,14 +2989,48 @@ static void add_valid_vertex_edges(VLE_local_context *vlelctx,
     /* there better be a valid vertex */
     if (ve == NULL)
     {
+        bool label_constrained = vlelctx->edge_label_name_oid != InvalidOid;
+
+        if (vlelctx->use_local_edge_state &&
+            label_constrained &&
+            vlelctx->num_edge_property_constraints == 0)
+        {
+            if ((vlelctx->edge_direction == CYPHER_REL_DIR_RIGHT ||
+                 vlelctx->edge_direction == CYPHER_REL_DIR_NONE) &&
+                OidIsValid(vlelctx->age_adjacency_out_index_oid))
+            {
+                (void) add_valid_vertex_edges_from_age_adjacency(
+                    vlelctx, vertex_id, NULL, true, false, false);
+            }
+            if ((vlelctx->edge_direction == CYPHER_REL_DIR_LEFT ||
+                 vlelctx->edge_direction == CYPHER_REL_DIR_NONE) &&
+                OidIsValid(vlelctx->age_adjacency_in_index_oid))
+            {
+                (void) add_valid_vertex_edges_from_age_adjacency(
+                    vlelctx, vertex_id, NULL, false,
+                    vlelctx->edge_direction == CYPHER_REL_DIR_NONE, false);
+            }
+            return;
+        }
+
         elog(ERROR, "add_valid_vertex_edges: no vertex found");
     }
+
+    vlelctx->cached_vertex_id = vertex_id;
+    vlelctx->cached_vertex_entry = ve;
 
     add_valid_vertex_edges_for_entry(vlelctx, ve);
 }
 
 static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
                                              vertex_entry *ve)
+{
+    add_valid_vertex_edges_for_entry_with_depth(
+        vlelctx, ve, gid_stack_size(vlelctx->dfs_path_stack));
+}
+
+static inline void add_valid_vertex_edges_for_entry_with_depth(
+    VLE_local_context *vlelctx, vertex_entry *ve, int64 path_stack_size)
 {
     VLETraversalFrameStack *frame_stack = NULL;
     GraphEdgeAdjList *edge_in = NULL;
@@ -2220,15 +3041,15 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
     int64 edge_self_idx = 0;
     HTAB *relation_cache = NULL;
     graphid source_vertex_id = 0;
-    int64 path_stack_size;
     bool label_constrained = vlelctx->edge_label_name_oid != InvalidOid;
     bool has_property_constraints =
         vlelctx->num_edge_property_constraints > 0;
     bool used_age_adjacency = false;
+    uint8 *edge_state_flags_array = vlelctx->edge_state_flags;
+    int64 edge_state_flags_size = vlelctx->edge_state_flags_size;
 
     /* point to stacks */
     frame_stack = vlelctx->dfs_frame_stack;
-    path_stack_size = gid_stack_size(vlelctx->dfs_path_stack);
     source_vertex_id = get_vertex_entry_id(ve);
 
     /* set to the first edge for each edge list for the specified direction */
@@ -2271,13 +3092,8 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
 
     if (has_property_constraints)
     {
-        if (vlelctx->edge_property_relation_cache == NULL)
-        {
-            vlelctx->edge_property_relation_cache =
-                create_entry_property_relation_cache(
-                    "VLE edge match relation cache");
-        }
-        relation_cache = vlelctx->edge_property_relation_cache;
+        relation_cache = ensure_vle_edge_property_relation_cache(
+            vlelctx, "VLE edge match relation cache");
     }
 
     /*
@@ -2292,7 +3108,7 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
         OidIsValid(vlelctx->age_adjacency_out_index_oid))
     {
         if (add_valid_vertex_edges_from_age_adjacency(
-                vlelctx, ve, relation_cache, true, false,
+                vlelctx, source_vertex_id, relation_cache, true, false,
                 has_property_constraints))
         {
             edge_out = NULL;
@@ -2306,7 +3122,8 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
         OidIsValid(vlelctx->age_adjacency_in_index_oid))
     {
         if (add_valid_vertex_edges_from_age_adjacency(
-                vlelctx, ve, relation_cache, false, used_age_adjacency,
+                vlelctx, source_vertex_id, relation_cache, false,
+                used_age_adjacency,
                 has_property_constraints))
         {
             edge_in = NULL;
@@ -2360,12 +3177,20 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
             !has_property_constraints)
         {
             vle_frame_stack_push(frame_stack, edge_id, edge_index,
-                                 fast_next_vertex_id, source_vertex_id);
+                                 fast_next_vertex_id,
+                                 adj_entry->next_vertex_entry,
+                                 source_vertex_id);
             continue;
         }
 
-        /* get its state */
-        edge_flags = get_edge_state_flags(vlelctx, edge_index);
+        if (edge_index < 0 ||
+            edge_index >= edge_state_flags_size ||
+            edge_state_flags_array == NULL)
+        {
+            elog(ERROR,
+                 "add_valid_vertex_edges_for_entry: invalid edge index");
+        }
+        edge_flags = &edge_state_flags_array[edge_index];
         /*
          * Don't add any edges that we have already seen because they will
          * cause a loop to form.
@@ -2404,7 +3229,9 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
             if ((*edge_flags & VLE_EDGE_STATE_MATCHED) != 0)
             {
                 vle_frame_stack_push(frame_stack, edge_id, edge_index,
-                                     fast_next_vertex_id, source_vertex_id);
+                                     fast_next_vertex_id,
+                                     adj_entry->next_vertex_entry,
+                                     source_vertex_id);
             }
         }
     }
@@ -2413,11 +3240,20 @@ static void add_valid_vertex_edges_for_entry(VLE_local_context *vlelctx,
 }
 
 static bool add_valid_vertex_edges_from_age_adjacency(
-    VLE_local_context *vlelctx, vertex_entry *ve, HTAB *relation_cache,
+    VLE_local_context *vlelctx, graphid source_vertex_id,
+    HTAB *relation_cache,
     bool outgoing, bool skip_self_loops, bool has_property_constraints)
 {
     VLEAgeAdjacencyScanState state;
+    VLEAdjacencyPayloadCacheEntry *cache_entry = NULL;
+    VLEAdjacencyPayloadCacheState cache_state;
+    AgeAdjacencyVisiblePayloadScan **payload_scan;
     Oid index_oid;
+    bool *payload_cache_decided;
+    bool *payload_cache_enabled;
+    bool can_use_payload_cache;
+    bool use_payload_cache;
+    int64 scanned;
 
     index_oid = outgoing ? vlelctx->age_adjacency_out_index_oid :
                            vlelctx->age_adjacency_in_index_oid;
@@ -2430,17 +3266,171 @@ static bool add_valid_vertex_edges_from_age_adjacency(
     state.vlelctx = vlelctx;
     state.frame_stack = vlelctx->dfs_frame_stack;
     state.relation_cache = relation_cache;
-    state.source_vertex_id = get_vertex_entry_id(ve);
+    state.source_vertex_id = source_vertex_id;
     state.path_stack_size = gid_stack_size(vlelctx->dfs_path_stack);
     state.has_property_constraints = has_property_constraints;
     state.outgoing = outgoing;
     state.skip_self_loops = skip_self_loops;
 
-    age_adjacency_foreach_visible_payload(index_oid, state.source_vertex_id,
-                                          GetActiveSnapshot(),
-                                          add_age_adjacency_payload, &state);
+    if (outgoing)
+    {
+        payload_scan = &vlelctx->age_adjacency_out_scan;
+        payload_cache_decided =
+            &vlelctx->age_adjacency_out_payload_cache_decided;
+        payload_cache_enabled =
+            &vlelctx->age_adjacency_out_payload_cache_enabled;
+    }
+    else
+    {
+        payload_scan = &vlelctx->age_adjacency_in_scan;
+        payload_cache_decided =
+            &vlelctx->age_adjacency_in_payload_cache_decided;
+        payload_cache_enabled =
+            &vlelctx->age_adjacency_in_payload_cache_enabled;
+    }
+
+    if (*payload_scan == NULL)
+    {
+        *payload_scan = age_adjacency_begin_visible_payload_scan(
+            index_oid, GetActiveSnapshot(), false);
+    }
+
+    can_use_payload_cache = vlelctx->use_local_edge_state &&
+                            !has_property_constraints;
+    if (can_use_payload_cache && !*payload_cache_decided)
+    {
+        scanned = age_adjacency_visible_payload_scan_foreach(
+            *payload_scan, state.source_vertex_id,
+            add_age_adjacency_payload, &state);
+        *payload_cache_enabled = scanned > 1;
+        *payload_cache_decided = true;
+        return true;
+    }
+
+    use_payload_cache = can_use_payload_cache && *payload_cache_enabled;
+    if (use_payload_cache)
+    {
+        VLEAdjacencyPayloadCacheKey cache_key;
+        HASHCTL ctl;
+        bool found;
+
+        if (vlelctx->age_adjacency_payload_cache == NULL)
+        {
+            MemSet(&ctl, 0, sizeof(ctl));
+            ctl.keysize = sizeof(VLEAdjacencyPayloadCacheKey);
+            ctl.entrysize = sizeof(VLEAdjacencyPayloadCacheEntry);
+            ctl.hash = tag_hash;
+            vlelctx->age_adjacency_payload_cache =
+            hash_create("VLE age_adjacency payload cache", 1024, &ctl,
+                        HASH_ELEM | HASH_FUNCTION);
+        }
+
+        MemSet(&cache_key, 0, sizeof(cache_key));
+        cache_key.index_oid = index_oid;
+        cache_key.source_vertex_id = state.source_vertex_id;
+        cache_entry = hash_search(vlelctx->age_adjacency_payload_cache,
+                                  &cache_key, HASH_ENTER, &found);
+        if (found)
+        {
+            replay_cached_age_adjacency_payloads(cache_entry, &state);
+            return true;
+        }
+        cache_entry->count = 0;
+        cache_entry->capacity = 0;
+        cache_entry->payloads = NULL;
+    }
+
+    if (use_payload_cache)
+    {
+        cache_state.scan_state = &state;
+        cache_state.cache_entry = cache_entry;
+        age_adjacency_visible_payload_scan_foreach(
+            *payload_scan, state.source_vertex_id,
+            cache_and_add_age_adjacency_payload, &cache_state);
+    }
+    else
+    {
+        age_adjacency_visible_payload_scan_foreach(
+            *payload_scan, state.source_vertex_id,
+            add_age_adjacency_payload, &state);
+    }
 
     return true;
+}
+
+static bool cache_and_add_age_adjacency_payload(
+    const AgeAdjacencyPayload *payload, void *callback_state)
+{
+    VLEAdjacencyPayloadCacheState *cache_state = callback_state;
+
+    append_age_adjacency_payload_cache(cache_state->cache_entry, payload);
+    return add_age_adjacency_payload(payload, cache_state->scan_state);
+}
+
+static void replay_cached_age_adjacency_payloads(
+    VLEAdjacencyPayloadCacheEntry *cache_entry,
+    VLEAgeAdjacencyScanState *state)
+{
+    int64 i;
+
+    for (i = 0; i < cache_entry->count; i++)
+    {
+        if (!add_age_adjacency_payload(&cache_entry->payloads[i], state))
+        {
+            return;
+        }
+    }
+}
+
+static void append_age_adjacency_payload_cache(
+    VLEAdjacencyPayloadCacheEntry *cache_entry,
+    const AgeAdjacencyPayload *payload)
+{
+    if (cache_entry->count == cache_entry->capacity)
+    {
+        int64 new_capacity = cache_entry->capacity == 0 ? 8 :
+                             cache_entry->capacity * 2;
+
+        if (cache_entry->payloads == NULL)
+        {
+            cache_entry->payloads = palloc_array(AgeAdjacencyPayload,
+                                                 new_capacity);
+        }
+        else
+        {
+            cache_entry->payloads = repalloc_array(cache_entry->payloads,
+                                                   AgeAdjacencyPayload,
+                                                   new_capacity);
+        }
+        cache_entry->capacity = new_capacity;
+    }
+
+    cache_entry->payloads[cache_entry->count++] = *payload;
+}
+
+static void free_age_adjacency_payload_cache(VLE_local_context *vlelctx)
+{
+    HASH_SEQ_STATUS status;
+    VLEAdjacencyPayloadCacheEntry *entry;
+
+    vlelctx->age_adjacency_out_payload_cache_decided = false;
+    vlelctx->age_adjacency_out_payload_cache_enabled = false;
+    vlelctx->age_adjacency_in_payload_cache_decided = false;
+    vlelctx->age_adjacency_in_payload_cache_enabled = false;
+
+    if (vlelctx->age_adjacency_payload_cache == NULL)
+    {
+        return;
+    }
+
+    hash_seq_init(&status, vlelctx->age_adjacency_payload_cache);
+    while ((entry = hash_seq_search(&status)) != NULL)
+    {
+        pfree_if_not_null(entry->payloads);
+        entry->payloads = NULL;
+    }
+    hash_destroy(vlelctx->age_adjacency_payload_cache);
+    vlelctx->age_adjacency_payload_cache = NULL;
 }
 
 static bool add_age_adjacency_payload(const AgeAdjacencyPayload *payload,
@@ -2449,9 +3439,16 @@ static bool add_age_adjacency_payload(const AgeAdjacencyPayload *payload,
     VLEAgeAdjacencyScanState *state = callback_state;
     VLE_local_context *vlelctx = state->vlelctx;
     edge_entry *ee;
+    vertex_entry *next_vertex_entry;
+    vertex_entry *start_vertex_entry;
+    vertex_entry *end_vertex_entry;
     uint8 *edge_flags;
     graphid edge_id = payload->edge_id;
+    graphid loaded_edge_id;
     graphid next_vertex_id = payload->next_vertex_id;
+    graphid start_vertex_id;
+    graphid end_vertex_id;
+    Oid edge_label_table_oid;
     int64 edge_index;
 
     if (state->skip_self_loops &&
@@ -2460,33 +3457,65 @@ static bool add_age_adjacency_payload(const AgeAdjacencyPayload *payload,
         return true;
     }
 
-    if (get_vertex_entry(vlelctx->ggctx, next_vertex_id) == NULL)
+    if (vlelctx->use_local_edge_state)
     {
-        return true;
-    }
-
-    ee = get_edge_entry(vlelctx->ggctx, edge_id);
-    if (ee == NULL ||
-        get_edge_entry_label_table_oid(ee) != vlelctx->edge_label_name_oid)
-    {
-        return true;
-    }
-
-    if (state->outgoing)
-    {
-        if (get_edge_entry_start_vertex_id(ee) != state->source_vertex_id ||
-            get_edge_entry_end_vertex_id(ee) != next_vertex_id)
+        if (state->has_property_constraints)
         {
             return true;
         }
+        edge_index = get_or_create_VLE_local_edge_index(vlelctx, edge_id);
+        next_vertex_entry = get_vertex_entry(vlelctx->ggctx, next_vertex_id);
     }
     else
     {
-        if (get_edge_entry_end_vertex_id(ee) != state->source_vertex_id ||
-            get_edge_entry_start_vertex_id(ee) != next_vertex_id)
+        if (!get_edge_entry_vle_fields_by_tid(vlelctx->ggctx,
+                                              &payload->heap_tid,
+                                              &loaded_edge_id,
+                                              &edge_label_table_oid,
+                                              &start_vertex_id,
+                                              &end_vertex_id,
+                                              &edge_index,
+                                              &start_vertex_entry,
+                                              &end_vertex_entry, &ee))
         {
             return true;
         }
+
+        if (loaded_edge_id != edge_id ||
+            edge_label_table_oid != vlelctx->edge_label_name_oid)
+        {
+            return true;
+        }
+
+        if (state->outgoing)
+        {
+            if (start_vertex_id != state->source_vertex_id ||
+                end_vertex_id != next_vertex_id)
+            {
+                return true;
+            }
+            next_vertex_entry = end_vertex_entry;
+        }
+        else
+        {
+            if (end_vertex_id != state->source_vertex_id ||
+                start_vertex_id != next_vertex_id)
+            {
+                return true;
+            }
+            next_vertex_entry = start_vertex_entry;
+        }
+
+        if (next_vertex_entry == NULL)
+        {
+            next_vertex_entry = get_vertex_entry(vlelctx->ggctx,
+                                                 next_vertex_id);
+        }
+    }
+
+    if (next_vertex_entry == NULL && !vlelctx->use_local_edge_state)
+    {
+        return true;
     }
 
     if (state->path_stack_size > 0 &&
@@ -2496,17 +3525,22 @@ static bool add_age_adjacency_payload(const AgeAdjacencyPayload *payload,
         return true;
     }
 
-    edge_index = get_edge_entry_index(ee);
-
     if (state->path_stack_size < 10 &&
         !state->has_property_constraints)
     {
         vle_frame_stack_push(state->frame_stack, edge_id, edge_index,
-                             next_vertex_id, state->source_vertex_id);
+                             next_vertex_id, next_vertex_entry,
+                             state->source_vertex_id);
         return true;
     }
 
-    edge_flags = get_edge_state_flags(vlelctx, edge_index);
+    if (edge_index < 0 ||
+        edge_index >= vlelctx->edge_state_flags_size ||
+        vlelctx->edge_state_flags == NULL)
+    {
+        elog(ERROR, "add_age_adjacency_payload: invalid edge index");
+    }
+    edge_flags = &vlelctx->edge_state_flags[edge_index];
     if ((*edge_flags & VLE_EDGE_STATE_USED) != 0)
     {
         return true;
@@ -2534,7 +3568,8 @@ static bool add_age_adjacency_payload(const AgeAdjacencyPayload *payload,
     if ((*edge_flags & VLE_EDGE_STATE_MATCHED) != 0)
     {
         vle_frame_stack_push(state->frame_stack, edge_id, edge_index,
-                             next_vertex_id, state->source_vertex_id);
+                             next_vertex_id, next_vertex_entry,
+                             state->source_vertex_id);
     }
 
     return true;
@@ -2697,6 +3732,684 @@ static VLE_path_container *build_reversed_VLE_path_container(
     }
 
     return vpc;
+}
+
+static VLE_path_container *build_VLE_terminal_container(
+    VLE_local_context *vlelctx)
+{
+    GraphIdStack *vertex_stack = vlelctx->dfs_path_vertex_stack;
+    VLE_path_container *vpc = NULL;
+    graphid *graphid_array = NULL;
+    int ssize;
+    graphid terminal_id;
+
+    if (vertex_stack == NULL)
+    {
+        return NULL;
+    }
+
+    ssize = gid_stack_size(vlelctx->dfs_path_stack);
+    Assert(gid_stack_size(vertex_stack) == ssize + 1);
+
+    terminal_id = vlelctx->reverse_output_path ? vertex_stack->array[0] :
+                                                 vertex_stack->array[ssize];
+
+    vpc = create_VLE_path_container(1);
+    vpc->graph_oid = vlelctx->graph_oid;
+
+    graphid_array = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+    graphid_array[0] = terminal_id;
+
+    return vpc;
+}
+
+static VLE_path_container *build_VLE_terminal_zero_container(
+    VLE_local_context *vlelctx)
+{
+    VLE_path_container *vpc = NULL;
+    graphid *graphid_array = NULL;
+
+    vpc = create_VLE_path_container(1);
+    vpc->graph_oid = vlelctx->graph_oid;
+
+    graphid_array = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+    graphid_array[0] = vlelctx->vsid;
+
+    return vpc;
+}
+
+static Datum get_VLE_terminal_vertex_property(VLE_local_context *vlelctx,
+                                              graphid terminal_id,
+                                              bool *is_null)
+{
+    vertex_entry *ve = NULL;
+    Datum property = (Datum) 0;
+
+    Assert(vlelctx->emit_terminal_property);
+    Assert(vlelctx->terminal_property_key.type == AGTV_STRING);
+
+    *is_null = true;
+
+    if (vlelctx->cached_vertex_entry != NULL &&
+        vlelctx->cached_vertex_id == terminal_id)
+    {
+        ve = vlelctx->cached_vertex_entry;
+    }
+    else
+    {
+        ve = get_vertex_entry(vlelctx->ggctx, terminal_id);
+        Assert(ve != NULL);
+    }
+
+    if (get_cached_terminal_property_result(vlelctx, ve, &property))
+    {
+        *is_null = false;
+        return property;
+    }
+
+    if (should_prefetch_terminal_property_block(vlelctx))
+    {
+        Oid relid = get_vertex_entry_label_table_oid(ve);
+        BlockNumber blockno = get_vertex_entry_tid_block(ve);
+
+        if (!is_terminal_property_block_prefetched(vlelctx, relid, blockno))
+        {
+            int64 cached;
+            bool target_found = false;
+
+            if (vlelctx->terminal_property_prefetch_budget == 0)
+            {
+                cached = 0;
+            }
+            else
+            {
+                ensure_vle_edge_property_relation_cache(
+                    vlelctx, "VLE terminal property relation cache");
+                cached = prefetch_vertex_entry_block_scalar_property_cache(
+                    vlelctx->ggctx, ve,
+                    &vlelctx->edge_property_relation_cache,
+                    "VLE terminal property relation cache",
+                    &vlelctx->terminal_property_key,
+                    vlelctx->terminal_property_prefetch_budget,
+                    &property, &target_found);
+            }
+            mark_terminal_property_block_prefetched(vlelctx, relid, blockno);
+            if (vlelctx->terminal_property_prefetch_budget >= 0)
+            {
+                vlelctx->terminal_property_prefetch_budget -=
+                    Min(vlelctx->terminal_property_prefetch_budget,
+                        cached);
+            }
+
+            if (target_found)
+            {
+                *is_null = false;
+                return property;
+            }
+            else if (get_cached_terminal_property_result(vlelctx, ve,
+                                                         &property))
+            {
+                *is_null = false;
+                return property;
+            }
+        }
+    }
+
+    ensure_vle_edge_property_relation_cache(
+        vlelctx, "VLE terminal property relation cache");
+    if (get_vertex_entry_scalar_property_with_lazy_cache(
+            ve, &vlelctx->edge_property_relation_cache,
+            "VLE terminal property relation cache",
+            &vlelctx->terminal_property_key, &property))
+    {
+        *is_null = false;
+    }
+
+    return property;
+}
+
+static Datum build_VLE_terminal_property(VLE_local_context *vlelctx,
+                                         bool *is_null)
+{
+    GraphIdStack *vertex_stack = vlelctx->dfs_path_vertex_stack;
+    graphid terminal_id;
+    int ssize;
+
+    if (vertex_stack == NULL)
+    {
+        terminal_id = vlelctx->vsid;
+    }
+    else
+    {
+        ssize = gid_stack_size(vlelctx->dfs_path_stack);
+        Assert(gid_stack_size(vertex_stack) == ssize + 1);
+        terminal_id = vlelctx->reverse_output_path ? vertex_stack->array[0] :
+                                                     vertex_stack->array[ssize];
+    }
+
+    return get_VLE_terminal_vertex_property(vlelctx, terminal_id, is_null);
+}
+
+static void cache_terminal_property_result(VLE_local_context *vlelctx,
+                                           graphid terminal_id)
+{
+    if (!vlelctx->emit_terminal_property || vlelctx->reverse_output_path)
+    {
+        vlelctx->terminal_property_result_valid = false;
+        return;
+    }
+
+    cache_direct_terminal_property_result(vlelctx, terminal_id);
+}
+
+static bool should_materialize_terminal_properties(VLE_local_context *vlelctx)
+{
+    return vlelctx->emit_terminal_property &&
+           !vlelctx->reverse_output_path &&
+           vlelctx->use_local_edge_state &&
+           vlelctx->edge_label_name_oid != InvalidOid &&
+           vlelctx->num_edge_property_constraints == 0;
+}
+
+static void append_terminal_property_id(VLE_local_context *vlelctx,
+                                        graphid terminal_id)
+{
+    if (vlelctx->terminal_property_count >=
+        vlelctx->terminal_property_capacity)
+    {
+        int64 new_capacity = vlelctx->terminal_property_capacity > 0 ?
+            vlelctx->terminal_property_capacity * 2 : 256;
+
+        if (vlelctx->terminal_property_ids == NULL)
+        {
+            vlelctx->terminal_property_ids =
+                palloc(sizeof(graphid) * new_capacity);
+        }
+        else
+        {
+            vlelctx->terminal_property_ids =
+                repalloc(vlelctx->terminal_property_ids,
+                         sizeof(graphid) * new_capacity);
+        }
+        vlelctx->terminal_property_capacity = new_capacity;
+    }
+
+    vlelctx->terminal_property_ids[vlelctx->terminal_property_count++] =
+        terminal_id;
+}
+
+static void materialize_terminal_property_results(VLE_local_context *vlelctx)
+{
+    bool saved_emit_terminal_property;
+
+    if (vlelctx->terminal_property_materialized)
+    {
+        return;
+    }
+
+    saved_emit_terminal_property = vlelctx->emit_terminal_property;
+    vlelctx->emit_terminal_property = false;
+    while (dfs_find_a_path_from(vlelctx))
+    {
+        GraphIdStack *vertex_stack = vlelctx->dfs_path_vertex_stack;
+        int ssize = gid_stack_size(vlelctx->dfs_path_stack);
+
+        Assert(vertex_stack != NULL);
+        Assert(gid_stack_size(vertex_stack) == ssize + 1);
+        append_terminal_property_id(vlelctx, vertex_stack->array[ssize]);
+    }
+    vlelctx->emit_terminal_property = saved_emit_terminal_property;
+
+    if (vlelctx->terminal_property_count > 0)
+    {
+        vlelctx->terminal_property_results =
+            palloc0(sizeof(Datum) * vlelctx->terminal_property_count);
+        vlelctx->terminal_property_nulls =
+            palloc(sizeof(bool) * vlelctx->terminal_property_count);
+        memset(vlelctx->terminal_property_nulls, true,
+               sizeof(bool) * vlelctx->terminal_property_count);
+        batch_fetch_terminal_properties(vlelctx);
+    }
+
+    vlelctx->terminal_property_emit_index = 0;
+    vlelctx->terminal_property_materialized = true;
+}
+
+static void batch_fetch_terminal_properties(VLE_local_context *vlelctx)
+{
+    HASHCTL ctl;
+    HTAB *terminal_map;
+    HTAB *label_map;
+    HASH_SEQ_STATUS label_status;
+    VLETerminalLabelBatchEntry *label_entry;
+    int64 i;
+
+    MemSet(&ctl, 0, sizeof(ctl));
+    ctl.keysize = sizeof(graphid);
+    ctl.entrysize = sizeof(VLETerminalPropertyBatchEntry);
+    ctl.hash = tag_hash;
+    terminal_map = hash_create("VLE terminal property batch", 1024, &ctl,
+                               HASH_ELEM | HASH_FUNCTION);
+
+    MemSet(&ctl, 0, sizeof(ctl));
+    ctl.keysize = sizeof(int32);
+    ctl.entrysize = sizeof(VLETerminalLabelBatchEntry);
+    ctl.hash = tag_hash;
+    label_map = hash_create("VLE terminal property label batch", 16, &ctl,
+                            HASH_ELEM | HASH_FUNCTION);
+
+    for (i = 0; i < vlelctx->terminal_property_count; i++)
+    {
+        VLETerminalPropertyBatchEntry *entry;
+        VLETerminalLabelBatchEntry *label_entry;
+        bool found;
+        graphid terminal_id = vlelctx->terminal_property_ids[i];
+        int32 label_id = get_graphid_label_id(terminal_id);
+
+        entry = hash_search(terminal_map, &terminal_id, HASH_ENTER, &found);
+        if (!found)
+        {
+            entry->terminal_id = terminal_id;
+            entry->property = (Datum) 0;
+            entry->is_null = true;
+            entry->found = false;
+        }
+
+        if (found)
+        {
+            continue;
+        }
+
+        label_entry = hash_search(label_map, &label_id, HASH_ENTER, &found);
+        if (!found)
+        {
+            label_entry->label_id = label_id;
+            label_entry->needed = 1;
+            label_entry->min_terminal_id = terminal_id;
+            label_entry->max_terminal_id = terminal_id;
+        }
+        else
+        {
+            label_entry->needed++;
+            if (terminal_id < label_entry->min_terminal_id)
+            {
+                label_entry->min_terminal_id = terminal_id;
+            }
+            if (terminal_id > label_entry->max_terminal_id)
+            {
+                label_entry->max_terminal_id = terminal_id;
+            }
+        }
+    }
+
+    hash_seq_init(&label_status, label_map);
+    while ((label_entry = hash_seq_search(&label_status)) != NULL)
+    {
+        scan_terminal_property_label_batch(vlelctx, terminal_map,
+                                           label_entry);
+    }
+
+    for (i = 0; i < vlelctx->terminal_property_count; i++)
+    {
+        VLETerminalPropertyBatchEntry *entry;
+        bool found;
+        graphid terminal_id = vlelctx->terminal_property_ids[i];
+
+        entry = hash_search(terminal_map, &terminal_id, HASH_FIND, &found);
+        if (found && entry->found && !entry->is_null)
+        {
+            vlelctx->terminal_property_results[i] = entry->property;
+            vlelctx->terminal_property_nulls[i] = false;
+        }
+    }
+
+    hash_destroy(label_map);
+    hash_destroy(terminal_map);
+}
+
+static void scan_terminal_property_label_batch(
+    VLE_local_context *vlelctx, HTAB *terminal_map,
+    VLETerminalLabelBatchEntry *label_entry)
+{
+    label_cache_data *label_cache;
+    Relation rel;
+    TupleDesc tupdesc;
+    Oid index_oid = InvalidOid;
+    double label_tuples;
+    double range_span;
+    int64 remaining;
+
+    label_cache = search_label_graph_oid_cache_cached(
+        vlelctx->graph_oid, label_entry->label_id);
+    if (label_cache == NULL || !OidIsValid(label_cache->relation))
+    {
+        return;
+    }
+
+    rel = table_open(label_cache->relation, AccessShareLock);
+    tupdesc = RelationGetDescr(rel);
+    label_tuples = rel->rd_rel->reltuples;
+    range_span = (double) (label_entry->max_terminal_id -
+                           label_entry->min_terminal_id + 1);
+    remaining = label_entry->needed;
+
+    if (label_tuples > 0 && range_span < (label_tuples / 2.0))
+    {
+        index_oid = find_usable_btree_index_for_attr(
+            rel, Anum_ag_label_vertex_table_id);
+    }
+
+    if (OidIsValid(index_oid))
+    {
+        Relation index_rel;
+        IndexScanDesc scan;
+        TupleTableSlot *slot;
+        ScanKeyData scan_key[2];
+
+        ScanKeyInit(&scan_key[0], Anum_ag_label_vertex_table_id,
+                    BTGreaterEqualStrategyNumber, F_INT8GE,
+                    GRAPHID_GET_DATUM(label_entry->min_terminal_id));
+        ScanKeyInit(&scan_key[1], Anum_ag_label_vertex_table_id,
+                    BTLessEqualStrategyNumber, F_INT8LE,
+                    GRAPHID_GET_DATUM(label_entry->max_terminal_id));
+
+        index_rel = index_open(index_oid, AccessShareLock);
+        slot = table_slot_create(rel, NULL);
+        scan = index_beginscan(rel, index_rel, GetActiveSnapshot(), NULL,
+                               2, 0);
+        index_rescan(scan, scan_key, 2, NULL, 0);
+        while (remaining > 0 &&
+               index_getnext_slot(scan, ForwardScanDirection, slot))
+        {
+            bool should_free;
+            HeapTuple tuple;
+
+            tuple = ExecFetchSlotHeapTuple(slot, true, &should_free);
+            if (cache_batch_terminal_property_tuple(vlelctx, terminal_map,
+                                                    tuple, tupdesc))
+            {
+                remaining--;
+            }
+            if (should_free)
+            {
+                heap_freetuple(tuple);
+            }
+            ExecClearTuple(slot);
+        }
+        index_endscan(scan);
+        ExecDropSingleTupleTableSlot(slot);
+        index_close(index_rel, AccessShareLock);
+    }
+    else
+    {
+        TableScanDesc scan;
+        HeapTuple tuple;
+
+        scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL);
+        while (remaining > 0 &&
+               (tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+        {
+            if (cache_batch_terminal_property_tuple(vlelctx, terminal_map,
+                                                    tuple, tupdesc))
+            {
+                remaining--;
+            }
+        }
+        table_endscan(scan);
+    }
+
+    table_close(rel, AccessShareLock);
+}
+
+static bool cache_batch_terminal_property_tuple(
+    VLE_local_context *vlelctx, HTAB *terminal_map, HeapTuple tuple,
+    TupleDesc tupdesc)
+{
+    VLETerminalPropertyBatchEntry *entry;
+    agtype_value property_value;
+    bool property_value_needs_free = false;
+    agtype *properties;
+    Datum props;
+    Datum vertex_id_datum;
+    graphid vertex_id;
+    bool found = false;
+    bool isnull;
+
+    vertex_id_datum = heap_getattr(tuple, Anum_ag_label_vertex_table_id,
+                                   tupdesc, &isnull);
+    if (isnull)
+    {
+        return false;
+    }
+    vertex_id = DatumGetInt64(vertex_id_datum);
+    entry = hash_search(terminal_map, &vertex_id, HASH_FIND, &found);
+    if (!found || entry->found)
+    {
+        return false;
+    }
+
+    props = heap_getattr(tuple, Anum_ag_label_vertex_table_properties,
+                         tupdesc, &isnull);
+    if (isnull)
+    {
+        entry->found = true;
+        entry->is_null = true;
+        return true;
+    }
+
+    properties = DATUM_GET_AGTYPE_P(props);
+    if (find_agtype_value_from_container_no_copy(
+            &properties->root, AGT_FOBJECT, &vlelctx->terminal_property_key,
+            &property_value, &property_value_needs_free) &&
+        property_value.type != AGTV_NULL)
+    {
+        if (property_value.type == AGTV_INTEGER)
+        {
+            entry->property = PointerGetDatum(
+                agtype_integer_to_agtype(property_value.val.int_value));
+        }
+        else
+        {
+            entry->property = PointerGetDatum(
+                agtype_value_to_agtype(&property_value));
+        }
+        entry->is_null = false;
+    }
+    if (property_value_needs_free)
+    {
+        pfree_agtype_value_content(&property_value);
+    }
+
+    entry->found = true;
+    return true;
+}
+
+static inline void cache_direct_terminal_property_result(
+    VLE_local_context *vlelctx, graphid terminal_id)
+{
+    vertex_entry *ve = NULL;
+
+    Assert(vlelctx->terminal_property_key.type == AGTV_STRING);
+
+    if (vlelctx->cached_vertex_entry != NULL &&
+        vlelctx->cached_vertex_id == terminal_id)
+    {
+        ve = vlelctx->cached_vertex_entry;
+    }
+    else
+    {
+        ve = get_vertex_entry(vlelctx->ggctx, terminal_id);
+        Assert(ve != NULL);
+    }
+
+    cache_direct_terminal_property_result_for_entry(vlelctx, ve);
+}
+
+static inline void cache_direct_terminal_property_result_for_entry(
+    VLE_local_context *vlelctx, vertex_entry *ve)
+{
+    bool is_null = true;
+    Datum property = (Datum) 0;
+
+    Assert(vlelctx->terminal_property_key.type == AGTV_STRING);
+    Assert(ve != NULL);
+
+    if (get_cached_terminal_property_result(vlelctx, ve, &property))
+    {
+        is_null = false;
+    }
+    else if (should_prefetch_terminal_property_block(vlelctx))
+    {
+        Oid relid = get_vertex_entry_label_table_oid(ve);
+        BlockNumber blockno = get_vertex_entry_tid_block(ve);
+
+        if (!is_terminal_property_block_prefetched(vlelctx, relid, blockno))
+        {
+            int64 cached;
+            bool target_found = false;
+
+            if (vlelctx->terminal_property_prefetch_budget == 0)
+            {
+                cached = 0;
+            }
+            else
+            {
+                ensure_vle_edge_property_relation_cache(
+                    vlelctx, "VLE terminal property relation cache");
+                cached = prefetch_vertex_entry_block_scalar_property_cache(
+                    vlelctx->ggctx, ve,
+                    &vlelctx->edge_property_relation_cache,
+                    "VLE terminal property relation cache",
+                    &vlelctx->terminal_property_key,
+                    vlelctx->terminal_property_prefetch_budget,
+                    &property, &target_found);
+            }
+            mark_terminal_property_block_prefetched(vlelctx, relid, blockno);
+            if (vlelctx->terminal_property_prefetch_budget >= 0)
+            {
+                vlelctx->terminal_property_prefetch_budget -=
+                    Min(vlelctx->terminal_property_prefetch_budget,
+                        cached);
+            }
+
+            if (target_found)
+            {
+                is_null = false;
+            }
+            else if (get_cached_terminal_property_result(vlelctx, ve,
+                                                         &property))
+            {
+                is_null = false;
+            }
+        }
+    }
+
+    if (is_null)
+    {
+        ensure_vle_edge_property_relation_cache(
+            vlelctx, "VLE terminal property relation cache");
+    }
+    if (is_null &&
+        get_vertex_entry_scalar_property_with_lazy_cache(
+            ve, &vlelctx->edge_property_relation_cache,
+            "VLE terminal property relation cache",
+            &vlelctx->terminal_property_key, &property))
+    {
+        is_null = false;
+    }
+
+    vlelctx->terminal_property_result = property;
+    vlelctx->terminal_property_result_is_null = is_null;
+    vlelctx->terminal_property_result_valid = true;
+}
+
+static inline bool cache_terminal_property_char_hit_for_entry(
+    VLE_local_context *vlelctx, vertex_entry *ve)
+{
+    Datum property = (Datum) 0;
+
+    Assert(vlelctx->terminal_property_key.type == AGTV_STRING);
+    Assert(vlelctx->terminal_property_key_is_char);
+    Assert(ve != NULL);
+
+    if (!vertex_entry_cached_property_char_fast(
+            ve, vlelctx->terminal_property_key_char, &property))
+    {
+        return false;
+    }
+
+    vlelctx->terminal_property_result = property;
+    vlelctx->terminal_property_result_is_null = false;
+    vlelctx->terminal_property_result_valid = true;
+
+    return true;
+}
+
+static inline bool get_cached_terminal_property_result(
+    VLE_local_context *vlelctx, vertex_entry *ve, Datum *property)
+{
+    const char *key = vlelctx->terminal_property_key.val.string.val;
+    int key_len = vlelctx->terminal_property_key.val.string.len;
+
+    if (vlelctx->terminal_property_key_is_char)
+    {
+        return vertex_entry_cached_property_char_fast(
+            ve, vlelctx->terminal_property_key_char, property);
+    }
+
+    return get_vertex_entry_cached_property_str(ve, key, key_len, property);
+}
+
+static bool should_prefetch_terminal_property_block(
+    VLE_local_context *vlelctx)
+{
+    return vlelctx->uidx_infinite || vlelctx->uidx >= 64;
+}
+
+static bool is_terminal_property_block_prefetched(
+    VLE_local_context *vlelctx, Oid relid, BlockNumber blockno)
+{
+    VLEPrefetchedTerminalBlock key;
+    bool found = false;
+
+    if (vlelctx->terminal_property_prefetched_blocks == NULL)
+    {
+        return false;
+    }
+
+    MemSet(&key, 0, sizeof(key));
+    key.relid = relid;
+    key.blockno = blockno;
+
+    (void) hash_search(vlelctx->terminal_property_prefetched_blocks, &key,
+                       HASH_FIND, &found);
+
+    return found;
+}
+
+static void mark_terminal_property_block_prefetched(
+    VLE_local_context *vlelctx, Oid relid, BlockNumber blockno)
+{
+    HASHCTL ctl;
+    VLEPrefetchedTerminalBlock key;
+    bool found;
+
+    if (vlelctx->terminal_property_prefetched_blocks == NULL)
+    {
+        MemSet(&ctl, 0, sizeof(ctl));
+        ctl.keysize = sizeof(VLEPrefetchedTerminalBlock);
+        ctl.entrysize = sizeof(VLEPrefetchedTerminalBlock);
+        vlelctx->terminal_property_prefetched_blocks = hash_create(
+            "VLE terminal property prefetched blocks", 16, &ctl,
+            HASH_ELEM | HASH_BLOBS);
+    }
+
+    MemSet(&key, 0, sizeof(key));
+    key.relid = relid;
+    key.blockno = blockno;
+
+    (void) hash_search(vlelctx->terminal_property_prefetched_blocks, &key,
+                       HASH_ENTER, &found);
 }
 
 /* helper function to build a VPC for just the start vertex */
@@ -2863,6 +4576,260 @@ static agtype_value *build_vle_vertex_value(GRAPH_global_context *ggctx,
                                          ve, relation_cache));
 }
 
+static agtype *build_empty_agtype_object(void)
+{
+    agtype_build_state *bstate;
+    agtype *object;
+
+    bstate = init_agtype_build_state(0, AGT_FOBJECT);
+    object = build_agtype(bstate);
+    pfree_agtype_build_state(bstate);
+
+    return object;
+}
+
+static agtype *build_vle_vertex_object_agtype(GRAPH_global_context *ggctx,
+                                              graphid vertex_id,
+                                              HTAB *relation_cache)
+{
+    vertex_entry *ve = NULL;
+    agtype_build_state *bstate;
+    agtype *properties;
+    agtype *empty_properties = NULL;
+    agtype *vertex;
+
+    ve = get_vertex_entry(ggctx, vertex_id);
+    Assert(ve != NULL);
+
+    properties = DATUM_GET_AGTYPE_P(
+        get_vertex_entry_properties_with_cache(ve, relation_cache));
+    if (properties == NULL)
+    {
+        empty_properties = build_empty_agtype_object();
+        properties = empty_properties;
+    }
+
+    bstate = init_agtype_build_state(3, AGT_FOBJECT);
+    write_string(bstate, "id");
+    write_string(bstate, "label");
+    write_string(bstate, "properties");
+    write_graphid(bstate, get_vertex_entry_id(ve));
+    write_string(bstate, get_vertex_entry_label_name(ve));
+    write_container(bstate, properties);
+    vertex = build_agtype(bstate);
+    pfree_agtype_build_state(bstate);
+
+    if (empty_properties != NULL)
+        pfree(empty_properties);
+
+    return vertex;
+}
+
+static agtype *build_vle_edge_object_agtype(GRAPH_global_context *ggctx,
+                                            graphid edge_id,
+                                            HTAB *relation_cache)
+{
+    edge_entry *ee = NULL;
+    agtype_build_state *bstate;
+    agtype *properties;
+    agtype *empty_properties = NULL;
+    agtype *edge;
+
+    ee = get_edge_entry(ggctx, edge_id);
+    Assert(ee != NULL);
+
+    if (graph_global_context_has_edge_metadata(ggctx) &&
+        get_edge_entry_property_size(ee) > 0 &&
+        get_edge_entry_property_count(ee) == 0)
+    {
+        empty_properties = build_empty_agtype_object();
+        properties = empty_properties;
+    }
+    else
+    {
+        properties = DATUM_GET_AGTYPE_P(
+            get_edge_entry_properties_with_cache(ee, relation_cache));
+        if (properties == NULL)
+        {
+            empty_properties = build_empty_agtype_object();
+            properties = empty_properties;
+        }
+    }
+
+    bstate = init_agtype_build_state(5, AGT_FOBJECT);
+    write_string(bstate, "id");
+    write_string(bstate, "label");
+    write_string(bstate, "end_id");
+    write_string(bstate, "start_id");
+    write_string(bstate, "properties");
+    write_graphid(bstate, get_edge_entry_id(ee));
+    write_string(bstate, get_edge_entry_label_name(ee));
+    write_graphid(bstate, get_edge_entry_end_vertex_id(ee));
+    write_graphid(bstate, get_edge_entry_start_vertex_id(ee));
+    write_container(bstate, properties);
+    edge = build_agtype(bstate);
+    pfree_agtype_build_state(bstate);
+
+    if (empty_properties != NULL)
+        pfree(empty_properties);
+
+    return edge;
+}
+
+static agtype *copy_agtype_to_context(agtype *source, MemoryContext context)
+{
+    agtype *copy;
+    Size size;
+
+    size = VARSIZE(source);
+    copy = MemoryContextAlloc(context, size);
+    memcpy(copy, source, size);
+
+    return copy;
+}
+
+static VLEMaterializerObjectCache *get_vle_materializer_object_cache(
+    FunctionCallInfo fcinfo, Oid graph_oid)
+{
+    VLEMaterializerObjectCache *cache;
+    HASHCTL hash_ctl;
+    MemoryContext old_context;
+
+    cache = (VLEMaterializerObjectCache *)fcinfo->flinfo->fn_extra;
+    if (cache != NULL && cache->graph_oid == graph_oid)
+        return cache;
+
+    old_context = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+    cache = MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt, sizeof(*cache));
+    cache->graph_oid = graph_oid;
+    cache->context = fcinfo->flinfo->fn_mcxt;
+
+    memset(&hash_ctl, 0, sizeof(hash_ctl));
+    hash_ctl.keysize = sizeof(graphid);
+    hash_ctl.entrysize = sizeof(VLEMaterializerObjectCacheEntry);
+    hash_ctl.hcxt = fcinfo->flinfo->fn_mcxt;
+    cache->vertices = hash_create("VLE materialized vertex object cache", 128,
+                                  &hash_ctl,
+                                  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+    cache->edges = hash_create("VLE materialized edge object cache", 128,
+                               &hash_ctl,
+                               HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+    cache->typed_vertices =
+        hash_create("VLE materialized typed vertex cache", 128,
+                    &hash_ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+    cache->typed_edges =
+        hash_create("VLE materialized typed edge cache", 128,
+                    &hash_ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+    fcinfo->flinfo->fn_extra = cache;
+    MemoryContextSwitchTo(old_context);
+
+    return cache;
+}
+
+static agtype *get_cached_vle_vertex_object(
+    VLEMaterializerObjectCache *object_cache, GRAPH_global_context *ggctx,
+    graphid vertex_id, HTAB *relation_cache)
+{
+    VLEMaterializerObjectCacheEntry *entry;
+    agtype *vertex;
+    bool found;
+
+    if (object_cache == NULL)
+        return build_vle_vertex_object_agtype(ggctx, vertex_id, relation_cache);
+
+    entry = hash_search(object_cache->vertices, &vertex_id, HASH_ENTER,
+                        &found);
+    if (found)
+        return entry->object;
+
+    vertex = build_vle_vertex_object_agtype(ggctx, vertex_id, relation_cache);
+    entry->object = copy_agtype_to_context(vertex, object_cache->context);
+    pfree(vertex);
+
+    return entry->object;
+}
+
+static agtype *get_cached_vle_edge_object(
+    VLEMaterializerObjectCache *object_cache, GRAPH_global_context *ggctx,
+    graphid edge_id, HTAB *relation_cache)
+{
+    VLEMaterializerObjectCacheEntry *entry;
+    agtype *edge;
+    bool found;
+
+    if (object_cache == NULL)
+        return build_vle_edge_object_agtype(ggctx, edge_id, relation_cache);
+
+    entry = hash_search(object_cache->edges, &edge_id, HASH_ENTER, &found);
+    if (found)
+        return entry->object;
+
+    edge = build_vle_edge_object_agtype(ggctx, edge_id, relation_cache);
+    entry->object = copy_agtype_to_context(edge, object_cache->context);
+    pfree(edge);
+
+    return entry->object;
+}
+
+static agtype *get_cached_vle_typed_vertex(
+    VLEMaterializerObjectCache *object_cache, GRAPH_global_context *ggctx,
+    graphid vertex_id, HTAB *relation_cache)
+{
+    VLEMaterializerObjectCacheEntry *entry;
+    agtype_value *vertex_value;
+    agtype *vertex;
+    bool found;
+
+    if (object_cache == NULL)
+    {
+        vertex_value = build_vle_vertex_value(ggctx, vertex_id,
+                                              relation_cache);
+        vertex = agtype_value_to_agtype(vertex_value);
+        return vertex;
+    }
+
+    entry = hash_search(object_cache->typed_vertices, &vertex_id, HASH_ENTER,
+                        &found);
+    if (found)
+        return entry->object;
+
+    vertex_value = build_vle_vertex_value(ggctx, vertex_id, relation_cache);
+    vertex = agtype_value_to_agtype(vertex_value);
+    entry->object = copy_agtype_to_context(vertex, object_cache->context);
+    pfree(vertex);
+
+    return entry->object;
+}
+
+static agtype *get_cached_vle_typed_edge(
+    VLEMaterializerObjectCache *object_cache, GRAPH_global_context *ggctx,
+    graphid edge_id, HTAB *relation_cache)
+{
+    VLEMaterializerObjectCacheEntry *entry;
+    agtype_value *edge_value;
+    agtype *edge;
+    bool found;
+
+    if (object_cache == NULL)
+    {
+        edge_value = build_vle_edge_value(ggctx, edge_id, relation_cache);
+        edge = agtype_value_to_agtype(edge_value);
+        return edge;
+    }
+
+    entry = hash_search(object_cache->typed_edges, &edge_id, HASH_ENTER,
+                        &found);
+    if (found)
+        return entry->object;
+
+    edge_value = build_vle_edge_value(ggctx, edge_id, relation_cache);
+    edge = agtype_value_to_agtype(edge_value);
+    entry->object = copy_agtype_to_context(edge, object_cache->context);
+    pfree(edge);
+
+    return entry->object;
+}
+
 /*
  * Helper function to build an array of type AGTV_PATH from an array of
  * graphids.
@@ -2896,7 +4863,7 @@ static agtype_value *build_path(VLE_path_container *vpc)
     MemSet(&path_result, 0, sizeof(agtype_in_state));
     path_result.res = push_agtype_value(&path_result.parse_state,
                                         WAGT_BEGIN_ARRAY, NULL);
-    if (graphid_array_size > 1)
+    if (graphid_array_size > 3)
     {
         relation_cache = create_entry_property_relation_cache(
             "vle path materialization relation cache");
@@ -2944,6 +4911,159 @@ static agtype_value *build_path(VLE_path_container *vpc)
 
     /* return the path */
     return path_result.res;
+}
+
+static agtype *build_path_agtype(VLE_path_container *vpc,
+                                 VLEMaterializerObjectCache *object_cache)
+{
+    GRAPH_global_context *ggctx = NULL;
+    agtype_build_state *path_state;
+    agtype_build_state *scalar_state;
+    HTAB *relation_cache = NULL;
+    Oid graph_oid = InvalidOid;
+    graphid *graphid_array = NULL;
+    int64 graphid_array_size = 0;
+    int index = 0;
+    agtype *path;
+    agtype *result;
+
+    graph_oid = vpc->graph_oid;
+    ggctx = find_GRAPH_global_context(graph_oid);
+    Assert(ggctx != NULL);
+
+    graphid_array = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+    graphid_array_size = vpc->graphid_array_size;
+    path_state = init_agtype_build_state(graphid_array_size, AGT_FARRAY);
+    if (graphid_array_size > 3)
+    {
+        relation_cache = create_entry_property_relation_cache(
+            "vle path raw materialization relation cache");
+    }
+
+    for (index = 0; index < graphid_array_size; index += 2)
+    {
+        agtype *vertex;
+
+        vertex = get_cached_vle_vertex_object(object_cache, ggctx,
+                                              graphid_array[index],
+                                              relation_cache);
+        write_extended(path_state, vertex, AGT_HEADER_VERTEX);
+        if (object_cache == NULL)
+            pfree(vertex);
+
+        if (index + 1 < graphid_array_size)
+        {
+            agtype *edge;
+
+            edge = get_cached_vle_edge_object(object_cache, ggctx,
+                                              graphid_array[index + 1],
+                                              relation_cache);
+            write_extended(path_state, edge, AGT_HEADER_EDGE);
+            if (object_cache == NULL)
+                pfree(edge);
+        }
+    }
+
+    destroy_entry_property_relation_cache(relation_cache);
+    path = build_agtype(path_state);
+    pfree_agtype_build_state(path_state);
+
+    scalar_state = init_agtype_build_state(1, AGT_FARRAY | AGT_FSCALAR);
+    write_extended(scalar_state, path, AGT_HEADER_PATH);
+    result = build_agtype(scalar_state);
+    pfree_agtype_build_state(scalar_state);
+    pfree(path);
+
+    return result;
+}
+
+static agtype *build_edge_list_agtype(VLE_path_container *vpc,
+                                      VLEMaterializerObjectCache *object_cache)
+{
+    GRAPH_global_context *ggctx = NULL;
+    agtype_build_state *edges_state;
+    HTAB *relation_cache = NULL;
+    graphid *graphid_array = NULL;
+    int64 graphid_array_size = 0;
+    int64 edge_count = 0;
+    int64 index;
+    agtype *result;
+
+    graphid_array_size = vpc->graphid_array_size;
+    edge_count = (graphid_array_size - 1) / 2;
+    edges_state = init_agtype_build_state(edge_count, AGT_FARRAY);
+    if (edge_count > 1)
+    {
+        relation_cache = create_entry_property_relation_cache(
+            "vle edge raw materialization relation cache");
+    }
+
+    ggctx = find_GRAPH_global_context(vpc->graph_oid);
+    Assert(ggctx != NULL);
+
+    graphid_array = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+    for (index = 1; index < graphid_array_size - 1; index += 2)
+    {
+        agtype *edge;
+
+        edge = get_cached_vle_edge_object(object_cache, ggctx,
+                                          graphid_array[index],
+                                          relation_cache);
+        write_extended(edges_state, edge, AGT_HEADER_EDGE);
+        if (object_cache == NULL)
+            pfree(edge);
+    }
+
+    destroy_entry_property_relation_cache(relation_cache);
+    result = build_agtype(edges_state);
+    pfree_agtype_build_state(edges_state);
+
+    return result;
+}
+
+static agtype *build_node_list_agtype(VLE_path_container *vpc,
+                                      VLEMaterializerObjectCache *object_cache)
+{
+    GRAPH_global_context *ggctx = NULL;
+    agtype_build_state *nodes_state;
+    HTAB *relation_cache = NULL;
+    graphid *graphid_array = NULL;
+    int64 graphid_array_size = 0;
+    int64 node_count = 0;
+    int64 index;
+    agtype *result;
+
+    ggctx = find_GRAPH_global_context(vpc->graph_oid);
+    Assert(ggctx != NULL);
+
+    graphid_array = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+    graphid_array_size = vpc->graphid_array_size;
+    node_count = (graphid_array_size + 1) / 2;
+
+    nodes_state = init_agtype_build_state(node_count, AGT_FARRAY);
+    if (node_count > 1)
+    {
+        relation_cache = create_entry_property_relation_cache(
+            "vle node raw materialization relation cache");
+    }
+
+    for (index = 0; index < graphid_array_size; index += 2)
+    {
+        agtype *vertex;
+
+        vertex = get_cached_vle_vertex_object(object_cache, ggctx,
+                                              graphid_array[index],
+                                              relation_cache);
+        write_extended(nodes_state, vertex, AGT_HEADER_VERTEX);
+        if (object_cache == NULL)
+            pfree(vertex);
+    }
+
+    destroy_entry_property_relation_cache(relation_cache);
+    result = build_agtype(nodes_state);
+    pfree_agtype_build_state(nodes_state);
+
+    return result;
 }
 
 /*
@@ -3030,6 +5150,7 @@ Datum age_vle(PG_FUNCTION_ARGS)
          * context just created
          */
         funcctx->user_fctx = vlelctx;
+        register_vle_local_context_cleanup(funcctx, vlelctx);
 
         if (is_empty_length_range(vlelctx))
         {
@@ -3048,6 +5169,39 @@ Datum age_vle(PG_FUNCTION_ARGS)
 
     /* restore our VLE local context */
     vlelctx = (VLE_local_context *)funcctx->user_fctx;
+
+    if (should_materialize_terminal_properties(vlelctx))
+    {
+        if (!vlelctx->terminal_property_materialized)
+        {
+            MemoryContext materialize_oldctx;
+
+            materialize_oldctx =
+                MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+            materialize_terminal_property_results(vlelctx);
+            MemoryContextSwitchTo(materialize_oldctx);
+        }
+        if (vlelctx->terminal_property_emit_index <
+            vlelctx->terminal_property_count)
+        {
+            int64 index = vlelctx->terminal_property_emit_index++;
+
+            if (vlelctx->terminal_property_nulls[index])
+            {
+                SRF_RETURN_NEXT_NULL(funcctx);
+            }
+            SRF_RETURN_NEXT(funcctx,
+                            vlelctx->terminal_property_results[index]);
+        }
+
+        cleanup_vle_local_context_resources(vlelctx);
+        deactivate_vle_local_context_cleanup(vlelctx);
+        if (vlelctx->use_cache == false)
+        {
+            free_VLE_local_context(vlelctx);
+        }
+        SRF_RETURN_DONE(funcctx);
+    }
 
     /*
      * All work done in dfs_find_a_path needs to be done in a context that
@@ -3073,7 +5227,16 @@ Datum age_vle(PG_FUNCTION_ARGS)
 
             case VLE_FUNCTION_PATHS_ALL:
             case VLE_FUNCTION_PATHS_FROM:
-                found_a_path = dfs_find_a_path_from(vlelctx);
+                if (vlelctx->emit_terminal_property &&
+                    !vlelctx->reverse_output_path)
+                {
+                    found_a_path =
+                        dfs_find_terminal_property_path_from(vlelctx);
+                }
+                else
+                {
+                    found_a_path = dfs_find_a_path_from(vlelctx);
+                }
                 break;
 
             default:
@@ -3139,6 +5302,33 @@ Datum age_vle(PG_FUNCTION_ARGS)
     {
         VLE_path_container *vpc = NULL;
 
+        if (vlelctx->emit_terminal_property)
+        {
+            bool is_null = true;
+            Datum property;
+
+            if (!is_zero_bound && !vlelctx->reverse_output_path)
+            {
+                Assert(vlelctx->terminal_property_result_valid);
+                property = vlelctx->terminal_property_result;
+                is_null = vlelctx->terminal_property_result_is_null;
+            }
+            else
+            {
+                MemoryContext terminal_oldctx;
+
+                terminal_oldctx =
+                    MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+                property = build_VLE_terminal_property(vlelctx, &is_null);
+                MemoryContextSwitchTo(terminal_oldctx);
+            }
+            if (is_null)
+            {
+                SRF_RETURN_NEXT_NULL(funcctx);
+            }
+            SRF_RETURN_NEXT(funcctx, property);
+        }
+
         /* if this isn't the zero boundary case generate a normal vpc */
         if (!is_zero_bound)
         {
@@ -3150,7 +5340,11 @@ Datum age_vle(PG_FUNCTION_ARGS)
              * path_stack. This will also correct for the path_stack being last
              * in, first out.
              */
-            if (vlelctx->reverse_output_path)
+            if (vlelctx->emit_terminal_only)
+            {
+                vpc = build_VLE_terminal_container(vlelctx);
+            }
+            else if (vlelctx->reverse_output_path)
             {
                 vpc = build_reversed_VLE_path_container(vlelctx);
             }
@@ -3162,7 +5356,14 @@ Datum age_vle(PG_FUNCTION_ARGS)
         /* otherwise, this is the zero boundary case [*0..x] */
         else
         {
-            vpc = build_VLE_zero_container(vlelctx);
+            if (vlelctx->emit_terminal_only)
+            {
+                vpc = build_VLE_terminal_zero_container(vlelctx);
+            }
+            else
+            {
+                vpc = build_VLE_zero_container(vlelctx);
+            }
         }
 
         /* return the result and signal that the function is not yet done */
@@ -3171,9 +5372,8 @@ Datum age_vle(PG_FUNCTION_ARGS)
     /* otherwise, we are done and we need to cleanup and signal done */
     else
     {
-        destroy_entry_property_relation_cache(
-            vlelctx->edge_property_relation_cache);
-        vlelctx->edge_property_relation_cache = NULL;
+        cleanup_vle_local_context_resources(vlelctx);
+        deactivate_vle_local_context_cleanup(vlelctx);
 
         /* mark local context as clean */
         vlelctx->is_dirty = false;
@@ -3195,19 +5395,15 @@ Datum age_vle(PG_FUNCTION_ARGS)
  */
 agtype *agt_materialize_vle_path(agtype *agt_arg_vpc)
 {
-    agtype *agt_path = NULL;
-    agtype_value *agtv_path = NULL;
+    VLE_path_container *vpc = NULL;
 
-    /* get the path */
-    agtv_path = agtv_materialize_vle_path(agt_arg_vpc);
+    Assert(agt_arg_vpc != NULL);
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
 
-    /* convert  agtype_value to agtype */
-    agt_path = agtype_value_to_agtype(agtv_path);
+    vpc = (VLE_path_container *)agt_arg_vpc;
 
-    /* free in memory path */
-    pfree_agtype_value(agtv_path);
-
-    return agt_path;
+    return build_path_agtype(vpc, NULL);
 }
 
 /*
@@ -3549,8 +5745,46 @@ agtype_value *agtv_materialize_vle_edge_at(agtype *agt_arg_vpc,
                                 NULL);
 }
 
-static agtype_value *agtv_materialize_vle_vertex_at(agtype *agt_arg_vpc,
-                                                    int64 node_index)
+static agtype *materialize_vle_edge_at_agtype(
+    agtype *agt_arg_vpc, int64 edge_index,
+    VLEMaterializerObjectCache *object_cache)
+{
+    GRAPH_global_context *ggctx = NULL;
+    VLE_path_container *vpc = NULL;
+    graphid *graphid_array = NULL;
+    int64 edge_count = 0;
+    Oid graph_oid = InvalidOid;
+
+    Assert(agt_arg_vpc != NULL);
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    edge_count = agtv_vle_edge_count(agt_arg_vpc);
+
+    if (edge_index < 0)
+    {
+        edge_index = edge_count + edge_index;
+    }
+    if (edge_index < 0 || edge_index >= edge_count)
+    {
+        return NULL;
+    }
+
+    graph_oid = vpc->graph_oid;
+    ggctx = find_GRAPH_global_context(graph_oid);
+    Assert(ggctx != NULL);
+
+    graphid_array = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+
+    return get_cached_vle_typed_edge(object_cache, ggctx,
+                                     graphid_array[(edge_index * 2) + 1],
+                                     NULL);
+}
+
+static agtype *materialize_vle_vertex_at_agtype(
+    agtype *agt_arg_vpc, int64 node_index,
+    VLEMaterializerObjectCache *object_cache)
 {
     GRAPH_global_context *ggctx = NULL;
     VLE_path_container *vpc = NULL;
@@ -3576,8 +5810,9 @@ static agtype_value *agtv_materialize_vle_vertex_at(agtype *agt_arg_vpc,
     Assert(ggctx != NULL);
     graphid_array = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
 
-    return build_vle_vertex_value(ggctx, graphid_array[node_index * 2],
-                                  NULL);
+    return get_cached_vle_typed_vertex(object_cache, ggctx,
+                                       graphid_array[node_index * 2],
+                                       NULL);
 }
 
 static agtype_value *agtv_materialize_vle_edge_endpoint_at(
@@ -4126,7 +6361,8 @@ PG_FUNCTION_INFO_V1(age_materialize_vle_edges);
 Datum age_materialize_vle_edges(PG_FUNCTION_ARGS)
 {
     agtype *agt_arg_vpc = NULL;
-    agtype_value *agtv_array = NULL;
+    VLE_path_container *vpc = NULL;
+    VLEMaterializerObjectCache *object_cache;
     int64 edge_count;
 
     /* if we have a NULL VLE_path_container, return NULL */
@@ -4150,9 +6386,12 @@ Datum age_materialize_vle_edges(PG_FUNCTION_ARGS)
         PG_RETURN_POINTER(build_empty_agtype_array());
     }
 
-    agtv_array = agtv_materialize_vle_edges(agt_arg_vpc);
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    object_cache = get_vle_materializer_object_cache(fcinfo, vpc->graph_oid);
 
-    PG_RETURN_POINTER(agtype_value_to_agtype(agtv_array));
+    PG_RETURN_POINTER(build_edge_list_agtype(vpc, object_cache));
 }
 
 PG_FUNCTION_INFO_V1(age_materialize_vle_nodes);
@@ -4160,7 +6399,8 @@ PG_FUNCTION_INFO_V1(age_materialize_vle_nodes);
 Datum age_materialize_vle_nodes(PG_FUNCTION_ARGS)
 {
     agtype *agt_arg_vpc = NULL;
-    agtype_value *agtv_array = NULL;
+    VLE_path_container *vpc = NULL;
+    VLEMaterializerObjectCache *object_cache;
 
     if (PG_ARGISNULL(0))
     {
@@ -4173,9 +6413,12 @@ Datum age_materialize_vle_nodes(PG_FUNCTION_ARGS)
         PG_RETURN_NULL();
     }
 
-    agtv_array = agtv_materialize_vle_nodes(agt_arg_vpc);
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    object_cache = get_vle_materializer_object_cache(fcinfo, vpc->graph_oid);
 
-    PG_RETURN_POINTER(agtype_value_to_agtype(agtv_array));
+    PG_RETURN_POINTER(build_node_list_agtype(vpc, object_cache));
 }
 
 PG_FUNCTION_INFO_V1(age_vle_path_node_count);
@@ -5189,7 +7432,9 @@ Datum age_materialize_vle_node_at(PG_FUNCTION_ARGS)
 {
     agtype *agt_arg_vpc = NULL;
     agtype_value agtv_index;
-    agtype_value *agtv_vertex = NULL;
+    agtype *vertex = NULL;
+    VLEMaterializerObjectCache *object_cache;
+    VLE_path_container *vpc;
     bool index_needs_free = false;
     int64 node_index;
 
@@ -5203,6 +7448,10 @@ Datum age_materialize_vle_node_at(PG_FUNCTION_ARGS)
     {
         PG_RETURN_NULL();
     }
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    object_cache = get_vle_materializer_object_cache(fcinfo, vpc->graph_oid);
 
     get_vle_scalar_arg_no_copy("age_materialize_vle_node_at",
                                AG_GET_ARG_AGTYPE_P(1), AGTV_INTEGER, true,
@@ -5214,13 +7463,14 @@ Datum age_materialize_vle_node_at(PG_FUNCTION_ARGS)
         pfree_agtype_value_content(&agtv_index);
     }
 
-    agtv_vertex = agtv_materialize_vle_vertex_at(agt_arg_vpc, node_index);
-    if (agtv_vertex == NULL)
+    vertex = materialize_vle_vertex_at_agtype(agt_arg_vpc, node_index,
+                                              object_cache);
+    if (vertex == NULL)
     {
         PG_RETURN_NULL();
     }
 
-    PG_RETURN_POINTER(agtype_value_to_agtype(agtv_vertex));
+    PG_RETURN_POINTER(vertex);
 }
 
 PG_FUNCTION_INFO_V1(age_materialize_vle_node_reversed_at);
@@ -5229,7 +7479,9 @@ Datum age_materialize_vle_node_reversed_at(PG_FUNCTION_ARGS)
 {
     agtype *agt_arg_vpc = NULL;
     agtype_value agtv_index;
-    agtype_value *agtv_vertex = NULL;
+    agtype *vertex = NULL;
+    VLEMaterializerObjectCache *object_cache;
+    VLE_path_container *vpc;
     bool index_needs_free = false;
     int64 node_index;
 
@@ -5243,6 +7495,10 @@ Datum age_materialize_vle_node_reversed_at(PG_FUNCTION_ARGS)
     {
         PG_RETURN_NULL();
     }
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    object_cache = get_vle_materializer_object_cache(fcinfo, vpc->graph_oid);
 
     get_vle_scalar_arg_no_copy("age_materialize_vle_node_reversed_at",
                                AG_GET_ARG_AGTYPE_P(1), AGTV_INTEGER, true,
@@ -5259,14 +7515,14 @@ Datum age_materialize_vle_node_reversed_at(PG_FUNCTION_ARGS)
         PG_RETURN_NULL();
     }
 
-    agtv_vertex = agtv_materialize_vle_vertex_at(
-        agt_arg_vpc, -node_index - 1);
-    if (agtv_vertex == NULL)
+    vertex = materialize_vle_vertex_at_agtype(agt_arg_vpc, -node_index - 1,
+                                              object_cache);
+    if (vertex == NULL)
     {
         PG_RETURN_NULL();
     }
 
-    PG_RETURN_POINTER(agtype_value_to_agtype(agtv_vertex));
+    PG_RETURN_POINTER(vertex);
 }
 
 PG_FUNCTION_INFO_V1(age_materialize_vle_node_tail_last);
@@ -5608,6 +7864,103 @@ Datum age_vle_node_properties_at(PG_FUNCTION_ARGS)
     Assert(ve != NULL);
 
     PG_RETURN_DATUM(get_vertex_entry_properties(ve));
+}
+
+PG_FUNCTION_INFO_V1(age_vle_node_property_at);
+
+Datum age_vle_node_property_at(PG_FUNCTION_ARGS)
+{
+    GRAPH_global_context *ggctx = NULL;
+    VLE_path_container *vpc = NULL;
+    vertex_entry *ve = NULL;
+    agtype *agt_arg_vpc = NULL;
+    agtype_value agtv_index;
+    agtype_value key_value;
+    agtype_value property_value;
+    bool index_needs_free = false;
+    bool key_needs_free = false;
+    bool property_value_needs_free = false;
+    graphid *graphid_array = NULL;
+    graphid node_id;
+    int64 node_count;
+    int64 node_index;
+    agtype *properties;
+    bool found;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
+    {
+        PG_RETURN_NULL();
+    }
+
+    agt_arg_vpc = AG_GET_ARG_AGTYPE_P(0);
+    if (is_agtype_null(agt_arg_vpc))
+    {
+        PG_RETURN_NULL();
+    }
+
+    get_vle_scalar_arg_no_copy("age_vle_node_property_at",
+                               AG_GET_ARG_AGTYPE_P(1), AGTV_INTEGER, true,
+                               &agtv_index, &index_needs_free);
+    get_vle_terminal_property_key(fcinfo, "age_vle_node_property_at",
+                                  AG_GET_ARG_AGTYPE_P(2), &key_value,
+                                  &key_needs_free);
+    if (!validate_vle_property_key(&key_value, key_needs_free))
+    {
+        if (index_needs_free)
+            pfree_agtype_value_content(&agtv_index);
+        PG_RETURN_NULL();
+    }
+
+    node_index = agtv_index.val.int_value;
+    if (index_needs_free)
+    {
+        pfree_agtype_value_content(&agtv_index);
+    }
+
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    node_count = (vpc->graphid_array_size + 1) / 2;
+    if (node_index < 0)
+    {
+        node_index = node_count + node_index;
+    }
+    if (node_index < 0 || node_index >= node_count)
+    {
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        PG_RETURN_NULL();
+    }
+
+    graphid_array = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+    node_id = graphid_array[node_index * 2];
+
+    ggctx = find_GRAPH_global_context(vpc->graph_oid);
+    Assert(ggctx != NULL);
+    ve = get_vertex_entry(ggctx, node_id);
+    Assert(ve != NULL);
+
+    properties = DATUM_GET_AGTYPE_P(get_vertex_entry_properties(ve));
+    found = find_agtype_value_from_container_no_copy(
+        &properties->root, AGT_FOBJECT, &key_value, &property_value,
+        &property_value_needs_free);
+
+    if (key_needs_free)
+        pfree_agtype_value_content(&key_value);
+
+    if (!found || property_value.type == AGTV_NULL)
+    {
+        if (property_value_needs_free)
+            pfree_agtype_value_content(&property_value);
+        PG_RETURN_NULL();
+    }
+
+    properties = agtype_value_to_agtype(&property_value);
+    if (property_value_needs_free)
+        pfree_agtype_value_content(&property_value);
+
+    PG_RETURN_POINTER(properties);
 }
 
 PG_FUNCTION_INFO_V1(age_materialize_vle_nodes_slice);
@@ -6064,7 +8417,9 @@ Datum age_materialize_vle_edge_at(PG_FUNCTION_ARGS)
 {
     agtype *agt_arg_vpc = NULL;
     agtype_value agtv_index;
-    agtype_value *agtv_edge = NULL;
+    agtype *edge = NULL;
+    VLEMaterializerObjectCache *object_cache;
+    VLE_path_container *vpc;
     bool index_needs_free = false;
     int64 edge_index;
 
@@ -6078,6 +8433,10 @@ Datum age_materialize_vle_edge_at(PG_FUNCTION_ARGS)
     {
         PG_RETURN_NULL();
     }
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    object_cache = get_vle_materializer_object_cache(fcinfo, vpc->graph_oid);
 
     get_vle_scalar_arg_no_copy("age_materialize_vle_edge_at",
                                AG_GET_ARG_AGTYPE_P(1), AGTV_INTEGER, true,
@@ -6089,13 +8448,14 @@ Datum age_materialize_vle_edge_at(PG_FUNCTION_ARGS)
         pfree_agtype_value_content(&agtv_index);
     }
 
-    agtv_edge = agtv_materialize_vle_edge_at(agt_arg_vpc, edge_index);
-    if (agtv_edge == NULL)
+    edge = materialize_vle_edge_at_agtype(agt_arg_vpc, edge_index,
+                                          object_cache);
+    if (edge == NULL)
     {
         PG_RETURN_NULL();
     }
 
-    PG_RETURN_POINTER(agtype_value_to_agtype(agtv_edge));
+    PG_RETURN_POINTER(edge);
 }
 
 PG_FUNCTION_INFO_V1(age_materialize_vle_edge_reversed_at);
@@ -6104,7 +8464,9 @@ Datum age_materialize_vle_edge_reversed_at(PG_FUNCTION_ARGS)
 {
     agtype *agt_arg_vpc = NULL;
     agtype_value agtv_index;
-    agtype_value *agtv_edge = NULL;
+    agtype *edge = NULL;
+    VLEMaterializerObjectCache *object_cache;
+    VLE_path_container *vpc;
     bool index_needs_free = false;
     int64 edge_index;
 
@@ -6118,6 +8480,10 @@ Datum age_materialize_vle_edge_reversed_at(PG_FUNCTION_ARGS)
     {
         PG_RETURN_NULL();
     }
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    object_cache = get_vle_materializer_object_cache(fcinfo, vpc->graph_oid);
 
     get_vle_scalar_arg_no_copy("age_materialize_vle_edge_reversed_at",
                                AG_GET_ARG_AGTYPE_P(1), AGTV_INTEGER, true,
@@ -6134,13 +8500,14 @@ Datum age_materialize_vle_edge_reversed_at(PG_FUNCTION_ARGS)
         PG_RETURN_NULL();
     }
 
-    agtv_edge = agtv_materialize_vle_edge_at(agt_arg_vpc, -edge_index - 1);
-    if (agtv_edge == NULL)
+    edge = materialize_vle_edge_at_agtype(agt_arg_vpc, -edge_index - 1,
+                                          object_cache);
+    if (edge == NULL)
     {
         PG_RETURN_NULL();
     }
 
-    PG_RETURN_POINTER(agtype_value_to_agtype(agtv_edge));
+    PG_RETURN_POINTER(edge);
 }
 
 PG_FUNCTION_INFO_V1(age_materialize_vle_edge_tail_last);
@@ -6980,6 +9347,103 @@ Datum age_vle_edge_properties_at(PG_FUNCTION_ARGS)
     PG_RETURN_DATUM(get_edge_entry_properties(ee));
 }
 
+PG_FUNCTION_INFO_V1(age_vle_edge_property_at);
+
+Datum age_vle_edge_property_at(PG_FUNCTION_ARGS)
+{
+    GRAPH_global_context *ggctx = NULL;
+    VLE_path_container *vpc = NULL;
+    edge_entry *ee = NULL;
+    agtype *agt_arg_vpc = NULL;
+    agtype_value agtv_index;
+    agtype_value key_value;
+    agtype_value property_value;
+    bool index_needs_free = false;
+    bool key_needs_free = false;
+    bool property_value_needs_free = false;
+    graphid *graphid_array = NULL;
+    graphid edge_id;
+    int64 edge_count;
+    int64 edge_index;
+    agtype *properties;
+    bool found;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
+    {
+        PG_RETURN_NULL();
+    }
+
+    agt_arg_vpc = AG_GET_ARG_AGTYPE_P(0);
+    if (is_agtype_null(agt_arg_vpc))
+    {
+        PG_RETURN_NULL();
+    }
+
+    get_vle_scalar_arg_no_copy("age_vle_edge_property_at",
+                               AG_GET_ARG_AGTYPE_P(1), AGTV_INTEGER, true,
+                               &agtv_index, &index_needs_free);
+    get_vle_terminal_property_key(fcinfo, "age_vle_edge_property_at",
+                                  AG_GET_ARG_AGTYPE_P(2), &key_value,
+                                  &key_needs_free);
+    if (!validate_vle_property_key(&key_value, key_needs_free))
+    {
+        if (index_needs_free)
+            pfree_agtype_value_content(&agtv_index);
+        PG_RETURN_NULL();
+    }
+
+    edge_index = agtv_index.val.int_value;
+    if (index_needs_free)
+    {
+        pfree_agtype_value_content(&agtv_index);
+    }
+
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    edge_count = (vpc->graphid_array_size - 1) / 2;
+    if (edge_index < 0)
+    {
+        edge_index = edge_count + edge_index;
+    }
+    if (edge_index < 0 || edge_index >= edge_count)
+    {
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        PG_RETURN_NULL();
+    }
+
+    graphid_array = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+    edge_id = graphid_array[(edge_index * 2) + 1];
+
+    ggctx = find_GRAPH_global_context(vpc->graph_oid);
+    Assert(ggctx != NULL);
+    ee = get_edge_entry(ggctx, edge_id);
+    Assert(ee != NULL);
+
+    properties = DATUM_GET_AGTYPE_P(get_edge_entry_properties(ee));
+    found = find_agtype_value_from_container_no_copy(
+        &properties->root, AGT_FOBJECT, &key_value, &property_value,
+        &property_value_needs_free);
+
+    if (key_needs_free)
+        pfree_agtype_value_content(&key_value);
+
+    if (!found || property_value.type == AGTV_NULL)
+    {
+        if (property_value_needs_free)
+            pfree_agtype_value_content(&property_value);
+        PG_RETURN_NULL();
+    }
+
+    properties = agtype_value_to_agtype(&property_value);
+    if (property_value_needs_free)
+        pfree_agtype_value_content(&property_value);
+
+    PG_RETURN_POINTER(properties);
+}
+
 static Datum age_vle_edge_endpoint_at(FunctionCallInfo fcinfo,
                                       bool start_endpoint)
 {
@@ -7303,6 +9767,8 @@ PG_FUNCTION_INFO_V1(age_materialize_vle_path);
 Datum age_materialize_vle_path(PG_FUNCTION_ARGS)
 {
     agtype *agt_arg_vpc = NULL;
+    VLE_path_container *vpc = NULL;
+    VLEMaterializerObjectCache *object_cache;
 
     /* if we have a NULL VLE_path_container, return NULL */
     if (PG_ARGISNULL(0))
@@ -7319,7 +9785,12 @@ Datum age_materialize_vle_path(PG_FUNCTION_ARGS)
         PG_RETURN_NULL();
     }
 
-    PG_RETURN_POINTER(agt_materialize_vle_path(agt_arg_vpc));
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    object_cache = get_vle_materializer_object_cache(fcinfo, vpc->graph_oid);
+
+    PG_RETURN_POINTER(build_path_agtype(vpc, object_cache));
 }
 
 PG_FUNCTION_INFO_V1(age_vle_path_length);
@@ -7344,6 +9815,446 @@ Datum age_vle_path_length(PG_FUNCTION_ARGS)
     agtv_result.val.int_value = agtv_vle_edge_count(agt_arg_vpc);
 
     PG_RETURN_POINTER(agtype_value_to_agtype(&agtv_result));
+}
+
+PG_FUNCTION_INFO_V1(age_vle_terminal_id);
+
+Datum age_vle_terminal_id(PG_FUNCTION_ARGS)
+{
+    agtype *agt_arg_vpc = NULL;
+    VLE_path_container *vpc = NULL;
+    graphid *gida = NULL;
+
+    if (PG_ARGISNULL(0))
+    {
+        PG_RETURN_NULL();
+    }
+
+    agt_arg_vpc = AG_GET_ARG_AGTYPE_P(0);
+    if (is_agtype_null(agt_arg_vpc))
+    {
+        PG_RETURN_NULL();
+    }
+
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    Assert(vpc->graphid_array_size >= 1);
+
+    gida = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+
+    AG_RETURN_GRAPHID(gida[vpc->graphid_array_size - 1]);
+}
+
+PG_FUNCTION_INFO_V1(age_vle_terminal_vertex);
+
+static VLETerminalPropertyCache *get_vle_terminal_property_cache(
+    FunctionCallInfo fcinfo)
+{
+    VLETerminalPropertyCache *cache = NULL;
+
+    cache = (VLETerminalPropertyCache *)fcinfo->flinfo->fn_extra;
+    if (cache == NULL)
+    {
+        cache = MemoryContextAllocZero(fcinfo->flinfo->fn_mcxt,
+                                       sizeof(VLETerminalPropertyCache));
+        cache->callback.func = destroy_vle_terminal_property_cache;
+        cache->callback.arg = cache;
+        MemoryContextRegisterResetCallback(fcinfo->flinfo->fn_mcxt,
+                                           &cache->callback);
+        fcinfo->flinfo->fn_extra = cache;
+    }
+
+    return cache;
+}
+
+static Relation get_vle_terminal_property_relation(FunctionCallInfo fcinfo,
+                                                   Oid relid)
+{
+    VLETerminalPropertyCache *cache;
+
+    cache = get_vle_terminal_property_cache(fcinfo);
+
+    if (cache->rel == NULL || cache->relid != relid)
+    {
+        if (cache->rel != NULL)
+        {
+            table_close(cache->rel, AccessShareLock);
+        }
+
+        cache->relid = relid;
+        cache->rel = table_open(relid, AccessShareLock);
+    }
+
+    return cache->rel;
+}
+
+static void get_vle_terminal_property_key(FunctionCallInfo fcinfo,
+                                          const char *funcname,
+                                          agtype *agt_arg_key,
+                                          agtype_value *key_value,
+                                          bool *key_needs_free)
+{
+    VLETerminalPropertyCache *cache;
+    MemoryContext old_context;
+
+    cache = get_vle_terminal_property_cache(fcinfo);
+    if (cache->key_valid && cache->key_arg == agt_arg_key)
+    {
+        *key_value = cache->key;
+        *key_needs_free = false;
+        return;
+    }
+
+    get_vle_scalar_arg_no_copy((char *)funcname, agt_arg_key, AGTV_STRING,
+                               false, key_value, key_needs_free);
+    if (key_value->type != AGTV_STRING)
+    {
+        return;
+    }
+
+    if (cache->key_valid)
+    {
+        return;
+    }
+
+    old_context = MemoryContextSwitchTo(fcinfo->flinfo->fn_mcxt);
+    cache->key_arg = agt_arg_key;
+    cache->key = *key_value;
+    cache->key.val.string.val = pnstrdup(key_value->val.string.val,
+                                         key_value->val.string.len);
+    cache->key_valid = true;
+    MemoryContextSwitchTo(old_context);
+}
+
+static bool validate_vle_property_key(agtype_value *key_value,
+                                      bool key_needs_free)
+{
+    switch (key_value->type)
+    {
+    case AGTV_NULL:
+        if (key_needs_free)
+            pfree_agtype_value_content(key_value);
+        return false;
+    case AGTV_STRING:
+        return true;
+    case AGTV_INTEGER:
+        if (key_needs_free)
+            pfree_agtype_value_content(key_value);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("AGTV_INTEGER is not a valid key type")));
+        break;
+    case AGTV_FLOAT:
+        if (key_needs_free)
+            pfree_agtype_value_content(key_value);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("AGTV_FLOAT is not a valid key type")));
+        break;
+    case AGTV_NUMERIC:
+        if (key_needs_free)
+            pfree_agtype_value_content(key_value);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("AGTV_NUMERIC is not a valid key type")));
+        break;
+    case AGTV_BOOL:
+        if (key_needs_free)
+            pfree_agtype_value_content(key_value);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("AGTV_BOOL is not a valid key type")));
+        break;
+    default:
+        if (key_needs_free)
+            pfree_agtype_value_content(key_value);
+        ereport(ERROR, (errmsg("unknown agtype scalar type")));
+        break;
+    }
+
+    return false;
+}
+
+static void destroy_vle_terminal_property_cache(void *arg)
+{
+    VLETerminalPropertyCache *cache = (VLETerminalPropertyCache *)arg;
+
+    if (cache->rel != NULL)
+    {
+        table_close(cache->rel, AccessShareLock);
+        cache->rel = NULL;
+        cache->relid = InvalidOid;
+    }
+}
+
+Datum age_vle_terminal_vertex(PG_FUNCTION_ARGS)
+{
+    GRAPH_global_context *ggctx = NULL;
+    VLE_path_container *vpc = NULL;
+    agtype *agt_arg_vpc = NULL;
+    agtype_value *agtv_vertex = NULL;
+    graphid *gida = NULL;
+    graphid terminal_id;
+
+    if (PG_ARGISNULL(0))
+    {
+        PG_RETURN_NULL();
+    }
+
+    agt_arg_vpc = AG_GET_ARG_AGTYPE_P(0);
+    if (is_agtype_null(agt_arg_vpc))
+    {
+        PG_RETURN_NULL();
+    }
+
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    Assert(vpc->graphid_array_size >= 1);
+
+    gida = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+    terminal_id = gida[vpc->graphid_array_size - 1];
+
+    ggctx = find_GRAPH_global_context(vpc->graph_oid);
+    Assert(ggctx != NULL);
+
+    agtv_vertex = build_vle_vertex_value(ggctx, terminal_id, NULL);
+
+    PG_RETURN_POINTER(agtype_value_to_agtype(agtv_vertex));
+}
+
+PG_FUNCTION_INFO_V1(age_vle_terminal_vertex_properties);
+
+Datum age_vle_terminal_vertex_properties(PG_FUNCTION_ARGS)
+{
+    GRAPH_global_context *ggctx = NULL;
+    VLE_path_container *vpc = NULL;
+    vertex_entry *ve = NULL;
+    agtype *agt_arg_vpc = NULL;
+    graphid *gida = NULL;
+    graphid terminal_id;
+    Relation rel = NULL;
+
+    if (PG_ARGISNULL(0))
+    {
+        PG_RETURN_NULL();
+    }
+
+    agt_arg_vpc = AG_GET_ARG_AGTYPE_P(0);
+    if (is_agtype_null(agt_arg_vpc))
+    {
+        PG_RETURN_NULL();
+    }
+
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    Assert(vpc->graphid_array_size >= 1);
+
+    gida = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+    terminal_id = gida[vpc->graphid_array_size - 1];
+
+    ggctx = find_GRAPH_global_context(vpc->graph_oid);
+    Assert(ggctx != NULL);
+
+    ve = get_vertex_entry(ggctx, terminal_id);
+    Assert(ve != NULL);
+
+    rel = get_vle_terminal_property_relation(
+        fcinfo, get_vertex_entry_label_table_oid(ve));
+
+    PG_RETURN_DATUM(get_vertex_entry_properties_with_relation(ve, rel));
+}
+
+PG_FUNCTION_INFO_V1(age_vle_terminal_vertex_property);
+
+Datum age_vle_terminal_vertex_property(PG_FUNCTION_ARGS)
+{
+    agtype *properties = NULL;
+    agtype *agt_arg_key = NULL;
+    agtype_value key_value;
+    agtype_value *property_value = NULL;
+    bool key_needs_free = false;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+    {
+        PG_RETURN_NULL();
+    }
+
+    properties = AG_GET_ARG_AGTYPE_P(0);
+    if (is_agtype_null(properties))
+    {
+        PG_RETURN_NULL();
+    }
+
+    agt_arg_key = AG_GET_ARG_AGTYPE_P(1);
+    get_vle_terminal_property_key(fcinfo,
+                                  "age_vle_terminal_vertex_property",
+                                  agt_arg_key, &key_value, &key_needs_free);
+
+    switch (key_value.type)
+    {
+    case AGTV_NULL:
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        PG_RETURN_NULL();
+    case AGTV_STRING:
+        break;
+    case AGTV_INTEGER:
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("AGTV_INTEGER is not a valid key type")));
+        break;
+    case AGTV_FLOAT:
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("AGTV_FLOAT is not a valid key type")));
+        break;
+    case AGTV_NUMERIC:
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("AGTV_NUMERIC is not a valid key type")));
+        break;
+    case AGTV_BOOL:
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("AGTV_BOOL is not a valid key type")));
+        break;
+    default:
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        ereport(ERROR, (errmsg("unknown agtype scalar type")));
+        break;
+    }
+
+    property_value = find_agtype_value_from_container(&properties->root,
+                                                      AGT_FOBJECT,
+                                                      &key_value);
+
+    if (key_needs_free)
+        pfree_agtype_value_content(&key_value);
+
+    if (property_value == NULL || property_value->type == AGTV_NULL)
+    {
+        PG_RETURN_NULL();
+    }
+
+    properties = agtype_value_to_agtype(property_value);
+
+    PG_RETURN_POINTER(properties);
+}
+
+PG_FUNCTION_INFO_V1(age_vle_terminal_vertex_property_from_path);
+
+Datum age_vle_terminal_vertex_property_from_path(PG_FUNCTION_ARGS)
+{
+    GRAPH_global_context *ggctx = NULL;
+    VLE_path_container *vpc = NULL;
+    vertex_entry *ve = NULL;
+    agtype *agt_arg_vpc = NULL;
+    agtype *agt_arg_key = NULL;
+    agtype_value key_value;
+    Datum property = (Datum) 0;
+    graphid *gida = NULL;
+    graphid terminal_id;
+    Relation rel = NULL;
+    bool key_needs_free = false;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+    {
+        PG_RETURN_NULL();
+    }
+
+    agt_arg_vpc = AG_GET_ARG_AGTYPE_P(0);
+    if (is_agtype_null(agt_arg_vpc))
+    {
+        PG_RETURN_NULL();
+    }
+
+    Assert(AGT_ROOT_IS_BINARY(agt_arg_vpc));
+    Assert(AGT_ROOT_BINARY_FLAGS(agt_arg_vpc) == AGT_FBINARY_TYPE_VLE_PATH);
+
+    agt_arg_key = AG_GET_ARG_AGTYPE_P(1);
+    get_vle_terminal_property_key(
+        fcinfo, "age_vle_terminal_vertex_property_from_path", agt_arg_key,
+        &key_value, &key_needs_free);
+
+    switch (key_value.type)
+    {
+    case AGTV_NULL:
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        PG_RETURN_NULL();
+    case AGTV_STRING:
+        break;
+    case AGTV_INTEGER:
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("AGTV_INTEGER is not a valid key type")));
+        break;
+    case AGTV_FLOAT:
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("AGTV_FLOAT is not a valid key type")));
+        break;
+    case AGTV_NUMERIC:
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("AGTV_NUMERIC is not a valid key type")));
+        break;
+    case AGTV_BOOL:
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("AGTV_BOOL is not a valid key type")));
+        break;
+    default:
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        ereport(ERROR, (errmsg("unknown agtype scalar type")));
+        break;
+    }
+
+    vpc = (VLE_path_container *)agt_arg_vpc;
+    Assert(vpc->graphid_array_size >= 1);
+
+    gida = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+    terminal_id = gida[vpc->graphid_array_size - 1];
+
+    ggctx = find_GRAPH_global_context(vpc->graph_oid);
+    Assert(ggctx != NULL);
+
+    ve = get_vertex_entry(ggctx, terminal_id);
+    Assert(ve != NULL);
+
+    if (get_vertex_entry_cached_property(ve, &key_value, &property))
+    {
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        PG_RETURN_DATUM(property);
+    }
+
+    rel = get_vle_terminal_property_relation(
+        fcinfo, get_vertex_entry_label_table_oid(ve));
+    if (!get_vertex_entry_property_with_relation(ve, rel, &key_value,
+                                                 &property))
+    {
+        if (key_needs_free)
+            pfree_agtype_value_content(&key_value);
+        PG_RETURN_NULL();
+    }
+
+    if (key_needs_free)
+        pfree_agtype_value_content(&key_value);
+
+    PG_RETURN_DATUM(property);
 }
 
 /*

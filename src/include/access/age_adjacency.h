@@ -38,10 +38,20 @@ typedef struct AgeAdjacencyPayload
 typedef bool (*AgeAdjacencyPayloadCallback) (const AgeAdjacencyPayload *payload,
                                              void *callback_state);
 
+typedef struct AgeAdjacencyVisiblePayloadScan AgeAdjacencyVisiblePayloadScan;
+
 extern int64 age_adjacency_foreach_visible_payload(Oid index_oid,
                                                    graphid key,
                                                    Snapshot snapshot,
+                                                   bool fetch_properties,
                                                    AgeAdjacencyPayloadCallback callback,
                                                    void *callback_state);
+extern AgeAdjacencyVisiblePayloadScan *age_adjacency_begin_visible_payload_scan(
+    Oid index_oid, Snapshot snapshot, bool fetch_properties);
+extern int64 age_adjacency_visible_payload_scan_foreach(
+    AgeAdjacencyVisiblePayloadScan *scan, graphid key,
+    AgeAdjacencyPayloadCallback callback, void *callback_state);
+extern void age_adjacency_end_visible_payload_scan(
+    AgeAdjacencyVisiblePayloadScan *scan);
 
 #endif

@@ -19,6 +19,8 @@
 
 #include "postgres.h"
 
+#include <ctype.h>
+
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class_d.h"
@@ -26,6 +28,7 @@
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
 #include "catalog/pg_trigger.h"
+#include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "parser/parser.h"
@@ -34,6 +37,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/inval.h"
+#include "utils/json.h"
 #include "utils/lsyscache.h"
 
 #include "catalog/ag_graph.h"
@@ -85,6 +89,10 @@ static void create_index_on_column(char *schema_name,
                                    char *rel_name,
                                    char *colname,
                                    bool unique);
+static void create_index_on_property(char *schema_name, char *rel_name,
+                                     char *property_name);
+static Node *build_property_index_expr(char *property_name);
+static char *make_property_index_name(char *rel_name, char *property_name);
 static Oid create_label_with_graph_cache(char *graph_name, char *label_name,
                                          char label_type, List *parents,
                                          graph_cache_data *cache_data);
@@ -306,6 +314,57 @@ Datum create_elabel(PG_FUNCTION_ARGS)
 
     ereport(NOTICE,
             (errmsg("ELabel \"%s\" has been created", label_name)));
+
+    PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(create_property_index);
+
+Datum create_property_index(PG_FUNCTION_ARGS)
+{
+    char *graph_name;
+    char *label_name;
+    char *property_name;
+    graph_cache_data *graph_cache;
+    char *rel_name;
+
+    if (PG_ARGISNULL(0))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph name must not be NULL")));
+    if (PG_ARGISNULL(1))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("label name must not be NULL")));
+    if (PG_ARGISNULL(2))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("property name must not be NULL")));
+
+    graph_name = PG_GETARG_CSTRING(0);
+    label_name = PG_GETARG_CSTRING(1);
+    property_name = PG_GETARG_CSTRING(2);
+
+    if (is_valid_graph_name(graph_name) == 0)
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph name is invalid")));
+    if (is_valid_label_name(label_name, 0) == 0)
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("label name is invalid")));
+    if (property_name[0] == '\0')
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("property name must not be empty")));
+
+    graph_cache = search_graph_name_cache_cached(graph_name);
+    if (graph_cache == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_SCHEMA),
+                 errmsg("graph \"%s\" does not exist.", graph_name)));
+
+    rel_name = get_label_relation_name(label_name, graph_cache->oid);
+    if (rel_name == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_SCHEMA),
+                 errmsg("label \"%s\" does not exist", label_name)));
+
+    create_index_on_property(graph_name, rel_name, property_name);
 
     PG_RETURN_VOID();
 }
@@ -598,6 +657,108 @@ static void create_index_on_column(char *schema_name,
     ProcessUtility(index_wrapper, "(generated CREATE INDEX command)", false,
                    PROCESS_UTILITY_SUBCOMMAND, NULL, NULL, None_Receiver,
                    NULL);
+}
+
+static void create_index_on_property(char *schema_name, char *rel_name,
+                                     char *property_name)
+{
+    IndexStmt *index_stmt;
+    IndexElem *index_expr;
+    PlannedStmt *index_wrapper;
+
+    index_stmt = makeNode(IndexStmt);
+    index_expr = makeNode(IndexElem);
+    index_expr->name = NULL;
+    index_expr->expr = build_property_index_expr(property_name);
+    index_expr->indexcolname = NULL;
+    index_expr->collation = NIL;
+    index_expr->opclass = NIL;
+    index_expr->opclassopts = NIL;
+    index_expr->ordering = SORTBY_DEFAULT;
+    index_expr->nulls_ordering = SORTBY_NULLS_DEFAULT;
+
+    index_stmt->idxname = make_property_index_name(rel_name, property_name);
+    index_stmt->relation = makeRangeVar(schema_name, rel_name, -1);
+    index_stmt->accessMethod = "btree";
+    index_stmt->tableSpace = NULL;
+    index_stmt->indexParams = list_make1(index_expr);
+    index_stmt->options = NIL;
+    index_stmt->whereClause = NULL;
+    index_stmt->excludeOpNames = NIL;
+    index_stmt->idxcomment = NULL;
+    index_stmt->indexOid = InvalidOid;
+    index_stmt->unique = false;
+    index_stmt->nulls_not_distinct = false;
+    index_stmt->primary = false;
+    index_stmt->isconstraint = false;
+    index_stmt->deferrable = false;
+    index_stmt->initdeferred = false;
+    index_stmt->transformed = false;
+    index_stmt->concurrent = false;
+    index_stmt->if_not_exists = false;
+    index_stmt->reset_default_tblspc = false;
+
+    index_wrapper = makeNode(PlannedStmt);
+    index_wrapper->commandType = CMD_UTILITY;
+    index_wrapper->canSetTag = false;
+    index_wrapper->utilityStmt = (Node *)index_stmt;
+    index_wrapper->stmt_location = -1;
+    index_wrapper->stmt_len = 0;
+
+    ProcessUtility(index_wrapper, "(generated CREATE PROPERTY INDEX command)",
+                   false, PROCESS_UTILITY_SUBCOMMAND, NULL, NULL,
+                   None_Receiver, NULL);
+    CommandCounterIncrement();
+}
+
+static Node *build_property_index_expr(char *property_name)
+{
+    ColumnRef *properties;
+    A_Const *key_const;
+    TypeCast *key_cast;
+    FuncCall *access_call;
+    StringInfoData escaped_key;
+
+    properties = makeNode(ColumnRef);
+    properties->fields = list_make1(makeString(AG_VERTEX_COLNAME_PROPERTIES));
+    properties->location = -1;
+
+    initStringInfo(&escaped_key);
+    escape_json(&escaped_key, property_name);
+
+    key_const = makeNode(A_Const);
+    key_const->val.sval.type = T_String;
+    key_const->val.sval.sval = escaped_key.data;
+    key_const->location = -1;
+
+    key_cast = makeNode(TypeCast);
+    key_cast->arg = (Node *)key_const;
+    key_cast->typeName = makeTypeNameFromNameList(
+        list_make2(makeString("ag_catalog"), makeString("agtype")));
+    key_cast->location = -1;
+
+    access_call = makeFuncCall(
+        list_make2(makeString("ag_catalog"),
+                   makeString("agtype_access_operator")),
+        list_make2(properties, key_cast), COERCE_SQL_SYNTAX, -1);
+
+    return (Node *)access_call;
+}
+
+static char *make_property_index_name(char *rel_name, char *property_name)
+{
+    char *raw_name;
+    int i;
+
+    raw_name = psprintf("%s_%s_property_idx", rel_name, property_name);
+
+    for (i = 0; raw_name[i] != '\0'; i++)
+    {
+        if (!isalnum((unsigned char)raw_name[i]) && raw_name[i] != '_')
+            raw_name[i] = '_';
+    }
+
+    return raw_name;
 }
 
 /* 

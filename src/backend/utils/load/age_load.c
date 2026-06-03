@@ -114,7 +114,9 @@ static char *build_safe_filename(char *name)
 {
     int length;
     char path[PATH_MAX];
+    char *base_dir;
     char *resolved;
+    size_t base_len;
 
     if (name == NULL)
     {
@@ -134,6 +136,14 @@ static char *build_safe_filename(char *name)
 
     snprintf(path, sizeof(path), "%s%s", AGE_BASE_CSV_DIRECTORY, name);
 
+    base_dir = realpath(AGE_BASE_CSV_DIRECTORY, NULL);
+    if (base_dir == NULL)
+    {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("File or path does not exist [%s]",
+                               AGE_BASE_CSV_DIRECTORY)));
+    }
+
     resolved = realpath(path, NULL);
 
     if (resolved == NULL)
@@ -142,13 +152,15 @@ static char *build_safe_filename(char *name)
                         errmsg("File or path does not exist [%s]", path)));
     }
 
-    if (strncmp(resolved, AGE_BASE_CSV_DIRECTORY,
-                AGE_BASE_CSV_DIRECTORY_LEN) != 0)
+    base_len = strlen(base_dir);
+    if (strncmp(resolved, base_dir, base_len) != 0 ||
+        resolved[base_len] != '/')
     {
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                         errmsg("You can only load files located in [%s].",
                                AGE_BASE_CSV_DIRECTORY)));
     }
+    free(base_dir);
 
     length = strlen(resolved) - AGE_CSV_FILE_EXTENSION_LEN;
     if (strncmp(resolved+length, AGE_CSV_FILE_EXTENSION,
@@ -570,9 +582,9 @@ void insert_batch(batch_insert_state *batch_state)
                 bool isnull;
 
                 id = slot_getattr(batch_state->slots[i], 1, &isnull);
-                ereport(ERROR, (errmsg("Cannot insert duplicate vertex id: %ld",
+                ereport(ERROR, (errmsg("Cannot insert duplicate vertex id: " INT64_FORMAT,
                                         DATUM_GET_GRAPHID(id)),
-                                errhint("Entry id %ld is already used",
+                                errhint("Entry id " INT64_FORMAT " is already used",
                                         get_graphid_entry_id(id))));
             }
         }

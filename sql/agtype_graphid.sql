@@ -54,10 +54,26 @@ CALLED ON NULL INPUT
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
 
+CREATE FUNCTION ag_catalog._agtype_build_path_raw(VARIADIC "any")
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+CALLED ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
 --
 -- agtype - vertex
 --
 CREATE FUNCTION ag_catalog._agtype_build_vertex(graphid, cstring, agtype)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+CALLED ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog._agtype_build_vertex_label(oid, graphid, agtype)
     RETURNS agtype
     LANGUAGE c
     IMMUTABLE
@@ -70,6 +86,15 @@ AS 'MODULE_PATHNAME';
 --
 CREATE FUNCTION ag_catalog._agtype_build_edge(graphid, graphid, graphid,
                                               cstring, agtype)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+CALLED ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog._agtype_build_edge_label(oid, graphid, graphid,
+                                                    graphid, agtype)
     RETURNS agtype
     LANGUAGE c
     IMMUTABLE
@@ -166,4 +191,3 @@ CREATE FUNCTION ag_catalog.agtype_build_list()
 CALLED ON NULL INPUT
 PARALLEL SAFE
 AS 'MODULE_PATHNAME', 'agtype_build_list_noargs';
-

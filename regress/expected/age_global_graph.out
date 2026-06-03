@@ -587,6 +587,57 @@ NOTICE:  graph "vle_cache_test2" has been dropped
  
 (1 row)
 
+-- Label-constrained VLE can load only one edge label. Verify that a later
+-- VLE needing a different label or all labels rebuilds the graph context.
+\pset format unaligned
+SELECT * FROM create_graph('vle_edge_scope_test');
+NOTICE:  graph "vle_edge_scope_test" has been created
+create_graph
+
+(1 row)
+SELECT * FROM cypher('vle_edge_scope_test', $$
+  CREATE (a:N {name: 'a'})-[:E]->(b:N {name: 'b'})-[:F]->(c:N {name: 'c'})
+$$) AS (v agtype);
+v
+(0 rows)
+SELECT * FROM cypher('vle_edge_scope_test', $$
+  MATCH (a:N {name: 'a'})-[:E*1..2]->(n:N)
+  RETURN n.name
+  ORDER BY n.name
+$$) AS (name agtype);
+name
+"b"
+(1 row)
+SELECT * FROM cypher('vle_edge_scope_test', $$
+  MATCH (b:N {name: 'b'})-[:F*1..2]->(n:N)
+  RETURN n.name
+  ORDER BY n.name
+$$) AS (name agtype);
+name
+"c"
+(1 row)
+SELECT * FROM cypher('vle_edge_scope_test', $$
+  MATCH (a:N {name: 'a'})-[*1..2]->(n:N)
+  RETURN n.name
+  ORDER BY n.name
+$$) AS (name agtype);
+name
+"b"
+"c"
+(2 rows)
+-- Cleanup
+SELECT * FROM drop_graph('vle_edge_scope_test', true);
+NOTICE:  drop cascades to 5 other objects
+DETAIL:  drop cascades to table vle_edge_scope_test._ag_label_vertex
+drop cascades to table vle_edge_scope_test._ag_label_edge
+drop cascades to table vle_edge_scope_test."N"
+drop cascades to table vle_edge_scope_test."E"
+drop cascades to table vle_edge_scope_test."F"
+NOTICE:  graph "vle_edge_scope_test" has been dropped
+drop_graph
+
+(1 row)
+\pset format aligned
 -----------------------------------------------------------------------------------------------------------------------------
 --
 -- VLE cache invalidation via direct SQL (trigger tests)

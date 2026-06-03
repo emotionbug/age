@@ -21,11 +21,17 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/relation.h"
 #include "catalog/namespace.h"
+#include "commands/defrem.h"
 #include "commands/trigger.h"
 #include "common/hashfn.h"
 #include "commands/label_commands.h"
+#include "executor/executor.h"
 #include "port/atomics.h"
+#include "storage/bufmgr.h"
+#include "storage/bufpage.h"
+#include "storage/itemid.h"
 #include "storage/lwlock.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
@@ -116,21 +122,6 @@ typedef struct edge_label_adj_entry
     struct edge_label_adj_entry *next;
 } edge_label_adj_entry;
 
-/* vertex entry for the vertex_hashtable */
-typedef struct vertex_entry
-{
-    graphid vertex_id;             /* vertex id, it is also the hash key */
-    GraphEdgeAdjList *adj_edges_in;
-    GraphEdgeAdjList *adj_edges_out;
-    GraphEdgeAdjList *adj_edges_self;
-    edge_label_adj_entry *edges_in_by_label;
-    edge_label_adj_entry *edges_out_by_label;
-    edge_label_adj_entry *edges_self_by_label;
-    Oid vertex_label_table_oid;    /* the label table oid */
-    char *vertex_label_name;       /* the label name */
-    ItemPointerData tid;           /* physical tuple location for lazy fetch */
-} vertex_entry;
-
 /* edge entry for the edge_hashtable */
 typedef struct edge_entry
 {
@@ -140,6 +131,8 @@ typedef struct edge_entry
     ItemPointerData tid;           /* physical tuple location for lazy fetch */
     graphid start_vertex_id;       /* start vertex */
     graphid end_vertex_id;         /* end vertex */
+    vertex_entry *start_vertex;     /* linked start vertex entry, if valid */
+    vertex_entry *end_vertex;       /* linked end vertex entry, if valid */
     int64 edge_index;              /* dense index for traversal-local state */
     int edge_property_count;        /* top-level property pair count */
     int edge_property_size;         /* varlena size for exact-object checks */
@@ -150,6 +143,7 @@ typedef struct graph_label_entry
 {
     NameData name;
     Oid relation;
+    int32 label_id;
 } graph_label_entry;
 
 typedef struct graph_label_list
@@ -158,6 +152,22 @@ typedef struct graph_label_list
     int count;
     int capacity;
 } graph_label_list;
+
+typedef struct GraphIdHashEntry
+{
+    graphid id;
+} GraphIdHashEntry;
+
+typedef struct GraphLabelIdHashEntry
+{
+    int32 label_id;
+} GraphLabelIdHashEntry;
+
+typedef struct EdgeTidHashEntry
+{
+    ItemPointerData tid;
+    edge_entry *edge;
+} EdgeTidHashEntry;
 
 /*
  * GRAPH global context per graph. They are chained together via next.
@@ -170,6 +180,7 @@ typedef struct GRAPH_global_context
     Oid graph_oid;                 /* graph oid for searching */
     HTAB *vertex_hashtable;        /* hashtable to hold vertex edge lists */
     HTAB *edge_hashtable;          /* hashtable to hold edge to vertex map */
+    HTAB *edge_tid_hashtable;      /* hashtable to map heap TID to edge */
     uint64 graph_version;          /* version counter for cache invalidation */
     TransactionId xmin;            /* snapshot fallback: transaction xmin */
     TransactionId xmax;            /* snapshot fallback: transaction xmax */
@@ -178,6 +189,11 @@ typedef struct GRAPH_global_context
     int64 num_loaded_edges;        /* number of loaded edges in this graph */
     graph_label_list vertex_labels; /* loaded vertex labels for shared names */
     graph_label_list edge_labels;   /* loaded edge labels for shared names */
+    bool edge_property_metadata_loaded; /* edge property count/hash available */
+    bool edge_metadata_loaded;      /* edge hash/TID metadata available */
+    bool vertex_metadata_loaded;    /* vertex hash/TID metadata available */
+    Oid loaded_edge_label_oid;      /* InvalidOid means all edge labels */
+    bool adjacency_index_candidate_source; /* VLE uses index payloads */
     ListGraphId *vertices;         /* vertices for vertex hashtable cleanup */
     struct GRAPH_global_context *next; /* next graph */
 } GRAPH_global_context;
@@ -199,7 +215,9 @@ static GRAPH_global_context_container global_graph_contexts_container = {0};
 /* GRAPH global context functions */
 static bool free_specific_GRAPH_global_context(GRAPH_global_context *ggctx);
 static GRAPH_global_context *manage_GRAPH_global_contexts_internal(
-    const char *graph_name, int graph_name_len, Oid graph_oid);
+    const char *graph_name, int graph_name_len, Oid graph_oid,
+    bool load_edge_property_metadata, Oid edge_label_oid,
+    bool load_edge_metadata, bool load_vertex_metadata);
 static bool delete_specific_GRAPH_global_context_by_oid(Oid graph_oid);
 static bool delete_specific_GRAPH_global_contexts_len(const char *graph_name,
                                                       int graph_name_len);
@@ -213,20 +231,64 @@ static void get_global_graph_scalar_arg_no_copy(char *funcname,
                                                 agtype_value *result,
                                                 bool *needs_free);
 static void create_GRAPH_global_hashtables(GRAPH_global_context *ggctx);
-static void load_GRAPH_global_hashtables(GRAPH_global_context *ggctx);
+static void load_GRAPH_global_hashtables(GRAPH_global_context *ggctx,
+                                         bool load_edge_property_metadata,
+                                         Oid edge_label_oid,
+                                         bool load_edge_metadata,
+                                         bool load_vertex_metadata);
 static void load_vertex_hashtable(GRAPH_global_context *ggctx,
                                   Snapshot snapshot,
-                                  graph_label_list *vertex_labels);
+                                  graph_label_list *vertex_labels,
+                                  HTAB *vertex_filter,
+                                  HTAB *vertex_label_filter);
+static int load_vertex_tuples_by_index_range(GRAPH_global_context *ggctx,
+                                             Relation graph_vertex_label,
+                                             Snapshot snapshot, Oid index_oid,
+                                             TupleDesc tupdesc,
+                                             Oid vertex_label_table_oid,
+                                             const char *vertex_label_name,
+                                             HTAB *vertex_filter,
+                                             graphid min_vertex_id,
+                                             graphid max_vertex_id,
+                                             int vertices_needed);
 static void load_edge_hashtable(GRAPH_global_context *ggctx,
                                 Snapshot snapshot,
-                                graph_label_list *edge_labels);
+                                graph_label_list *edge_labels,
+                                bool load_edge_property_metadata,
+                                Oid edge_label_oid,
+                                HTAB *edge_endpoint_ids);
+static bool edge_label_has_age_adjacency_indexes(Oid edge_label_oid);
+static bool age_adjacency_index_matches(Relation index_rel, bool outgoing);
+static void link_edge_hashtable_to_vertices(GRAPH_global_context *ggctx);
 static void freeze_GRAPH_global_hashtables(GRAPH_global_context *ggctx);
+static bool graph_context_satisfies_edge_load(GRAPH_global_context *ggctx,
+                                              bool load_edge_property_metadata,
+                                              Oid edge_label_oid,
+                                              bool load_edge_metadata);
 static void get_ag_labels_names(Snapshot snapshot, Oid graph_oid,
                                 graph_label_list *vertex_labels,
                                 graph_label_list *edge_labels);
 static void append_graph_label(graph_label_list *labels, Name label_name,
-                               Oid relation);
+                               Oid relation, int32 label_id);
+static bool append_cached_graph_label(graph_label_list *labels,
+                                      label_cache_data *label_cache,
+                                      Oid graph_oid, char label_kind);
+static void append_endpoint_vertex_labels(GRAPH_global_context *ggctx,
+                                          HTAB *vertex_label_filter);
+static bool load_vertex_tuple(GRAPH_global_context *ggctx, TupleDesc tupdesc,
+                              HeapTuple tuple, Oid vertex_label_table_oid,
+                              const char *vertex_label_name,
+                              HTAB *vertex_filter,
+                              bool use_vertex_range,
+                              graphid min_vertex_id,
+                              graphid max_vertex_id);
 static void free_ag_label_names(graph_label_list *labels);
+static HTAB *create_graphid_hash(const char *name);
+static void add_graphid_hash(HTAB *hash, graphid id);
+static bool graphid_hash_contains(HTAB *hash, graphid id);
+static HTAB *create_label_id_hash(const char *name);
+static void add_label_id_hash(HTAB *hash, int32 label_id);
+static bool label_id_hash_contains(HTAB *hash, int32 label_id);
 static bool insert_edge_entry(GRAPH_global_context *ggctx, graphid edge_id,
                               ItemPointerData tid, graphid start_vertex_id,
                               graphid end_vertex_id, Oid edge_label_table_oid,
@@ -234,8 +296,9 @@ static bool insert_edge_entry(GRAPH_global_context *ggctx, graphid edge_id,
                               int edge_property_count,
                               int edge_property_size,
                               uint32 edge_property_hash,
-                              int64 *edge_index);
+                              int64 *edge_index, edge_entry **edge);
 static bool insert_vertex_edge(GRAPH_global_context *ggctx,
+                               edge_entry *edge,
                                graphid start_vertex_id, graphid end_vertex_id,
                                graphid edge_id, int64 edge_index,
                                Oid edge_label_table_oid,
@@ -244,6 +307,7 @@ static void append_labeled_vertex_edge(edge_label_adj_entry **head,
                                        Oid edge_label_table_oid,
                                        graphid edge_id,
                                        graphid next_vertex_id,
+                                       vertex_entry *next_vertex_entry,
                                        int64 edge_index);
 static GraphEdgeAdjList *get_labeled_vertex_adj_edges(
     edge_label_adj_entry *head, Oid edge_label_table_oid);
@@ -251,6 +315,7 @@ static void free_labeled_vertex_edges(edge_label_adj_entry *head);
 static GraphEdgeAdjList *append_graph_edge_adj(GraphEdgeAdjList *container,
                                                graphid edge_id,
                                                graphid next_vertex_id,
+                                               vertex_entry *next_vertex_entry,
                                                int64 edge_index);
 static GraphEdgeAdjList *compact_graph_edge_adj(GraphEdgeAdjList *container);
 static void compact_labeled_vertex_edges(edge_label_adj_entry *head);
@@ -263,6 +328,25 @@ static Datum fetch_entry_properties(Oid relid, ItemPointerData tid,
                                     AttrNumber property_attr,
                                     HTAB *relation_cache,
                                     const char *stale_msg);
+static Datum fetch_entry_properties_from_relation(Relation rel,
+                                                  ItemPointerData tid,
+                                                  AttrNumber property_attr,
+                                                  const char *stale_msg);
+static bool get_vertex_entry_property_with_relation_uncached(vertex_entry *ve,
+                                                             Relation rel,
+                                                             agtype_value *key,
+                                                             Datum *result);
+static bool get_vertex_entry_scalar_property_with_relation(vertex_entry *ve,
+                                                           Relation rel,
+                                                           agtype_value *key,
+                                                           Datum *result);
+static void cache_vertex_entry_scalar_property(vertex_entry *ve,
+                                               agtype_value *key,
+                                               agtype_value *property_value);
+static int64 prefetch_vertex_block_scalar_property_cache(
+    GRAPH_global_context *ggctx, Relation rel, BlockNumber blockno,
+    graphid target_vertex_id, agtype_value *key, int64 max_cached,
+    Datum *target_result, bool *target_found);
 static Relation get_entry_property_relation(Oid relid, HTAB *relation_cache);
 static bool is_ggctx_invalid_with_snapshot(GRAPH_global_context *ggctx,
                                            Snapshot *snapshot);
@@ -331,14 +415,17 @@ static void create_GRAPH_global_hashtables(GRAPH_global_context *ggctx)
 {
     HASHCTL vertex_ctl;
     HASHCTL edge_ctl;
+    HASHCTL edge_tid_ctl;
     char *graph_name = NULL;
     char *vhn = NULL;
     char *ehn = NULL;
+    char *ethn = NULL;
 
     /* get the graph name */
     graph_name = ggctx->graph_name;
     vhn = psprintf("%s%s", VERTEX_HTAB_NAME, graph_name);
     ehn = psprintf("%s%s", EDGE_HTAB_NAME, graph_name);
+    ethn = psprintf("GRAPH edge TID hash %s", graph_name);
 
     /* initialize the vertex hashtable */
     MemSet(&vertex_ctl, 0, sizeof(vertex_ctl));
@@ -358,6 +445,15 @@ static void create_GRAPH_global_hashtables(GRAPH_global_context *ggctx)
     ggctx->edge_hashtable = hash_create(ehn, EDGE_HTAB_INITIAL_SIZE, &edge_ctl,
                                         HASH_ELEM | HASH_FUNCTION);
     pfree_if_not_null(ehn);
+
+    MemSet(&edge_tid_ctl, 0, sizeof(edge_tid_ctl));
+    edge_tid_ctl.keysize = sizeof(ItemPointerData);
+    edge_tid_ctl.entrysize = sizeof(EdgeTidHashEntry);
+    edge_tid_ctl.hash = tag_hash;
+    ggctx->edge_tid_hashtable = hash_create(ethn, EDGE_HTAB_INITIAL_SIZE,
+                                            &edge_tid_ctl,
+                                            HASH_ELEM | HASH_FUNCTION);
+    pfree_if_not_null(ethn);
 }
 
 /* helper function to get label names for the specified graph */
@@ -395,6 +491,7 @@ static void get_ag_labels_names(Snapshot snapshot, Oid graph_oid,
         char label_type;
         Name label_name;
         Oid label_relation;
+        int32 label_id;
 
         datum = heap_getattr(tuple, Anum_ag_label_kind, tupdesc, &is_null);
         if (is_null)
@@ -418,13 +515,19 @@ static void get_ag_labels_names(Snapshot snapshot, Oid graph_oid,
             Assert(!is_null);
             label_relation = DatumGetObjectId(datum);
 
+            datum = heap_getattr(tuple, Anum_ag_label_id, tupdesc, &is_null);
+            Assert(!is_null);
+            label_id = DatumGetInt32(datum);
+
             if (label_type == LABEL_TYPE_VERTEX)
             {
-                append_graph_label(vertex_labels, label_name, label_relation);
+                append_graph_label(vertex_labels, label_name, label_relation,
+                                   label_id);
             }
             else
             {
-                append_graph_label(edge_labels, label_name, label_relation);
+                append_graph_label(edge_labels, label_name, label_relation,
+                                   label_id);
             }
         }
     }
@@ -434,7 +537,7 @@ static void get_ag_labels_names(Snapshot snapshot, Oid graph_oid,
 }
 
 static void append_graph_label(graph_label_list *labels, Name label_name,
-                               Oid relation)
+                               Oid relation, int32 label_id)
 {
     graph_label_entry *label;
 
@@ -459,6 +562,41 @@ static void append_graph_label(graph_label_list *labels, Name label_name,
     label = &labels->entries[labels->count++];
     namestrcpy(&label->name, NameStr(*label_name));
     label->relation = relation;
+    label->label_id = label_id;
+}
+
+static bool append_cached_graph_label(graph_label_list *labels,
+                                      label_cache_data *label_cache,
+                                      Oid graph_oid, char label_kind)
+{
+    if (label_cache == NULL ||
+        label_cache->graph != graph_oid ||
+        label_cache->kind != label_kind)
+    {
+        return false;
+    }
+
+    append_graph_label(labels, &label_cache->name, label_cache->relation,
+                       label_cache->id);
+    return true;
+}
+
+static void append_endpoint_vertex_labels(GRAPH_global_context *ggctx,
+                                          HTAB *vertex_label_filter)
+{
+    HASH_SEQ_STATUS status;
+    GraphLabelIdHashEntry *entry;
+
+    hash_seq_init(&status, vertex_label_filter);
+    while ((entry = hash_seq_search(&status)) != NULL)
+    {
+        label_cache_data *label_cache;
+
+        label_cache = search_label_graph_oid_cache_cached(ggctx->graph_oid,
+                                                          entry->label_id);
+        (void)append_cached_graph_label(&ggctx->vertex_labels, label_cache,
+                                        ggctx->graph_oid, LABEL_KIND_VERTEX);
+    }
 }
 
 static void free_ag_label_names(graph_label_list *labels)
@@ -467,6 +605,60 @@ static void free_ag_label_names(graph_label_list *labels)
     labels->entries = NULL;
     labels->count = 0;
     labels->capacity = 0;
+}
+
+static HTAB *create_graphid_hash(const char *name)
+{
+    HASHCTL ctl;
+
+    MemSet(&ctl, 0, sizeof(ctl));
+    ctl.keysize = sizeof(graphid);
+    ctl.entrysize = sizeof(GraphIdHashEntry);
+    ctl.hash = tag_hash;
+
+    return hash_create(name, 1024, &ctl, HASH_ELEM | HASH_FUNCTION);
+}
+
+static void add_graphid_hash(HTAB *hash, graphid id)
+{
+    bool found;
+
+    (void)hash_search(hash, &id, HASH_ENTER, &found);
+}
+
+static bool graphid_hash_contains(HTAB *hash, graphid id)
+{
+    bool found;
+
+    (void)hash_search(hash, &id, HASH_FIND, &found);
+    return found;
+}
+
+static HTAB *create_label_id_hash(const char *name)
+{
+    HASHCTL ctl;
+
+    MemSet(&ctl, 0, sizeof(ctl));
+    ctl.keysize = sizeof(int32);
+    ctl.entrysize = sizeof(GraphLabelIdHashEntry);
+    ctl.hash = tag_hash;
+
+    return hash_create(name, 16, &ctl, HASH_ELEM | HASH_FUNCTION);
+}
+
+static void add_label_id_hash(HTAB *hash, int32 label_id)
+{
+    bool found;
+
+    (void)hash_search(hash, &label_id, HASH_ENTER, &found);
+}
+
+static bool label_id_hash_contains(HTAB *hash, int32 label_id)
+{
+    bool found;
+
+    (void)hash_search(hash, &label_id, HASH_FIND, &found);
+    return found;
 }
 
 /*
@@ -480,7 +672,7 @@ static bool insert_edge_entry(GRAPH_global_context *ggctx, graphid edge_id,
                               int edge_property_count,
                               int edge_property_size,
                               uint32 edge_property_hash,
-                              int64 *edge_index)
+                              int64 *edge_index, edge_entry **edge)
 {
     edge_entry *ee = NULL;
     bool found = false;
@@ -505,13 +697,13 @@ static bool insert_edge_entry(GRAPH_global_context *ggctx, graphid edge_id,
     {
         ereport(WARNING,
                 (errcode(ERRCODE_DATA_EXCEPTION),
-                 errmsg("edge: [id: %ld, start: %ld, end: %ld, label oid: %d] %s",
+                 errmsg("edge: [id: " INT64_FORMAT ", start: " INT64_FORMAT ", end: " INT64_FORMAT ", label oid: %d] %s",
                         edge_id, start_vertex_id, end_vertex_id,
                         edge_label_table_oid, "duplicate edge found")));
 
         ereport(WARNING,
                 (errcode(ERRCODE_DATA_EXCEPTION),
-                 errmsg("previous edge: [id: %ld, start: %ld, end: %ld, label oid: %d]",
+                 errmsg("previous edge: [id: " INT64_FORMAT ", start: " INT64_FORMAT ", end: " INT64_FORMAT ", label oid: %d]",
                         ee->edge_id, ee->start_vertex_id, ee->end_vertex_id,
                         ee->edge_label_table_oid)));
 
@@ -538,6 +730,10 @@ static bool insert_edge_entry(GRAPH_global_context *ggctx, graphid edge_id,
     if (edge_index != NULL)
     {
         *edge_index = new_edge_index;
+    }
+    if (edge != NULL)
+    {
+        *edge = ee;
     }
 
     /* increment the number of loaded edges */
@@ -573,13 +769,13 @@ static bool insert_vertex_entry(GRAPH_global_context *ggctx, graphid vertex_id,
     {
         ereport(WARNING,
                 (errcode(ERRCODE_DATA_EXCEPTION),
-                 errmsg("vertex: [id: %ld, label oid: %d] %s",
+                 errmsg("vertex: [id: " INT64_FORMAT ", label oid: %d] %s",
                         vertex_id, vertex_label_table_oid,
                         "duplicate vertex found")));
 
         ereport(WARNING,
                 (errcode(ERRCODE_DATA_EXCEPTION),
-                 errmsg("previous vertex: [id: %ld, label oid: %d]",
+                 errmsg("previous vertex: [id: " INT64_FORMAT ", label oid: %d]",
                         ve->vertex_id, ve->vertex_label_table_oid)));
 
         return false;
@@ -619,12 +815,14 @@ static bool insert_vertex_entry(GRAPH_global_context *ggctx, graphid vertex_id,
  * global vertex hashtable.
  */
 static bool insert_vertex_edge(GRAPH_global_context *ggctx,
+                               edge_entry *edge,
                                graphid start_vertex_id, graphid end_vertex_id,
                                graphid edge_id, int64 edge_index,
                                Oid edge_label_table_oid,
                                const char *edge_label_name)
 {
-    vertex_entry *value = NULL;
+    vertex_entry *start_value = NULL;
+    vertex_entry *end_value = NULL;
     bool start_found = false;
     bool end_found = false;
     bool is_selfloop = false;
@@ -633,9 +831,27 @@ static bool insert_vertex_edge(GRAPH_global_context *ggctx,
     is_selfloop = (start_vertex_id == end_vertex_id);
 
     /* search for the start vertex of the edge */
-    value = (vertex_entry *)hash_search(ggctx->vertex_hashtable,
-                                        (void *)&start_vertex_id, HASH_FIND,
-                                        &start_found);
+    start_value = (vertex_entry *)hash_search(ggctx->vertex_hashtable,
+                                              (void *)&start_vertex_id,
+                                              HASH_FIND, &start_found);
+
+    if (!is_selfloop)
+    {
+        end_value = (vertex_entry *)hash_search(ggctx->vertex_hashtable,
+                                                (void *)&end_vertex_id,
+                                                HASH_FIND, &end_found);
+    }
+    else
+    {
+        end_found = start_found;
+        end_value = start_value;
+    }
+
+    if (edge != NULL)
+    {
+        edge->start_vertex = start_found ? start_value : NULL;
+        edge->end_vertex = end_found ? end_value : NULL;
+    }
 
     /*
      * If we found the start_vertex_id and it is a self loop, add the edge to
@@ -643,13 +859,12 @@ static bool insert_vertex_edge(GRAPH_global_context *ggctx,
      */
     if (start_found && is_selfloop)
     {
-        value->adj_edges_self = append_graph_edge_adj(value->adj_edges_self,
-                                                      edge_id,
-                                                      start_vertex_id,
-                                                      edge_index);
-        append_labeled_vertex_edge(&value->edges_self_by_label,
+        start_value->adj_edges_self = append_graph_edge_adj(
+            start_value->adj_edges_self, edge_id, start_vertex_id,
+            start_value, edge_index);
+        append_labeled_vertex_edge(&start_value->edges_self_by_label,
                                    edge_label_table_oid, edge_id,
-                                   start_vertex_id, edge_index);
+                                   start_vertex_id, start_value, edge_index);
         return true;
     }
     /*
@@ -658,19 +873,13 @@ static bool insert_vertex_edge(GRAPH_global_context *ggctx,
      */
     else if (start_found)
     {
-        value->adj_edges_out = append_graph_edge_adj(value->adj_edges_out,
-                                                     edge_id,
-                                                     end_vertex_id,
-                                                     edge_index);
-        append_labeled_vertex_edge(&value->edges_out_by_label,
+        start_value->adj_edges_out = append_graph_edge_adj(
+            start_value->adj_edges_out, edge_id, end_vertex_id,
+            end_value, edge_index);
+        append_labeled_vertex_edge(&start_value->edges_out_by_label,
                                    edge_label_table_oid, edge_id,
-                                   end_vertex_id, edge_index);
+                                   end_vertex_id, end_value, edge_index);
     }
-
-    /* search for the end vertex of the edge */
-    value = (vertex_entry *)hash_search(ggctx->vertex_hashtable,
-                                        (void *)&end_vertex_id, HASH_FIND,
-                                        &end_found);
 
     /*
      * If we found the start_vertex_id and the end_vertex_id add the edge to the
@@ -678,13 +887,12 @@ static bool insert_vertex_edge(GRAPH_global_context *ggctx,
      */
     if (start_found && end_found)
     {
-        value->adj_edges_in = append_graph_edge_adj(value->adj_edges_in,
-                                                    edge_id,
-                                                    start_vertex_id,
-                                                    edge_index);
-        append_labeled_vertex_edge(&value->edges_in_by_label,
+        end_value->adj_edges_in = append_graph_edge_adj(
+            end_value->adj_edges_in, edge_id, start_vertex_id,
+            start_value, edge_index);
+        append_labeled_vertex_edge(&end_value->edges_in_by_label,
                                    edge_label_table_oid, edge_id,
-                                   start_vertex_id, edge_index);
+                                   start_vertex_id, start_value, edge_index);
         return true;
     }
     /*
@@ -695,7 +903,7 @@ static bool insert_vertex_edge(GRAPH_global_context *ggctx,
     {
         ereport(WARNING,
                 (errcode(ERRCODE_DATA_EXCEPTION),
-                 errmsg("edge: [id: %ld, start: %ld, end: %ld, label: %s] %s",
+                 errmsg("edge: [id: " INT64_FORMAT ", start: " INT64_FORMAT ", end: " INT64_FORMAT ", label: %s] %s",
                         edge_id, start_vertex_id, end_vertex_id,
                         edge_label_name, "start vertex not found")));
     }
@@ -703,7 +911,7 @@ static bool insert_vertex_edge(GRAPH_global_context *ggctx,
     {
         ereport(WARNING,
                 (errcode(ERRCODE_DATA_EXCEPTION),
-                 errmsg("edge: [id: %ld, start: %ld, end: %ld, label: %s] %s",
+                 errmsg("edge: [id: " INT64_FORMAT ", start: " INT64_FORMAT ", end: " INT64_FORMAT ", label: %s] %s",
                         edge_id, start_vertex_id, end_vertex_id,
                         edge_label_name, "end vertex not found")));
     }
@@ -711,7 +919,7 @@ static bool insert_vertex_edge(GRAPH_global_context *ggctx,
     {
         ereport(WARNING,
                 (errcode(ERRCODE_DATA_EXCEPTION),
-                 errmsg("edge: [id: %ld, start: %ld, end: %ld, label: %s] %s",
+                 errmsg("edge: [id: " INT64_FORMAT ", start: " INT64_FORMAT ", end: " INT64_FORMAT ", label: %s] %s",
                         edge_id, start_vertex_id, end_vertex_id,
                         edge_label_name, "start and end vertices not found")));
     }
@@ -723,6 +931,7 @@ static void append_labeled_vertex_edge(edge_label_adj_entry **head,
                                        Oid edge_label_table_oid,
                                        graphid edge_id,
                                        graphid next_vertex_id,
+                                       vertex_entry *next_vertex_entry,
                                        int64 edge_index)
 {
     edge_label_adj_entry *entry = NULL;
@@ -734,6 +943,7 @@ static void append_labeled_vertex_edge(edge_label_adj_entry **head,
             entry->adj_edges = append_graph_edge_adj(entry->adj_edges,
                                                      edge_id,
                                                      next_vertex_id,
+                                                     next_vertex_entry,
                                                      edge_index);
             return;
         }
@@ -742,7 +952,7 @@ static void append_labeled_vertex_edge(edge_label_adj_entry **head,
     entry = palloc0(sizeof(*entry));
     entry->edge_label_table_oid = edge_label_table_oid;
     entry->adj_edges = append_graph_edge_adj(NULL, edge_id, next_vertex_id,
-                                             edge_index);
+                                             next_vertex_entry, edge_index);
     entry->next = *head;
     *head = entry;
 }
@@ -780,6 +990,7 @@ static void free_labeled_vertex_edges(edge_label_adj_entry *head)
 static GraphEdgeAdjList *append_graph_edge_adj(GraphEdgeAdjList *container,
                                                graphid edge_id,
                                                graphid next_vertex_id,
+                                               vertex_entry *next_vertex_entry,
                                                int64 edge_index)
 {
     if (container == NULL)
@@ -800,6 +1011,7 @@ static GraphEdgeAdjList *append_graph_edge_adj(GraphEdgeAdjList *container,
 
     container->items[container->size].edge_id = edge_id;
     container->items[container->size].next_vertex_id = next_vertex_id;
+    container->items[container->size].next_vertex_entry = next_vertex_entry;
     container->items[container->size].edge_index = edge_index;
     container->size++;
 
@@ -856,7 +1068,9 @@ static void free_graph_edge_adj(GraphEdgeAdjList *container)
 /* helper routine to load all vertices into the GRAPH global vertex hashtable */
 static void load_vertex_hashtable(GRAPH_global_context *ggctx,
                                   Snapshot snapshot,
-                                  graph_label_list *vertex_labels)
+                                  graph_label_list *vertex_labels,
+                                  HTAB *vertex_filter,
+                                  HTAB *vertex_label_filter)
 {
     int i;
 
@@ -870,13 +1084,22 @@ static void load_vertex_hashtable(GRAPH_global_context *ggctx,
         char *vertex_label_name;
         Oid vertex_label_table_oid;
         TupleDesc tupdesc;
+        int vertices_needed = -1;
+        bool use_vertex_range = false;
+        graphid min_vertex_id = 0;
+        graphid max_vertex_id = 0;
 
         label_entry = &vertex_labels->entries[i];
         vertex_label_name = NameStr(label_entry->name);
         vertex_label_table_oid = label_entry->relation;
+        if (vertex_label_filter != NULL &&
+            !label_id_hash_contains(vertex_label_filter, label_entry->label_id))
+        {
+            continue;
+        }
+
         /* open the relation (table) and begin the scan */
         graph_vertex_label = table_open(vertex_label_table_oid, AccessShareLock);
-        scan_desc = table_beginscan(graph_vertex_label, snapshot, 0, NULL);
         /* get the tupdesc - we don't need to release this one */
         tupdesc = RelationGetDescr(graph_vertex_label);
         /* bail if the number of columns differs */
@@ -887,36 +1110,88 @@ static void load_vertex_hashtable(GRAPH_global_context *ggctx,
                      errmsg("Invalid number of attributes for %s.%s",
                      ggctx->graph_name, vertex_label_name)));
         }
+
+        if (vertex_filter != NULL)
+        {
+            HASH_SEQ_STATUS status;
+            GraphIdHashEntry *entry;
+
+            vertices_needed = 0;
+            hash_seq_init(&status, vertex_filter);
+            while ((entry = hash_seq_search(&status)) != NULL)
+            {
+                if (get_graphid_label_id(entry->id) != label_entry->label_id)
+                {
+                    continue;
+                }
+                if (!use_vertex_range)
+                {
+                    min_vertex_id = entry->id;
+                    max_vertex_id = entry->id;
+                    use_vertex_range = true;
+                }
+                else
+                {
+                    if (entry->id < min_vertex_id)
+                    {
+                        min_vertex_id = entry->id;
+                    }
+                    if (entry->id > max_vertex_id)
+                    {
+                        max_vertex_id = entry->id;
+                    }
+                }
+                vertices_needed++;
+            }
+            if (vertices_needed == 0)
+            {
+                table_close(graph_vertex_label, AccessShareLock);
+                continue;
+            }
+            else
+            {
+                Oid index_oid;
+                double label_tuples;
+                double range_span;
+
+                label_tuples = graph_vertex_label->rd_rel->reltuples;
+                range_span = (double) (max_vertex_id - min_vertex_id + 1);
+                if (label_tuples > 0 &&
+                    range_span < (label_tuples / 2.0))
+                {
+                    index_oid = find_usable_btree_index_for_attr(
+                        graph_vertex_label, Anum_ag_label_vertex_table_id);
+                    if (OidIsValid(index_oid))
+                    {
+                        vertices_needed = load_vertex_tuples_by_index_range(
+                            ggctx, graph_vertex_label, snapshot, index_oid,
+                            tupdesc, vertex_label_table_oid, vertex_label_name,
+                            vertex_filter, min_vertex_id, max_vertex_id,
+                            vertices_needed);
+
+                        table_close(graph_vertex_label, AccessShareLock);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        scan_desc = table_beginscan(graph_vertex_label, snapshot, 0, NULL);
         /* get all tuples in table and insert them into graph hashtables */
         while((tuple = heap_getnext(scan_desc, ForwardScanDirection)) != NULL)
         {
-            graphid vertex_id;
-            bool isnull;
-            bool inserted = false;
-
-            vertex_id = DatumGetInt64(heap_getattr(tuple,
-                                                   Anum_ag_label_vertex_table_id,
-                                                   tupdesc, &isnull));
-            if (isnull)
+            if (load_vertex_tuple(ggctx, tupdesc, tuple,
+                                  vertex_label_table_oid,
+                                  vertex_label_name, vertex_filter,
+                                  use_vertex_range, min_vertex_id,
+                                  max_vertex_id) &&
+                vertices_needed > 0)
             {
-                ereport(ERROR,
-                        (errcode(ERRCODE_UNDEFINED_TABLE),
-                         errmsg("vertex id is null for %s.%s",
-                                ggctx->graph_name, vertex_label_name)));
-            }
-
-            /* insert vertex into vertex hashtable with TID (no property copy) */
-            inserted = insert_vertex_entry(ggctx, vertex_id,
-                                           vertex_label_table_oid,
-                                           vertex_label_name,
-                                           tuple->t_self);
-
-            /* warn if there is a duplicate */
-            if (!inserted)
-            {
-                 ereport(WARNING,
-                         (errcode(ERRCODE_DATA_EXCEPTION),
-                          errmsg("ignored duplicate vertex")));
+                vertices_needed--;
+                if (vertices_needed == 0)
+                {
+                    break;
+                }
             }
         }
 
@@ -926,26 +1201,325 @@ static void load_vertex_hashtable(GRAPH_global_context *ggctx,
     }
 }
 
+static int load_vertex_tuples_by_index_range(GRAPH_global_context *ggctx,
+                                             Relation graph_vertex_label,
+                                             Snapshot snapshot, Oid index_oid,
+                                             TupleDesc tupdesc,
+                                             Oid vertex_label_table_oid,
+                                             const char *vertex_label_name,
+                                             HTAB *vertex_filter,
+                                             graphid min_vertex_id,
+                                             graphid max_vertex_id,
+                                             int vertices_needed)
+{
+    Relation index_rel;
+    IndexScanDesc scan_desc;
+    TupleTableSlot *slot;
+    ScanKeyData scan_key[2];
+
+    ScanKeyInit(&scan_key[0], Anum_ag_label_vertex_table_id,
+                BTGreaterEqualStrategyNumber, F_INT8GE,
+                GRAPHID_GET_DATUM(min_vertex_id));
+    ScanKeyInit(&scan_key[1], Anum_ag_label_vertex_table_id,
+                BTLessEqualStrategyNumber, F_INT8LE,
+                GRAPHID_GET_DATUM(max_vertex_id));
+
+    index_rel = index_open(index_oid, AccessShareLock);
+    slot = table_slot_create(graph_vertex_label, NULL);
+    scan_desc = index_beginscan(graph_vertex_label, index_rel, snapshot, NULL,
+                                2, 0);
+    index_rescan(scan_desc, scan_key, 2, NULL, 0);
+
+    while (vertices_needed > 0 &&
+           index_getnext_slot(scan_desc, ForwardScanDirection, slot))
+    {
+        bool should_free;
+        HeapTuple tuple;
+
+        tuple = ExecFetchSlotHeapTuple(slot, true, &should_free);
+        if (load_vertex_tuple(ggctx, tupdesc, tuple,
+                              vertex_label_table_oid,
+                              vertex_label_name, vertex_filter, true,
+                              min_vertex_id, max_vertex_id))
+        {
+            vertices_needed--;
+        }
+        if (should_free)
+        {
+            heap_freetuple(tuple);
+        }
+        ExecClearTuple(slot);
+    }
+
+    index_endscan(scan_desc);
+    ExecDropSingleTupleTableSlot(slot);
+    index_close(index_rel, AccessShareLock);
+
+    return vertices_needed;
+}
+
+static bool load_vertex_tuple(GRAPH_global_context *ggctx, TupleDesc tupdesc,
+                              HeapTuple tuple, Oid vertex_label_table_oid,
+                              const char *vertex_label_name,
+                              HTAB *vertex_filter,
+                              bool use_vertex_range,
+                              graphid min_vertex_id,
+                              graphid max_vertex_id)
+{
+    graphid vertex_id;
+    bool isnull;
+    bool inserted = false;
+
+    vertex_id = DatumGetInt64(heap_getattr(tuple,
+                                           Anum_ag_label_vertex_table_id,
+                                           tupdesc, &isnull));
+    if (isnull)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_TABLE),
+                 errmsg("vertex id is null for %s.%s",
+                        ggctx->graph_name, vertex_label_name)));
+    }
+    if (use_vertex_range &&
+        (vertex_id < min_vertex_id || vertex_id > max_vertex_id))
+    {
+        return false;
+    }
+    if (vertex_filter != NULL && !graphid_hash_contains(vertex_filter,
+                                                        vertex_id))
+    {
+        return false;
+    }
+
+    /* insert vertex into vertex hashtable with TID (no property copy) */
+    inserted = insert_vertex_entry(ggctx, vertex_id, vertex_label_table_oid,
+                                   vertex_label_name, tuple->t_self);
+
+    /* warn if there is a duplicate */
+    if (!inserted)
+    {
+         ereport(WARNING,
+                 (errcode(ERRCODE_DATA_EXCEPTION),
+                  errmsg("ignored duplicate vertex")));
+    }
+
+    return true;
+}
+
 /*
  * Helper function to load all of the GRAPH global hashtables (vertex & edge)
  * for the current global context.
  */
-static void load_GRAPH_global_hashtables(GRAPH_global_context *ggctx)
+static void load_GRAPH_global_hashtables(GRAPH_global_context *ggctx,
+                                         bool load_edge_property_metadata,
+                                         Oid edge_label_oid,
+                                         bool load_edge_metadata,
+                                         bool load_vertex_metadata)
 {
     Snapshot snapshot = GetActiveSnapshot();
+    HTAB *edge_endpoint_ids = NULL;
+    HTAB *edge_endpoint_label_ids = NULL;
+    bool targeted_edge_label = false;
 
     /* initialize statistics */
     ggctx->num_loaded_vertices = 0;
     ggctx->num_loaded_edges = 0;
 
-    get_ag_labels_names(snapshot, ggctx->graph_oid, &ggctx->vertex_labels,
-                        &ggctx->edge_labels);
+    if (OidIsValid(edge_label_oid))
+    {
+        label_cache_data *edge_label_cache;
 
-    /* insert all of our vertices */
-    load_vertex_hashtable(ggctx, snapshot, &ggctx->vertex_labels);
+        edge_label_cache = search_label_relation_cache_cached(edge_label_oid);
+        targeted_edge_label =
+            append_cached_graph_label(&ggctx->edge_labels, edge_label_cache,
+                                      ggctx->graph_oid, LABEL_KIND_EDGE);
+        if (!targeted_edge_label)
+        {
+            get_ag_labels_names(snapshot, ggctx->graph_oid,
+                                &ggctx->vertex_labels, &ggctx->edge_labels);
+        }
 
-    /* insert all of our edges */
-    load_edge_hashtable(ggctx, snapshot, &ggctx->edge_labels);
+        if (load_edge_metadata)
+        {
+            edge_endpoint_ids = create_graphid_hash("VLE edge endpoint ids");
+            edge_endpoint_label_ids =
+                create_label_id_hash("VLE edge endpoint label ids");
+            load_edge_hashtable(ggctx, snapshot, &ggctx->edge_labels,
+                                load_edge_property_metadata, edge_label_oid,
+                                edge_endpoint_ids);
+        }
+        if (edge_endpoint_ids != NULL &&
+            hash_get_num_entries(edge_endpoint_ids) > 0)
+        {
+            HASH_SEQ_STATUS status;
+            GraphIdHashEntry *entry;
+
+            hash_seq_init(&status, edge_endpoint_ids);
+            while ((entry = hash_seq_search(&status)) != NULL)
+            {
+                add_label_id_hash(edge_endpoint_label_ids,
+                                  get_graphid_label_id(entry->id));
+            }
+        }
+        if (!load_vertex_metadata)
+        {
+            if (targeted_edge_label)
+            {
+                graph_label_list edge_labels = {0};
+
+                get_ag_labels_names(snapshot, ggctx->graph_oid,
+                                    &ggctx->vertex_labels,
+                                    &edge_labels);
+                free_ag_label_names(&edge_labels);
+            }
+        }
+        else if (edge_endpoint_ids == NULL ||
+                 hash_get_num_entries(edge_endpoint_ids) == 0)
+        {
+            if (targeted_edge_label)
+            {
+                graph_label_list edge_labels = {0};
+
+                get_ag_labels_names(snapshot, ggctx->graph_oid,
+                                    &ggctx->vertex_labels,
+                                    &edge_labels);
+                free_ag_label_names(&edge_labels);
+            }
+            load_vertex_hashtable(ggctx, snapshot, &ggctx->vertex_labels,
+                                  NULL, NULL);
+        }
+        else
+        {
+            if (targeted_edge_label)
+            {
+                append_endpoint_vertex_labels(ggctx,
+                                              edge_endpoint_label_ids);
+            }
+            load_vertex_hashtable(ggctx, snapshot, &ggctx->vertex_labels,
+                                  edge_endpoint_ids, edge_endpoint_label_ids);
+        }
+        ggctx->adjacency_index_candidate_source =
+            targeted_edge_label &&
+            edge_label_has_age_adjacency_indexes(edge_label_oid);
+        if (load_edge_metadata && !ggctx->adjacency_index_candidate_source)
+        {
+            link_edge_hashtable_to_vertices(ggctx);
+        }
+        if (edge_endpoint_ids != NULL)
+        {
+            hash_destroy(edge_endpoint_ids);
+        }
+        if (edge_endpoint_label_ids != NULL)
+        {
+            hash_destroy(edge_endpoint_label_ids);
+        }
+    }
+    else
+    {
+        get_ag_labels_names(snapshot, ggctx->graph_oid, &ggctx->vertex_labels,
+                            &ggctx->edge_labels);
+
+        /* insert all of our vertices */
+        if (load_vertex_metadata)
+        {
+            load_vertex_hashtable(ggctx, snapshot, &ggctx->vertex_labels, NULL,
+                                  NULL);
+        }
+
+        /* insert all of our edges */
+        if (load_edge_metadata)
+        {
+            load_edge_hashtable(ggctx, snapshot, &ggctx->edge_labels,
+                                load_edge_property_metadata, InvalidOid, NULL);
+        }
+    }
+    ggctx->edge_property_metadata_loaded = load_edge_property_metadata;
+    ggctx->edge_metadata_loaded = load_edge_metadata;
+    ggctx->vertex_metadata_loaded = load_vertex_metadata;
+    ggctx->loaded_edge_label_oid = edge_label_oid;
+}
+
+static bool edge_label_has_age_adjacency_indexes(Oid edge_label_oid)
+{
+    static Oid age_adjacency_am_oid = InvalidOid;
+    Relation edge_rel;
+    List *index_list;
+    ListCell *lc;
+    bool has_outgoing = false;
+    bool has_incoming = false;
+
+    if (!OidIsValid(edge_label_oid))
+    {
+        return false;
+    }
+
+    if (!OidIsValid(age_adjacency_am_oid))
+    {
+        age_adjacency_am_oid = get_index_am_oid("age_adjacency", true);
+        if (!OidIsValid(age_adjacency_am_oid))
+        {
+            return false;
+        }
+    }
+
+    edge_rel = relation_open(edge_label_oid, AccessShareLock);
+    index_list = RelationGetIndexList(edge_rel);
+
+    foreach(lc, index_list)
+    {
+        Oid index_oid = lfirst_oid(lc);
+        Relation index_rel;
+
+        index_rel = index_open(index_oid, AccessShareLock);
+        if (index_rel->rd_rel->relam == age_adjacency_am_oid &&
+            index_rel->rd_index != NULL &&
+            index_rel->rd_index->indisvalid &&
+            index_rel->rd_index->indisready)
+        {
+            if (age_adjacency_index_matches(index_rel, true))
+            {
+                has_outgoing = true;
+            }
+            if (age_adjacency_index_matches(index_rel, false))
+            {
+                has_incoming = true;
+            }
+        }
+        index_close(index_rel, AccessShareLock);
+        if (has_outgoing && has_incoming)
+        {
+            break;
+        }
+    }
+
+    list_free(index_list);
+    relation_close(edge_rel, AccessShareLock);
+
+    return has_outgoing && has_incoming;
+}
+
+static bool age_adjacency_index_matches(Relation index_rel, bool outgoing)
+{
+    int2vector *indkey;
+
+    if (index_rel->rd_index->indnkeyatts != 3 ||
+        index_rel->rd_index->indnatts != 3)
+    {
+        return false;
+    }
+
+    indkey = &index_rel->rd_index->indkey;
+
+    if (outgoing)
+    {
+        return indkey->values[0] == Anum_ag_label_edge_table_start_id &&
+               indkey->values[1] == Anum_ag_label_edge_table_id &&
+               indkey->values[2] == Anum_ag_label_edge_table_end_id;
+    }
+
+    return indkey->values[0] == Anum_ag_label_edge_table_end_id &&
+           indkey->values[1] == Anum_ag_label_edge_table_id &&
+           indkey->values[2] == Anum_ag_label_edge_table_start_id;
 }
 
 /*
@@ -954,7 +1528,10 @@ static void load_GRAPH_global_hashtables(GRAPH_global_context *ggctx)
  */
 static void load_edge_hashtable(GRAPH_global_context *ggctx,
                                 Snapshot snapshot,
-                                graph_label_list *edge_labels)
+                                graph_label_list *edge_labels,
+                                bool load_edge_property_metadata,
+                                Oid edge_label_oid,
+                                HTAB *edge_endpoint_ids)
 {
     int i;
 
@@ -972,6 +1549,12 @@ static void load_edge_hashtable(GRAPH_global_context *ggctx,
         label_entry = &edge_labels->entries[i];
         edge_label_name = NameStr(label_entry->name);
         edge_label_table_oid = label_entry->relation;
+        if (OidIsValid(edge_label_oid) &&
+            edge_label_table_oid != edge_label_oid)
+        {
+            continue;
+        }
+
         /* open the relation (table) and begin the scan */
         graph_edge_label = table_open(edge_label_table_oid, AccessShareLock);
         scan_desc = table_beginscan(graph_edge_label, snapshot, 0, NULL);
@@ -998,6 +1581,7 @@ static void load_edge_hashtable(GRAPH_global_context *ggctx,
             int edge_property_size = 0;
             uint32 edge_property_hash = 0;
             int64 edge_index = 0;
+            edge_entry *ee = NULL;
 
             edge_id = DatumGetInt64(heap_getattr(tuple,
                                                  Anum_ag_label_edge_table_id,
@@ -1030,25 +1614,29 @@ static void load_edge_hashtable(GRAPH_global_context *ggctx,
                                 ggctx->graph_name, edge_label_name)));
             }
 
-            edge_properties = heap_getattr(
-                tuple, Anum_ag_label_edge_table_properties, tupdesc, &isnull);
-            if (isnull)
+            if (load_edge_property_metadata)
             {
-                ereport(ERROR,
-                        (errcode(ERRCODE_UNDEFINED_TABLE),
-                         errmsg("edge properties are null for %s.%s",
-                                ggctx->graph_name, edge_label_name)));
-            }
-            else
-            {
-                agtype *agt_edge_properties =
-                    DATUM_GET_AGTYPE_P(edge_properties);
+                edge_properties = heap_getattr(
+                    tuple, Anum_ag_label_edge_table_properties, tupdesc,
+                    &isnull);
+                if (isnull)
+                {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_UNDEFINED_TABLE),
+                             errmsg("edge properties are null for %s.%s",
+                                    ggctx->graph_name, edge_label_name)));
+                }
+                else
+                {
+                    agtype *agt_edge_properties =
+                        DATUM_GET_AGTYPE_P(edge_properties);
 
-                edge_property_count =
-                    AGTYPE_CONTAINER_SIZE(&agt_edge_properties->root);
-                edge_property_size = VARSIZE_ANY(agt_edge_properties);
-                edge_property_hash =
-                    datum_image_hash(edge_properties, false, -1);
+                    edge_property_count =
+                        AGTYPE_CONTAINER_SIZE(&agt_edge_properties->root);
+                    edge_property_size = VARSIZE_ANY(agt_edge_properties);
+                    edge_property_hash =
+                        datum_image_hash(edge_properties, false, -1);
+                }
             }
 
             /* insert edge into edge hashtable with TID (no property copy) */
@@ -1060,7 +1648,7 @@ static void load_edge_hashtable(GRAPH_global_context *ggctx,
                                          edge_property_count,
                                          edge_property_size,
                                          edge_property_hash,
-                                         &edge_index);
+                                         &edge_index, &ee);
 
             /* warn if there is a duplicate */
             if (!inserted)
@@ -1071,23 +1659,69 @@ static void load_edge_hashtable(GRAPH_global_context *ggctx,
                  continue;
             }
 
-            /* insert the edge into the start and end vertices edge lists */
-            inserted = insert_vertex_edge(ggctx, edge_vertex_start_id,
-                                          edge_vertex_end_id, edge_id,
-                                          edge_index,
-                                          edge_label_table_oid,
-                                          edge_label_name);
-            if (!inserted)
+            if (ggctx->edge_tid_hashtable != NULL)
             {
-                 ereport(WARNING,
-                         (errcode(ERRCODE_DATA_EXCEPTION),
-                          errmsg("ignored malformed or dangling edge")));
+                EdgeTidHashEntry *tid_entry;
+                bool found;
+
+                tid_entry = hash_search(ggctx->edge_tid_hashtable,
+                                        &tuple->t_self, HASH_ENTER, &found);
+                (void) found;
+                if (tid_entry == NULL)
+                {
+                    elog(ERROR,
+                         "load_edge_hashtable: edge TID hash returned NULL");
+                }
+                tid_entry->edge = ee;
+            }
+
+            /* insert the edge into the start and end vertices edge lists */
+            if (edge_endpoint_ids != NULL)
+            {
+                add_graphid_hash(edge_endpoint_ids, edge_vertex_start_id);
+                add_graphid_hash(edge_endpoint_ids, edge_vertex_end_id);
+            }
+            else
+            {
+                inserted = insert_vertex_edge(ggctx, ee,
+                                              edge_vertex_start_id,
+                                              edge_vertex_end_id, edge_id,
+                                              edge_index,
+                                              edge_label_table_oid,
+                                              edge_label_name);
+                if (!inserted)
+                {
+                    ereport(WARNING,
+                            (errcode(ERRCODE_DATA_EXCEPTION),
+                             errmsg("ignored malformed or dangling edge")));
+                }
             }
         }
 
         /* end the scan and close the relation */
         table_endscan(scan_desc);
         table_close(graph_edge_label, AccessShareLock);
+    }
+}
+
+static void link_edge_hashtable_to_vertices(GRAPH_global_context *ggctx)
+{
+    HASH_SEQ_STATUS status;
+    edge_entry *ee;
+
+    hash_seq_init(&status, ggctx->edge_hashtable);
+    while ((ee = hash_seq_search(&status)) != NULL)
+    {
+        if (!insert_vertex_edge(ggctx, ee, ee->start_vertex_id,
+                                ee->end_vertex_id, ee->edge_id,
+                                ee->edge_index,
+                                ee->edge_label_table_oid,
+                                ee->edge_label_name))
+        {
+            ereport(WARNING,
+                    (errcode(ERRCODE_DATA_EXCEPTION),
+                     errmsg("ignored malformed or dangling edge")));
+        }
     }
 }
 
@@ -1127,6 +1761,7 @@ static void freeze_GRAPH_global_hashtables(GRAPH_global_context *ggctx)
 
     hash_freeze(ggctx->vertex_hashtable);
     hash_freeze(ggctx->edge_hashtable);
+    hash_freeze(ggctx->edge_tid_hashtable);
 }
 
 /*
@@ -1182,6 +1817,9 @@ static bool free_specific_GRAPH_global_context(GRAPH_global_context *ggctx)
         free_labeled_vertex_edges(value->edges_in_by_label);
         free_labeled_vertex_edges(value->edges_out_by_label);
         free_labeled_vertex_edges(value->edges_self_by_label);
+        pfree_if_not_null(DatumGetPointer(value->cached_properties));
+        pfree_if_not_null(value->cached_property_key);
+        pfree_if_not_null(DatumGetPointer(value->cached_property_value));
 
         value->adj_edges_in = NULL;
         value->adj_edges_out = NULL;
@@ -1189,6 +1827,13 @@ static bool free_specific_GRAPH_global_context(GRAPH_global_context *ggctx)
         value->edges_in_by_label = NULL;
         value->edges_out_by_label = NULL;
         value->edges_self_by_label = NULL;
+        value->cached_properties = (Datum) 0;
+        value->cached_properties_valid = false;
+        value->cached_property_key = NULL;
+        value->cached_property_key_len = 0;
+        value->cached_property_key_char = '\0';
+        value->cached_property_value = (Datum) 0;
+        value->cached_property_value_valid = false;
 
         /* move to the next vertex */
         curr_vertex = next_vertex;
@@ -1204,9 +1849,11 @@ static bool free_specific_GRAPH_global_context(GRAPH_global_context *ggctx)
     /* free the hashtables */
     hash_destroy(ggctx->vertex_hashtable);
     hash_destroy(ggctx->edge_hashtable);
+    hash_destroy(ggctx->edge_tid_hashtable);
 
     ggctx->vertex_hashtable = NULL;
     ggctx->edge_hashtable = NULL;
+    ggctx->edge_tid_hashtable = NULL;
 
     /* free the context */
     pfree_if_not_null(ggctx);
@@ -1228,7 +1875,8 @@ GRAPH_global_context *manage_GRAPH_global_contexts(char *graph_name,
                                                    Oid graph_oid)
 {
     return manage_GRAPH_global_contexts_internal(graph_name, strlen(graph_name),
-                                                graph_oid);
+                                                graph_oid, true, InvalidOid,
+                                                true, true);
 }
 
 GRAPH_global_context *manage_GRAPH_global_contexts_len(const char *graph_name,
@@ -1236,11 +1884,27 @@ GRAPH_global_context *manage_GRAPH_global_contexts_len(const char *graph_name,
                                                        Oid graph_oid)
 {
     return manage_GRAPH_global_contexts_internal(graph_name, graph_name_len,
-                                                graph_oid);
+                                                graph_oid, true, InvalidOid,
+                                                true, true);
+}
+
+GRAPH_global_context *manage_GRAPH_global_contexts_len_for_vle(
+    const char *graph_name, int graph_name_len, Oid graph_oid,
+    bool load_edge_property_metadata, Oid edge_label_oid,
+    bool load_edge_metadata, bool load_vertex_metadata)
+{
+    return manage_GRAPH_global_contexts_internal(graph_name, graph_name_len,
+                                                graph_oid,
+                                                load_edge_property_metadata,
+                                                edge_label_oid,
+                                                load_edge_metadata,
+                                                load_vertex_metadata);
 }
 
 static GRAPH_global_context *manage_GRAPH_global_contexts_internal(
-    const char *graph_name, int graph_name_len, Oid graph_oid)
+    const char *graph_name, int graph_name_len, Oid graph_oid,
+    bool load_edge_property_metadata, Oid edge_label_oid,
+    bool load_edge_metadata, bool load_vertex_metadata)
 {
     GRAPH_global_context *new_ggctx = NULL;
     GRAPH_global_context *curr_ggctx = NULL;
@@ -1308,7 +1972,13 @@ static GRAPH_global_context *manage_GRAPH_global_contexts_internal(
         }
         else
         {
-            if (found_ggctx == NULL && curr_ggctx->graph_oid == graph_oid)
+            if (found_ggctx == NULL &&
+                curr_ggctx->graph_oid == graph_oid &&
+                (!load_vertex_metadata ||
+                 curr_ggctx->vertex_metadata_loaded) &&
+                graph_context_satisfies_edge_load(
+                    curr_ggctx, load_edge_property_metadata, edge_label_oid,
+                    load_edge_metadata))
             {
                 found_ggctx = curr_ggctx;
             }
@@ -1367,7 +2037,9 @@ static GRAPH_global_context *manage_GRAPH_global_contexts_internal(
 
     /* build the hashtables for this graph */
     create_GRAPH_global_hashtables(new_ggctx);
-    load_GRAPH_global_hashtables(new_ggctx);
+    load_GRAPH_global_hashtables(new_ggctx, load_edge_property_metadata,
+                                 edge_label_oid, load_edge_metadata,
+                                 load_vertex_metadata);
     freeze_GRAPH_global_hashtables(new_ggctx);
 
     /* unlock the global contexts list */
@@ -1377,6 +2049,34 @@ static GRAPH_global_context *manage_GRAPH_global_contexts_internal(
     MemoryContextSwitchTo(oldctx);
 
     return new_ggctx;
+}
+
+static bool graph_context_satisfies_edge_load(GRAPH_global_context *ggctx,
+                                              bool load_edge_property_metadata,
+                                              Oid edge_label_oid,
+                                              bool load_edge_metadata)
+{
+    if (load_edge_metadata && !ggctx->edge_metadata_loaded)
+    {
+        return false;
+    }
+
+    if (load_edge_property_metadata && !ggctx->edge_property_metadata_loaded)
+    {
+        return false;
+    }
+
+    if (!OidIsValid(ggctx->loaded_edge_label_oid))
+    {
+        return true;
+    }
+
+    if (!OidIsValid(edge_label_oid))
+    {
+        return false;
+    }
+
+    return ggctx->loaded_edge_label_oid == edge_label_oid;
 }
 
 /*
@@ -1649,6 +2349,64 @@ edge_entry *get_edge_entry(GRAPH_global_context *ggctx, graphid edge_id)
     return ee;
 }
 
+edge_entry *get_edge_entry_by_tid(GRAPH_global_context *ggctx,
+                                  const ItemPointerData *tid)
+{
+    EdgeTidHashEntry *entry = NULL;
+    bool found = false;
+
+    entry = hash_search(ggctx->edge_tid_hashtable, tid, HASH_FIND, &found);
+    if (!found)
+    {
+        return NULL;
+    }
+
+    return entry->edge;
+}
+
+bool get_edge_entry_vle_fields_by_tid(GRAPH_global_context *ggctx,
+                                      const ItemPointerData *tid,
+                                      graphid *edge_id,
+                                      Oid *label_table_oid,
+                                      graphid *start_vertex_id,
+                                      graphid *end_vertex_id,
+                                      int64 *edge_index,
+                                      vertex_entry **start_vertex,
+                                      vertex_entry **end_vertex,
+                                      edge_entry **edge)
+{
+    EdgeTidHashEntry *entry = NULL;
+    edge_entry *ee;
+    bool found = false;
+
+    entry = hash_search(ggctx->edge_tid_hashtable, tid, HASH_FIND, &found);
+    if (!found)
+    {
+        return false;
+    }
+
+    ee = entry->edge;
+    *edge_id = ee->edge_id;
+    *label_table_oid = ee->edge_label_table_oid;
+    *start_vertex_id = ee->start_vertex_id;
+    *end_vertex_id = ee->end_vertex_id;
+    *edge_index = ee->edge_index;
+    if (start_vertex != NULL)
+    {
+        *start_vertex = ee->start_vertex;
+    }
+    if (end_vertex != NULL)
+    {
+        *end_vertex = ee->end_vertex;
+    }
+    if (edge != NULL)
+    {
+        *edge = ee;
+    }
+
+    return true;
+}
+
 /*
  * Helper function to find the GRAPH_global_context used by the specified
  * graph_oid. If not found, it returns NULL.
@@ -1685,6 +2443,32 @@ GRAPH_global_context *find_GRAPH_global_context(Oid graph_oid)
     return NULL;
 }
 
+bool is_GRAPH_global_context_current(GRAPH_global_context *ggctx)
+{
+    GRAPH_global_context *curr_ggctx = NULL;
+    bool found = false;
+
+    if (ggctx == NULL)
+    {
+        return false;
+    }
+
+    pthread_mutex_lock(&global_graph_contexts_container.mutex_lock);
+    curr_ggctx = global_graph_contexts_container.contexts;
+    while (curr_ggctx != NULL)
+    {
+        if (curr_ggctx == ggctx)
+        {
+            found = true;
+            break;
+        }
+        curr_ggctx = curr_ggctx->next;
+    }
+    pthread_mutex_unlock(&global_graph_contexts_container.mutex_lock);
+
+    return found && !is_ggctx_invalid(ggctx);
+}
+
 /* graph vertices accessor */
 ListGraphId *get_graph_vertices(GRAPH_global_context *ggctx)
 {
@@ -1694,6 +2478,11 @@ ListGraphId *get_graph_vertices(GRAPH_global_context *ggctx)
 int64 get_graph_num_loaded_edges(GRAPH_global_context *ggctx)
 {
     return ggctx->num_loaded_edges;
+}
+
+bool graph_global_context_has_edge_metadata(GRAPH_global_context *ggctx)
+{
+    return ggctx->edge_metadata_loaded;
 }
 
 /* vertex_entry accessor functions */
@@ -1775,19 +2564,524 @@ Datum get_vertex_entry_properties_with_cache(vertex_entry *ve,
         "vertex entry references a tuple that is no longer visible");
 }
 
+Datum get_vertex_entry_properties_with_relation(vertex_entry *ve, Relation rel)
+{
+    Assert(RelationGetRelid(rel) == ve->vertex_label_table_oid);
+
+    return fetch_entry_properties_from_relation(
+        rel, ve->tid, 2,
+        "get_vertex_entry_properties: stale TID - "
+        "vertex entry references a tuple that is no longer visible");
+}
+
+bool get_vertex_entry_cached_property(vertex_entry *ve, agtype_value *key,
+                                      Datum *result)
+{
+    Assert(key != NULL);
+    Assert(result != NULL);
+
+    return get_vertex_entry_cached_property_str(
+        ve, key->val.string.val, key->val.string.len, result);
+}
+
+bool get_vertex_entry_cached_property_str(vertex_entry *ve,
+                                          const char *key, int key_len,
+                                          Datum *result)
+{
+    Assert(key != NULL);
+    Assert(result != NULL);
+
+    *result = (Datum) 0;
+    if (ve->cached_property_value_valid &&
+        ve->cached_property_key_len == key_len &&
+        (key_len == 1 ? ve->cached_property_key_char == key[0] :
+         memcmp(ve->cached_property_key, key, key_len) == 0))
+    {
+        *result = ve->cached_property_value;
+        return true;
+    }
+
+    return false;
+}
+
+bool get_vertex_entry_cached_property_char(vertex_entry *ve, char key,
+                                           Datum *result)
+{
+    Assert(result != NULL);
+
+    *result = (Datum) 0;
+    if (ve->cached_property_value_valid &&
+        ve->cached_property_key_len == 1 &&
+        ve->cached_property_key_char == key)
+    {
+        *result = ve->cached_property_value;
+        return true;
+    }
+
+    return false;
+}
+
+bool get_vertex_entry_property_with_cache(vertex_entry *ve,
+                                          HTAB *relation_cache,
+                                          agtype_value *key, Datum *result)
+{
+    Relation rel;
+    bool close_rel;
+
+    if (get_vertex_entry_cached_property(ve, key, result))
+    {
+        return true;
+    }
+
+    rel = get_entry_property_relation(ve->vertex_label_table_oid,
+                                      relation_cache);
+    close_rel = relation_cache == NULL;
+
+    if (get_vertex_entry_property_with_relation_uncached(ve, rel, key, result))
+    {
+        if (close_rel)
+            table_close(rel, AccessShareLock);
+        return true;
+    }
+
+    if (close_rel)
+        table_close(rel, AccessShareLock);
+    return false;
+}
+
+bool get_vertex_entry_property_with_lazy_cache(vertex_entry *ve,
+                                               HTAB **relation_cache,
+                                               const char *cache_name,
+                                               agtype_value *key,
+                                               Datum *result)
+{
+    Relation rel;
+
+    if (get_vertex_entry_cached_property(ve, key, result))
+    {
+        return true;
+    }
+
+    if (*relation_cache == NULL)
+    {
+        *relation_cache = create_entry_property_relation_cache(cache_name);
+    }
+
+    rel = get_entry_property_relation(ve->vertex_label_table_oid,
+                                      *relation_cache);
+    return get_vertex_entry_property_with_relation_uncached(ve, rel, key,
+                                                           result);
+}
+
+bool get_vertex_entry_scalar_property_with_lazy_cache(vertex_entry *ve,
+                                                      HTAB **relation_cache,
+                                                      const char *cache_name,
+                                                      agtype_value *key,
+                                                      Datum *result)
+{
+    Relation rel;
+
+    if (get_vertex_entry_cached_property(ve, key, result))
+    {
+        return true;
+    }
+
+    if (*relation_cache == NULL)
+    {
+        *relation_cache = create_entry_property_relation_cache(cache_name);
+    }
+
+    rel = get_entry_property_relation(ve->vertex_label_table_oid,
+                                      *relation_cache);
+    return get_vertex_entry_scalar_property_with_relation(ve, rel, key,
+                                                         result);
+}
+
+BlockNumber get_vertex_entry_tid_block(vertex_entry *ve)
+{
+    return ItemPointerGetBlockNumber(&ve->tid);
+}
+
+int64 prefetch_vertex_entry_block_scalar_property_cache(
+    GRAPH_global_context *ggctx, vertex_entry *ve, HTAB **relation_cache,
+    const char *cache_name, agtype_value *key, int64 max_cached,
+    Datum *target_result, bool *target_found)
+{
+    Relation rel;
+
+    Assert(ggctx != NULL);
+    Assert(ve != NULL);
+    Assert(key != NULL);
+
+    if (*relation_cache == NULL)
+    {
+        *relation_cache = create_entry_property_relation_cache(cache_name);
+    }
+
+    rel = get_entry_property_relation(ve->vertex_label_table_oid,
+                                      *relation_cache);
+
+    if (target_result != NULL)
+    {
+        *target_result = (Datum) 0;
+    }
+    if (target_found != NULL)
+    {
+        *target_found = false;
+    }
+
+    return prefetch_vertex_block_scalar_property_cache(
+        ggctx, rel, ItemPointerGetBlockNumber(&ve->tid), ve->vertex_id,
+        key, max_cached, target_result, target_found);
+}
+
+bool get_vertex_entry_property_with_relation(vertex_entry *ve, Relation rel,
+                                             agtype_value *key, Datum *result)
+{
+    Assert(RelationGetRelid(rel) == ve->vertex_label_table_oid);
+
+    if (get_vertex_entry_cached_property(ve, key, result))
+    {
+        return true;
+    }
+
+    return get_vertex_entry_property_with_relation_uncached(ve, rel, key,
+                                                           result);
+}
+
+static bool get_vertex_entry_property_with_relation_uncached(vertex_entry *ve,
+                                                             Relation rel,
+                                                             agtype_value *key,
+                                                             Datum *result)
+{
+    HeapTupleData tuple;
+    Buffer buffer;
+    bool tuple_found;
+    bool property_found = false;
+    agtype *properties = NULL;
+
+    Assert(RelationGetRelid(rel) == ve->vertex_label_table_oid);
+    Assert(key != NULL);
+    Assert(result != NULL);
+
+    *result = (Datum) 0;
+
+    if (ve->cached_properties_valid)
+    {
+        properties = DATUM_GET_AGTYPE_P(ve->cached_properties);
+    }
+    else
+    {
+        tuple.t_self = ve->tid;
+        tuple_found = heap_fetch(rel, GetActiveSnapshot(), &tuple, &buffer,
+                                 true);
+        if (tuple_found)
+        {
+            TupleDesc tupdesc = RelationGetDescr(rel);
+            bool isnull;
+            Datum props;
+
+            props = heap_getattr(&tuple, 2, tupdesc, &isnull);
+            if (!isnull)
+            {
+                MemoryContext oldctx;
+
+                oldctx = MemoryContextSwitchTo(TopMemoryContext);
+                ve->cached_properties = datumCopy(props, false, -1);
+                ve->cached_properties_valid = true;
+                MemoryContextSwitchTo(oldctx);
+
+                properties = DATUM_GET_AGTYPE_P(ve->cached_properties);
+            }
+
+            ReleaseBuffer(buffer);
+        }
+
+        if (!tuple_found)
+        {
+            elog(ERROR, "%s",
+                 "get_vertex_entry_property: stale TID - "
+                 "vertex entry references a tuple that is no longer visible");
+        }
+    }
+
+    if (properties != NULL)
+    {
+        agtype_value property_value;
+        bool property_value_needs_free = false;
+
+        if (find_agtype_value_from_container_no_copy(&properties->root,
+                                                     AGT_FOBJECT, key,
+                                                     &property_value,
+                                                     &property_value_needs_free) &&
+            property_value.type != AGTV_NULL)
+        {
+            cache_vertex_entry_scalar_property(ve, key, &property_value);
+            *result = ve->cached_property_value;
+            property_found = true;
+        }
+        if (property_value_needs_free)
+        {
+            pfree_agtype_value_content(&property_value);
+        }
+    }
+
+    return property_found;
+}
+
+static bool get_vertex_entry_scalar_property_with_relation(vertex_entry *ve,
+                                                           Relation rel,
+                                                           agtype_value *key,
+                                                           Datum *result)
+{
+    HeapTupleData tuple;
+    Buffer buffer;
+    bool tuple_found;
+    bool property_found = false;
+    agtype *properties = NULL;
+
+    Assert(RelationGetRelid(rel) == ve->vertex_label_table_oid);
+    Assert(key != NULL);
+    Assert(result != NULL);
+
+    *result = (Datum) 0;
+
+    if (ve->cached_properties_valid)
+    {
+        properties = DATUM_GET_AGTYPE_P(ve->cached_properties);
+    }
+    else
+    {
+        tuple.t_self = ve->tid;
+        tuple_found = heap_fetch(rel, GetActiveSnapshot(), &tuple, &buffer,
+                                 true);
+        if (tuple_found)
+        {
+            TupleDesc tupdesc = RelationGetDescr(rel);
+            bool isnull;
+            Datum props;
+
+            props = heap_getattr(&tuple, 2, tupdesc, &isnull);
+            if (!isnull)
+            {
+                properties = DATUM_GET_AGTYPE_P(props);
+            }
+
+            ReleaseBuffer(buffer);
+        }
+
+        if (!tuple_found)
+        {
+            elog(ERROR, "%s",
+                 "get_vertex_entry_property: stale TID - "
+                 "vertex entry references a tuple that is no longer visible");
+        }
+    }
+
+    if (properties != NULL)
+    {
+        agtype_value property_value;
+        bool property_value_needs_free = false;
+
+        if (find_agtype_value_from_container_no_copy(&properties->root,
+                                                     AGT_FOBJECT, key,
+                                                     &property_value,
+                                                     &property_value_needs_free) &&
+            property_value.type != AGTV_NULL)
+        {
+            cache_vertex_entry_scalar_property(ve, key, &property_value);
+            *result = ve->cached_property_value;
+            property_found = true;
+        }
+        if (property_value_needs_free)
+        {
+            pfree_agtype_value_content(&property_value);
+        }
+    }
+
+    return property_found;
+}
+
+static void cache_vertex_entry_scalar_property(vertex_entry *ve,
+                                               agtype_value *key,
+                                               agtype_value *property_value)
+{
+    MemoryContext oldctx;
+
+    oldctx = MemoryContextSwitchTo(TopMemoryContext);
+    pfree_if_not_null(ve->cached_property_key);
+    pfree_if_not_null(DatumGetPointer(ve->cached_property_value));
+    ve->cached_property_key_len = key->val.string.len;
+    if (key->val.string.len == 1)
+    {
+        ve->cached_property_key = NULL;
+        ve->cached_property_key_char = key->val.string.val[0];
+    }
+    else
+    {
+        ve->cached_property_key = pnstrdup(key->val.string.val,
+                                           key->val.string.len);
+        ve->cached_property_key_char = '\0';
+    }
+    if (property_value->type == AGTV_INTEGER)
+    {
+        ve->cached_property_value = PointerGetDatum(
+            agtype_integer_to_agtype(property_value->val.int_value));
+    }
+    else
+    {
+        ve->cached_property_value = PointerGetDatum(
+            agtype_value_to_agtype(property_value));
+    }
+    ve->cached_property_value_valid = true;
+    MemoryContextSwitchTo(oldctx);
+}
+
+static int64 prefetch_vertex_block_scalar_property_cache(
+    GRAPH_global_context *ggctx, Relation rel, BlockNumber blockno,
+    graphid target_vertex_id, agtype_value *key, int64 max_cached,
+    Datum *target_result, bool *target_found)
+{
+    Buffer buffer;
+    Page page;
+    OffsetNumber maxoff;
+    OffsetNumber offnum;
+    TupleDesc tupdesc;
+    Snapshot snapshot;
+    int64 cached = 0;
+
+    Assert(ggctx != NULL);
+    Assert(rel != NULL);
+    Assert(key != NULL);
+
+    snapshot = GetActiveSnapshot();
+    tupdesc = RelationGetDescr(rel);
+
+    buffer = ReadBuffer(rel, blockno);
+    LockBuffer(buffer, BUFFER_LOCK_SHARE);
+    page = BufferGetPage(buffer);
+    maxoff = PageGetMaxOffsetNumber(page);
+
+    for (offnum = FirstOffsetNumber;
+         offnum <= maxoff;
+         offnum = OffsetNumberNext(offnum))
+    {
+        ItemId itemid;
+        HeapTupleData tuple;
+        bool isnull;
+        Datum vertex_id_datum;
+        Datum props;
+        graphid vertex_id;
+        vertex_entry *block_ve;
+        bool found = false;
+        agtype *properties;
+        agtype_value property_value;
+        bool property_value_needs_free = false;
+
+        itemid = PageGetItemId(page, offnum);
+        if (!ItemIdIsNormal(itemid))
+        {
+            continue;
+        }
+
+        ItemPointerSet(&tuple.t_self, blockno, offnum);
+        tuple.t_tableOid = RelationGetRelid(rel);
+        tuple.t_data = (HeapTupleHeader) PageGetItem(page, itemid);
+        tuple.t_len = ItemIdGetLength(itemid);
+
+        if (!HeapTupleSatisfiesVisibility(&tuple, snapshot, buffer))
+        {
+            continue;
+        }
+
+        vertex_id_datum = heap_getattr(&tuple, Anum_ag_label_vertex_table_id,
+                                       tupdesc, &isnull);
+        if (isnull)
+        {
+            continue;
+        }
+
+        vertex_id = DatumGetInt64(vertex_id_datum);
+        block_ve = (vertex_entry *)hash_search(ggctx->vertex_hashtable,
+                                               (void *)&vertex_id,
+                                               HASH_FIND, &found);
+        if (!found || block_ve->vertex_label_table_oid != RelationGetRelid(rel))
+        {
+            continue;
+        }
+
+        props = heap_getattr(&tuple, Anum_ag_label_vertex_table_properties,
+                             tupdesc, &isnull);
+        if (isnull)
+        {
+            continue;
+        }
+
+        properties = DATUM_GET_AGTYPE_P(props);
+        if (find_agtype_value_from_container_no_copy(&properties->root,
+                                                     AGT_FOBJECT, key,
+                                                     &property_value,
+                                                     &property_value_needs_free) &&
+            property_value.type != AGTV_NULL)
+        {
+            cache_vertex_entry_scalar_property(block_ve, key,
+                                               &property_value);
+            if (vertex_id == target_vertex_id && target_result != NULL &&
+                target_found != NULL)
+            {
+                *target_result = block_ve->cached_property_value;
+                *target_found = true;
+            }
+            cached++;
+            if (max_cached >= 0 && cached >= max_cached)
+            {
+                break;
+            }
+        }
+        if (property_value_needs_free)
+        {
+            pfree_agtype_value_content(&property_value);
+        }
+    }
+
+    LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
+    ReleaseBuffer(buffer);
+
+    return cached;
+}
+
 static Datum fetch_entry_properties(Oid relid, ItemPointerData tid,
                                     AttrNumber property_attr,
                                     HTAB *relation_cache,
                                     const char *stale_msg)
 {
     Relation rel;
-    HeapTupleData tuple;
-    Buffer buffer;
     Datum result = (Datum) 0;
     bool close_rel = false;
 
     rel = get_entry_property_relation(relid, relation_cache);
     close_rel = relation_cache == NULL;
+
+    result = fetch_entry_properties_from_relation(rel, tid, property_attr,
+                                                  stale_msg);
+
+    if (close_rel)
+    {
+        table_close(rel, AccessShareLock);
+    }
+
+    return result;
+}
+
+static Datum fetch_entry_properties_from_relation(Relation rel,
+                                                  ItemPointerData tid,
+                                                  AttrNumber property_attr,
+                                                  const char *stale_msg)
+{
+    HeapTupleData tuple;
+    Buffer buffer;
+    Datum result = (Datum) 0;
+
     tuple.t_self = tid;
 
     if (heap_fetch(rel, GetActiveSnapshot(), &tuple, &buffer, true))
@@ -1803,11 +3097,6 @@ static Datum fetch_entry_properties(Oid relid, ItemPointerData tid,
         }
 
         ReleaseBuffer(buffer);
-    }
-
-    if (close_rel)
-    {
-        table_close(rel, AccessShareLock);
     }
 
     /*
@@ -1925,6 +3214,18 @@ graphid get_edge_entry_end_vertex_id(edge_entry *ee)
 int64 get_edge_entry_index(edge_entry *ee)
 {
     return ee->edge_index;
+}
+
+void get_edge_entry_vle_fields(edge_entry *ee, graphid *edge_id,
+                               Oid *label_table_oid,
+                               graphid *start_vertex_id,
+                               graphid *end_vertex_id, int64 *edge_index)
+{
+    *edge_id = ee->edge_id;
+    *label_table_oid = ee->edge_label_table_oid;
+    *start_vertex_id = ee->start_vertex_id;
+    *end_vertex_id = ee->end_vertex_id;
+    *edge_index = ee->edge_index;
 }
 
 int get_edge_entry_property_count(edge_entry *ee)
