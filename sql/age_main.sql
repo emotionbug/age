@@ -110,6 +110,13 @@ CREATE FUNCTION ag_catalog.create_elabel(graph_name cstring, label_name cstring)
     LANGUAGE c
     AS 'MODULE_PATHNAME';
 
+CREATE FUNCTION ag_catalog.create_property_index(graph_name cstring,
+                                                 label_name cstring,
+                                                 property_name cstring)
+    RETURNS void
+    LANGUAGE c
+    AS 'MODULE_PATHNAME';
+
 CREATE FUNCTION ag_catalog.alter_graph(graph_name name, operation cstring,
                                        new_value name)
     RETURNS void

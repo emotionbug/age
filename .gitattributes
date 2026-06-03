@@ -1,0 +1,3 @@
+# Regression outputs preserve psql-aligned padding, including trailing spaces.
+regress/expected/*.out -whitespace
+regress/results/*.out -whitespace

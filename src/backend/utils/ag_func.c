@@ -36,6 +36,26 @@
 
 #include "catalog/ag_namespace.h"
 #include "utils/ag_func.h"
+#include "utils/agtype.h"
+
+#define AGE_FUNC_ARG_KINDS(symbol, sql_name, cypher_name, nargs, result_kind, \
+                           arg_kind, fast_path, ...) \
+    static const AgeFuncSqlArgKind symbol##_arg_kinds[] = { __VA_ARGS__ };
+
+AGE_BUILTIN_FUNC_CATALOG(AGE_FUNC_ARG_KINDS)
+
+#undef AGE_FUNC_ARG_KINDS
+
+#define AGE_FUNC_META(symbol, sql_name, cypher_name, nargs, result_kind, \
+                      arg_kind, fast_path, ...) \
+    { #sql_name, #cypher_name, nargs, symbol##_arg_kinds, result_kind, \
+      arg_kind, fast_path },
+
+static const AgeBuiltinFuncMeta age_builtin_func_catalog[] = {
+    AGE_BUILTIN_FUNC_CATALOG(AGE_FUNC_META)
+};
+
+#undef AGE_FUNC_META
 
 typedef struct ag_func_cache_key
 {
@@ -57,6 +77,7 @@ static bool ag_func_oid_callback_registered = false;
 static void initialize_ag_func_oid_cache(void);
 static void invalidate_ag_func_oid_cache(Datum arg, int cache_id,
                                          uint32 hash_value);
+static Oid get_age_builtin_sql_arg_oid(AgeFuncSqlArgKind arg_kind);
 
 /* checks that func_oid is of func_name function in ag_catalog */
 bool is_oid_ag_func(Oid func_oid, const char *func_name)
@@ -246,4 +267,112 @@ Oid get_pg_func_oid(const char *func_name, const int nargs, ...)
     }
 
     return entry->func_oid;
+}
+
+const AgeBuiltinFuncMeta *get_age_builtin_func_meta_by_name(
+    const char *func_name)
+{
+    int i;
+
+    Assert(func_name);
+
+    for (i = 0; i < lengthof(age_builtin_func_catalog); i++)
+    {
+        const AgeBuiltinFuncMeta *meta = &age_builtin_func_catalog[i];
+
+        if (pg_strcasecmp(func_name, meta->sql_name) == 0 ||
+            pg_strcasecmp(func_name, meta->cypher_name) == 0)
+        {
+            return meta;
+        }
+    }
+
+    return NULL;
+}
+
+Oid get_age_builtin_func_oid(const AgeBuiltinFuncMeta *meta)
+{
+    Oid args[FUNC_MAX_ARGS];
+    int i;
+
+    Assert(meta != NULL);
+    Assert(meta->nargs >= 0 && meta->nargs <= FUNC_MAX_ARGS);
+
+    for (i = 0; i < meta->nargs; i++)
+    {
+        args[i] = get_age_builtin_sql_arg_oid(meta->arg_kinds[i]);
+    }
+
+    if (meta->nargs == 0)
+    {
+        return get_ag_func_oid(meta->sql_name, 0);
+    }
+
+    switch (meta->nargs)
+    {
+    case 1:
+        return get_ag_func_oid(meta->sql_name, 1, args[0]);
+    case 2:
+        return get_ag_func_oid(meta->sql_name, 2, args[0], args[1]);
+    case 3:
+        return get_ag_func_oid(meta->sql_name, 3, args[0], args[1], args[2]);
+    case 4:
+        return get_ag_func_oid(meta->sql_name, 4, args[0], args[1], args[2],
+                               args[3]);
+    default:
+        break;
+    }
+
+    ereport(ERROR, (errmsg_internal("unsupported AGE built-in metadata arity"),
+                    errdetail_internal("%s(%d)", meta->sql_name,
+                                       meta->nargs)));
+}
+
+Oid get_age_builtin_func_oid_by_name(const char *func_name)
+{
+    const AgeBuiltinFuncMeta *meta;
+
+    meta = get_age_builtin_func_meta_by_name(func_name);
+    if (meta == NULL)
+    {
+        ereport(ERROR, (errmsg_internal("AGE built-in metadata does not exist"),
+                        errdetail_internal("%s", func_name)));
+    }
+
+    return get_age_builtin_func_oid(meta);
+}
+
+static Oid get_age_builtin_sql_arg_oid(AgeFuncSqlArgKind arg_kind)
+{
+    switch (arg_kind)
+    {
+    case AGE_FUNC_SQL_ARG_AGTYPE:
+        return AGTYPEOID;
+    case AGE_FUNC_SQL_ARG_ANY:
+        return ANYOID;
+    }
+
+    elog(ERROR, "unsupported AGE built-in SQL argument kind: %d", arg_kind);
+}
+
+const AgeBuiltinFuncMeta *get_age_builtin_func_meta_by_oid(Oid func_oid)
+{
+    int i;
+
+    if (!OidIsValid(func_oid))
+    {
+        return NULL;
+    }
+
+    for (i = 0; i < lengthof(age_builtin_func_catalog); i++)
+    {
+        const AgeBuiltinFuncMeta *meta = &age_builtin_func_catalog[i];
+
+        if (get_age_builtin_func_oid(meta) == func_oid)
+        {
+            return meta;
+        }
+    }
+
+    return NULL;
 }
