@@ -46,27 +46,33 @@ public class BaseDockerizedTest {
     @AfterAll
     public void afterAll() throws Exception {
         connection.close();
-        agensGraphContainer.stop();
+        if (agensGraphContainer != null) {
+            agensGraphContainer.stop();
+        }
     }
 
     @BeforeAll
     public void beforeAll() throws Exception {
-        String CORRECT_DB_PASSWORDS = "postgres";
+        String jdbcUrl = System.getenv("AGE_JDBC_URL");
+        String user = envOrDefault("AGE_JDBC_USER", "postgres");
+        String password = envOrDefault("AGE_JDBC_PASSWORD", "postgres");
 
-        agensGraphContainer = new GenericContainer<>(DockerImageName
-            .parse("apache/age:dev_snapshot_master"))
-            .withEnv("POSTGRES_PASSWORD", CORRECT_DB_PASSWORDS)
-            .withExposedPorts(5432)
-            .waitingFor(Wait.forLogMessage(".*database system is ready to accept connections.*\\n", 2)
-                .withStartupTimeout(Duration.ofSeconds(60)));
-        agensGraphContainer.start();
+        if (jdbcUrl == null || jdbcUrl.isBlank()) {
+            agensGraphContainer = new GenericContainer<>(DockerImageName
+                .parse("apache/age:dev_snapshot_master"))
+                .withEnv("POSTGRES_PASSWORD", password)
+                .withExposedPorts(5432)
+                .waitingFor(Wait.forLogMessage(".*database system is ready to accept connections.*\\n", 2)
+                    .withStartupTimeout(Duration.ofSeconds(60)));
+            agensGraphContainer.start();
 
-        String host = agensGraphContainer.getHost();
-        int mappedPort = agensGraphContainer.getMappedPort(5432);
-        String jdbcUrl = String
-            .format("jdbc:postgresql://%s:%d/%s?sslmode=disable", host, mappedPort, "postgres");
+            String host = agensGraphContainer.getHost();
+            int mappedPort = agensGraphContainer.getMappedPort(5432);
+            jdbcUrl = String
+                .format("jdbc:postgresql://%s:%d/%s?sslmode=disable", host, mappedPort, "postgres");
+        }
 
-        this.connection = DriverManager.getConnection(jdbcUrl, "postgres", CORRECT_DB_PASSWORDS)
+        this.connection = DriverManager.getConnection(jdbcUrl, user, password)
                      .unwrap(PgConnection.class);
         this.connection.addDataType("agtype", Agtype.class);
         try (Statement statement = connection.createStatement()) {
@@ -75,5 +81,10 @@ public class BaseDockerizedTest {
             statement.execute("SET search_path = ag_catalog, \"$user\", public;");
             statement.execute("SELECT create_graph('cypher');");
         }
+    }
+
+    private static String envOrDefault(String name, String defaultValue) {
+        String value = System.getenv(name);
+        return value == null || value.isBlank() ? defaultValue : value;
     }
 }

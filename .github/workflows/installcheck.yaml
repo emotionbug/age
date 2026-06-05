@@ -1,72 +1,287 @@
-name: Build / Regression
+name: Build / Regression / Drivers
 
 on:
   push:
     branches: [ "master" ]
-
   pull_request:
     branches: [ "master" ]
 
+concurrency:
+  group: installcheck-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PG_PREFIX: ${{ github.workspace }}/.pg18
+  PG_SOURCE: ${{ github.workspace }}/.pg18source
+  PGVECTOR_SOURCE: ${{ github.workspace }}/.pgvector
+
 jobs:
-  build:
+  installcheck:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Get latest commit id of PostgreSQL 18
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve upstream revisions
         run: |
           echo "PG_COMMIT_HASH=$(git ls-remote https://git.postgresql.org/git/postgresql.git refs/heads/REL_18_STABLE | awk '{print $1}')" >> $GITHUB_ENV
+          echo "PGVECTOR_COMMIT_HASH=$(git ls-remote https://github.com/pgvector/pgvector.git refs/heads/master | awk '{print $1}')" >> $GITHUB_ENV
 
-      - name: Cache PostgreSQL 18
-        uses: actions/cache@v3
-        id: pg18cache
-        with:
-          path: ~/pg18
-          key: ${{ runner.os }}-v1-pg18-${{ env.PG_COMMIT_HASH }}
-
-      - name: Install necessary dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libreadline-dev zlib1g-dev flex bison
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            bison \
+            ccache \
+            flex \
+            libreadline-dev \
+            zlib1g-dev
 
-      - name: Install PostgreSQL 18 and some extensions
+      - name: Cache PostgreSQL 18
+        uses: actions/cache@v4
+        id: pg18cache
+        with:
+          path: ${{ env.PG_PREFIX }}
+          key: ${{ runner.os }}-pg18-cassert-${{ env.PG_COMMIT_HASH }}
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Build PostgreSQL 18
         if: steps.pg18cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch REL_18_STABLE https://git.postgresql.org/git/postgresql.git ~/pg18source
-          cd ~/pg18source
-          ./configure --prefix=$HOME/pg18 CFLAGS="-std=gnu99 -ggdb -O0" --enable-cassert
+          git clone --depth 1 --branch REL_18_STABLE https://git.postgresql.org/git/postgresql.git "$PG_SOURCE"
+          cd "$PG_SOURCE"
+          ./configure --prefix="$PG_PREFIX" CC="ccache gcc" CFLAGS="-std=gnu99 -ggdb -O0" --enable-cassert
           make install -j$(nproc) > /dev/null
           cd contrib
           cd fuzzystrmatch
-          make PG_CONFIG=$HOME/pg18/bin/pg_config install -j$(nproc) > /dev/null
+          make PG_CONFIG="$PG_PREFIX/bin/pg_config" CC="ccache gcc" install -j$(nproc) > /dev/null
           cd ../pg_trgm
-          make PG_CONFIG=$HOME/pg18/bin/pg_config install -j$(nproc) > /dev/null
+          make PG_CONFIG="$PG_PREFIX/bin/pg_config" CC="ccache gcc" install -j$(nproc) > /dev/null
 
-      - uses: actions/checkout@v3
+      - name: Cache pgvector install
+        uses: actions/cache@v4
+        id: pgvectorcache
         with:
-          fetch-depth: 75
+          path: |
+            ${{ env.PG_PREFIX }}/lib/vector.so
+            ${{ env.PG_PREFIX }}/share/extension/vector.control
+            ${{ env.PG_PREFIX }}/share/extension/vector--*.sql
+          key: ${{ runner.os }}-pgvector-${{ env.PGVECTOR_COMMIT_HASH }}-pg18-${{ env.PG_COMMIT_HASH }}
+
+      - name: Build pgvector
+        if: steps.pgvectorcache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/pgvector/pgvector.git "$PGVECTOR_SOURCE"
+          make -C "$PGVECTOR_SOURCE" PG_CONFIG="$PG_PREFIX/bin/pg_config" CC="ccache gcc" install -j$(nproc) > /dev/null
 
       - name: Build AGE
-        id: build
         run: |
-          make PG_CONFIG=$HOME/pg18/bin/pg_config COPT=-Werror install -j$(nproc)
-
-      - name: Pull and build pgvector
-        id: pgvector
-        run: |
-          git clone https://github.com/pgvector/pgvector.git
-          cd pgvector
-          make PG_CONFIG=$HOME/pg18/bin/pg_config install -j$(nproc) > /dev/null
+          make PG_CONFIG="$PG_PREFIX/bin/pg_config" CC="ccache gcc" COPT=-Werror install -j$(nproc)
 
       - name: Regression tests
-        id: regression_tests
         run: |
-          make PG_CONFIG=$HOME/pg18/bin/pg_config installcheck EXTRA_TESTS="pgvector fuzzystrmatch pg_trgm"
-        continue-on-error: true
+          trap 'test ! -f regress/regression.diffs || { echo "Dump section begin."; cat regress/regression.diffs; echo "Dump section end."; }' ERR
+          make PG_CONFIG="$PG_PREFIX/bin/pg_config" installcheck EXTRA_TESTS="pgvector fuzzystrmatch pg_trgm"
 
-      - name: Dump regression test errors
-        if: steps.regression_tests.outcome != 'success'
+      - name: Package PostgreSQL install
+        run: tar -C "${{ github.workspace }}" -czf "$RUNNER_TEMP/pg18-age.tar.gz" .pg18
+
+      - name: Upload PostgreSQL install
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg18-age
+          path: ${{ runner.temp }}/pg18-age.tar.gz
+          retention-days: 1
+
+  go-driver:
+    needs: installcheck
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: [ '1.20', '1.21' ]
+
+    defaults:
+      run:
+        working-directory: drivers/golang/age/
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download PostgreSQL install
+        uses: actions/download-artifact@v4
+        with:
+          name: pg18-age
+          path: ${{ runner.temp }}/pg18-age
+
+      - name: Extract PostgreSQL install
+        run: tar -C "${{ github.workspace }}" -xzf "$RUNNER_TEMP/pg18-age/pg18-age.tar.gz"
+        working-directory: ${{ github.workspace }}
+
+      - name: Start PostgreSQL
+        uses: ./.github/actions/start-age-postgres
+        with:
+          pg-prefix: ${{ github.workspace }}/.pg18
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Generate
+        run: go generate ./../...
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        run: go test . -v
+
+  nodejs-driver:
+    needs: installcheck
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: drivers/nodejs/
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download PostgreSQL install
+        uses: actions/download-artifact@v4
+        with:
+          name: pg18-age
+          path: ${{ runner.temp }}/pg18-age
+
+      - name: Extract PostgreSQL install
+        run: tar -C "${{ github.workspace }}" -xzf "$RUNNER_TEMP/pg18-age/pg18-age.tar.gz"
+        working-directory: ${{ github.workspace }}
+
+      - name: Start PostgreSQL
+        uses: ./.github/actions/start-age-postgres
+        with:
+          pg-prefix: ${{ github.workspace }}/.pg18
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: latest
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+  python-driver:
+    needs: installcheck
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: drivers/python
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download PostgreSQL install
+        uses: actions/download-artifact@v4
+        with:
+          name: pg18-age
+          path: ${{ runner.temp }}/pg18-age
+
+      - name: Extract PostgreSQL install
+        run: tar -C "${{ github.workspace }}" -xzf "$RUNNER_TEMP/pg18-age/pg18-age.tar.gz"
+        working-directory: ${{ github.workspace }}
+
+      - name: Start PostgreSQL
+        uses: ./.github/actions/start-age-postgres
+        with:
+          pg-prefix: ${{ github.workspace }}/.pg18
+
+      - name: Set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pre-requisites
         run: |
-          echo "Dump section begin."
-          cat $HOME/work/age/age/regress/regression.diffs
-          echo "Dump section end."
-          exit 1
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-dev libpq-dev
+          pip install --no-binary psycopg -r requirements.txt
+
+      - name: Build
+        run: |
+          pip install .
+
+      - name: Test
+        run: |
+          python test_age_py.py -db "postgres" -u "postgres" -pass "agens"
+          python test_networkx.py -db "postgres" -u "postgres" -pass "agens"
+          python -m unittest -v test_agtypes.py
+          python -m unittest -v test_security.py
+
+  jdbc-driver:
+    needs: installcheck
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: drivers/jdbc
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download PostgreSQL install
+        uses: actions/download-artifact@v4
+        with:
+          name: pg18-age
+          path: ${{ runner.temp }}/pg18-age
+
+      - name: Extract PostgreSQL install
+        run: tar -C "${{ github.workspace }}" -xzf "$RUNNER_TEMP/pg18-age/pg18-age.tar.gz"
+        working-directory: ${{ github.workspace }}
+
+      - name: Start PostgreSQL
+        uses: ./.github/actions/start-age-postgres
+        with:
+          pg-prefix: ${{ github.workspace }}/.pg18
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Build and Test
+        env:
+          AGE_JDBC_URL: jdbc:postgresql://127.0.0.1:5432/postgres?sslmode=disable
+          AGE_JDBC_USER: postgres
+          AGE_JDBC_PASSWORD: agens
+        run: gradle build

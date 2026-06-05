@@ -1,0 +1,45 @@
+name: Start AGE PostgreSQL
+description: Start a local PostgreSQL cluster with AGE installed for driver tests.
+
+inputs:
+  pg-prefix:
+    description: PostgreSQL install prefix.
+    required: false
+    default: .pg18
+  port:
+    description: PostgreSQL port.
+    required: false
+    default: "5432"
+  password:
+    description: Password assigned to the postgres user.
+    required: false
+    default: agens
+
+runs:
+  using: composite
+  steps:
+    - name: Start PostgreSQL
+      shell: bash
+      run: |
+        set -euo pipefail
+        PG_PREFIX="${{ inputs.pg-prefix }}"
+        PGDATA="$RUNNER_TEMP/age_pgdata"
+        PGPORT="${{ inputs.port }}"
+
+        echo "$PG_PREFIX/bin" >> "$GITHUB_PATH"
+        echo "LD_LIBRARY_PATH=$PG_PREFIX/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+        export PATH="$PG_PREFIX/bin:$PATH"
+        export LD_LIBRARY_PATH="$PG_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+
+        rm -rf "$PGDATA"
+        initdb -D "$PGDATA" --username=postgres --auth-local=trust --auth-host=trust
+
+        pg_ctl -D "$PGDATA" \
+          -l "$RUNNER_TEMP/postgres.log" \
+          -o "-p $PGPORT -c listen_addresses=127.0.0.1" \
+          start
+
+        psql -h 127.0.0.1 -p "$PGPORT" -U postgres -d postgres -v ON_ERROR_STOP=1 \
+          -c "ALTER USER postgres PASSWORD '${{ inputs.password }}';"
+        psql -h 127.0.0.1 -p "$PGPORT" -U postgres -d postgres -v ON_ERROR_STOP=1 \
+          -c "CREATE EXTENSION age;"

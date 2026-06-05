@@ -155,7 +155,10 @@ typedef struct AgeAdjacencyDeltaCompactPostingData
     ItemPointerData heap_tid;
     uint8 edge_entry_id[6];
     uint8 next_entry_id[6];
-} pg_attribute_packed() AgeAdjacencyDeltaCompactPostingData;
+} AgeAdjacencyDeltaCompactPostingData;
+
+StaticAssertDecl(sizeof(AgeAdjacencyDeltaCompactPostingData) == 24,
+                 "AgeAdjacencyDeltaCompactPostingData size changed");
 
 typedef AgeAdjacencyDeltaCompactPostingData *AgeAdjacencyDeltaCompactPosting;
 
@@ -173,7 +176,10 @@ typedef struct AgeAdjacencyMainCompactPostingData
     ItemPointerData heap_tid;
     uint8 edge_entry_id[6];
     uint8 next_entry_id[6];
-} pg_attribute_packed() AgeAdjacencyMainCompactPostingData;
+} AgeAdjacencyMainCompactPostingData;
+
+StaticAssertDecl(sizeof(AgeAdjacencyMainCompactPostingData) == 18,
+                 "AgeAdjacencyMainCompactPostingData size changed");
 
 typedef AgeAdjacencyMainCompactPostingData *AgeAdjacencyMainCompactPosting;
 
