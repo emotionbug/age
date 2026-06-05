@@ -1851,8 +1851,8 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     Path *reference_path;
     double rows;
     double pages;
-    Cost random_page_cost;
-    Cost seq_page_cost;
+    Cost local_random_page_cost;
+    Cost local_seq_page_cost;
 
     if (input_rel == NULL || output_rel == NULL || slots == NIL ||
         root->parse == NULL ||
@@ -1914,9 +1914,9 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     reference_path = linitial(input_rel->pathlist);
     rows = clamp_row_est(Max(base_rel->rows, 1.0));
     pages = Max(base_rel->pages, 1);
-    get_tablespace_page_costs(base_rel->reltablespace, &random_page_cost,
-                              &seq_page_cost);
-    (void) random_page_cost;
+    get_tablespace_page_costs(base_rel->reltablespace, &local_random_page_cost,
+                              &local_seq_page_cost);
+    (void) local_random_page_cost;
 
     cp = makeNode(CustomPath);
     cp->path.pathtype = T_CustomScan;
@@ -1929,7 +1929,7 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     cp->path.pathkeys = reference_path->pathkeys;
     cp->path.rows = rows;
     cp->path.startup_cost = 0;
-    cp->path.total_cost = seq_page_cost * pages + cpu_tuple_cost * rows;
+    cp->path.total_cost = local_seq_page_cost * pages + cpu_tuple_cost * rows;
     cp->flags = CUSTOMPATH_SUPPORT_PROJECTION;
     cp->custom_paths = NIL;
     cp->custom_private = list_make2(make_property_projection_slot_private(slots),
@@ -5276,7 +5276,7 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
     int residual_count;
     int index_solved_count;
     bool edge_payload_required;
-    Cost random_page_cost;
+    Cost local_random_page_cost;
     Cost local_seq_page_cost;
 
     rows = cp->path.param_info != NULL ? cp->path.param_info->ppi_rows :
@@ -5376,7 +5376,7 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
         adjacency_match_index_solved_predicate_count(candidate,
                                                      payload_request);
 
-    get_tablespace_page_costs(rel->reltablespace, &random_page_cost,
+    get_tablespace_page_costs(rel->reltablespace, &local_random_page_cost,
                               &local_seq_page_cost);
 
     /*
@@ -5384,8 +5384,8 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
      * the endpoint posting run. Charge a bounded page probe plus heap
      * visibility rechecks for the estimated payload rows.
      */
-    page_probe_cost = Min(pages, 4.0) * random_page_cost * 0.03;
-    heap_recheck_cost = estimated_payload_rows * random_page_cost *
+    page_probe_cost = Min(pages, 4.0) * local_random_page_cost * 0.03;
+    heap_recheck_cost = estimated_payload_rows * local_random_page_cost *
         (edge_payload_required ? 0.035 : 0.012);
     right_property_recheck_cost = 0;
     if (candidate->has_right_property_predicate)

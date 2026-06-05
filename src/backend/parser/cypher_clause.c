@@ -5917,7 +5917,7 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
              */
             if (node->name != NULL)
             {
-                Node *expr;
+                Node *existing_var;
 
                 if (path->var_name && strcmp(node->name, path->var_name) == 0)
                 {
@@ -5932,9 +5932,9 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                  * Checks the previous clauses to see if the variable already
                  * exists.
                  */
-                expr = colNameToVar(pstate, node->name, false,
-                                          node->location);
-                if (expr != NULL)
+                existing_var = colNameToVar(pstate, node->name, false,
+                                            node->location);
+                if (existing_var != NULL)
                 {
                     node_declared_in_prev_clause = true;
                 }
@@ -6546,7 +6546,7 @@ static Oid get_age_adjacency_match_metadata_index(Oid graph_oid,
         Oid index_oid;
         char label_kind;
         char *tuple_label_name;
-        char *index_kind;
+        char *tuple_index_kind;
         char *tuple_direction;
         char *index_name;
         char *provider;
@@ -6574,8 +6574,8 @@ static Oid get_age_adjacency_match_metadata_index(Oid graph_oid,
         value = heap_getattr(tuple, 7, tupdesc, &isnull);
         if (isnull)
             continue;
-        index_kind = TextDatumGetCString(value);
-        if (pg_strcasecmp(index_kind, "ADJACENCY") != 0)
+        tuple_index_kind = TextDatumGetCString(value);
+        if (pg_strcasecmp(tuple_index_kind, "ADJACENCY") != 0)
             continue;
 
         value = heap_getattr(tuple, 8, tupdesc, &isnull);
@@ -6617,7 +6617,7 @@ static Oid get_age_adjacency_match_metadata_index(Oid graph_oid,
             }
             result = index_oid;
             result_source = psprintf("graph-metadata:%s", index_name);
-            result_kind = pstrdup(index_kind);
+            result_kind = pstrdup(tuple_index_kind);
             result_provider = pstrdup(provider);
             result_direction = pstrdup(tuple_direction);
             index_close(index_rel, AccessShareLock);
@@ -7065,21 +7065,21 @@ transform_match_create_path_variable(cypher_parsestate *cpstate,
     /* extract the expr for each entity */
     foreach (lc, entities)
     {
-        transform_entity *entity = lfirst(lc);
+        transform_entity *path_entity = lfirst(lc);
 
-        if (entity->expr != NULL)
+        if (path_entity->expr != NULL)
         {
             /*
              * Is it a NULL constant, meaning there was an invalid label?
              * If so, flag it for later
              */
-            if (IsA(entity->expr, Const) &&
-                ((Const*)(entity->expr))->constisnull)
+            if (IsA(path_entity->expr, Const) &&
+                ((Const*)(path_entity->expr))->constisnull)
             {
                 null_path_entity = true;
             }
 
-            entity_exprs = lappend(entity_exprs, entity->expr);
+            entity_exprs = lappend(entity_exprs, path_entity->expr);
         }
     }
 
@@ -7927,7 +7927,7 @@ static Expr *transform_cypher_node(cypher_parsestate *cpstate,
      */
     if (node->name != NULL)
     {
-        Node *expr = NULL;
+        Node *existing_expr = NULL;
 
         /*
          * If we are in a WHERE clause transform, we don't want to create new
@@ -7991,10 +7991,11 @@ static Expr *transform_cypher_node(cypher_parsestate *cpstate,
         }
 
         /* if this vertex is referencing an existing col var, return its expr */
-        expr = colNameToVar(pstate, node->name, false, node->location);
-        if (expr != NULL)
+        existing_expr = colNameToVar(pstate, node->name, false,
+                                     node->location);
+        if (existing_expr != NULL)
         {
-            return (Expr*)expr;
+            return (Expr*)existing_expr;
         }
     }
     else
