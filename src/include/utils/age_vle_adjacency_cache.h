@@ -37,15 +37,20 @@ typedef struct VLEAdjacencyPayloadCacheEntry
     int64 count;
     int64 capacity;
     AgeAdjacencyPayload *payloads;
+    bool known_empty;
 } VLEAdjacencyPayloadCacheEntry;
 
 extern VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_get(
     HTAB **payload_cache, Oid index_oid, graphid source_vertex_id,
     bool *found);
+extern VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_lookup(
+    HTAB *payload_cache, Oid index_oid, graphid source_vertex_id);
 extern void age_vle_adjacency_payload_cache_append(
     VLEAdjacencyPayloadCacheEntry *cache_entry,
     const AgeAdjacencyPayload *payload);
 extern void age_vle_adjacency_payload_cache_discard(
+    VLEAdjacencyPayloadCacheEntry *cache_entry);
+extern void age_vle_adjacency_payload_cache_mark_empty(
     VLEAdjacencyPayloadCacheEntry *cache_entry);
 extern void age_vle_adjacency_payload_cache_free(HTAB **payload_cache);
 

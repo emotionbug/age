@@ -37,10 +37,13 @@ typedef struct CypherPropertyHandoffDescriptor
 
 typedef struct CypherCachedPropertySlotDescriptor
 {
+    bool has_property_descriptor;
+    CypherPropertyHandoffDescriptor property_descriptor;
     Node *container;
     List *keys;
     Oid value_type;
     Oid field_result_type;
+    int final_materialization_weight;
     Oid final_func_oid;
     Oid agg_func_oid;
     Node *index_expr;

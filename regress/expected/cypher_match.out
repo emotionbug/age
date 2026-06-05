@@ -74,12 +74,24 @@ SELECT * FROM cypher('cypher_match', $$MATCH (n:v) RETURN n.i$$) AS (i agtype);
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT *
 FROM cypher('cypher_match',
+            $$MATCH (n:v) RETURN n.i$$) AS (i agtype);
+                                               QUERY PLAN                                               
+--------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE Property Projection) on cypher_match.v n
+   Output: (agtype_object_field_agtype(n.properties, '"i"'::agtype))
+   Cached Property Slots: 1:{source=heap-properties, key=i, value=agtype, field=agtype, final-weight=2}
+   Cached Property Slot Count: 1
+(4 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
             $$MATCH (n:v) RETURN n.i::pg_bigint$$) AS (i bigint);
-                                       QUERY PLAN                                       
-----------------------------------------------------------------------------------------
+                                               QUERY PLAN                                               
+--------------------------------------------------------------------------------------------------------
  Custom Scan (AGE Property Projection) on cypher_match.v n
    Output: (agtype_object_field_int8(n.properties, '"i"'::agtype))
-   Cached Property Slots: 1:{source=heap-properties, key=i, value=bigint, field=bigint}
+   Cached Property Slots: 1:{source=heap-properties, key=i, value=bigint, field=bigint, final-weight=1}
    Cached Property Slot Count: 1
 (4 rows)
 
@@ -88,11 +100,11 @@ SELECT *
 FROM cypher('cypher_match',
             $$MATCH (n:v) RETURN n.i::pg_bigint, n.i::pg_float8$$)
      AS (i bigint, f float8);
-                                                                            QUERY PLAN                                                                            
-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                            QUERY PLAN                                                                                            
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE Property Projection) on cypher_match.v n
    Output: (agtype_object_field_int8(n.properties, '"i"'::agtype)), (agtype_object_field_float8(n.properties, '"i"'::agtype))
-   Cached Property Slots: 1:{source=heap-properties, key=i, value=bigint, field=bigint}; 2:{source=slot-1, key=i, value=double precision, field=double precision}
+   Cached Property Slots: 1:{source=heap-properties, key=i, value=bigint, field=bigint, final-weight=1}; 2:{source=slot-1, key=i, value=double precision, field=double precision, final-weight=1}
    Cached Property Slot Count: 2
 (4 rows)
 
@@ -305,7 +317,7 @@ FROM cypher('cypher_match_numeric_path',
 -----------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE Property Projection) on cypher_match_numeric_path."NumericPath" n
    Output: (agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype))
-   Cached Property Slots: 1:{source=heap-properties, key=payload.a, value=numeric, field=numeric}
+   Cached Property Slots: 1:{source=heap-properties, key=payload.a, value=numeric, field=numeric, final-weight=1}
    Cached Property Slot Count: 1
 (4 rows)
 
@@ -2140,8 +2152,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
               RETURN relationships(p)$$) AS (r agtype)
 $plan$);
-                                                                             plan                                                                              
----------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                      plan                                                                                                                                                                                                                                                                                                                                                                                                                                                       
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_edges(_age_default_alias_0.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_vle_function_end_var_2
@@ -2157,12 +2169,12 @@ $plan$);
                VLE Argument Slots: graph=const, start=dynamic, end=dynamic, edge=const, lower=const, upper=const, direction=const, grammar-node=const
                VLE Graph: cypher_match
                VLE Edge: label=e1, properties=0
-               VLE Edge Source: global-metadata, fixed-source=out=none/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=global-edge-state
+               VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
                VLE Endpoints: start=runtime-id, end=runtime-id
                VLE Range: 1..2
                VLE Direction: right
                VLE Output: path(requirement=path, grammar=cached)
-               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
 (21 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
@@ -2173,8 +2185,8 @@ FROM cypher('cypher_match',
               ORDER BY last(relationships(p)).payload.a$$)
      AS (payload agtype, count agtype)
 $plan$);
-                                                                                                plan                                                                                                
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                               plan                                                                                                                                                                                                                                                                                                                                                                                                                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Result
    Output: (agtype_object_field_agtype(agtype_object_field_agtype(age_vle_edge_properties_at(_age_default_alias_0.edges, '-1'::agtype), '"payload"'::agtype), '"a"'::agtype)), ((count(*)))::agtype
    ->  Sort
@@ -2198,12 +2210,12 @@ $plan$);
                                  VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
                                  VLE Graph: cypher_match
                                  VLE Edge: label=e1, properties=0
-                                 VLE Edge Source: global-metadata, fixed-source=out=none/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=global-edge-state
+                                 VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
                                  VLE Endpoints: start=runtime-id, end=const-id
                                  VLE Range: 1..2
                                  VLE Direction: right
                                  VLE Output: path(requirement=path, grammar=cached)
-                                 VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+                                 VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
                      ->  Hash
                            Output: b.id
                            ->  Seq Scan on cypher_match.v1 b
@@ -2218,8 +2230,8 @@ FROM cypher('cypher_match',
               ORDER BY last(nodes(p)).payload.a$$)
      AS (payload agtype, count agtype)
 $plan$);
-                                                                                                plan                                                                                                
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                               plan                                                                                                                                                                                                                                                                                                                                                                                                                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Result
    Output: (agtype_object_field_agtype(agtype_object_field_agtype(age_vle_node_properties_at(_age_default_alias_0.edges, '-1'::agtype), '"payload"'::agtype), '"a"'::agtype)), ((count(*)))::agtype
    ->  Sort
@@ -2243,12 +2255,12 @@ $plan$);
                                  VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
                                  VLE Graph: cypher_match
                                  VLE Edge: label=e1, properties=0
-                                 VLE Edge Source: global-metadata, fixed-source=out=none/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=global-edge-state
+                                 VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
                                  VLE Endpoints: start=runtime-id, end=const-id
                                  VLE Range: 1..2
                                  VLE Direction: right
                                  VLE Output: path(requirement=path, grammar=cached)
-                                 VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+                                 VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
                      ->  Hash
                            Output: b.id
                            ->  Seq Scan on cypher_match.v1 b
@@ -2261,8 +2273,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
               RETURN p$$) AS (p agtype)
 $plan$);
-                                                                             plan                                                                              
----------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                      plan                                                                                                                                                                                                                                                                                                                                                                                                                                                       
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_vle_function_end_var_7
@@ -2278,12 +2290,12 @@ $plan$);
                VLE Argument Slots: graph=const, start=dynamic, end=dynamic, edge=const, lower=const, upper=const, direction=const, grammar-node=const
                VLE Graph: cypher_match
                VLE Edge: label=e1, properties=0
-               VLE Edge Source: global-metadata, fixed-source=out=none/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=global-edge-state
+               VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
                VLE Endpoints: start=runtime-id, end=runtime-id
                VLE Range: 1..2
                VLE Direction: right
                VLE Output: path(requirement=path, grammar=cached)
-               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
 (21 rows)
 
 --Undirected Path Tests

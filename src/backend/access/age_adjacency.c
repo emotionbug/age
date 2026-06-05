@@ -2096,6 +2096,31 @@ age_adjacency_visible_payload_scan_begin_key(
 }
 
 bool
+age_adjacency_visible_payload_scan_key_known_empty(
+    AgeAdjacencyVisiblePayloadScan *scan, graphid key)
+{
+    AgeAdjacencyDirectoryEntryData entry;
+
+    if (scan == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload scan is required")));
+    }
+
+    if (BlockNumberIsValid(scan->meta.first_delta_blkno))
+        return false;
+
+    if (!BlockNumberIsValid(scan->meta.first_directory_blkno) ||
+        !BlockNumberIsValid(scan->meta.last_directory_blkno))
+    {
+        return true;
+    }
+
+    return !age_adjacency_find_directory_entry_cached(scan, key, &entry);
+}
+
+bool
 age_adjacency_visible_payload_scan_next(
     AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyPayload *payload)
 {

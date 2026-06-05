@@ -125,14 +125,47 @@ typedef enum AgeVLEStreamEdgeSourceIndex
     AGE_VLE_STREAM_EDGE_SOURCE_ENDPOINT_START,
     AGE_VLE_STREAM_EDGE_SOURCE_ENDPOINT_END,
     AGE_VLE_STREAM_EDGE_SOURCE_LOCAL_EDGE_STATE,
+    AGE_VLE_STREAM_EDGE_SOURCE_EDGE_LABEL_OID,
     AGE_VLE_STREAM_EDGE_SOURCE_OUTGOING_KIND,
     AGE_VLE_STREAM_EDGE_SOURCE_INCOMING_KIND,
     AGE_VLE_STREAM_EDGE_SOURCE_RELATION_TUPLES,
     AGE_VLE_STREAM_EDGE_SOURCE_START_FANOUT,
     AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT,
+    AGE_VLE_STREAM_EDGE_SOURCE_RELATION_TUPLES_KNOWN,
+    AGE_VLE_STREAM_EDGE_SOURCE_START_FANOUT_KNOWN,
+    AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT_KNOWN,
     AGE_VLE_STREAM_EDGE_SOURCE_COST_POLICY,
     AGE_VLE_STREAM_EDGE_SOURCE_POLICY_OUTGOING_KIND,
     AGE_VLE_STREAM_EDGE_SOURCE_POLICY_INCOMING_KIND,
+    AGE_VLE_STREAM_EDGE_SOURCE_POLICY_CONSUMER,
+    AGE_VLE_STREAM_EDGE_SOURCE_POLICY_CONSUMER_CLASS,
+    AGE_VLE_STREAM_EDGE_SOURCE_POLICY_ACTIVE_DIRECTION,
+    AGE_VLE_STREAM_EDGE_SOURCE_POLICY_FANOUT_BUDGET,
+    AGE_VLE_STREAM_EDGE_SOURCE_POLICY_MATERIALIZATION_WEIGHT,
+    AGE_VLE_STREAM_EDGE_SOURCE_POLICY_CLASS,
+    AGE_VLE_STREAM_EDGE_SOURCE_POLICY_RECOMMENDATION,
+    AGE_VLE_STREAM_EDGE_SOURCE_CACHE_SEED_ELIGIBLE,
+    AGE_VLE_STREAM_EDGE_SOURCE_ENDPOINT_HEADROOM_PERCENT,
+    AGE_VLE_STREAM_EDGE_SOURCE_EMPTY_LIFECYCLE_ELIGIBLE,
+    AGE_VLE_STREAM_EDGE_SOURCE_EMPTY_LIFECYCLE_DEPTH,
+    AGE_VLE_STREAM_EDGE_SOURCE_EMPTY_LIFECYCLE_BATCH_SIZE,
+    AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_KNOWN,
+    AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_HEADROOM_PERCENT,
+    AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_BATCH_SIZE,
+    AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_OBSERVED_COUNT,
+    AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_SATURATED_COUNT,
+    AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_RELAXED_COUNT,
+    AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_SOURCE,
+    AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_REASON,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_KNOWN,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_HEADROOM_PERCENT,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_SCAN_RUNS,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_REPLAY_RUNS,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_SEED_RUNS,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_REPLAY_PERCENT,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_SEED_PERCENT,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_OBSERVED_COUNT,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_REASON,
     AGE_VLE_STREAM_EDGE_SOURCE_COUNT
 } AgeVLEStreamEdgeSourceIndex;
 
@@ -190,14 +223,47 @@ typedef struct AgeVLEStreamEdgeSource
     bool endpoint_start;
     bool endpoint_end;
     bool local_edge_state;
+    Oid edge_label_oid;
     AgeVLEStreamDirectedSourceKind outgoing_kind;
     AgeVLEStreamDirectedSourceKind incoming_kind;
     int64 relation_tuples;
     int64 start_fanout;
     int64 end_fanout;
+    bool relation_tuples_known;
+    bool start_fanout_known;
+    bool end_fanout_known;
     char *cost_policy;
     AgeVLEStreamDirectedSourceKind policy_outgoing_kind;
     AgeVLEStreamDirectedSourceKind policy_incoming_kind;
+    char *policy_consumer;
+    char *policy_consumer_class;
+    char *policy_active_direction;
+    int64 policy_fanout_budget;
+    int64 policy_materialization_weight;
+    char *policy_class;
+    char *policy_recommendation;
+    bool cache_seed_eligible;
+    int64 endpoint_headroom_percent;
+    bool empty_lifecycle_eligible;
+    int64 empty_lifecycle_depth;
+    int64 empty_lifecycle_batch_size;
+    bool threshold_input_known;
+    int64 threshold_input_headroom_percent;
+    int64 threshold_input_batch_size;
+    int64 threshold_input_observed_count;
+    int64 threshold_input_saturated_count;
+    int64 threshold_input_relaxed_count;
+    char *threshold_input_source;
+    char *threshold_input_reason;
+    bool payload_input_known;
+    int64 payload_input_headroom_percent;
+    int64 payload_input_scan_runs;
+    int64 payload_input_replay_runs;
+    int64 payload_input_seed_runs;
+    int64 payload_input_replay_percent;
+    int64 payload_input_seed_percent;
+    int64 payload_input_observed_count;
+    char *payload_input_reason;
 } AgeVLEStreamEdgeSource;
 
 extern const CustomScanMethods age_vle_stream_scan_methods;
@@ -222,7 +288,7 @@ const char *format_age_vle_stream_direction(
     AgeVLEStreamRangeDirection *range);
 char *format_age_vle_stream_output(AgeVLEStreamOutput *output, int nargs);
 const char *format_age_vle_stream_materialization(
-    AgeVLEStreamOutput *output);
+    AgeVLEStreamOutput *output, AgeVLEStreamEdgeSource *source);
 const char *format_age_vle_stream_terminal_slot(CustomScan *cscan,
                                                 AgeVLEStreamOutput *output,
                                                 int nargs);

@@ -212,6 +212,9 @@ void read_age_vle_stream_edge_source(CustomScan *cscan,
     source->local_edge_state =
         age_vle_stream_private_bool(
             descriptor, AGE_VLE_STREAM_EDGE_SOURCE_LOCAL_EDGE_STATE);
+    source->edge_label_oid =
+        (Oid)age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_EDGE_LABEL_OID);
     source->outgoing_kind =
         (AgeVLEStreamDirectedSourceKind)age_vle_stream_private_int64(
             descriptor, AGE_VLE_STREAM_EDGE_SOURCE_OUTGOING_KIND);
@@ -227,6 +230,15 @@ void read_age_vle_stream_edge_source(CustomScan *cscan,
     source->end_fanout =
         age_vle_stream_private_int64(
             descriptor, AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT);
+    source->relation_tuples_known =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_RELATION_TUPLES_KNOWN);
+    source->start_fanout_known =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_START_FANOUT_KNOWN);
+    source->end_fanout_known =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT_KNOWN);
     source->cost_policy =
         age_vle_stream_private_text(
             descriptor, AGE_VLE_STREAM_EDGE_SOURCE_COST_POLICY);
@@ -236,6 +248,105 @@ void read_age_vle_stream_edge_source(CustomScan *cscan,
     source->policy_incoming_kind =
         (AgeVLEStreamDirectedSourceKind)age_vle_stream_private_int64(
             descriptor, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_INCOMING_KIND);
+    source->policy_consumer =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_CONSUMER);
+    source->policy_consumer_class =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_CONSUMER_CLASS);
+    source->policy_active_direction =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_ACTIVE_DIRECTION);
+    source->policy_fanout_budget =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_FANOUT_BUDGET);
+    source->policy_materialization_weight =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_POLICY_MATERIALIZATION_WEIGHT);
+    source->policy_class =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_CLASS);
+    source->policy_recommendation =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_RECOMMENDATION);
+    source->cache_seed_eligible =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_CACHE_SEED_ELIGIBLE);
+    source->endpoint_headroom_percent =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_ENDPOINT_HEADROOM_PERCENT);
+    source->empty_lifecycle_eligible =
+        age_vle_stream_private_bool(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_EMPTY_LIFECYCLE_ELIGIBLE);
+    source->empty_lifecycle_depth =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_EMPTY_LIFECYCLE_DEPTH);
+    source->empty_lifecycle_batch_size =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_EMPTY_LIFECYCLE_BATCH_SIZE);
+    source->threshold_input_known =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_KNOWN);
+    source->threshold_input_headroom_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_HEADROOM_PERCENT);
+    source->threshold_input_batch_size =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_BATCH_SIZE);
+    source->threshold_input_observed_count =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_OBSERVED_COUNT);
+    source->threshold_input_saturated_count =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_SATURATED_COUNT);
+    source->threshold_input_relaxed_count =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_RELAXED_COUNT);
+    source->threshold_input_source =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_SOURCE);
+    source->threshold_input_reason =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_REASON);
+    source->payload_input_known =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_KNOWN);
+    source->payload_input_headroom_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_HEADROOM_PERCENT);
+    source->payload_input_scan_runs =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_SCAN_RUNS);
+    source->payload_input_replay_runs =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_REPLAY_RUNS);
+    source->payload_input_seed_runs =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_SEED_RUNS);
+    source->payload_input_replay_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_REPLAY_PERCENT);
+    source->payload_input_seed_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_SEED_PERCENT);
+    source->payload_input_observed_count =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_OBSERVED_COUNT);
+    source->payload_input_reason =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_REASON);
 }
 
 const char *age_vle_stream_shape_name(AgeVLEStreamOutput *output, int nargs)
@@ -407,10 +518,15 @@ char *format_age_vle_stream_output(AgeVLEStreamOutput *output, int nargs)
 }
 
 const char *format_age_vle_stream_materialization(
-    AgeVLEStreamOutput *output)
+    AgeVLEStreamOutput *output, AgeVLEStreamEdgeSource *source)
 {
+    const char *object_source;
+
     if (output == NULL)
         return "unknown";
+
+    object_source = source != NULL && source->local_edge_state ?
+        "label-row-fallback" : "global-metadata";
 
     switch (output->requirement)
     {
@@ -418,14 +534,19 @@ const char *format_age_vle_stream_materialization(
             if (output->materializer_vertex_prefetch)
             {
                 return psprintf("path-container, vertex-prefetch=label-batch"
-                                "(min-rel-candidates=%d)",
-                                output->materializer_prefetch_min_rel_candidates);
+                                "(min-rel-candidates=%d), "
+                                "object-source=%s",
+                                output->materializer_prefetch_min_rel_candidates,
+                                object_source);
             }
-            return "path-container";
+            return psprintf("path-container, object-source=%s",
+                            object_source);
         case AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_VERTEX:
-            return "terminal-vertex-container";
+            return psprintf("terminal-vertex-container, object-source=%s",
+                            object_source);
         case AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES:
-            return "terminal-properties-direct";
+            return psprintf("terminal-properties-direct, vertex-source=%s",
+                            object_source);
         case AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY:
             return "terminal-property-direct";
         case AGE_VLE_OUTPUT_REQUIREMENT_UNKNOWN:

@@ -88,6 +88,10 @@ typedef struct AgeVLEInput
     bool source_policy_known;
     int source_policy_outgoing_kind;
     int source_policy_incoming_kind;
+    bool empty_lifecycle_policy_known;
+    bool empty_lifecycle_eligible;
+    int64 empty_lifecycle_depth;
+    int64 empty_lifecycle_batch_size;
 } AgeVLEInput;
 
 typedef struct AgeVLEInputEdgePrototype
@@ -105,11 +109,33 @@ typedef struct AgeVLESourceStats
     int64 missing_vertex_source_hits;
     int64 age_adjacency_scans;
     int64 age_adjacency_candidates;
+    int64 age_adjacency_empty_scans;
+    int64 age_adjacency_empty_source_skips;
+    int64 age_adjacency_empty_source_skip_out;
+    int64 age_adjacency_empty_source_skip_in;
+    int64 age_adjacency_empty_source_cache_hits;
+    int64 age_adjacency_empty_source_cache_hit_out;
+    int64 age_adjacency_empty_source_cache_hit_in;
+    int64 age_adjacency_empty_source_frontier_marks;
+    int64 age_adjacency_empty_source_frontier_mark_out;
+    int64 age_adjacency_empty_source_frontier_mark_in;
+    int64 age_adjacency_empty_source_frontier_batch_flushes;
+    int64 age_adjacency_empty_source_frontier_batch_out;
+    int64 age_adjacency_empty_source_frontier_batch_in;
+    int64 age_adjacency_empty_source_frontier_batch_keys;
+    int64 age_adjacency_empty_source_frontier_batch_max;
+    int64 age_adjacency_empty_source_run_skips;
+    int64 age_adjacency_empty_source_run_skip_out;
+    int64 age_adjacency_empty_source_run_skip_in;
+    int64 age_adjacency_payload_scan_runs;
+    int64 age_adjacency_payload_replay_runs;
+    int64 age_adjacency_payload_cache_seed_runs;
     int64 age_adjacency_payload_scans;
     int64 age_adjacency_payload_replays;
     int64 age_adjacency_payload_cache_seeds;
     int64 endpoint_btree_scans;
     int64 endpoint_btree_candidates;
+    int64 endpoint_btree_empty_scans;
     int64 packed_scans;
     int64 packed_candidates;
     int64 packed_empty_skips;
@@ -119,6 +145,15 @@ typedef struct AgeVLESourceStats
     int64 packed_suppress_self;
     int64 candidates_yielded;
     int64 candidates_pushed;
+    int64 empty_lifecycle_context_runs;
+    int64 empty_lifecycle_context_eligible_runs;
+    int64 empty_lifecycle_context_depth;
+    int64 empty_lifecycle_batch_capacity;
+    int64 root_empty_completion_count;
+    int64 root_empty_completion_out;
+    int64 root_empty_completion_in;
+    int64 root_empty_batch_capacity;
+    int64 root_empty_saturated_count;
 } AgeVLESourceStats;
 
 AgeVLEIterator *age_vle_iterator_create_from_input(AgeVLEInput *input,

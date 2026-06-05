@@ -2452,16 +2452,27 @@ vertex_entry *ensure_vertex_entry_skeleton(GRAPH_global_context *ggctx,
 }
 
 /* helper function to retrieve an edge_entry from the graph's edge hash table */
-edge_entry *get_edge_entry(GRAPH_global_context *ggctx, graphid edge_id)
+edge_entry *find_edge_entry(GRAPH_global_context *ggctx, graphid edge_id)
 {
     edge_entry *ee = NULL;
     bool found = false;
 
-    /* retrieve the current edge entry */
     ee = (edge_entry *)hash_search(ggctx->edge_hashtable, (void *)&edge_id,
                                    HASH_FIND, &found);
+    if (!found)
+        return NULL;
+
+    return ee;
+}
+
+/* helper function to retrieve an edge_entry from the graph's edge hash table */
+edge_entry *get_edge_entry(GRAPH_global_context *ggctx, graphid edge_id)
+{
+    edge_entry *ee = NULL;
+
+    ee = find_edge_entry(ggctx, edge_id);
     /* it should be found, otherwise we have problems */
-    Assert(found);
+    Assert(ee != NULL);
 
     return ee;
 }
@@ -2558,6 +2569,13 @@ GRAPH_global_context *find_GRAPH_global_context(Oid graph_oid)
 
     /* we did not find it so return NULL */
     return NULL;
+}
+
+Oid get_GRAPH_global_context_oid(GRAPH_global_context *ggctx)
+{
+    Assert(ggctx != NULL);
+
+    return ggctx->graph_oid;
 }
 
 bool is_GRAPH_global_context_current(GRAPH_global_context *ggctx)

@@ -21,6 +21,7 @@
 
 #include "common/hashfn.h"
 #include "utils/age_vle_adjacency_cache.h"
+#include "utils/memutils.h"
 
 VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_get(
     HTAB **payload_cache, Oid index_oid, graphid source_vertex_id,
@@ -28,16 +29,19 @@ VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_get(
 {
     VLEAdjacencyPayloadCacheKey cache_key;
     VLEAdjacencyPayloadCacheEntry *entry;
+    MemoryContext oldctx;
     HASHCTL ctl;
 
     if (*payload_cache == NULL)
     {
+        oldctx = MemoryContextSwitchTo(TopMemoryContext);
         MemSet(&ctl, 0, sizeof(ctl));
         ctl.keysize = sizeof(VLEAdjacencyPayloadCacheKey);
         ctl.entrysize = sizeof(VLEAdjacencyPayloadCacheEntry);
         ctl.hash = tag_hash;
         *payload_cache = hash_create("VLE age_adjacency payload cache", 1024,
                                      &ctl, HASH_ELEM | HASH_FUNCTION);
+        MemoryContextSwitchTo(oldctx);
     }
 
     MemSet(&cache_key, 0, sizeof(cache_key));
@@ -50,9 +54,25 @@ VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_get(
         entry->count = 0;
         entry->capacity = 0;
         entry->payloads = NULL;
+        entry->known_empty = false;
     }
 
     return entry;
+}
+
+VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_lookup(
+    HTAB *payload_cache, Oid index_oid, graphid source_vertex_id)
+{
+    VLEAdjacencyPayloadCacheKey cache_key;
+
+    if (payload_cache == NULL)
+        return NULL;
+
+    MemSet(&cache_key, 0, sizeof(cache_key));
+    cache_key.index_oid = index_oid;
+    cache_key.source_vertex_id = source_vertex_id;
+
+    return hash_search(payload_cache, &cache_key, HASH_FIND, NULL);
 }
 
 void age_vle_adjacency_payload_cache_append(
@@ -63,7 +83,9 @@ void age_vle_adjacency_payload_cache_append(
     {
         int64 new_capacity = cache_entry->capacity == 0 ? 8 :
                              cache_entry->capacity * 2;
+        MemoryContext oldctx;
 
+        oldctx = MemoryContextSwitchTo(TopMemoryContext);
         if (cache_entry->payloads == NULL)
         {
             cache_entry->payloads = palloc_array(AgeAdjacencyPayload,
@@ -75,9 +97,11 @@ void age_vle_adjacency_payload_cache_append(
                                                    AgeAdjacencyPayload,
                                                    new_capacity);
         }
+        MemoryContextSwitchTo(oldctx);
         cache_entry->capacity = new_capacity;
     }
 
+    cache_entry->known_empty = false;
     cache_entry->payloads[cache_entry->count++] = *payload;
 }
 
@@ -91,6 +115,14 @@ void age_vle_adjacency_payload_cache_discard(
     cache_entry->count = 0;
     cache_entry->capacity = 0;
     cache_entry->payloads = NULL;
+    cache_entry->known_empty = false;
+}
+
+void age_vle_adjacency_payload_cache_mark_empty(
+    VLEAdjacencyPayloadCacheEntry *cache_entry)
+{
+    age_vle_adjacency_payload_cache_discard(cache_entry);
+    cache_entry->known_empty = true;
 }
 
 void age_vle_adjacency_payload_cache_free(HTAB **payload_cache)

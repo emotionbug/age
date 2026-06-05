@@ -271,7 +271,7 @@ SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH ()-[e*1.
                VLE Range: 1..2
                VLE Direction: right
                VLE Output: path(requirement=path, grammar=cached)
-               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
 (17 rows)
 
 SELECT * FROM cypher('cypher_vle', $$EXPLAIN (COSTS OFF) MATCH (:begin)-[e*1..2 {name: "main edge"}]->(:end) RETURN count(*) $$) AS (plan agtype);
@@ -329,7 +329,7 @@ SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: terminal-vertex(requirement=terminal-vertex, grammar=terminal-only)
-         VLE Materialization: terminal-vertex-container
+         VLE Materialization: terminal-vertex-container, object-source=global-metadata
 (17 rows)
 
 SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)-[*1..2]->(n) RETURN properties(n) $$) AS (plan agtype);
@@ -351,7 +351,7 @@ SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: terminal-properties(requirement=terminal-properties, grammar=terminal-only)
-         VLE Materialization: terminal-properties-direct
+         VLE Materialization: terminal-properties-direct, vertex-source=global-metadata
          VLE Terminal Output Slot: full-properties, source=const
 (18 rows)
 
@@ -1923,7 +1923,7 @@ SELECT * FROM cypher('issue_1910', $$ EXPLAIN (VERBOSE, COSTS OFF)
                  VLE Range: 1..unbounded
                  VLE Direction: any
                  VLE Output: path(requirement=path, grammar=cached)
-                 VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+                 VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
 (20 rows)
 
 SELECT * FROM cypher('issue_1910', $$ MATCH (n) WHERE EXISTS((n)-[*]-({name: 'Willem Defoe'}))
@@ -2150,8 +2150,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                       QUERY PLAN                                                                                                                                                                        
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                  QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_265
@@ -2166,7 +2166,7 @@ AS (plan agtype);
          VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
          VLE Graph: vle_index_probe
          VLE Edge: label=R, properties=0
-         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=endpoint-btree, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 policy=out=endpoint-btree/in=endpoint-btree depth=costed endpoint-work=sum(out:2/2,in:1/2) reason=out:endpoint-work/in:endpoint-work
+         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-property/class:terminal-scalar/active:out/budget:2/weight:1 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:2/2,in:1/2) combined-work=all:0/0 reason=out:endpoint-work/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..1
          VLE Direction: right
@@ -2178,8 +2178,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                       QUERY PLAN                                                                                                                                                                        
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=2.00 loops=1)
    Output: _age_default_alias_0.edges
    Buffers: shared hit=25
@@ -2199,14 +2199,14 @@ AS (plan agtype);
          VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
          VLE Graph: vle_index_probe
          VLE Edge: label=R, properties=0
-         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=endpoint-btree, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 policy=out=endpoint-btree/in=endpoint-btree depth=costed endpoint-work=sum(out:2/2,in:1/2) reason=out:endpoint-work/in:endpoint-work
+         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-property/class:terminal-scalar/active:out/budget:2/weight:1 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:2/2,in:1/2) combined-work=all:0/0 reason=out:endpoint-work/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..1
          VLE Direction: right
          VLE Output: terminal-property(requirement=terminal-property, grammar=terminal-only, key=i, len=1, char-fast=true)
          VLE Materialization: terminal-property-direct
          VLE Terminal Output Slot: property-key, source=const
-         VLE Source Runtime: sources=age_adjacency=0/0/0/0/0 endpoint-btree=1/2 packed=0/0/0/1, packed-suppressed=out:0/in:0/self:0, missing-vertex=0/0, candidates=2/2, feedback=dominant=endpoint-btree density=age_adjacency:0.00,endpoint-btree:2.00,packed:0.00 yield=2/1 replay=0/0 push=2/2
+         VLE Source Runtime: sources=age_adjacency=0/0/0/0/0 endpoint-btree=1/2 packed=0/0/0/1, empty=age_adjacency:0/endpoint-btree:0, empty-suppressed=age_adjacency:0/out:0/in:0, empty-cache=age_adjacency:0/out:0/in:0, empty-frontier=age_adjacency:0/out:0/in:0, empty-frontier-batch=flushes:0/out:0/in:0/keys:0/max:0, empty-run=age_adjacency:0/out:0/in:0, payload-cache=runs:scan:0/replay:0/seed:0/tuples:scan:0/replay:0/seeds:0, empty-plan=ineligible/depth:0 match=true, empty-context=ineligible/depth:0/runs:1 match=true, empty-batch=ineligible/size:0/capacity:0 match=true, empty-summary=completion:0/batch:0/saturated:false, root-empty=completion:0/out:0/in:0/batch:0/saturated-roots:0, threshold-feedback=ineligible/headroom:0/batch:0/source:none/reason:none, empty-evidence=none, suppressed-source=out:none/in:none suppression-match=true, packed-suppressed=out:0/in:0/self:0, missing-vertex=0/0, candidates=2/2, feedback=dominant=endpoint-btree planned=out:endpoint-btree/in:none source-match=true class=endpoint-direct planned-class=endpoint-direct class-match=true recommendation=keep-endpoint-btree planned-recommendation=keep-endpoint-btree density=age_adjacency:0.00,endpoint-btree:2.00,packed:0.00 yield=2/1 replay=0/0 push=2/2 pressure=endpoint-fanout action=watch-endpoint-budget
          Buffers: shared hit=21
  Planning:
    Buffers: shared hit=1
@@ -2220,8 +2220,8 @@ ANALYZE vle_index_probe."R";
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                         QUERY PLAN                                                                                                                                                                         
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=2.00 loops=1)
    Output: _age_default_alias_0.edges
    Buffers: shared hit=8
@@ -2241,29 +2241,175 @@ AS (plan agtype);
          VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
          VLE Graph: vle_index_probe
          VLE Edge: label=R, properties=0
-         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 policy=out=endpoint-btree/in=endpoint-btree depth=costed endpoint-work=sum(out:2/2,in:1/2) reason=out:endpoint-work/in:endpoint-work
+         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-property/class:terminal-scalar/active:out/budget:2/weight:1 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:2/2,in:1/2) combined-work=all:0/0 reason=out:endpoint-work/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..1
          VLE Direction: right
          VLE Output: terminal-property(requirement=terminal-property, grammar=terminal-only, key=i, len=1, char-fast=true)
          VLE Materialization: terminal-property-direct
          VLE Terminal Output Slot: property-key, source=const
-         VLE Source Runtime: sources=age_adjacency=0/0/0/0/0 endpoint-btree=1/2 packed=0/0/0/1, packed-suppressed=out:0/in:0/self:0, missing-vertex=0/0, candidates=2/2, feedback=dominant=endpoint-btree density=age_adjacency:0.00,endpoint-btree:2.00,packed:0.00 yield=2/1 replay=0/0 push=2/2
+         VLE Source Runtime: sources=age_adjacency=0/0/0/0/0 endpoint-btree=1/2 packed=0/0/0/1, empty=age_adjacency:0/endpoint-btree:0, empty-suppressed=age_adjacency:0/out:0/in:0, empty-cache=age_adjacency:0/out:0/in:0, empty-frontier=age_adjacency:0/out:0/in:0, empty-frontier-batch=flushes:0/out:0/in:0/keys:0/max:0, empty-run=age_adjacency:0/out:0/in:0, payload-cache=runs:scan:0/replay:0/seed:0/tuples:scan:0/replay:0/seeds:0, empty-plan=ineligible/depth:0 match=true, empty-context=ineligible/depth:0/runs:1 match=true, empty-batch=ineligible/size:0/capacity:0 match=true, empty-summary=completion:0/batch:0/saturated:false, root-empty=completion:0/out:0/in:0/batch:0/saturated-roots:0, threshold-feedback=ineligible/headroom:0/batch:0/source:none/reason:none, empty-evidence=none, suppressed-source=out:none/in:none suppression-match=true, packed-suppressed=out:0/in:0/self:0, missing-vertex=0/0, candidates=2/2, feedback=dominant=endpoint-btree planned=out:endpoint-btree/in:none source-match=true class=endpoint-direct planned-class=endpoint-direct class-match=true recommendation=keep-endpoint-btree planned-recommendation=keep-endpoint-btree density=age_adjacency:0.00,endpoint-btree:2.00,packed:0.00 yield=2/1 replay=0/0 push=2/2 pressure=endpoint-fanout action=watch-endpoint-budget
          Buffers: shared hit=4
  Planning:
    Buffers: shared hit=11
 (30 rows)
 
 SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..1]->(n) RETURN p$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                               QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                               
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: age_materialize_vle_path(_age_default_alias_0.edges)
+   ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_271
+         Output: _age_default_vle_function_start_var_271.id, _age_default_vle_function_start_var_271.properties
+         Recheck Cond: (_age_default_vle_function_start_var_271.properties @> '{"i": 0}'::agtype)
+         ->  Bitmap Index Scan on vle_index_probe_n_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_271.properties @> '{"i": 0}'::agtype)
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_0.edges
+         VLE Shape: cypher
+         VLE Arguments: 8
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+         VLE Graph: vle_index_probe
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 stats=rel:known/start:known/end:known profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:2/1,in:1/1) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-work recommendation=keep-age-adjacency
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..1
+         VLE Direction: right
+         VLE Output: path(requirement=path, grammar=cached)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+(20 rows)
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 3})<-[:R*1..1]-(n) RETURN n.i$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                   QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: _age_default_alias_0.edges
+   ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_273
+         Output: _age_default_vle_function_start_var_273.id, _age_default_vle_function_start_var_273.properties
+         Recheck Cond: (_age_default_vle_function_start_var_273.properties @> '{"i": 3}'::agtype)
+         ->  Bitmap Index Scan on vle_index_probe_n_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_273.properties @> '{"i": 3}'::agtype)
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_0.edges
+         VLE Shape: terminal-property
+         VLE Arguments: 9
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+         VLE Graph: vle_index_probe
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=none/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-property/class:terminal-scalar/active:in/budget:2/weight:1 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=none/in=endpoint-btree depth=costed endpoint-work=sum(out:2/2,in:1/2) combined-work=all:0/0 reason=out:inactive-direction/in:endpoint-work class=endpoint-direct recommendation=keep-endpoint-btree
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..1
+         VLE Direction: left
+         VLE Output: terminal-property(requirement=terminal-property, grammar=terminal-only, key=i, len=1, char-fast=true)
+         VLE Materialization: terminal-property-direct
+         VLE Terminal Output Slot: property-key, source=const
+(21 rows)
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                   QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: age_vle_terminal_vertex(_age_default_alias_0.edges)
+   ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_275
+         Output: _age_default_vle_function_start_var_275.id, _age_default_vle_function_start_var_275.properties
+         Recheck Cond: (_age_default_vle_function_start_var_275.properties @> '{"i": 0}'::agtype)
+         ->  Bitmap Index Scan on vle_index_probe_n_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_275.properties @> '{"i": 0}'::agtype)
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_0.edges
+         VLE Shape: terminal-vertex
+         VLE Arguments: 8
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+         VLE Graph: vle_index_probe
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-vertex/class:terminal-object/active:out/budget:1/weight:2 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:2/1,in:1/1) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-work recommendation=keep-age-adjacency
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..1
+         VLE Direction: right
+         VLE Output: terminal-vertex(requirement=terminal-vertex, grammar=terminal-only)
+         VLE Materialization: terminal-vertex-container, object-source=label-row-fallback
+(20 rows)
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop (actual rows=2.00 loops=1)
+   Output: age_vle_terminal_vertex(_age_default_alias_0.edges)
+   Buffers: shared hit=9
+   ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_277 (actual rows=1.00 loops=1)
+         Output: _age_default_vle_function_start_var_277.id, _age_default_vle_function_start_var_277.properties
+         Recheck Cond: (_age_default_vle_function_start_var_277.properties @> '{"i": 0}'::agtype)
+         Heap Blocks: exact=1
+         Buffers: shared hit=4
+         ->  Bitmap Index Scan on vle_index_probe_n_properties_gin_idx (actual rows=1.00 loops=1)
+               Index Cond: (_age_default_vle_function_start_var_277.properties @> '{"i": 0}'::agtype)
+               Index Searches: 1
+               Buffers: shared hit=3
+   ->  Custom Scan (AGE VLE Stream) (actual rows=2.00 loops=1)
+         Output: _age_default_alias_0.edges
+         VLE Shape: terminal-vertex
+         VLE Arguments: 8
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+         VLE Graph: vle_index_probe
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-vertex/class:terminal-object/active:out/budget:1/weight:2 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:2/1,in:1/1) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-work recommendation=keep-age-adjacency
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..1
+         VLE Direction: right
+         VLE Output: terminal-vertex(requirement=terminal-vertex, grammar=terminal-only)
+         VLE Materialization: terminal-vertex-container, object-source=label-row-fallback
+         VLE Source Runtime: sources=age_adjacency=1/2/2/0/1 endpoint-btree=0/0 packed=0/0/0/1, empty=age_adjacency:0/endpoint-btree:0, empty-suppressed=age_adjacency:0/out:0/in:0, empty-cache=age_adjacency:0/out:0/in:0, empty-frontier=age_adjacency:0/out:0/in:0, empty-frontier-batch=flushes:0/out:0/in:0/keys:0/max:0, empty-run=age_adjacency:0/out:0/in:0, payload-cache=runs:scan:1/replay:0/seed:1/tuples:scan:2/replay:0/seeds:1, empty-plan=ineligible/depth:0 match=true, empty-context=ineligible/depth:0/runs:1 match=true, empty-batch=ineligible/size:0/capacity:0 match=true, empty-summary=completion:0/batch:0/saturated:false, root-empty=completion:0/out:0/in:0/batch:0/saturated-roots:0, threshold-feedback=ineligible/headroom:0/batch:0/source:none/reason:none, empty-evidence=none, suppressed-source=out:none/in:none suppression-match=true, packed-suppressed=out:0/in:0/self:0, missing-vertex=0/0, candidates=2/2, feedback=dominant=age-adjacency planned=out:age-adjacency/in:none source-match=true class=adjacency-work planned-class=adjacency-work class-match=true recommendation=keep-age-adjacency planned-recommendation=keep-age-adjacency density=age_adjacency:2.00,endpoint-btree:0.00,packed:0.00 yield=2/1 replay=0/2 push=2/2 pressure=stable action=observe
+         Buffers: shared hit=5
+ Planning:
+   Buffers: shared hit=1
+(29 rows)
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN properties(n)$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                     QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                      
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: _age_default_alias_0.edges
+   ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_279
+         Output: _age_default_vle_function_start_var_279.id, _age_default_vle_function_start_var_279.properties
+         Recheck Cond: (_age_default_vle_function_start_var_279.properties @> '{"i": 0}'::agtype)
+         ->  Bitmap Index Scan on vle_index_probe_n_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_279.properties @> '{"i": 0}'::agtype)
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_0.edges
+         VLE Shape: terminal-properties
+         VLE Arguments: 9
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+         VLE Graph: vle_index_probe
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-properties/class:terminal-object/active:out/budget:1/weight:2 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:2/1,in:1/1) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-work recommendation=keep-age-adjacency
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..1
+         VLE Direction: right
+         VLE Output: terminal-properties(requirement=terminal-properties, grammar=terminal-only)
+         VLE Materialization: terminal-properties-direct, vertex-source=label-row-fallback
+         VLE Terminal Output Slot: full-properties, source=const
+(21 rows)
+
+SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N)-[:R*1..1]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                         QUERY PLAN                                                                                                                                                                         
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=6.00 loops=1)
    Output: _age_default_alias_0.edges
    Buffers: shared hit=16
-   ->  Index Only Scan using "N_pkey" on vle_index_probe."N" _age_default_vle_function_start_var_271 (actual rows=5.00 loops=1)
-         Output: _age_default_vle_function_start_var_271.id
+   ->  Index Only Scan using "N_pkey" on vle_index_probe."N" _age_default_vle_function_start_var_281 (actual rows=5.00 loops=1)
+         Output: _age_default_vle_function_start_var_281.id
          Heap Fetches: 5
          Index Searches: 1
          Buffers: shared hit=2
@@ -2274,32 +2420,32 @@ AS (plan agtype);
          VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
          VLE Graph: vle_index_probe
          VLE Edge: label=R, properties=0
-         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 policy=out=endpoint-btree/in=endpoint-btree depth=costed endpoint-work=sum(out:2/2,in:1/2) reason=out:endpoint-work/in:endpoint-work
+         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-property/class:terminal-scalar/active:out/budget:2/weight:1 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:2/2,in:1/2) combined-work=all:0/0 reason=out:endpoint-work/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..1
          VLE Direction: right
          VLE Output: terminal-property(requirement=terminal-property, grammar=terminal-only, key=i, len=1, char-fast=true)
          VLE Materialization: terminal-property-direct
          VLE Terminal Output Slot: property-key, source=const
-         VLE Source Runtime: sources=age_adjacency=0/0/0/0/0 endpoint-btree=5/6 packed=0/0/0/5, packed-suppressed=out:0/in:0/self:0, missing-vertex=0/0, candidates=6/6, feedback=dominant=endpoint-btree density=age_adjacency:0.00,endpoint-btree:1.20,packed:0.00 yield=6/5 replay=0/0 push=6/6
+         VLE Source Runtime: sources=age_adjacency=0/0/0/0/0 endpoint-btree=5/6 packed=0/0/0/5, empty=age_adjacency:0/endpoint-btree:2, empty-suppressed=age_adjacency:0/out:0/in:0, empty-cache=age_adjacency:0/out:0/in:0, empty-frontier=age_adjacency:0/out:0/in:0, empty-frontier-batch=flushes:0/out:0/in:0/keys:0/max:0, empty-run=age_adjacency:0/out:0/in:0, payload-cache=runs:scan:0/replay:0/seed:0/tuples:scan:0/replay:0/seeds:0, empty-plan=ineligible/depth:0 match=true, empty-context=ineligible/depth:0/runs:5 match=true, empty-batch=ineligible/size:0/capacity:0 match=true, empty-summary=completion:0/batch:0/saturated:false, root-empty=completion:0/out:0/in:0/batch:0/saturated-roots:0, threshold-feedback=ineligible/headroom:0/batch:0/source:none/reason:none, empty-evidence=endpoint-empty-scan, suppressed-source=out:none/in:none suppression-match=true, packed-suppressed=out:0/in:0/self:0, missing-vertex=0/0, candidates=6/6, feedback=dominant=endpoint-btree planned=out:endpoint-btree/in:none source-match=true class=endpoint-direct planned-class=endpoint-direct class-match=true recommendation=keep-endpoint-btree planned-recommendation=keep-endpoint-btree density=age_adjacency:0.00,endpoint-btree:1.20,packed:0.00 yield=6/5 replay=0/0 push=6/6 pressure=endpoint-fanout action=watch-endpoint-budget
          Buffers: shared hit=14
 (24 rows)
 
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                         QUERY PLAN                                                                                                                                                                         
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=6.00 loops=1)
    Output: _age_default_alias_0.edges
-   Buffers: shared hit=11
-   ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_273 (actual rows=1.00 loops=1)
-         Output: _age_default_vle_function_start_var_273.id, _age_default_vle_function_start_var_273.properties
-         Recheck Cond: (_age_default_vle_function_start_var_273.properties @> '{"i": 0}'::agtype)
+   Buffers: shared hit=14
+   ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_283 (actual rows=1.00 loops=1)
+         Output: _age_default_vle_function_start_var_283.id, _age_default_vle_function_start_var_283.properties
+         Recheck Cond: (_age_default_vle_function_start_var_283.properties @> '{"i": 0}'::agtype)
          Heap Blocks: exact=1
          Buffers: shared hit=4
          ->  Bitmap Index Scan on vle_index_probe_n_properties_gin_idx (actual rows=1.00 loops=1)
-               Index Cond: (_age_default_vle_function_start_var_273.properties @> '{"i": 0}'::agtype)
+               Index Cond: (_age_default_vle_function_start_var_283.properties @> '{"i": 0}'::agtype)
                Index Searches: 1
                Buffers: shared hit=3
    ->  Custom Scan (AGE VLE Stream) (actual rows=6.00 loops=1)
@@ -2309,15 +2455,15 @@ AS (plan agtype);
          VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
          VLE Graph: vle_index_probe
          VLE Edge: label=R, properties=0
-         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 policy=out=endpoint-btree/in=endpoint-btree depth=costed endpoint-work=sum(out:6/6,in:4/6) reason=out:endpoint-work/in:endpoint-work
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:2/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-property/class:terminal-scalar/active:out/budget:2/weight:1 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:6/6,in:4/6) combined-work=all:0/0 reason=out:work-tie/in:inactive-direction class=adjacency-cache-seeded recommendation=prefer-age-adjacency-depth
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: terminal-property(requirement=terminal-property, grammar=terminal-only, key=i, len=1, char-fast=true)
          VLE Materialization: terminal-property-direct
          VLE Terminal Output Slot: property-key, source=const
-         VLE Source Runtime: sources=age_adjacency=0/0/0/0/0 endpoint-btree=3/6 packed=0/0/0/3, packed-suppressed=out:0/in:0/self:0, missing-vertex=0/0, candidates=6/6, feedback=dominant=endpoint-btree density=age_adjacency:0.00,endpoint-btree:2.00,packed:0.00 yield=6/3 replay=0/0 push=6/6
-         Buffers: shared hit=7
+         VLE Source Runtime: sources=age_adjacency=3/6/6/0/3 endpoint-btree=0/0 packed=0/0/0/3, empty=age_adjacency:0/endpoint-btree:0, empty-suppressed=age_adjacency:0/out:0/in:0, empty-cache=age_adjacency:0/out:0/in:0, empty-frontier=age_adjacency:2/out:2/in:0, empty-frontier-batch=flushes:2/out:2/in:0/keys:4/max:2, empty-run=age_adjacency:0/out:0/in:0, payload-cache=runs:scan:3/replay:0/seed:3/tuples:scan:6/replay:0/seeds:3, empty-plan=eligible/depth:2 match=true, empty-context=eligible/depth:2/runs:1 match=true, empty-batch=eligible/size:8/capacity:8 match=true, empty-summary=completion:2/batch:8/saturated:false, root-empty=completion:2/out:2/in:0/batch:8/saturated-roots:0, threshold-feedback=eligible/headroom:50/batch:8/source:out/reason:root-empty-observed, empty-evidence=empty-frontier, suppressed-source=out:age-adjacency/in:none suppression-match=true, packed-suppressed=out:0/in:0/self:0, missing-vertex=0/0, candidates=6/6, feedback=dominant=age-adjacency planned=out:age-adjacency/in:none source-match=true class=adjacency-cache-seeded planned-class=adjacency-cache-seeded class-match=true recommendation=prefer-age-adjacency-depth planned-recommendation=prefer-age-adjacency-depth density=age_adjacency:2.00,endpoint-btree:0.00,packed:0.00 yield=6/3 replay=0/6 push=6/6 pressure=adjacency-empty-frontier action=keep-empty-frontier:out
+         Buffers: shared hit=10
  Planning:
    Buffers: shared hit=1
 (30 rows)
@@ -2371,15 +2517,15 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_fanout_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                           QUERY PLAN                                                                                                                                                                           
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                          QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                          
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
-   ->  Bitmap Heap Scan on vle_fanout_policy."N" _age_default_vle_function_start_var_275
-         Output: _age_default_vle_function_start_var_275.id, _age_default_vle_function_start_var_275.properties
-         Recheck Cond: (_age_default_vle_function_start_var_275.properties @> '{"i": 0}'::agtype)
+   ->  Bitmap Heap Scan on vle_fanout_policy."N" _age_default_vle_function_start_var_285
+         Output: _age_default_vle_function_start_var_285.id, _age_default_vle_function_start_var_285.properties
+         Recheck Cond: (_age_default_vle_function_start_var_285.properties @> '{"i": 0}'::agtype)
          ->  Bitmap Index Scan on vle_fanout_policy_n_properties_gin_idx
-               Index Cond: (_age_default_vle_function_start_var_275.properties @> '{"i": 0}'::agtype)
+               Index Cond: (_age_default_vle_function_start_var_285.properties @> '{"i": 0}'::agtype)
    ->  Custom Scan (AGE VLE Stream)
          Output: _age_default_alias_0.edges
          VLE Shape: terminal-property
@@ -2387,7 +2533,7 @@ AS (plan agtype);
          VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
          VLE Graph: vle_fanout_policy
          VLE Edge: label=R, properties=0
-         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=3 fanout=start:3/end:1 policy=out=age-adjacency/in=endpoint-btree depth=costed endpoint-work=sum(out:12/6,in:2/6) reason=out:work-exceeds-limit/in:endpoint-work
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=3 fanout=start:3/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-property/class:terminal-scalar/active:out/budget:2/weight:1 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:12/6,in:2/6) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-cache-seeded recommendation=prefer-age-adjacency-depth
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..2
          VLE Direction: right
@@ -2399,15 +2545,15 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_fanout_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                            QUERY PLAN                                                                                                                                                                            
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                           QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                            
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
-   ->  Bitmap Heap Scan on vle_fanout_policy."N" _age_default_vle_function_start_var_277
-         Output: _age_default_vle_function_start_var_277.id, _age_default_vle_function_start_var_277.properties
-         Recheck Cond: (_age_default_vle_function_start_var_277.properties @> '{"i": 0}'::agtype)
+   ->  Bitmap Heap Scan on vle_fanout_policy."N" _age_default_vle_function_start_var_287
+         Output: _age_default_vle_function_start_var_287.id, _age_default_vle_function_start_var_287.properties
+         Recheck Cond: (_age_default_vle_function_start_var_287.properties @> '{"i": 0}'::agtype)
          ->  Bitmap Index Scan on vle_fanout_policy_n_properties_gin_idx
-               Index Cond: (_age_default_vle_function_start_var_277.properties @> '{"i": 0}'::agtype)
+               Index Cond: (_age_default_vle_function_start_var_287.properties @> '{"i": 0}'::agtype)
    ->  Custom Scan (AGE VLE Stream)
          Output: _age_default_alias_0.edges
          VLE Shape: terminal-property
@@ -2415,7 +2561,7 @@ AS (plan agtype);
          VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
          VLE Graph: vle_fanout_policy
          VLE Edge: label=R, properties=0
-         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=3 fanout=start:3/end:1 policy=out=age-adjacency/in=endpoint-btree depth=costed endpoint-work=sum(out:39/14,in:3/14) reason=out:work-exceeds-limit/in:endpoint-work
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=3 fanout=start:3/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-property/class:terminal-scalar/active:out/budget:2/weight:1 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:14 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:39/14,in:3/14) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-cache-seeded recommendation=prefer-age-adjacency-depth
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..3
          VLE Direction: right
@@ -2432,6 +2578,561 @@ drop cascades to table vle_fanout_policy._ag_label_edge
 drop cascades to table vle_fanout_policy."N"
 drop cascades to table vle_fanout_policy."R"
 NOTICE:  graph "vle_fanout_policy" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
+SELECT create_graph('vle_tie_policy');
+NOTICE:  graph "vle_tie_policy" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT * FROM cypher('vle_tie_policy', $$
+    CREATE (s0:S {i: 0}), (s1:S {i: 1}), (s2:S {i: 2}), (s3:S {i: 3}),
+           (s4:S {i: 4}), (s5:S {i: 5}), (s6:S {i: 6}), (s7:S {i: 7}),
+           (t0:T {i: 0}), (t1:T {i: 1}), (t2:T {i: 2}), (t3:T {i: 3}),
+           (t4:T {i: 4}), (t5:T {i: 5}), (t6:T {i: 6}), (t7:T {i: 7})
+    CREATE (s0)-[:R]->(t0), (s1)-[:R]->(t1),
+           (s2)-[:R]->(t2), (s3)-[:R]->(t3),
+           (s4)-[:R]->(t4), (s5)-[:R]->(t5),
+           (s6)-[:R]->(t6), (s7)-[:R]->(t7)
+$$) AS (result agtype);
+ result 
+--------
+(0 rows)
+
+CREATE INDEX vle_tie_policy_t_properties_gin_idx
+ON vle_tie_policy."T" USING gin (properties);
+CREATE INDEX vle_tie_policy_r_start_idx
+ON vle_tie_policy."R" USING btree (start_id);
+CREATE INDEX vle_tie_policy_r_end_idx
+ON vle_tie_policy."R" USING btree (end_id);
+CREATE INDEX vle_tie_policy_r_start_adj_idx
+ON vle_tie_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_tie_policy_r_end_adj_idx
+ON vle_tie_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_tie_policy."T";
+ANALYZE vle_tie_policy."R";
+SET enable_seqscan = off;
+SELECT * FROM cypher('vle_tie_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:T {i: 0})<-[:R*1..1]-(n) RETURN n.i$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                   QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: _age_default_alias_0.edges
+   ->  Bitmap Heap Scan on vle_tie_policy."T" _age_default_vle_function_start_var_289
+         Output: _age_default_vle_function_start_var_289.id, _age_default_vle_function_start_var_289.properties
+         Recheck Cond: (_age_default_vle_function_start_var_289.properties @> '{"i": 0}'::agtype)
+         ->  Bitmap Index Scan on vle_tie_policy_t_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_289.properties @> '{"i": 0}'::agtype)
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_0.edges
+         VLE Shape: terminal-property
+         VLE Arguments: 9
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+         VLE Graph: vle_tie_policy
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=none/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=8 fanout=start:1/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-property/class:terminal-scalar/active:in/budget:2/weight:1 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=none/in=endpoint-btree depth=costed endpoint-work=sum(out:1/2,in:1/2) combined-work=all:0/0 reason=out:inactive-direction/in:endpoint-work class=endpoint-direct recommendation=keep-endpoint-btree
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..1
+         VLE Direction: left
+         VLE Output: terminal-property(requirement=terminal-property, grammar=terminal-only, key=i, len=1, char-fast=true)
+         VLE Materialization: terminal-property-direct
+         VLE Terminal Output Slot: property-key, source=const
+(21 rows)
+
+SELECT * FROM cypher('vle_tie_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:T {i: 0})<-[:R*1..1]-(n) RETURN p$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                        QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: age_materialize_vle_path(_age_default_alias_0.edges)
+   ->  Bitmap Heap Scan on vle_tie_policy."T" _age_default_vle_function_start_var_291
+         Output: _age_default_vle_function_start_var_291.id, _age_default_vle_function_start_var_291.properties
+         Recheck Cond: (_age_default_vle_function_start_var_291.properties @> '{"i": 0}'::agtype)
+         ->  Bitmap Index Scan on vle_tie_policy_t_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_291.properties @> '{"i": 0}'::agtype)
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_0.edges
+         VLE Shape: cypher
+         VLE Arguments: 8
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+         VLE Graph: vle_tie_policy
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=none/in=age-adjacency, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=8 fanout=start:1/end:1 stats=rel:known/start:known/end:known profile=consumer:path/class:path-materialized/active:in/budget:1/weight:3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=none/in=age-adjacency depth=costed endpoint-work=sum(out:1/1,in:1/1) combined-work=all:0/0 reason=out:inactive-direction/in:work-tie class=adjacency-materialized-tie recommendation=prefer-age-adjacency-materialization
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..1
+         VLE Direction: left
+         VLE Output: path(requirement=path, grammar=cached)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+(20 rows)
+
+SELECT * FROM cypher('vle_tie_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:T {i: 0})<-[:R*1..1]-(n) RETURN n$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                             QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: age_vle_terminal_vertex(_age_default_alias_0.edges)
+   ->  Bitmap Heap Scan on vle_tie_policy."T" _age_default_vle_function_start_var_293
+         Output: _age_default_vle_function_start_var_293.id, _age_default_vle_function_start_var_293.properties
+         Recheck Cond: (_age_default_vle_function_start_var_293.properties @> '{"i": 0}'::agtype)
+         ->  Bitmap Index Scan on vle_tie_policy_t_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_293.properties @> '{"i": 0}'::agtype)
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_0.edges
+         VLE Shape: terminal-vertex
+         VLE Arguments: 8
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+         VLE Graph: vle_tie_policy
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=none/in=age-adjacency, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=8 fanout=start:1/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-vertex/class:terminal-object/active:in/budget:1/weight:2 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=none/in=age-adjacency depth=costed endpoint-work=sum(out:1/1,in:1/1) combined-work=all:0/0 reason=out:inactive-direction/in:work-tie class=adjacency-materialized-tie recommendation=prefer-age-adjacency-materialization
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..1
+         VLE Direction: left
+         VLE Output: terminal-vertex(requirement=terminal-vertex, grammar=terminal-only)
+         VLE Materialization: terminal-vertex-container, object-source=label-row-fallback
+(20 rows)
+
+SET enable_seqscan = on;
+SELECT drop_graph('vle_tie_policy', true);
+NOTICE:  drop cascades to 5 other objects
+DETAIL:  drop cascades to table vle_tie_policy._ag_label_vertex
+drop cascades to table vle_tie_policy._ag_label_edge
+drop cascades to table vle_tie_policy."S"
+drop cascades to table vle_tie_policy."T"
+drop cascades to table vle_tie_policy."R"
+NOTICE:  graph "vle_tie_policy" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
+SELECT create_graph('vle_headroom_policy');
+NOTICE:  graph "vle_headroom_policy" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT * FROM cypher('vle_headroom_policy', $$
+    CREATE (n0:N {i: 0}),
+           (n1:N {i: 1}),
+           (n2:N {i: 2}),
+           (n3:N {i: 3}),
+           (n4:N {i: 4}),
+           (n5:N {i: 5}),
+           (n6:N {i: 6}),
+           (n7:N {i: 7})
+    CREATE (n0)-[:R]->(n1),
+           (n0)-[:R]->(n2),
+           (n1)-[:R]->(n3),
+           (n1)-[:R]->(n4),
+           (n2)-[:R]->(n5),
+           (n2)-[:R]->(n6),
+           (n3)-[:R]->(n7)
+$$) AS (result agtype);
+ result 
+--------
+(0 rows)
+
+CREATE INDEX vle_headroom_policy_n_properties_gin_idx
+ON vle_headroom_policy."N" USING gin (properties);
+CREATE INDEX vle_headroom_policy_r_start_idx
+ON vle_headroom_policy."R" USING btree (start_id);
+CREATE INDEX vle_headroom_policy_r_end_idx
+ON vle_headroom_policy."R" USING btree (end_id);
+CREATE INDEX vle_headroom_policy_r_start_adj_idx
+ON vle_headroom_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_headroom_policy_r_end_adj_idx
+ON vle_headroom_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_headroom_policy."N";
+ANALYZE vle_headroom_policy."R";
+SET enable_seqscan = off;
+SELECT * FROM cypher('vle_headroom_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                            QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: _age_default_alias_0.edges
+   ->  Bitmap Heap Scan on vle_headroom_policy."N" _age_default_vle_function_start_var_295
+         Output: _age_default_vle_function_start_var_295.id, _age_default_vle_function_start_var_295.properties
+         Recheck Cond: (_age_default_vle_function_start_var_295.properties @> '{"i": 0}'::agtype)
+         ->  Bitmap Index Scan on vle_headroom_policy_n_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_295.properties @> '{"i": 0}'::agtype)
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_0.edges
+         VLE Shape: terminal-property
+         VLE Arguments: 9
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+         VLE Graph: vle_headroom_policy
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=7 fanout=start:2/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-property/class:terminal-scalar/active:out/budget:2/weight:1 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:5/6,in:2/6) combined-work=all:0/0 reason=out:empty-lifecycle-headroom/in:inactive-direction class=adjacency-cache-seeded recommendation=prefer-age-adjacency-depth
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..2
+         VLE Direction: right
+         VLE Output: terminal-property(requirement=terminal-property, grammar=terminal-only, key=i, len=1, char-fast=true)
+         VLE Materialization: terminal-property-direct
+         VLE Terminal Output Slot: property-key, source=const
+(21 rows)
+
+SET enable_seqscan = on;
+SELECT drop_graph('vle_headroom_policy', true);
+NOTICE:  drop cascades to 4 other objects
+DETAIL:  drop cascades to table vle_headroom_policy._ag_label_vertex
+drop cascades to table vle_headroom_policy._ag_label_edge
+drop cascades to table vle_headroom_policy."N"
+drop cascades to table vle_headroom_policy."R"
+NOTICE:  graph "vle_headroom_policy" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
+SELECT create_graph('vle_empty_cache_policy');
+NOTICE:  graph "vle_empty_cache_policy" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT * FROM cypher('vle_empty_cache_policy', $$
+    CREATE (s:N {i: 0}),
+           (a0:N {i: 1}), (a1:N {i: 2}), (a2:N {i: 3}),
+           (a3:N {i: 4}), (a4:N {i: 5}), (a5:N {i: 6}),
+           (a6:N {i: 7}), (a7:N {i: 8})
+    CREATE (s)-[:R]->(a0), (s)-[:R]->(a1),
+           (s)-[:R]->(a2), (s)-[:R]->(a3),
+           (s)-[:R]->(a4), (s)-[:R]->(a5),
+           (s)-[:R]->(a6), (s)-[:R]->(a7)
+$$) AS (result agtype);
+ result 
+--------
+(0 rows)
+
+CREATE INDEX vle_empty_cache_policy_n_properties_gin_idx
+ON vle_empty_cache_policy."N" USING gin (properties);
+CREATE INDEX vle_empty_cache_policy_r_start_adj_idx
+ON vle_empty_cache_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_empty_cache_policy_r_end_adj_idx
+ON vle_empty_cache_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_empty_cache_policy."N";
+ANALYZE vle_empty_cache_policy."R";
+SET enable_seqscan = off;
+SELECT * FROM cypher('vle_empty_cache_policy',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop (actual rows=8.00 loops=1)
+   Output: age_materialize_vle_path(_age_default_alias_0.edges)
+   Buffers: shared hit=41
+   ->  Bitmap Heap Scan on vle_empty_cache_policy."N" _age_default_vle_function_start_var_297 (actual rows=1.00 loops=1)
+         Output: _age_default_vle_function_start_var_297.id, _age_default_vle_function_start_var_297.properties
+         Recheck Cond: (_age_default_vle_function_start_var_297.properties @> '{"i": 0}'::agtype)
+         Heap Blocks: exact=1
+         Buffers: shared hit=4
+         ->  Bitmap Index Scan on vle_empty_cache_policy_n_properties_gin_idx (actual rows=1.00 loops=1)
+               Index Cond: (_age_default_vle_function_start_var_297.properties @> '{"i": 0}'::agtype)
+               Index Searches: 1
+               Buffers: shared hit=3
+   ->  Custom Scan (AGE VLE Stream) (actual rows=8.00 loops=1)
+         Output: _age_default_alias_0.edges
+         VLE Shape: cypher
+         VLE Arguments: 8
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+         VLE Graph: vle_empty_cache_policy
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=8 fanout=start:8/end:1 stats=rel:known/start:known/end:known profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:9 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:584/3,in:3/3) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-cache-seeded recommendation=prefer-age-adjacency-depth
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..3
+         VLE Direction: right
+         VLE Output: path(requirement=path, grammar=cached)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+         VLE Source Runtime: sources=age_adjacency=1/8/8/0/1 endpoint-btree=0/0 packed=0/0/0/0, empty=age_adjacency:0/endpoint-btree:0, empty-suppressed=age_adjacency:0/out:0/in:0, empty-cache=age_adjacency:0/out:0/in:0, empty-frontier=age_adjacency:8/out:8/in:0, empty-frontier-batch=flushes:1/out:1/in:0/keys:8/max:8, empty-run=age_adjacency:8/out:8/in:0, payload-cache=runs:scan:1/replay:0/seed:1/tuples:scan:8/replay:0/seeds:1, empty-plan=eligible/depth:3 match=true, empty-context=eligible/depth:3/runs:1 match=true, empty-batch=eligible/size:9/capacity:9 match=true, empty-summary=completion:16/batch:9/saturated:true, root-empty=completion:16/out:16/in:0/batch:9/saturated-roots:1, threshold-feedback=eligible/headroom:35/batch:18/source:out/reason:root-empty-saturated, empty-evidence=empty-run, suppressed-source=out:age-adjacency/in:none suppression-match=true, packed-suppressed=out:0/in:0/self:0, missing-vertex=1/1, candidates=8/8, feedback=dominant=age-adjacency planned=out:age-adjacency/in:none source-match=true class=adjacency-cache-seeded planned-class=adjacency-cache-seeded class-match=true recommendation=prefer-age-adjacency-depth planned-recommendation=prefer-age-adjacency-depth density=age_adjacency:8.00,endpoint-btree:0.00,packed:0.00 yield=8/1 replay=0/8 push=8/8 pressure=adjacency-empty-run action=keep-empty-run-batch:out
+         Buffers: shared hit=11
+ Planning:
+   Buffers: shared hit=31
+(29 rows)
+
+SELECT * FROM cypher('vle_empty_cache_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                           QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: age_materialize_vle_path(_age_default_alias_0.edges)
+   ->  Bitmap Heap Scan on vle_empty_cache_policy."N" _age_default_vle_function_start_var_299
+         Output: _age_default_vle_function_start_var_299.id, _age_default_vle_function_start_var_299.properties
+         Recheck Cond: (_age_default_vle_function_start_var_299.properties @> '{"i": 0}'::agtype)
+         ->  Bitmap Index Scan on vle_empty_cache_policy_n_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_299.properties @> '{"i": 0}'::agtype)
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_0.edges
+         VLE Shape: cypher
+         VLE Arguments: 8
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+         VLE Graph: vle_empty_cache_policy
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=8 fanout=start:8/end:1 stats=rel:known/start:known/end:known profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:18 threshold-input=runtime-cache/headroom:35/batch:18/source:out/reason:root-empty-saturated threshold-cache=observed:1/saturated:1/relaxed:0 payload-input=runtime-cache/headroom:50/scan-runs:1/replay-runs:0/seed-runs:1/replay-percent:0/seed-percent:100/observed:1/reason:payload-cache-seeded policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:584/3,in:3/3) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-empty-batch recommendation=keep-empty-batch
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..3
+         VLE Direction: right
+         VLE Output: path(requirement=path, grammar=cached)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+(20 rows)
+
+SET enable_seqscan = on;
+SELECT drop_graph('vle_empty_cache_policy', true);
+NOTICE:  drop cascades to 4 other objects
+DETAIL:  drop cascades to table vle_empty_cache_policy._ag_label_vertex
+drop cascades to table vle_empty_cache_policy._ag_label_edge
+drop cascades to table vle_empty_cache_policy."N"
+drop cascades to table vle_empty_cache_policy."R"
+NOTICE:  graph "vle_empty_cache_policy" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
+SELECT create_graph('vle_payload_replay_policy');
+NOTICE:  graph "vle_payload_replay_policy" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT * FROM cypher('vle_payload_replay_policy', $$
+    CREATE (s:N {i: 0}), (a:N {i: 1}), (b:N {i: 2}),
+           (x:N {i: 3}), (y0:N {i: 4}), (y1:N {i: 5})
+    CREATE (s)-[:R]->(a), (s)-[:R]->(b),
+           (a)-[:R]->(x), (b)-[:R]->(x),
+           (x)-[:R]->(y0), (x)-[:R]->(y1)
+$$) AS (result agtype);
+ result 
+--------
+(0 rows)
+
+CREATE INDEX vle_payload_replay_policy_n_properties_gin_idx
+ON vle_payload_replay_policy."N" USING gin (properties);
+CREATE INDEX vle_payload_replay_policy_r_start_adj_idx
+ON vle_payload_replay_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_payload_replay_policy_r_end_adj_idx
+ON vle_payload_replay_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_payload_replay_policy."N";
+ANALYZE vle_payload_replay_policy."R";
+SET enable_seqscan = off;
+SELECT * FROM cypher('vle_payload_replay_policy',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop (actual rows=8.00 loops=1)
+   Output: age_materialize_vle_path(_age_default_alias_0.edges)
+   Buffers: shared hit=31
+   ->  Bitmap Heap Scan on vle_payload_replay_policy."N" _age_default_vle_function_start_var_301 (actual rows=1.00 loops=1)
+         Output: _age_default_vle_function_start_var_301.id, _age_default_vle_function_start_var_301.properties
+         Recheck Cond: (_age_default_vle_function_start_var_301.properties @> '{"i": 0}'::agtype)
+         Heap Blocks: exact=1
+         Buffers: shared hit=4
+         ->  Bitmap Index Scan on vle_payload_replay_policy_n_properties_gin_idx (actual rows=1.00 loops=1)
+               Index Cond: (_age_default_vle_function_start_var_301.properties @> '{"i": 0}'::agtype)
+               Index Searches: 1
+               Buffers: shared hit=3
+   ->  Custom Scan (AGE VLE Stream) (actual rows=8.00 loops=1)
+         Output: _age_default_alias_0.edges
+         VLE Shape: cypher
+         VLE Arguments: 8
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+         VLE Graph: vle_payload_replay_policy
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:9 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:7/3,in:4/3) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-cache-seeded recommendation=prefer-age-adjacency-depth
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..3
+         VLE Direction: right
+         VLE Output: path(requirement=path, grammar=cached)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+         VLE Source Runtime: sources=age_adjacency=5/8/6/2/2 endpoint-btree=0/0 packed=0/0/0/0, empty=age_adjacency:0/endpoint-btree:0, empty-suppressed=age_adjacency:0/out:0/in:0, empty-cache=age_adjacency:0/out:0/in:0, empty-frontier=age_adjacency:2/out:2/in:0, empty-frontier-batch=flushes:1/out:1/in:0/keys:2/max:2, empty-run=age_adjacency:0/out:0/in:0, payload-cache=runs:scan:4/replay:1/seed:2/tuples:scan:6/replay:2/seeds:2, empty-plan=eligible/depth:3 match=true, empty-context=eligible/depth:3/runs:1 match=true, empty-batch=eligible/size:9/capacity:9 match=true, empty-summary=completion:2/batch:9/saturated:false, root-empty=completion:2/out:2/in:0/batch:9/saturated-roots:0, threshold-feedback=eligible/headroom:50/batch:8/source:out/reason:root-empty-observed, empty-evidence=empty-frontier, suppressed-source=out:age-adjacency/in:none suppression-match=true, packed-suppressed=out:0/in:0/self:0, missing-vertex=5/5, candidates=8/8, feedback=dominant=age-adjacency planned=out:age-adjacency/in:none source-match=true class=adjacency-replay planned-class=adjacency-cache-seeded class-match=false recommendation=keep-age-adjacency planned-recommendation=prefer-age-adjacency-depth density=age_adjacency:1.60,endpoint-btree:0.00,packed:0.00 yield=8/5 replay=2/6 push=8/8 pressure=class-mismatch action=tune-source-policy
+         Buffers: shared hit=9
+ Planning:
+   Buffers: shared hit=31
+(29 rows)
+
+SELECT * FROM cypher('vle_payload_replay_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                           QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: age_materialize_vle_path(_age_default_alias_0.edges)
+   ->  Bitmap Heap Scan on vle_payload_replay_policy."N" _age_default_vle_function_start_var_303
+         Output: _age_default_vle_function_start_var_303.id, _age_default_vle_function_start_var_303.properties
+         Recheck Cond: (_age_default_vle_function_start_var_303.properties @> '{"i": 0}'::agtype)
+         ->  Bitmap Index Scan on vle_payload_replay_policy_n_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_303.properties @> '{"i": 0}'::agtype)
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_0.edges
+         VLE Shape: cypher
+         VLE Arguments: 8
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+         VLE Graph: vle_payload_replay_policy
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=eligible endpoint-headroom=0.18 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:9 threshold-input=runtime-cache/headroom:50/batch:8/source:out/reason:root-empty-observed threshold-cache=observed:1/saturated:0/relaxed:1 payload-input=runtime-cache/headroom:18/scan-runs:4/replay-runs:1/seed-runs:2/replay-percent:25/seed-percent:50/observed:1/reason:payload-replay-ratio-observed policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:7/3,in:4/3) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-replay recommendation=keep-age-adjacency
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..3
+         VLE Direction: right
+         VLE Output: path(requirement=path, grammar=cached)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+(20 rows)
+
+SELECT * FROM cypher('vle_payload_replay_policy',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n.i$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop (actual rows=8.00 loops=1)
+   Output: _age_default_alias_0.edges
+   Buffers: shared hit=30
+   ->  Bitmap Heap Scan on vle_payload_replay_policy."N" _age_default_vle_function_start_var_305 (actual rows=1.00 loops=1)
+         Output: _age_default_vle_function_start_var_305.id, _age_default_vle_function_start_var_305.properties
+         Recheck Cond: (_age_default_vle_function_start_var_305.properties @> '{"i": 0}'::agtype)
+         Heap Blocks: exact=1
+         Buffers: shared hit=4
+         ->  Bitmap Index Scan on vle_payload_replay_policy_n_properties_gin_idx (actual rows=1.00 loops=1)
+               Index Cond: (_age_default_vle_function_start_var_305.properties @> '{"i": 0}'::agtype)
+               Index Searches: 1
+               Buffers: shared hit=3
+   ->  Custom Scan (AGE VLE Stream) (actual rows=8.00 loops=1)
+         Output: _age_default_alias_0.edges
+         VLE Shape: terminal-property
+         VLE Arguments: 9
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+         VLE Graph: vle_payload_replay_policy
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-property/class:terminal-scalar/active:out/budget:2/weight:1 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:14 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:7/14,in:4/14) combined-work=all:0/0 reason=out:empty-lifecycle-headroom/in:inactive-direction class=adjacency-cache-seeded recommendation=prefer-age-adjacency-depth
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..3
+         VLE Direction: right
+         VLE Output: terminal-property(requirement=terminal-property, grammar=terminal-only, key=i, len=1, char-fast=true)
+         VLE Materialization: terminal-property-direct
+         VLE Terminal Output Slot: property-key, source=const
+         VLE Source Runtime: sources=age_adjacency=5/8/6/2/2 endpoint-btree=0/0 packed=0/0/0/5, empty=age_adjacency:0/endpoint-btree:0, empty-suppressed=age_adjacency:0/out:0/in:0, empty-cache=age_adjacency:0/out:0/in:0, empty-frontier=age_adjacency:2/out:2/in:0, empty-frontier-batch=flushes:1/out:1/in:0/keys:2/max:2, empty-run=age_adjacency:0/out:0/in:0, payload-cache=runs:scan:4/replay:1/seed:2/tuples:scan:6/replay:2/seeds:2, empty-plan=eligible/depth:3 match=true, empty-context=eligible/depth:3/runs:1 match=true, empty-batch=eligible/size:14/capacity:14 match=true, empty-summary=completion:2/batch:14/saturated:false, root-empty=completion:2/out:2/in:0/batch:14/saturated-roots:0, threshold-feedback=eligible/headroom:35/batch:8/source:out/reason:root-empty-observed, empty-evidence=empty-frontier, suppressed-source=out:age-adjacency/in:none suppression-match=true, packed-suppressed=out:0/in:0/self:0, missing-vertex=0/0, candidates=8/8, feedback=dominant=age-adjacency planned=out:age-adjacency/in:none source-match=true class=adjacency-replay planned-class=adjacency-cache-seeded class-match=false recommendation=keep-age-adjacency planned-recommendation=prefer-age-adjacency-depth density=age_adjacency:1.60,endpoint-btree:0.00,packed:0.00 yield=8/5 replay=2/6 push=8/8 pressure=class-mismatch action=tune-source-policy
+         Buffers: shared hit=26
+ Planning:
+   Buffers: shared hit=1
+(30 rows)
+
+SELECT * FROM cypher('vle_payload_replay_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n.i$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: _age_default_alias_0.edges
+   ->  Bitmap Heap Scan on vle_payload_replay_policy."N" _age_default_vle_function_start_var_307
+         Output: _age_default_vle_function_start_var_307.id, _age_default_vle_function_start_var_307.properties
+         Recheck Cond: (_age_default_vle_function_start_var_307.properties @> '{"i": 0}'::agtype)
+         ->  Bitmap Index Scan on vle_payload_replay_policy_n_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_307.properties @> '{"i": 0}'::agtype)
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_0.edges
+         VLE Shape: terminal-property
+         VLE Arguments: 9
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+         VLE Graph: vle_payload_replay_policy
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known profile=consumer:terminal-property/class:terminal-scalar/active:out/budget:2/weight:1 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:14 threshold-input=runtime-cache/headroom:35/batch:8/source:out/reason:root-empty-observed threshold-cache=observed:1/saturated:0/relaxed:1 payload-input=runtime-cache/headroom:35/scan-runs:4/replay-runs:1/seed-runs:2/replay-percent:25/seed-percent:50/observed:1/reason:payload-replay-observed policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:7/14,in:4/14) combined-work=all:0/0 reason=out:empty-lifecycle-headroom/in:inactive-direction class=adjacency-replay recommendation=keep-age-adjacency
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..3
+         VLE Direction: right
+         VLE Output: terminal-property(requirement=terminal-property, grammar=terminal-only, key=i, len=1, char-fast=true)
+         VLE Materialization: terminal-property-direct
+         VLE Terminal Output Slot: property-key, source=const
+(21 rows)
+
+SET enable_seqscan = on;
+SELECT drop_graph('vle_payload_replay_policy', true);
+NOTICE:  drop cascades to 4 other objects
+DETAIL:  drop cascades to table vle_payload_replay_policy._ag_label_vertex
+drop cascades to table vle_payload_replay_policy._ag_label_edge
+drop cascades to table vle_payload_replay_policy."N"
+drop cascades to table vle_payload_replay_policy."R"
+NOTICE:  graph "vle_payload_replay_policy" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
+SELECT create_graph('vle_adjacency_only_policy');
+NOTICE:  graph "vle_adjacency_only_policy" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT * FROM cypher('vle_adjacency_only_policy', $$
+    CREATE (n0:N {i: 0}),
+           (n1:N {i: 1}),
+           (n2:N {i: 2}),
+           (n3:N {i: 3})
+    CREATE (n0)-[:R]->(n1),
+           (n0)-[:R]->(n2),
+           (n0)-[:R]->(n3)
+$$) AS (result agtype);
+ result 
+--------
+(0 rows)
+
+CREATE INDEX vle_adjacency_only_policy_n_properties_gin_idx
+ON vle_adjacency_only_policy."N" USING gin (properties);
+CREATE INDEX vle_adjacency_only_policy_r_start_adj_idx
+ON vle_adjacency_only_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_adjacency_only_policy_r_end_adj_idx
+ON vle_adjacency_only_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_adjacency_only_policy."N";
+SET enable_seqscan = off;
+SELECT * FROM cypher('vle_adjacency_only_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                   QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: _age_default_alias_0.edges
+   ->  Bitmap Heap Scan on vle_adjacency_only_policy."N" _age_default_vle_function_start_var_309
+         Output: _age_default_vle_function_start_var_309.id, _age_default_vle_function_start_var_309.properties
+         Recheck Cond: (_age_default_vle_function_start_var_309.properties @> '{"i": 0}'::agtype)
+         ->  Bitmap Index Scan on vle_adjacency_only_policy_n_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_309.properties @> '{"i": 0}'::agtype)
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_0.edges
+         VLE Shape: terminal-property
+         VLE Arguments: 9
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+         VLE Graph: vle_adjacency_only_policy
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=3 fanout=start:0/end:0 stats=rel:known/start:unknown/end:unknown profile=consumer:terminal-property/class:terminal-scalar/active:out/budget:2/weight:1 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:0/6,in:0/6) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=unknown-fanout recommendation=collect-endpoint-stats
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..2
+         VLE Direction: right
+         VLE Output: terminal-property(requirement=terminal-property, grammar=terminal-only, key=i, len=1, char-fast=true)
+         VLE Materialization: terminal-property-direct
+         VLE Terminal Output Slot: property-key, source=const
+(21 rows)
+
+SET enable_seqscan = on;
+SELECT drop_graph('vle_adjacency_only_policy', true);
+NOTICE:  drop cascades to 4 other objects
+DETAIL:  drop cascades to table vle_adjacency_only_policy._ag_label_vertex
+drop cascades to table vle_adjacency_only_policy._ag_label_edge
+drop cascades to table vle_adjacency_only_policy."N"
+drop cascades to table vle_adjacency_only_policy."R"
+NOTICE:  graph "vle_adjacency_only_policy" has been dropped
  drop_graph 
 ------------
  
@@ -2456,7 +3157,7 @@ AS (plan agtype);
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: path(requirement=path, grammar=cached)
-         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
 (15 rows)
 
 SELECT * FROM cypher('cypher_vle',
@@ -2478,7 +3179,7 @@ AS (plan agtype);
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: path(requirement=path, grammar=cached)
-         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
 (15 rows)
 
 SELECT * FROM cypher('cypher_vle',
@@ -2500,7 +3201,7 @@ AS (plan agtype);
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: path(requirement=path, grammar=cached)
-         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
 (15 rows)
 
 SELECT * FROM cypher('cypher_vle',
@@ -2522,7 +3223,7 @@ AS (plan agtype);
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: path(requirement=path, grammar=cached)
-         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
 (15 rows)
 
 SELECT * FROM cypher('cypher_vle',
@@ -2544,7 +3245,7 @@ AS (plan agtype);
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: path(requirement=path, grammar=cached)
-         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
 (15 rows)
 
 SELECT * FROM cypher('cypher_vle',
@@ -2566,7 +3267,7 @@ AS (plan agtype);
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: path(requirement=path, grammar=cached)
-         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
 (15 rows)
 
 SELECT * FROM cypher('cypher_vle',
@@ -2588,7 +3289,7 @@ AS (plan agtype);
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: path(requirement=path, grammar=cached)
-         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
 (15 rows)
 
 SELECT * FROM cypher('cypher_vle',
@@ -2610,7 +3311,7 @@ AS (plan agtype);
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: path(requirement=path, grammar=cached)
-         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
 (15 rows)
 
 SELECT * FROM cypher('cypher_vle',
@@ -2632,7 +3333,7 @@ AS (plan agtype);
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: path(requirement=path, grammar=cached)
-         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
 (15 rows)
 
 SELECT * FROM cypher('cypher_vle',
@@ -2659,7 +3360,7 @@ AS (plan agtype);
                      VLE Range: 1..2
                      VLE Direction: right
                      VLE Output: path(requirement=path, grammar=cached)
-                     VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+                     VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
                ->  Append
                      ->  Seq Scan on cypher_vle._ag_label_vertex _age_default_alias_0_1
                            Output: _age_default_alias_0_1.id
@@ -2706,7 +3407,7 @@ AS (plan agtype);
                      VLE Range: 2..3
                      VLE Direction: right
                      VLE Output: path(requirement=path, grammar=cached)
-                     VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+                     VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
                ->  Append
                      ->  Seq Scan on cypher_vle._ag_label_vertex _age_default_alias_0_1
                            Output: _age_default_alias_0_1.id
@@ -2751,7 +3452,7 @@ AS (plan agtype);
                VLE Range: 1..2
                VLE Direction: right
                VLE Output: path(requirement=path, grammar=cached)
-               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
          ->  Append
                ->  Seq Scan on cypher_vle._ag_label_vertex _age_default_alias_0_1
                      Output: _age_default_alias_0_1.id
@@ -2777,12 +3478,12 @@ AS (plan agtype);
 SELECT * FROM cypher('cypher_vle',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:begin)-[:edge*1..2]->() RETURN p$$)
 AS (plan agtype);
-                                                                       QUERY PLAN                                                                        
----------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                                                                                                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
-   ->  Seq Scan on cypher_vle.begin _age_default_vle_function_start_var_291
-         Output: _age_default_vle_function_start_var_291.id, _age_default_vle_function_start_var_291.properties
+   ->  Seq Scan on cypher_vle.begin _age_default_vle_function_start_var_323
+         Output: _age_default_vle_function_start_var_323.id, _age_default_vle_function_start_var_323.properties
    ->  Custom Scan (AGE VLE Stream)
          Output: _age_default_alias_0.edges
          VLE Shape: cypher
@@ -2790,12 +3491,12 @@ AS (plan agtype);
          VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
          VLE Graph: cypher_vle
          VLE Edge: label=edge, properties=0
-         VLE Edge Source: global-metadata, fixed-source=out=none/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=global-edge-state
+         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..2
          VLE Direction: right
          VLE Output: path(requirement=path, grammar=cached)
-         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
 (17 rows)
 
 SELECT * FROM cypher('cypher_vle',
@@ -2820,7 +3521,7 @@ AS (plan agtype);
                VLE Range: 1..2
                VLE Direction: right
                VLE Output: path(requirement=path, grammar=cached)
-               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
          ->  Append
                ->  Seq Scan on cypher_vle._ag_label_vertex _age_default_alias_0_1
                      Output: _age_default_alias_0_1.id
@@ -2865,7 +3566,7 @@ AS (plan agtype);
                VLE Range: 1..2
                VLE Direction: right
                VLE Output: path(requirement=path, grammar=cached)
-               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
          ->  Append
                ->  Seq Scan on cypher_vle._ag_label_vertex _age_default_alias_0_1
                      Output: _age_default_alias_0_1.id
@@ -2910,7 +3611,7 @@ AS (plan agtype);
                VLE Range: 1..2
                VLE Direction: right
                VLE Output: path(requirement=path, grammar=cached)
-               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
          ->  Append
                ->  Seq Scan on cypher_vle._ag_label_vertex _age_default_alias_0_1
                      Output: _age_default_alias_0_1.id
@@ -2955,7 +3656,7 @@ AS (plan agtype);
                VLE Range: 1..2
                VLE Direction: right
                VLE Output: path(requirement=path, grammar=cached)
-               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
          ->  Append
                ->  Seq Scan on cypher_vle._ag_label_vertex _age_default_alias_0_1
                      Output: _age_default_alias_0_1.id
@@ -3000,7 +3701,7 @@ AS (plan agtype);
                VLE Range: 1..2
                VLE Direction: right
                VLE Output: path(requirement=path, grammar=cached)
-               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
          ->  Append
                ->  Seq Scan on cypher_vle._ag_label_vertex _age_default_alias_0_1
                      Output: _age_default_alias_0_1.id
@@ -3045,7 +3746,7 @@ AS (plan agtype);
                VLE Range: 1..2
                VLE Direction: right
                VLE Output: path(requirement=path, grammar=cached)
-               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=global-metadata
          ->  Append
                ->  Seq Scan on cypher_vle._ag_label_vertex _age_default_alias_0_1
                      Output: _age_default_alias_0_1.id
@@ -3067,6 +3768,80 @@ AS (plan agtype);
                ->  Seq Scan on cypher_vle."end" _age_default_alias_2_4
                      Output: _age_default_alias_2_4.id
 (38 rows)
+
+SELECT create_graph('vle_frontier_empty_policy');
+NOTICE:  graph "vle_frontier_empty_policy" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT * FROM cypher('vle_frontier_empty_policy', $$
+    CREATE (s:N {i: 0}), (a:N {i: 1}),
+           (padding:N {i: 100}), (tail:N {i: 101})
+    CREATE (s)-[:R]->(a), (padding)-[:R]->(tail)
+$$) AS (result agtype);
+ result 
+--------
+(0 rows)
+
+CREATE INDEX vle_frontier_empty_policy_n_properties_gin_idx
+ON vle_frontier_empty_policy."N" USING gin (properties);
+CREATE INDEX vle_frontier_empty_policy_r_start_adj_idx
+ON vle_frontier_empty_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_frontier_empty_policy_r_end_adj_idx
+ON vle_frontier_empty_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_frontier_empty_policy."N";
+ANALYZE vle_frontier_empty_policy."R";
+SET enable_seqscan = off;
+SELECT * FROM cypher('vle_frontier_empty_policy',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH p=(:N {i: 0})-[:R*1..2]->(n) RETURN p$$)
+AS (plan agtype);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop (actual rows=1.00 loops=1)
+   Output: age_materialize_vle_path(_age_default_alias_0.edges)
+   Buffers: shared hit=13
+   ->  Bitmap Heap Scan on vle_frontier_empty_policy."N" _age_default_vle_function_start_var_331 (actual rows=1.00 loops=1)
+         Output: _age_default_vle_function_start_var_331.id, _age_default_vle_function_start_var_331.properties
+         Recheck Cond: (_age_default_vle_function_start_var_331.properties @> '{"i": 0}'::agtype)
+         Heap Blocks: exact=1
+         Buffers: shared hit=4
+         ->  Bitmap Index Scan on vle_frontier_empty_policy_n_properties_gin_idx (actual rows=1.00 loops=1)
+               Index Cond: (_age_default_vle_function_start_var_331.properties @> '{"i": 0}'::agtype)
+               Index Searches: 1
+               Buffers: shared hit=3
+   ->  Custom Scan (AGE VLE Stream) (actual rows=1.00 loops=1)
+         Output: _age_default_alias_0.edges
+         VLE Shape: cypher
+         VLE Arguments: 8
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+         VLE Graph: vle_frontier_empty_policy
+         VLE Edge: label=R, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local, cost=reltuples=2 fanout=start:1/end:1 stats=rel:known/start:known/end:known profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=age-adjacency/in=none depth=costed endpoint-work=sum(out:2/2,in:2/2) combined-work=all:0/0 reason=out:work-tie/in:inactive-direction class=adjacency-cache-seeded recommendation=prefer-age-adjacency-depth
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 1..2
+         VLE Direction: right
+         VLE Output: path(requirement=path, grammar=cached)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+         VLE Source Runtime: sources=age_adjacency=1/1/1/0/0 endpoint-btree=0/0 packed=0/0/0/0, empty=age_adjacency:0/endpoint-btree:0, empty-suppressed=age_adjacency:0/out:0/in:0, empty-cache=age_adjacency:0/out:0/in:0, empty-frontier=age_adjacency:1/out:1/in:0, empty-frontier-batch=flushes:1/out:1/in:0/keys:1/max:1, empty-run=age_adjacency:1/out:1/in:0, payload-cache=runs:scan:1/replay:0/seed:0/tuples:scan:1/replay:0/seeds:0, empty-plan=eligible/depth:2 match=true, empty-context=eligible/depth:2/runs:1 match=true, empty-batch=eligible/size:8/capacity:8 match=true, empty-summary=completion:2/batch:8/saturated:false, root-empty=completion:2/out:2/in:0/batch:8/saturated-roots:0, threshold-feedback=eligible/headroom:50/batch:8/source:out/reason:root-empty-observed, empty-evidence=empty-run, suppressed-source=out:age-adjacency/in:none suppression-match=true, packed-suppressed=out:0/in:0/self:0, missing-vertex=1/1, candidates=1/1, feedback=dominant=age-adjacency planned=out:age-adjacency/in:none source-match=true class=adjacency-cache-seeded planned-class=adjacency-cache-seeded class-match=true recommendation=prefer-age-adjacency-depth planned-recommendation=prefer-age-adjacency-depth density=age_adjacency:1.00,endpoint-btree:0.00,packed:0.00 yield=1/1 replay=0/1 push=1/1 pressure=adjacency-empty-run action=keep-empty-run:out
+         Buffers: shared hit=4
+ Planning:
+   Buffers: shared hit=31
+(29 rows)
+
+SET enable_seqscan = on;
+SELECT drop_graph('vle_frontier_empty_policy', true);
+NOTICE:  drop cascades to 4 other objects
+DETAIL:  drop cascades to table vle_frontier_empty_policy._ag_label_vertex
+drop cascades to table vle_frontier_empty_policy._ag_label_edge
+drop cascades to table vle_frontier_empty_policy."N"
+drop cascades to table vle_frontier_empty_policy."R"
+NOTICE:  graph "vle_frontier_empty_policy" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
 
 --
 -- Clean up
