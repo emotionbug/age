@@ -30,10 +30,12 @@
 #include "access/tableam.h"
 #include "access/visibilitymap.h"
 #include "catalog/ag_label.h"
+#include "catalog/index.h"
 #include "executor/tuptable.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "nodes/nodes.h"
+#include "nodes/nodeFuncs.h"
 #include "nodes/pathnodes.h"
 #include "nodes/tidbitmap.h"
 #include "optimizer/optimizer.h"
@@ -42,12 +44,27 @@
 #include "storage/itemptr.h"
 #include "storage/lmgr.h"
 #include "utils/graphid.h"
+#include "utils/builtins.h"
+#include "utils/datum.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/tuplestore.h"
 
 #define AGE_ADJACENCY_MAGIC 0xA9EAD620
-#define AGE_ADJACENCY_VERSION 3
+#define AGE_ADJACENCY_VERSION 18
+#define AGE_ADJACENCY_DIRECTORY_LABEL_BLOOM_SLOTS 2
+#define AGE_ADJACENCY_DIRECTORY_EXACT_VERTEX_SLOTS 8
+#define AGE_ADJACENCY_DIRECTORY_EXACT_VERTEX_OVERFLOW PG_UINT16_MAX
+#define AGE_ADJACENCY_DIRECTORY_COMPRESSED_VERTEX_SLOTS 32
+#define AGE_ADJACENCY_DIRECTORY_COMPRESSED_VERTEX_OVERFLOW PG_UINT16_MAX
+#define AGE_ADJACENCY_DIRECTORY_VERTEX_BLOOM_WORDS 4
+#define AGE_ADJACENCY_VALUE_POSTING_BLOOM_WORDS 8
+#define AGE_ADJACENCY_MAIN_BLOCK_VERTEX_BLOOM_WORDS 4
+#define AGE_ADJACENCY_MAIN_BLOCK_EXACT_VERTEX_SLOTS 8
+#define AGE_ADJACENCY_MAIN_BLOCK_EXACT_VERTEX_OVERFLOW PG_UINT16_MAX
+#define AGE_ADJACENCY_MAIN_BLOCK_COMPRESSED_VERTEX_SLOTS 32
+#define AGE_ADJACENCY_MAIN_BLOCK_COMPRESSED_VERTEX_OVERFLOW PG_UINT16_MAX
 #define AGE_ADJACENCY_METAPAGE_BLKNO 0
 #define AGE_ADJACENCY_EQUAL_STRATEGY 1
 #define AGE_ADJACENCY_PAYLOAD_NATTS 3
@@ -57,6 +74,9 @@
 #define AGE_ADJACENCY_PAGE_MAIN 3
 #define AGE_ADJACENCY_PAGE_DELTA 4
 
+#define AGE_ADJACENCY_MAIN_BLOCK_FULL 0x0001
+#define AGE_ADJACENCY_MAIN_BLOCK_COMPACT 0x0002
+#define AGE_ADJACENCY_DELTA_PAGE_COMPACT 0x0001
 #define AGE_ADJACENCY_DELTA_REINDEX_THRESHOLD 4096
 #define AGE_ADJACENCY_PAGE_USABLE_BYTES \
     (BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - \
@@ -64,6 +84,22 @@
 #define AGE_ADJACENCY_ITEMS_PER_PAGE(item_size) \
     Max(1, (int) (AGE_ADJACENCY_PAGE_USABLE_BYTES / \
                   (MAXALIGN(item_size) + sizeof(ItemIdData))))
+#define AGE_ADJACENCY_MAIN_RUN_BLOCK_HEADER \
+    MAXALIGN(offsetof(AgeAdjacencyMainRunBlockData, data))
+#define AGE_ADJACENCY_MAIN_RUN_BLOCK_FULL_SIZE(count) \
+    (AGE_ADJACENCY_MAIN_RUN_BLOCK_HEADER + \
+     sizeof(AgeAdjacencyMainPostingData) * (count))
+#define AGE_ADJACENCY_MAIN_RUN_BLOCK_COMPACT_SIZE(count) \
+    (AGE_ADJACENCY_MAIN_RUN_BLOCK_HEADER + \
+     sizeof(AgeAdjacencyMainCompactPostingData) * (count))
+#define AGE_ADJACENCY_MAIN_RUN_BLOCK_FULL_MAX_POSTINGS \
+    Max(1, (int) ((AGE_ADJACENCY_PAGE_USABLE_BYTES - sizeof(ItemIdData) - \
+                   AGE_ADJACENCY_MAIN_RUN_BLOCK_HEADER) / \
+                  sizeof(AgeAdjacencyMainPostingData)))
+#define AGE_ADJACENCY_MAIN_RUN_BLOCK_COMPACT_MAX_POSTINGS \
+    Max(1, (int) ((AGE_ADJACENCY_PAGE_USABLE_BYTES - sizeof(ItemIdData) - \
+                   AGE_ADJACENCY_MAIN_RUN_BLOCK_HEADER) / \
+                  sizeof(AgeAdjacencyMainCompactPostingData)))
 
 typedef struct AgeAdjacencyMetaPageData
 {
@@ -90,10 +126,15 @@ typedef struct AgeAdjacencyPageOpaqueData
     uint32 magic;
     uint16 version;
     uint16 page_type;
+    uint16 flags;
+    uint16 reserved;
     BlockNumber next_blkno;
     uint32 posting_count;
     graphid min_key;
     graphid max_key;
+    int32 key_label_id;
+    int32 edge_label_id;
+    int32 next_label_id;
 } AgeAdjacencyPageOpaqueData;
 
 typedef AgeAdjacencyPageOpaqueData *AgeAdjacencyPageOpaque;
@@ -108,12 +149,78 @@ typedef struct AgeAdjacencyPostingData
 
 typedef AgeAdjacencyPostingData *AgeAdjacencyPosting;
 
+typedef struct AgeAdjacencyDeltaCompactPostingData
+{
+    uint8 key_entry_id[6];
+    ItemPointerData heap_tid;
+    uint8 edge_entry_id[6];
+    uint8 next_entry_id[6];
+} pg_attribute_packed() AgeAdjacencyDeltaCompactPostingData;
+
+typedef AgeAdjacencyDeltaCompactPostingData *AgeAdjacencyDeltaCompactPosting;
+
+typedef struct AgeAdjacencyMainPostingData
+{
+    ItemPointerData heap_tid;
+    graphid edge_id;
+    graphid next_vertex_id;
+} AgeAdjacencyMainPostingData;
+
+typedef AgeAdjacencyMainPostingData *AgeAdjacencyMainPosting;
+
+typedef struct AgeAdjacencyMainCompactPostingData
+{
+    ItemPointerData heap_tid;
+    uint8 edge_entry_id[6];
+    uint8 next_entry_id[6];
+} pg_attribute_packed() AgeAdjacencyMainCompactPostingData;
+
+typedef AgeAdjacencyMainCompactPostingData *AgeAdjacencyMainCompactPosting;
+
+typedef struct AgeAdjacencyMainRunBlockData
+{
+    uint16 posting_count;
+    uint16 flags;
+    uint16 exact_next_vertex_count;
+    uint16 compressed_next_entry_count;
+    int32 edge_label_id;
+    int32 next_label_id;
+    graphid min_next_vertex_id;
+    graphid max_next_vertex_id;
+    uint64 next_vertex_bloom[AGE_ADJACENCY_MAIN_BLOCK_VERTEX_BLOOM_WORDS];
+    uint64 value_posting_bloom[AGE_ADJACENCY_VALUE_POSTING_BLOOM_WORDS];
+    uint8 compressed_next_entries[
+        AGE_ADJACENCY_MAIN_BLOCK_COMPRESSED_VERTEX_SLOTS][6];
+    graphid exact_next_vertex_ids[AGE_ADJACENCY_MAIN_BLOCK_EXACT_VERTEX_SLOTS];
+    char data[FLEXIBLE_ARRAY_MEMBER];
+} AgeAdjacencyMainRunBlockData;
+
+typedef AgeAdjacencyMainRunBlockData *AgeAdjacencyMainRunBlock;
+
 typedef struct AgeAdjacencyDirectoryEntryData
 {
     graphid key;
     BlockNumber first_blkno;
     OffsetNumber first_offnum;
     uint32 posting_count;
+    int32 min_next_label_id;
+    int32 max_next_label_id;
+    uint32 next_label_count;
+    graphid min_next_vertex_id;
+    graphid max_next_vertex_id;
+    uint64 next_vertex_bloom;
+    uint64 next_vertex_bloom_wide[AGE_ADJACENCY_DIRECTORY_VERTEX_BLOOM_WORDS];
+    uint64 value_posting_bloom[AGE_ADJACENCY_VALUE_POSTING_BLOOM_WORDS];
+    uint16 exact_next_vertex_count;
+    uint16 compressed_next_entry_count;
+    int32 next_vertex_bloom_label_id[AGE_ADJACENCY_DIRECTORY_LABEL_BLOOM_SLOTS];
+    uint64 next_vertex_label_bloom[AGE_ADJACENCY_DIRECTORY_LABEL_BLOOM_SLOTS];
+    uint64 next_vertex_label_value_posting_bloom[
+        AGE_ADJACENCY_DIRECTORY_LABEL_BLOOM_SLOTS]
+        [AGE_ADJACENCY_VALUE_POSTING_BLOOM_WORDS];
+    uint8 compressed_next_entries[
+        AGE_ADJACENCY_DIRECTORY_COMPRESSED_VERTEX_SLOTS][6];
+    graphid exact_next_vertex_ids[AGE_ADJACENCY_DIRECTORY_EXACT_VERTEX_SLOTS];
 } AgeAdjacencyDirectoryEntryData;
 
 typedef AgeAdjacencyDirectoryEntryData *AgeAdjacencyDirectoryEntry;
@@ -134,6 +241,9 @@ typedef struct AgeAdjacencyMainPageCache
     bool valid;
     BlockNumber blkno;
     BlockNumber next_blkno;
+    OffsetNumber next_offnum;
+    uint16 next_posting_index;
+    OffsetNumber maxoff;
     int count;
     int capacity;
     struct AgeAdjacencyCachedPosting *postings;
@@ -141,8 +251,7 @@ typedef struct AgeAdjacencyMainPageCache
 
 typedef struct AgeAdjacencyCachedPosting
 {
-    OffsetNumber offnum;
-    AgeAdjacencyPostingData posting;
+    AgeAdjacencyMainPostingData posting;
 } AgeAdjacencyCachedPosting;
 
 typedef struct AgeAdjacencyBuildState
@@ -169,9 +278,52 @@ typedef struct AgeAdjacencyScanTarget
     bool visibilitymap_cache_valid;
     bool visibilitymap_cached_all_visible;
     bool fetch_properties;
+    int32 terminal_label_id;
+    int64 terminal_label_filtered;
+    int64 terminal_directory_label_filtered;
+    int64 terminal_property_filtered;
+    int64 terminal_cache_filtered;
+    int64 terminal_cache_label_filtered;
+    int64 terminal_cache_property_filtered;
+    int64 terminal_vertex_set_range_filtered;
+    int64 terminal_vertex_set_sorted_filtered;
+    int64 terminal_vertex_set_block_filtered;
+    int64 terminal_vertex_set_block_value_filtered;
+    int64 terminal_vertex_set_block_value_posting_filtered;
+    int64 terminal_vertex_set_block_range_filtered;
+    int64 terminal_vertex_set_block_exact_filtered;
+    int64 terminal_vertex_set_block_compressed_filtered;
+    int64 terminal_vertex_set_block_bloom_filtered;
+    int64 terminal_vertex_set_block_posting_filtered;
+    int64 terminal_vertex_set_directory_filtered;
+    int64 terminal_vertex_set_directory_range_filtered;
+    int64 terminal_vertex_set_directory_exact_filtered;
+    int64 terminal_vertex_set_directory_label_bloom_filtered;
+    int64 terminal_vertex_set_directory_compressed_filtered;
+    int64 terminal_vertex_set_directory_wide_bloom_filtered;
+    int64 terminal_vertex_set_directory_value_filtered;
+    int64 terminal_vertex_set_directory_value_posting_filtered;
+    int64 terminal_composite_requests;
+    int64 terminal_composite_block_filtered;
+    int64 terminal_composite_directory_filtered;
+    int64 terminal_composite_directory_estimated;
+    AgeAdjacencyVertexSetFilter terminal_vertex_set_filter;
+    Oid terminal_property_index_oid;
+    uint32 terminal_property_filter_id;
+    int64 terminal_property_match_count;
+    AgeAdjacencyVertexFilterCallback terminal_vertex_filter;
+    void *terminal_vertex_filter_state;
+    bool has_terminal_property_summary;
     AgeAdjacencyPayloadCallback callback;
     void *callback_state;
 } AgeAdjacencyScanTarget;
+
+typedef enum AgeAdjacencyCacheFilterResult
+{
+    AGE_ADJACENCY_CACHE_FILTER_PASS,
+    AGE_ADJACENCY_CACHE_FILTER_LABEL,
+    AGE_ADJACENCY_CACHE_FILTER_PROPERTY
+} AgeAdjacencyCacheFilterResult;
 
 struct AgeAdjacencyVisiblePayloadScan
 {
@@ -186,10 +338,12 @@ struct AgeAdjacencyVisiblePayloadScan
     bool key_active;
     bool main_active;
     uint32 main_remaining;
+    int64 main_label_candidate_count;
+    bool main_composite_estimate_recorded;
     BlockNumber main_blkno;
     OffsetNumber main_offnum;
+    uint16 main_posting_index;
     int main_cache_index;
-    bool main_reached_start;
     BlockNumber delta_blkno;
     OffsetNumber delta_offnum;
 };
@@ -208,10 +362,37 @@ typedef struct AgeAdjacencyCandidateRowStore
     bool outgoing;
 } AgeAdjacencyCandidateRowStore;
 
+typedef struct AgeAdjacencyDeltaProbeStats
+{
+    int64 pages_visited;
+    int64 pages_skipped;
+    int64 entries_scanned;
+} AgeAdjacencyDeltaProbeStats;
+
+typedef struct AgeAdjacencyMainProbeStats
+{
+    bool found;
+    int64 pages_visited;
+    int64 window_offsets;
+    int64 page_offsets;
+    int64 block_items;
+    int64 compact_block_items;
+    int64 full_block_items;
+    int64 entries_cached;
+    int64 label_groups;
+} AgeAdjacencyMainProbeStats;
+
 PG_FUNCTION_INFO_V1(age_adjacency_handler);
 PG_FUNCTION_INFO_V1(age_adjacency_debug_payload);
 PG_FUNCTION_INFO_V1(age_adjacency_debug_stats);
 PG_FUNCTION_INFO_V1(age_adjacency_debug_directory_probe);
+PG_FUNCTION_INFO_V1(age_adjacency_debug_key_known_empty);
+PG_FUNCTION_INFO_V1(age_adjacency_debug_key_known_empty_range);
+PG_FUNCTION_INFO_V1(age_adjacency_debug_composite_probe);
+PG_FUNCTION_INFO_V1(age_adjacency_debug_main_probe);
+PG_FUNCTION_INFO_V1(age_adjacency_debug_delta_probe);
+PG_FUNCTION_INFO_V1(age_adjacency_debug_delta_maintenance);
+PG_FUNCTION_INFO_V1(age_adjacency_reindex_if_needed);
 PG_FUNCTION_INFO_V1(age_adjacency_candidate_edges);
 PG_FUNCTION_INFO_V1(age_adjacency_candidate_edge_rows);
 
@@ -226,15 +407,41 @@ static Buffer age_adjacency_new_buffer(Relation index_rel);
 static void age_adjacency_form_posting(Relation index_rel, Datum *values,
                                        bool *isnull, ItemPointer heap_tid,
                                        AgeAdjacencyPostingData *posting);
+static void age_adjacency_store_entry_id48(uint8 *dest, int64 entry_id);
+static int64 age_adjacency_load_entry_id48(const uint8 *src);
+static bool age_adjacency_main_run_block_can_compact(
+    AgeAdjacencyPostingData *postings, Size posting_count,
+    int32 *edge_label_id_out, int32 *next_label_id_out);
+static Size age_adjacency_main_run_block_size(uint16 flags,
+                                              Size posting_count);
+static void age_adjacency_main_run_block_get_posting(
+    AgeAdjacencyMainRunBlock block, uint16 posting_index, graphid key,
+    AgeAdjacencyPostingData *posting);
+static bool age_adjacency_main_run_block_matches_terminal_label(
+    AgeAdjacencyMainRunBlock block, int32 terminal_label_id);
+static bool age_adjacency_main_run_block_may_match_compact_postings(
+    AgeAdjacencyMainRunBlock block, uint16 posting_index,
+    const AgeAdjacencyVertexSetFilter *filter);
+static void age_adjacency_form_delta_posting(AgeAdjacencyPosting posting,
+                                             AgeAdjacencyDeltaCompactPosting delta);
+static void age_adjacency_delta_posting_get_posting(
+    AgeAdjacencyDeltaCompactPosting delta, AgeAdjacencyPageOpaque opaque,
+    AgeAdjacencyPostingData *posting);
 static void age_adjacency_append_item(Relation index_rel, uint16 page_type,
                                       const void *item, Size item_size,
+                                      graphid item_key,
+                                      int32 key_label_id,
+                                      int32 edge_label_id,
+                                      int32 next_label_id,
+                                      uint32 posting_units,
                                       BlockNumber *inserted_blkno,
                                       OffsetNumber *inserted_offnum);
-static void age_adjacency_append_posting(Relation index_rel,
-                                         AgeAdjacencyPosting posting,
-                                         uint16 page_type,
-                                         BlockNumber *inserted_blkno,
-                                         OffsetNumber *inserted_offnum);
+static void age_adjacency_append_main_run_block(
+    Relation index_rel, AgeAdjacencyPostingData *postings, Size posting_count,
+    graphid run_key, BlockNumber *inserted_blkno,
+    OffsetNumber *inserted_offnum);
+static void age_adjacency_append_delta_posting(Relation index_rel,
+                                               AgeAdjacencyPosting posting);
 static void age_adjacency_append_directory_entry(Relation index_rel,
                                                  AgeAdjacencyDirectoryEntry entry);
 static int age_adjacency_compare_postings(const void *left, const void *right);
@@ -264,6 +471,98 @@ static bool age_adjacency_find_directory_entry_with_meta(
 static bool age_adjacency_find_directory_entry_cached(
     AgeAdjacencyVisiblePayloadScan *scan, graphid key,
     AgeAdjacencyDirectoryEntryData *entry_out);
+static bool age_adjacency_directory_entry_matches_terminal_label(
+    AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id);
+static bool age_adjacency_directory_entry_may_match_vertex_set(
+    AgeAdjacencyDirectoryEntry entry,
+    const AgeAdjacencyVertexSetFilter *filter);
+static uint64 age_adjacency_vertex_bloom_add(uint64 bloom, graphid vertex_id);
+static void age_adjacency_vertex_bloom256_add(uint64 *bloom,
+                                              graphid vertex_id);
+static bool age_adjacency_vertex_bloom256_may_contain(const uint64 *bloom,
+                                                       graphid vertex_id);
+static bool age_adjacency_vertex_bloom256_intersects(const uint64 *left,
+                                                     const uint64 *right);
+static void age_adjacency_value_posting_bloom_add(uint64 *bloom,
+                                                  graphid vertex_id);
+static bool age_adjacency_value_posting_bloom_intersects(
+    const uint64 *left, const uint64 *right);
+static void age_adjacency_vertex_set_filter_prepare_value_summary(
+    AgeAdjacencyVertexSetFilter *filter, uint32 value_filter_id);
+static bool age_adjacency_main_run_block_may_match_vertex_range(
+    AgeAdjacencyMainRunBlock block,
+    const AgeAdjacencyVertexSetFilter *filter);
+static void age_adjacency_main_run_block_add_exact_vertex(
+    AgeAdjacencyMainRunBlock block, graphid next_vertex_id);
+static bool age_adjacency_main_run_block_may_match_exact_vertex(
+    AgeAdjacencyMainRunBlock block,
+    const AgeAdjacencyVertexSetFilter *filter);
+static void age_adjacency_main_run_block_add_compressed_vertex(
+    AgeAdjacencyMainRunBlock block, graphid next_vertex_id);
+static bool age_adjacency_main_run_block_may_match_compressed_vertex(
+    AgeAdjacencyMainRunBlock block,
+    const AgeAdjacencyVertexSetFilter *filter);
+static bool age_adjacency_main_run_block_may_match_vertex_bloom(
+    AgeAdjacencyMainRunBlock block,
+    const AgeAdjacencyVertexSetFilter *filter);
+static bool age_adjacency_main_run_block_may_match_value_posting(
+    AgeAdjacencyMainRunBlock block,
+    const AgeAdjacencyVertexSetFilter *filter);
+static void age_adjacency_directory_entry_add_exact_vertex(
+    AgeAdjacencyDirectoryEntry entry, graphid next_vertex_id);
+static bool age_adjacency_directory_entry_exact_vertex_may_match(
+    AgeAdjacencyDirectoryEntry entry,
+    const AgeAdjacencyVertexSetFilter *filter, bool *has_exact_summary);
+static void age_adjacency_directory_entry_add_compressed_vertex(
+    AgeAdjacencyDirectoryEntry entry, graphid next_vertex_id);
+static bool age_adjacency_directory_entry_may_match_compressed_vertex(
+    AgeAdjacencyDirectoryEntry entry,
+    const AgeAdjacencyVertexSetFilter *filter);
+static void age_adjacency_directory_entry_add_label_bloom(
+    AgeAdjacencyDirectoryEntry entry, int32 next_label_id,
+    graphid next_vertex_id);
+static bool age_adjacency_directory_entry_label_bloom_may_match(
+    AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id,
+    const AgeAdjacencyVertexSetFilter *filter, bool *has_label_bloom);
+static bool age_adjacency_vertex_bloom_may_contain(uint64 bloom,
+                                                   graphid vertex_id);
+static bool age_adjacency_directory_entry_may_match_vertex_bloom(
+    AgeAdjacencyDirectoryEntry entry,
+    const AgeAdjacencyVertexSetFilter *filter);
+static bool age_adjacency_directory_entry_may_match_wide_vertex_bloom(
+    AgeAdjacencyDirectoryEntry entry,
+    const AgeAdjacencyVertexSetFilter *filter);
+static bool age_adjacency_directory_entry_may_match_value_summary(
+    AgeAdjacencyDirectoryEntry entry,
+    const AgeAdjacencyVertexSetFilter *filter);
+static bool age_adjacency_directory_entry_may_match_value_posting(
+    AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id,
+    const AgeAdjacencyVertexSetFilter *filter);
+static const char *age_adjacency_directory_entry_value_posting_source(
+    AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id);
+static bool age_adjacency_directory_entry_range_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target);
+static bool age_adjacency_directory_entry_exact_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target);
+static bool age_adjacency_directory_entry_label_bloom_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target);
+static bool age_adjacency_directory_entry_compressed_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target);
+static bool age_adjacency_directory_entry_value_summary_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target);
+static bool age_adjacency_directory_entry_value_posting_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target);
+static bool age_adjacency_directory_entry_wide_bloom_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target);
+static bool age_adjacency_directory_entry_matches_composite_target(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target,
+    bool *label_mismatch, bool *property_mismatch);
+static void age_adjacency_visible_payload_scan_record_composite_estimate(
+    AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyDirectoryEntry entry);
+static bool age_adjacency_visible_payload_scan_apply_directory_vertex_set_filter(
+    AgeAdjacencyVisiblePayloadScan *scan);
+static int64 age_adjacency_directory_entry_terminal_label_postings(
+    AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id);
 static void age_adjacency_load_directory_cache(
     AgeAdjacencyVisiblePayloadScan *scan, BlockNumber blkno);
 static void age_adjacency_load_main_cache(AgeAdjacencyVisiblePayloadScan *scan,
@@ -272,11 +571,32 @@ static void age_adjacency_probe_directory(Relation index_rel, graphid key,
                                           bool *found,
                                           int64 *pages_visited,
                                           int64 *entries_scanned);
+static void age_adjacency_probe_main_run(
+    Relation index_rel, graphid key, const AgeAdjacencyMetaPageData *meta,
+    AgeAdjacencyMainProbeStats *stats);
+static void age_adjacency_probe_delta_pages(
+    Relation index_rel, graphid key, const AgeAdjacencyMetaPageData *meta,
+    AgeAdjacencyDeltaProbeStats *stats);
+static const char *age_adjacency_delta_maintenance_action(
+    const AgeAdjacencyMetaPageData *meta, BlockNumber index_pages,
+    int64 *delta_pages_out, int64 *delta_tuples_per_page_out,
+    const char **reason_out);
 static int64 age_adjacency_emit_posting(AgeAdjacencyPosting posting,
                                         AgeAdjacencyScanTarget *target);
 static bool age_adjacency_posting_visible_payload(
     AgeAdjacencyPosting posting, AgeAdjacencyScanTarget *target,
     AgeAdjacencyPayload *payload);
+static bool age_adjacency_posting_matches_terminal_label(
+    AgeAdjacencyScanTarget *target, graphid next_vertex_id);
+static bool age_adjacency_posting_matches_terminal_vertex_filter(
+    AgeAdjacencyScanTarget *target, graphid next_vertex_id);
+static bool age_adjacency_vertex_set_sorted_contains(
+    const AgeAdjacencyVertexSetFilter *filter, graphid vertex_id);
+static AgeAdjacencyCacheFilterResult
+age_adjacency_posting_matches_cache_filters(
+    AgeAdjacencyPosting posting, AgeAdjacencyScanTarget *target);
+static bool age_adjacency_delta_page_may_contain_key(
+    AgeAdjacencyPageOpaque opaque, graphid key);
 static bool age_adjacency_visible_payload_scan_next_main(
     AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyPayload *payload);
 static bool age_adjacency_visible_payload_scan_next_delta(
@@ -310,6 +630,10 @@ static IndexBulkDeleteResult *age_adjacency_vacuum_cleanup(IndexVacuumInfo *info
 static bool age_adjacency_read_planner_meta(Oid index_oid,
                                             AgeAdjacencyMetaPageData *meta_out,
                                             BlockNumber *pages_out);
+static bool age_adjacency_extract_constant_index_key(IndexPath *path,
+                                                     graphid *key_out);
+static bool age_adjacency_probe_planner_delta(Oid index_oid, graphid key,
+                                              AgeAdjacencyDeltaProbeStats *stats);
 static void age_adjacency_cost_estimate(struct PlannerInfo *root,
                                         struct IndexPath *path,
                                         double loop_count,
@@ -338,10 +662,15 @@ age_adjacency_init_page(Page page, uint16 page_type)
     opaque->magic = AGE_ADJACENCY_MAGIC;
     opaque->version = AGE_ADJACENCY_VERSION;
     opaque->page_type = page_type;
+    opaque->flags = 0;
+    opaque->reserved = 0;
     opaque->next_blkno = InvalidBlockNumber;
     opaque->posting_count = 0;
     opaque->min_key = 0;
     opaque->max_key = 0;
+    opaque->key_label_id = INVALID_LABEL_ID;
+    opaque->edge_label_id = INVALID_LABEL_ID;
+    opaque->next_label_id = INVALID_LABEL_ID;
 }
 
 static void
@@ -459,7 +788,7 @@ age_adjacency_validate_index(Relation index_rel)
     {
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                 errmsg("age_adjacency payload v3 indexes require exactly "
+                 errmsg("age_adjacency payload v4 indexes require exactly "
                         "three graphid key columns"),
                  errhint("Use (endpoint_id, edge_id, next_vertex_id), such as "
                          "(start_id, id, end_id) or (end_id, id, start_id).")));
@@ -473,7 +802,7 @@ age_adjacency_validate_index(Relation index_rel)
         {
             ereport(ERROR,
                     (errcode(ERRCODE_DATATYPE_MISMATCH),
-                     errmsg("age_adjacency payload v3 column %d must be graphid",
+                     errmsg("age_adjacency payload v4 column %d must be graphid",
                             i + 1)));
         }
     }
@@ -541,7 +870,7 @@ age_adjacency_form_posting(Relation index_rel, Datum *values, bool *isnull,
         {
             ereport(ERROR,
                     (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-                     errmsg("age_adjacency payload v3 does not support null "
+                     errmsg("age_adjacency payload v4 does not support null "
                             "columns")));
         }
     }
@@ -553,8 +882,1476 @@ age_adjacency_form_posting(Relation index_rel, Datum *values, bool *isnull,
 }
 
 static void
+age_adjacency_store_entry_id48(uint8 *dest, int64 entry_id)
+{
+    uint64 value = (uint64) entry_id;
+
+    Assert(dest != NULL);
+    Assert(entry_id_is_valid(entry_id));
+
+    dest[0] = (uint8) (value & 0xff);
+    dest[1] = (uint8) ((value >> 8) & 0xff);
+    dest[2] = (uint8) ((value >> 16) & 0xff);
+    dest[3] = (uint8) ((value >> 24) & 0xff);
+    dest[4] = (uint8) ((value >> 32) & 0xff);
+    dest[5] = (uint8) ((value >> 40) & 0xff);
+}
+
+static int64
+age_adjacency_load_entry_id48(const uint8 *src)
+{
+    uint64 value;
+
+    Assert(src != NULL);
+
+    value = ((uint64) src[0]) |
+            (((uint64) src[1]) << 8) |
+            (((uint64) src[2]) << 16) |
+            (((uint64) src[3]) << 24) |
+            (((uint64) src[4]) << 32) |
+            (((uint64) src[5]) << 40);
+    return (int64) value;
+}
+
+static bool
+age_adjacency_main_run_block_can_compact(AgeAdjacencyPostingData *postings,
+                                         Size posting_count,
+                                         int32 *edge_label_id_out,
+                                         int32 *next_label_id_out)
+{
+    int32 edge_label_id;
+    int32 next_label_id;
+    Size i;
+
+    Assert(postings != NULL);
+    Assert(posting_count > 0);
+
+    edge_label_id = get_graphid_label_id(postings[0].edge_id);
+    next_label_id = get_graphid_label_id(postings[0].next_vertex_id);
+    if (!label_id_is_valid(edge_label_id) ||
+        !label_id_is_valid(next_label_id))
+    {
+        return false;
+    }
+
+    for (i = 1; i < posting_count; i++)
+    {
+        if (get_graphid_label_id(postings[i].edge_id) != edge_label_id ||
+            get_graphid_label_id(postings[i].next_vertex_id) != next_label_id)
+        {
+            return false;
+        }
+    }
+
+    if (edge_label_id_out != NULL)
+    {
+        *edge_label_id_out = edge_label_id;
+    }
+    if (next_label_id_out != NULL)
+    {
+        *next_label_id_out = next_label_id;
+    }
+
+    return true;
+}
+
+static Size
+age_adjacency_main_run_block_size(uint16 flags, Size posting_count)
+{
+    if ((flags & AGE_ADJACENCY_MAIN_BLOCK_COMPACT) != 0)
+    {
+        return AGE_ADJACENCY_MAIN_RUN_BLOCK_COMPACT_SIZE(posting_count);
+    }
+
+    return AGE_ADJACENCY_MAIN_RUN_BLOCK_FULL_SIZE(posting_count);
+}
+
+static void
+age_adjacency_main_run_block_get_posting(AgeAdjacencyMainRunBlock block,
+                                         uint16 posting_index,
+                                         graphid key,
+                                         AgeAdjacencyPostingData *posting)
+{
+    Assert(block != NULL);
+    Assert(posting != NULL);
+    Assert(posting_index < block->posting_count);
+
+    posting->key = key;
+    if ((block->flags & AGE_ADJACENCY_MAIN_BLOCK_COMPACT) != 0)
+    {
+        AgeAdjacencyMainCompactPosting compact_posting;
+
+        compact_posting =
+            &((AgeAdjacencyMainCompactPosting) block->data)[posting_index];
+        memcpy(&posting->heap_tid, &compact_posting->heap_tid,
+               sizeof(ItemPointerData));
+        posting->edge_id =
+            make_graphid(block->edge_label_id,
+                         age_adjacency_load_entry_id48(
+                             compact_posting->edge_entry_id));
+        posting->next_vertex_id =
+            make_graphid(block->next_label_id,
+                         age_adjacency_load_entry_id48(
+                             compact_posting->next_entry_id));
+    }
+    else
+    {
+        AgeAdjacencyMainPosting full_posting;
+
+        full_posting = &((AgeAdjacencyMainPosting) block->data)[posting_index];
+        ItemPointerCopy(&full_posting->heap_tid, &posting->heap_tid);
+        posting->edge_id = full_posting->edge_id;
+        posting->next_vertex_id = full_posting->next_vertex_id;
+    }
+}
+
+static bool
+age_adjacency_main_run_block_matches_terminal_label(
+    AgeAdjacencyMainRunBlock block, int32 terminal_label_id)
+{
+    Assert(block != NULL);
+
+    if (!label_id_is_valid(terminal_label_id))
+        return true;
+
+    /*
+     * Only compact blocks carry a block-level homogeneous next label
+     * descriptor.  Full blocks must fall through to per-posting filtering.
+     */
+    if ((block->flags & AGE_ADJACENCY_MAIN_BLOCK_COMPACT) == 0)
+        return true;
+
+    return block->next_label_id == terminal_label_id;
+}
+
+static bool
+age_adjacency_main_run_block_may_match_compact_postings(
+    AgeAdjacencyMainRunBlock block, uint16 posting_index,
+    const AgeAdjacencyVertexSetFilter *filter)
+{
+    AgeAdjacencyMainCompactPosting compact_postings;
+    uint16 i;
+
+    Assert(block != NULL);
+
+    if (filter == NULL || !filter->has_sorted_vertex_ids)
+        return true;
+
+    if ((block->flags & AGE_ADJACENCY_MAIN_BLOCK_COMPACT) == 0)
+        return true;
+
+    if (filter->has_range &&
+        (make_graphid(block->next_label_id, 0) > filter->max_vertex_id ||
+         make_graphid(block->next_label_id, ENTRY_ID_MASK) <
+         filter->min_vertex_id))
+    {
+        return false;
+    }
+
+    compact_postings = (AgeAdjacencyMainCompactPosting) block->data;
+    for (i = posting_index; i < block->posting_count; i++)
+    {
+        graphid next_vertex_id;
+
+        next_vertex_id = make_graphid(
+            block->next_label_id,
+            age_adjacency_load_entry_id48(compact_postings[i].next_entry_id));
+        if (age_adjacency_vertex_set_sorted_contains(filter, next_vertex_id))
+            return true;
+    }
+
+    return false;
+}
+
+static bool
+age_adjacency_directory_entry_matches_terminal_label(
+    AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id)
+{
+    Assert(entry != NULL);
+
+    if (!label_id_is_valid(terminal_label_id))
+        return true;
+    if (!label_id_is_valid(entry->min_next_label_id) ||
+        !label_id_is_valid(entry->max_next_label_id))
+    {
+        return true;
+    }
+
+    return terminal_label_id >= entry->min_next_label_id &&
+        terminal_label_id <= entry->max_next_label_id;
+}
+
+static bool
+age_adjacency_directory_entry_may_match_vertex_set(
+    AgeAdjacencyDirectoryEntry entry,
+    const AgeAdjacencyVertexSetFilter *filter)
+{
+    Assert(entry != NULL);
+
+    if (filter == NULL || !filter->has_range)
+        return true;
+
+    if (entry->min_next_vertex_id == 0 && entry->max_next_vertex_id == 0)
+        return true;
+
+    if (entry->min_next_vertex_id > filter->max_vertex_id ||
+        entry->max_next_vertex_id < filter->min_vertex_id)
+    {
+        return false;
+    }
+
+    if (!age_adjacency_directory_entry_exact_vertex_may_match(entry, filter,
+                                                              NULL))
+        return false;
+
+    return age_adjacency_directory_entry_may_match_vertex_bloom(entry,
+                                                                filter);
+}
+
+static uint32
+age_adjacency_property_filter_id_mix(uint32 filter_id, uint32 value_hash)
+{
+    filter_id ^= value_hash + 0x9e3779b9 + (filter_id << 6) +
+                 (filter_id >> 2);
+    if (filter_id == 0)
+        filter_id = 1;
+
+    return filter_id;
+}
+
+uint32
+age_adjacency_property_filter_id(Oid property_index_oid,
+                                 Datum property_value,
+                                 bool property_value_isnull)
+{
+    uint32 value_hash;
+
+    if (!OidIsValid(property_index_oid))
+        return 0;
+
+    if (property_value_isnull)
+        value_hash = 0x51f15eED;
+    else
+        value_hash = datum_image_hash(property_value, false, -1);
+
+    return age_adjacency_property_filter_id_mix((uint32)property_index_oid,
+                                                value_hash);
+}
+
+static uint64
+age_adjacency_vertex_bloom_add(uint64 bloom, graphid vertex_id)
+{
+    uint64 hash;
+    uint64 mixed;
+
+    hash = (uint64)vertex_id;
+    mixed = hash ^ (hash >> 33);
+    mixed *= UINT64CONST(0xff51afd7ed558ccd);
+    mixed ^= mixed >> 33;
+    mixed *= UINT64CONST(0xc4ceb9fe1a85ec53);
+    mixed ^= mixed >> 33;
+
+    bloom |= UINT64CONST(1) << (mixed & 63);
+    bloom |= UINT64CONST(1) << ((mixed >> 6) & 63);
+    bloom |= UINT64CONST(1) << ((mixed >> 12) & 63);
+
+    return bloom;
+}
+
+static void
+age_adjacency_vertex_bloom256_add(uint64 *bloom, graphid vertex_id)
+{
+    uint64 hash;
+    uint64 mixed;
+
+    Assert(bloom != NULL);
+
+    hash = (uint64)vertex_id;
+    mixed = hash ^ (hash >> 33);
+    mixed *= UINT64CONST(0xff51afd7ed558ccd);
+    mixed ^= mixed >> 33;
+    mixed *= UINT64CONST(0xc4ceb9fe1a85ec53);
+    mixed ^= mixed >> 33;
+
+    bloom[mixed & 3] |= UINT64CONST(1) << ((mixed >> 2) & 63);
+    bloom[(mixed >> 8) & 3] |= UINT64CONST(1) << ((mixed >> 10) & 63);
+    bloom[(mixed >> 16) & 3] |= UINT64CONST(1) << ((mixed >> 18) & 63);
+}
+
+static bool
+age_adjacency_vertex_bloom256_may_contain(const uint64 *bloom,
+                                          graphid vertex_id)
+{
+    uint64 candidate[AGE_ADJACENCY_MAIN_BLOCK_VERTEX_BLOOM_WORDS] = {0, 0, 0, 0};
+    int i;
+    bool has_bloom = false;
+
+    Assert(bloom != NULL);
+
+    for (i = 0; i < AGE_ADJACENCY_MAIN_BLOCK_VERTEX_BLOOM_WORDS; i++)
+    {
+        if (bloom[i] != 0)
+            has_bloom = true;
+    }
+    if (!has_bloom)
+        return true;
+
+    age_adjacency_vertex_bloom256_add(candidate, vertex_id);
+    for (i = 0; i < AGE_ADJACENCY_MAIN_BLOCK_VERTEX_BLOOM_WORDS; i++)
+    {
+        if ((bloom[i] & candidate[i]) != candidate[i])
+            return false;
+    }
+
+    return true;
+}
+
+static bool
+age_adjacency_vertex_bloom256_intersects(const uint64 *left,
+                                         const uint64 *right)
+{
+    int i;
+    bool has_left = false;
+    bool has_right = false;
+
+    Assert(left != NULL);
+    Assert(right != NULL);
+
+    for (i = 0; i < AGE_ADJACENCY_MAIN_BLOCK_VERTEX_BLOOM_WORDS; i++)
+    {
+        if (left[i] != 0)
+            has_left = true;
+        if (right[i] != 0)
+            has_right = true;
+        if ((left[i] & right[i]) != 0)
+            return true;
+    }
+
+    return !has_left || !has_right;
+}
+
+static void
+age_adjacency_value_posting_bloom_add(uint64 *bloom, graphid vertex_id)
+{
+    uint64 hash;
+    uint64 mixed;
+    int i;
+
+    Assert(bloom != NULL);
+
+    hash = (uint64) vertex_id ^ UINT64CONST(0x7a6f4d2c9e3779b9);
+    for (i = 0; i < 6; i++)
+    {
+        mixed = hash + UINT64CONST(0x9e3779b97f4a7c15) * (uint64) (i + 1);
+        mixed ^= mixed >> 30;
+        mixed *= UINT64CONST(0xbf58476d1ce4e5b9);
+        mixed ^= mixed >> 27;
+        mixed *= UINT64CONST(0x94d049bb133111eb);
+        mixed ^= mixed >> 31;
+        bloom[mixed & (AGE_ADJACENCY_VALUE_POSTING_BLOOM_WORDS - 1)] |=
+            UINT64CONST(1) << ((mixed >> 8) & 63);
+        hash = mixed;
+    }
+}
+
+static bool
+age_adjacency_value_posting_bloom_intersects(const uint64 *left,
+                                             const uint64 *right)
+{
+    bool has_left = false;
+    bool has_right = false;
+    int i;
+
+    Assert(left != NULL);
+    Assert(right != NULL);
+
+    for (i = 0; i < AGE_ADJACENCY_VALUE_POSTING_BLOOM_WORDS; i++)
+    {
+        if (left[i] != 0)
+            has_left = true;
+        if (right[i] != 0)
+            has_right = true;
+        if ((left[i] & right[i]) != 0)
+            return true;
+    }
+
+    return !has_left || !has_right;
+}
+
+static void
+age_adjacency_vertex_set_filter_prepare_value_summary(
+    AgeAdjacencyVertexSetFilter *filter, uint32 value_filter_id)
+{
+    int64 i;
+
+    Assert(filter != NULL);
+
+    filter->value_bloom = 0;
+    memset(filter->value_bloom_wide, 0, sizeof(filter->value_bloom_wide));
+    memset(filter->value_posting_bloom, 0,
+           sizeof(filter->value_posting_bloom));
+    filter->value_filter_id = value_filter_id;
+    filter->has_value_summary = false;
+
+    if (value_filter_id == 0 ||
+        !filter->has_sorted_vertex_ids ||
+        filter->sorted_vertex_ids == NULL ||
+        filter->sorted_vertex_count <= 0)
+    {
+        return;
+    }
+
+    for (i = 0; i < filter->sorted_vertex_count; i++)
+    {
+        filter->value_bloom = age_adjacency_vertex_bloom_add(
+            filter->value_bloom, filter->sorted_vertex_ids[i]);
+        age_adjacency_vertex_bloom256_add(filter->value_bloom_wide,
+                                          filter->sorted_vertex_ids[i]);
+        age_adjacency_value_posting_bloom_add(filter->value_posting_bloom,
+                                              filter->sorted_vertex_ids[i]);
+    }
+    filter->has_value_summary = true;
+}
+
+static bool
+age_adjacency_main_run_block_may_match_vertex_range(
+    AgeAdjacencyMainRunBlock block,
+    const AgeAdjacencyVertexSetFilter *filter)
+{
+    Assert(block != NULL);
+
+    if (filter == NULL || !filter->has_range)
+        return true;
+
+    if (block->min_next_vertex_id == 0 && block->max_next_vertex_id == 0)
+        return true;
+
+    return block->min_next_vertex_id <= filter->max_vertex_id &&
+        block->max_next_vertex_id >= filter->min_vertex_id;
+}
+
+static void
+age_adjacency_main_run_block_add_exact_vertex(
+    AgeAdjacencyMainRunBlock block, graphid next_vertex_id)
+{
+    uint16 i;
+
+    Assert(block != NULL);
+
+    if (block->exact_next_vertex_count ==
+        AGE_ADJACENCY_MAIN_BLOCK_EXACT_VERTEX_OVERFLOW)
+    {
+        return;
+    }
+
+    for (i = 0; i < block->exact_next_vertex_count; i++)
+    {
+        if (block->exact_next_vertex_ids[i] == next_vertex_id)
+            return;
+    }
+
+    if (block->exact_next_vertex_count >=
+        AGE_ADJACENCY_MAIN_BLOCK_EXACT_VERTEX_SLOTS)
+    {
+        block->exact_next_vertex_count =
+            AGE_ADJACENCY_MAIN_BLOCK_EXACT_VERTEX_OVERFLOW;
+        return;
+    }
+
+    block->exact_next_vertex_ids[block->exact_next_vertex_count] =
+        next_vertex_id;
+    block->exact_next_vertex_count++;
+}
+
+static bool
+age_adjacency_main_run_block_may_match_exact_vertex(
+    AgeAdjacencyMainRunBlock block,
+    const AgeAdjacencyVertexSetFilter *filter)
+{
+    int64 vertex_index;
+    uint16 exact_index;
+
+    Assert(block != NULL);
+
+    if (filter == NULL ||
+        !filter->has_sorted_vertex_ids ||
+        filter->sorted_vertex_ids == NULL ||
+        filter->sorted_vertex_count <= 0 ||
+        block->exact_next_vertex_count == 0 ||
+        block->exact_next_vertex_count ==
+        AGE_ADJACENCY_MAIN_BLOCK_EXACT_VERTEX_OVERFLOW)
+    {
+        return true;
+    }
+
+    for (vertex_index = 0; vertex_index < filter->sorted_vertex_count;
+         vertex_index++)
+    {
+        for (exact_index = 0; exact_index < block->exact_next_vertex_count;
+             exact_index++)
+        {
+            if (filter->sorted_vertex_ids[vertex_index] ==
+                block->exact_next_vertex_ids[exact_index])
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static void
+age_adjacency_main_run_block_add_compressed_vertex(
+    AgeAdjacencyMainRunBlock block, graphid next_vertex_id)
+{
+    int64 next_entry_id;
+    uint16 i;
+
+    Assert(block != NULL);
+
+    if ((block->flags & AGE_ADJACENCY_MAIN_BLOCK_COMPACT) == 0 ||
+        block->compressed_next_entry_count ==
+        AGE_ADJACENCY_MAIN_BLOCK_COMPRESSED_VERTEX_OVERFLOW)
+    {
+        return;
+    }
+
+    next_entry_id = get_graphid_entry_id(next_vertex_id);
+    for (i = 0; i < block->compressed_next_entry_count; i++)
+    {
+        if (age_adjacency_load_entry_id48(
+                block->compressed_next_entries[i]) == next_entry_id)
+        {
+            return;
+        }
+    }
+
+    if (block->compressed_next_entry_count >=
+        AGE_ADJACENCY_MAIN_BLOCK_COMPRESSED_VERTEX_SLOTS)
+    {
+        block->compressed_next_entry_count =
+            AGE_ADJACENCY_MAIN_BLOCK_COMPRESSED_VERTEX_OVERFLOW;
+        return;
+    }
+
+    age_adjacency_store_entry_id48(
+        block->compressed_next_entries[block->compressed_next_entry_count],
+        next_entry_id);
+    block->compressed_next_entry_count++;
+}
+
+static bool
+age_adjacency_main_run_block_may_match_compressed_vertex(
+    AgeAdjacencyMainRunBlock block,
+    const AgeAdjacencyVertexSetFilter *filter)
+{
+    int64 vertex_index;
+    uint16 compressed_index;
+
+    Assert(block != NULL);
+
+    if ((block->flags & AGE_ADJACENCY_MAIN_BLOCK_COMPACT) == 0 ||
+        filter == NULL ||
+        !filter->has_sorted_vertex_ids ||
+        filter->sorted_vertex_ids == NULL ||
+        filter->sorted_vertex_count <= 0 ||
+        block->compressed_next_entry_count == 0 ||
+        block->compressed_next_entry_count ==
+        AGE_ADJACENCY_MAIN_BLOCK_COMPRESSED_VERTEX_OVERFLOW)
+    {
+        return true;
+    }
+
+    for (vertex_index = 0; vertex_index < filter->sorted_vertex_count;
+         vertex_index++)
+    {
+        graphid vertex_id = filter->sorted_vertex_ids[vertex_index];
+        int64 entry_id;
+
+        if (get_graphid_label_id(vertex_id) != block->next_label_id)
+            continue;
+
+        entry_id = get_graphid_entry_id(vertex_id);
+        for (compressed_index = 0;
+             compressed_index < block->compressed_next_entry_count;
+             compressed_index++)
+        {
+            if (age_adjacency_load_entry_id48(
+                    block->compressed_next_entries[compressed_index]) ==
+                entry_id)
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool
+age_adjacency_main_run_block_may_match_vertex_bloom(
+    AgeAdjacencyMainRunBlock block,
+    const AgeAdjacencyVertexSetFilter *filter)
+{
+    int64 i;
+
+    Assert(block != NULL);
+
+    if (filter == NULL ||
+        !filter->has_sorted_vertex_ids ||
+        filter->sorted_vertex_ids == NULL ||
+        filter->sorted_vertex_count <= 0)
+    {
+        return true;
+    }
+
+    for (i = 0; i < filter->sorted_vertex_count; i++)
+    {
+        if (age_adjacency_vertex_bloom256_may_contain(
+                block->next_vertex_bloom, filter->sorted_vertex_ids[i]))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+age_adjacency_main_run_block_may_match_value_posting(
+    AgeAdjacencyMainRunBlock block, const AgeAdjacencyVertexSetFilter *filter)
+{
+    Assert(block != NULL);
+
+    if (filter == NULL || !filter->has_value_summary)
+        return true;
+
+    return age_adjacency_value_posting_bloom_intersects(
+        block->value_posting_bloom, filter->value_posting_bloom);
+}
+
+static void
+age_adjacency_directory_entry_add_exact_vertex(
+    AgeAdjacencyDirectoryEntry entry, graphid next_vertex_id)
+{
+    uint16 i;
+
+    Assert(entry != NULL);
+
+    if (entry->exact_next_vertex_count ==
+        AGE_ADJACENCY_DIRECTORY_EXACT_VERTEX_OVERFLOW)
+    {
+        return;
+    }
+
+    for (i = 0; i < entry->exact_next_vertex_count; i++)
+    {
+        if (entry->exact_next_vertex_ids[i] == next_vertex_id)
+            return;
+    }
+
+    if (entry->exact_next_vertex_count >=
+        AGE_ADJACENCY_DIRECTORY_EXACT_VERTEX_SLOTS)
+    {
+        entry->exact_next_vertex_count =
+            AGE_ADJACENCY_DIRECTORY_EXACT_VERTEX_OVERFLOW;
+        return;
+    }
+
+    entry->exact_next_vertex_ids[entry->exact_next_vertex_count] =
+        next_vertex_id;
+    entry->exact_next_vertex_count++;
+}
+
+static bool
+age_adjacency_directory_entry_exact_vertex_may_match(
+    AgeAdjacencyDirectoryEntry entry,
+    const AgeAdjacencyVertexSetFilter *filter, bool *has_exact_summary)
+{
+    int64 vertex_index;
+    uint16 exact_index;
+
+    Assert(entry != NULL);
+
+    if (has_exact_summary != NULL)
+        *has_exact_summary = false;
+
+    if (filter == NULL ||
+        !filter->has_sorted_vertex_ids ||
+        filter->sorted_vertex_ids == NULL ||
+        filter->sorted_vertex_count <= 0 ||
+        entry->exact_next_vertex_count == 0 ||
+        entry->exact_next_vertex_count ==
+        AGE_ADJACENCY_DIRECTORY_EXACT_VERTEX_OVERFLOW)
+    {
+        return true;
+    }
+
+    if (has_exact_summary != NULL)
+        *has_exact_summary = true;
+
+    for (vertex_index = 0; vertex_index < filter->sorted_vertex_count;
+         vertex_index++)
+    {
+        for (exact_index = 0; exact_index < entry->exact_next_vertex_count;
+             exact_index++)
+        {
+            if (filter->sorted_vertex_ids[vertex_index] ==
+                entry->exact_next_vertex_ids[exact_index])
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static void
+age_adjacency_directory_entry_add_compressed_vertex(
+    AgeAdjacencyDirectoryEntry entry, graphid next_vertex_id)
+{
+    int64 next_entry_id;
+    uint16 i;
+
+    Assert(entry != NULL);
+
+    if (entry->compressed_next_entry_count ==
+        AGE_ADJACENCY_DIRECTORY_COMPRESSED_VERTEX_OVERFLOW)
+    {
+        return;
+    }
+
+    next_entry_id = get_graphid_entry_id(next_vertex_id);
+    for (i = 0; i < entry->compressed_next_entry_count; i++)
+    {
+        if (age_adjacency_load_entry_id48(
+                entry->compressed_next_entries[i]) == next_entry_id)
+        {
+            return;
+        }
+    }
+
+    if (entry->compressed_next_entry_count >=
+        AGE_ADJACENCY_DIRECTORY_COMPRESSED_VERTEX_SLOTS)
+    {
+        entry->compressed_next_entry_count =
+            AGE_ADJACENCY_DIRECTORY_COMPRESSED_VERTEX_OVERFLOW;
+        return;
+    }
+
+    age_adjacency_store_entry_id48(
+        entry->compressed_next_entries[entry->compressed_next_entry_count],
+        next_entry_id);
+    entry->compressed_next_entry_count++;
+}
+
+static bool
+age_adjacency_directory_entry_may_match_compressed_vertex(
+    AgeAdjacencyDirectoryEntry entry,
+    const AgeAdjacencyVertexSetFilter *filter)
+{
+    int64 vertex_index;
+    uint16 compressed_index;
+
+    Assert(entry != NULL);
+
+    if (entry->next_label_count != 1 ||
+        filter == NULL ||
+        !filter->has_sorted_vertex_ids ||
+        filter->sorted_vertex_ids == NULL ||
+        filter->sorted_vertex_count <= 0 ||
+        entry->compressed_next_entry_count == 0 ||
+        entry->compressed_next_entry_count ==
+        AGE_ADJACENCY_DIRECTORY_COMPRESSED_VERTEX_OVERFLOW)
+    {
+        return true;
+    }
+
+    for (vertex_index = 0; vertex_index < filter->sorted_vertex_count;
+         vertex_index++)
+    {
+        graphid vertex_id = filter->sorted_vertex_ids[vertex_index];
+        int64 entry_id;
+
+        if (get_graphid_label_id(vertex_id) != entry->min_next_label_id)
+            continue;
+
+        entry_id = get_graphid_entry_id(vertex_id);
+        for (compressed_index = 0;
+             compressed_index < entry->compressed_next_entry_count;
+             compressed_index++)
+        {
+            if (age_adjacency_load_entry_id48(
+                    entry->compressed_next_entries[compressed_index]) ==
+                entry_id)
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static void
+age_adjacency_directory_entry_add_label_bloom(
+    AgeAdjacencyDirectoryEntry entry, int32 next_label_id,
+    graphid next_vertex_id)
+{
+    int i;
+
+    Assert(entry != NULL);
+
+    if (!label_id_is_valid(next_label_id))
+        return;
+
+    for (i = 0; i < AGE_ADJACENCY_DIRECTORY_LABEL_BLOOM_SLOTS; i++)
+    {
+        if (entry->next_vertex_bloom_label_id[i] == next_label_id)
+        {
+            entry->next_vertex_label_bloom[i] =
+                age_adjacency_vertex_bloom_add(
+                    entry->next_vertex_label_bloom[i], next_vertex_id);
+            age_adjacency_value_posting_bloom_add(
+                entry->next_vertex_label_value_posting_bloom[i],
+                next_vertex_id);
+            return;
+        }
+    }
+
+    for (i = 0; i < AGE_ADJACENCY_DIRECTORY_LABEL_BLOOM_SLOTS; i++)
+    {
+        if (!label_id_is_valid(entry->next_vertex_bloom_label_id[i]))
+        {
+            entry->next_vertex_bloom_label_id[i] = next_label_id;
+            entry->next_vertex_label_bloom[i] =
+                age_adjacency_vertex_bloom_add(0, next_vertex_id);
+            age_adjacency_value_posting_bloom_add(
+                entry->next_vertex_label_value_posting_bloom[i],
+                next_vertex_id);
+            return;
+        }
+    }
+}
+
+static bool
+age_adjacency_directory_entry_label_bloom_may_match(
+    AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id,
+    const AgeAdjacencyVertexSetFilter *filter, bool *has_label_bloom)
+{
+    int i;
+
+    Assert(entry != NULL);
+
+    if (has_label_bloom != NULL)
+        *has_label_bloom = false;
+
+    if (!label_id_is_valid(terminal_label_id) ||
+        filter == NULL ||
+        !filter->has_sorted_vertex_ids ||
+        filter->sorted_vertex_ids == NULL ||
+        filter->sorted_vertex_count <= 0)
+    {
+        return true;
+    }
+
+    for (i = 0; i < AGE_ADJACENCY_DIRECTORY_LABEL_BLOOM_SLOTS; i++)
+    {
+        int64 vertex_index;
+
+        if (entry->next_vertex_bloom_label_id[i] != terminal_label_id)
+            continue;
+
+        if (has_label_bloom != NULL)
+            *has_label_bloom = true;
+        if (entry->next_vertex_label_bloom[i] == 0)
+            return true;
+
+        for (vertex_index = 0; vertex_index < filter->sorted_vertex_count;
+             vertex_index++)
+        {
+            if (age_adjacency_vertex_bloom_may_contain(
+                    entry->next_vertex_label_bloom[i],
+                    filter->sorted_vertex_ids[vertex_index]))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    return true;
+}
+
+static bool
+age_adjacency_vertex_bloom_may_contain(uint64 bloom, graphid vertex_id)
+{
+    uint64 candidate;
+
+    if (bloom == 0)
+        return true;
+
+    candidate = age_adjacency_vertex_bloom_add(0, vertex_id);
+    return (bloom & candidate) == candidate;
+}
+
+static bool
+age_adjacency_directory_entry_may_match_vertex_bloom(
+    AgeAdjacencyDirectoryEntry entry,
+    const AgeAdjacencyVertexSetFilter *filter)
+{
+    int64 i;
+
+    Assert(entry != NULL);
+
+    if (filter == NULL || !filter->has_sorted_vertex_ids ||
+        filter->sorted_vertex_ids == NULL ||
+        filter->sorted_vertex_count <= 0 ||
+        entry->next_vertex_bloom == 0)
+    {
+        return true;
+    }
+
+    for (i = 0; i < filter->sorted_vertex_count; i++)
+    {
+        if (age_adjacency_vertex_bloom_may_contain(
+                entry->next_vertex_bloom, filter->sorted_vertex_ids[i]))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+age_adjacency_directory_entry_may_match_wide_vertex_bloom(
+    AgeAdjacencyDirectoryEntry entry,
+    const AgeAdjacencyVertexSetFilter *filter)
+{
+    int64 i;
+
+    Assert(entry != NULL);
+
+    if (filter == NULL ||
+        !filter->has_sorted_vertex_ids ||
+        filter->sorted_vertex_ids == NULL ||
+        filter->sorted_vertex_count <= 0)
+    {
+        return true;
+    }
+
+    for (i = 0; i < filter->sorted_vertex_count; i++)
+    {
+        if (age_adjacency_vertex_bloom256_may_contain(
+                entry->next_vertex_bloom_wide, filter->sorted_vertex_ids[i]))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+age_adjacency_directory_entry_may_match_value_summary(
+    AgeAdjacencyDirectoryEntry entry,
+    const AgeAdjacencyVertexSetFilter *filter)
+{
+    Assert(entry != NULL);
+
+    if (filter == NULL || !filter->has_value_summary)
+        return true;
+
+    if (entry->next_vertex_bloom != 0 &&
+        (entry->next_vertex_bloom & filter->value_bloom) == 0)
+    {
+        return false;
+    }
+
+    return age_adjacency_vertex_bloom256_intersects(
+        entry->next_vertex_bloom_wide, filter->value_bloom_wide);
+}
+
+static bool
+age_adjacency_directory_entry_may_match_value_posting(
+    AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id,
+    const AgeAdjacencyVertexSetFilter *filter)
+{
+    int i;
+
+    Assert(entry != NULL);
+
+    if (filter == NULL || !filter->has_value_summary)
+        return true;
+    if (label_id_is_valid(terminal_label_id))
+    {
+        for (i = 0; i < AGE_ADJACENCY_DIRECTORY_LABEL_BLOOM_SLOTS; i++)
+        {
+            if (entry->next_vertex_bloom_label_id[i] != terminal_label_id)
+                continue;
+
+            return age_adjacency_value_posting_bloom_intersects(
+                entry->next_vertex_label_value_posting_bloom[i],
+                filter->value_posting_bloom);
+        }
+    }
+    if (entry->next_label_count != 1)
+        return true;
+
+    return age_adjacency_value_posting_bloom_intersects(
+        entry->value_posting_bloom, filter->value_posting_bloom);
+}
+
+static const char *
+age_adjacency_directory_entry_value_posting_source(
+    AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id)
+{
+    int i;
+
+    Assert(entry != NULL);
+
+    if (label_id_is_valid(terminal_label_id))
+    {
+        for (i = 0; i < AGE_ADJACENCY_DIRECTORY_LABEL_BLOOM_SLOTS; i++)
+        {
+            if (entry->next_vertex_bloom_label_id[i] == terminal_label_id)
+                return "label-slice";
+        }
+    }
+    if (entry->next_label_count == 1)
+        return "run";
+
+    return "none";
+}
+
+static bool
+age_adjacency_directory_entry_range_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target)
+{
+    const AgeAdjacencyVertexSetFilter *filter;
+
+    Assert(entry != NULL);
+    Assert(target != NULL);
+
+    filter = &target->terminal_vertex_set_filter;
+    if (!age_adjacency_directory_entry_matches_terminal_label(
+            entry, target->terminal_label_id))
+    {
+        return false;
+    }
+    if (filter == NULL || !filter->has_range)
+        return false;
+    if (entry->min_next_vertex_id == 0 && entry->max_next_vertex_id == 0)
+        return false;
+
+    return entry->min_next_vertex_id > filter->max_vertex_id ||
+           entry->max_next_vertex_id < filter->min_vertex_id;
+}
+
+static bool
+age_adjacency_directory_entry_exact_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target)
+{
+    bool has_exact_summary = false;
+
+    Assert(entry != NULL);
+    Assert(target != NULL);
+
+    if (!age_adjacency_directory_entry_matches_terminal_label(
+            entry, target->terminal_label_id))
+    {
+        return false;
+    }
+    if (age_adjacency_directory_entry_range_rejects(entry, target))
+        return false;
+
+    return !age_adjacency_directory_entry_exact_vertex_may_match(
+               entry, &target->terminal_vertex_set_filter,
+               &has_exact_summary) &&
+           has_exact_summary;
+}
+
+static bool
+age_adjacency_directory_entry_label_bloom_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target)
+{
+    bool has_label_bloom = false;
+
+    Assert(entry != NULL);
+    Assert(target != NULL);
+
+    if (!age_adjacency_directory_entry_matches_terminal_label(
+            entry, target->terminal_label_id))
+    {
+        return false;
+    }
+    if (!age_adjacency_directory_entry_may_match_vertex_set(
+            entry, &target->terminal_vertex_set_filter))
+    {
+        return false;
+    }
+
+    return !age_adjacency_directory_entry_label_bloom_may_match(
+               entry, target->terminal_label_id,
+               &target->terminal_vertex_set_filter, &has_label_bloom) &&
+           has_label_bloom;
+}
+
+static bool
+age_adjacency_directory_entry_value_summary_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target)
+{
+    Assert(entry != NULL);
+    Assert(target != NULL);
+
+    if (!age_adjacency_directory_entry_matches_terminal_label(
+            entry, target->terminal_label_id))
+    {
+        return false;
+    }
+    if (!age_adjacency_directory_entry_may_match_vertex_set(
+            entry, &target->terminal_vertex_set_filter))
+    {
+        return false;
+    }
+    if (!age_adjacency_directory_entry_label_bloom_may_match(
+            entry, target->terminal_label_id,
+            &target->terminal_vertex_set_filter, NULL))
+    {
+        return false;
+    }
+
+    return !age_adjacency_directory_entry_may_match_value_summary(
+        entry, &target->terminal_vertex_set_filter);
+}
+
+static bool
+age_adjacency_directory_entry_value_posting_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target)
+{
+    Assert(entry != NULL);
+    Assert(target != NULL);
+
+    if (!age_adjacency_directory_entry_matches_terminal_label(
+            entry, target->terminal_label_id))
+    {
+        return false;
+    }
+    if (!age_adjacency_directory_entry_may_match_vertex_set(
+            entry, &target->terminal_vertex_set_filter))
+    {
+        return false;
+    }
+    if (!age_adjacency_directory_entry_label_bloom_may_match(
+            entry, target->terminal_label_id,
+            &target->terminal_vertex_set_filter, NULL))
+    {
+        return false;
+    }
+    if (!age_adjacency_directory_entry_may_match_compressed_vertex(
+            entry, &target->terminal_vertex_set_filter))
+    {
+        return false;
+    }
+    if (!age_adjacency_directory_entry_may_match_value_summary(
+            entry, &target->terminal_vertex_set_filter))
+    {
+        return false;
+    }
+
+    return !age_adjacency_directory_entry_may_match_value_posting(
+        entry, target->terminal_label_id, &target->terminal_vertex_set_filter);
+}
+
+static bool
+age_adjacency_directory_entry_compressed_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target)
+{
+    Assert(entry != NULL);
+    Assert(target != NULL);
+
+    if (!age_adjacency_directory_entry_matches_terminal_label(
+            entry, target->terminal_label_id))
+    {
+        return false;
+    }
+    if (!age_adjacency_directory_entry_may_match_vertex_set(
+            entry, &target->terminal_vertex_set_filter))
+    {
+        return false;
+    }
+    if (!age_adjacency_directory_entry_label_bloom_may_match(
+            entry, target->terminal_label_id,
+            &target->terminal_vertex_set_filter, NULL))
+    {
+        return false;
+    }
+
+    return !age_adjacency_directory_entry_may_match_compressed_vertex(
+        entry, &target->terminal_vertex_set_filter);
+}
+
+static bool
+age_adjacency_directory_entry_wide_bloom_rejects(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target)
+{
+    Assert(entry != NULL);
+    Assert(target != NULL);
+
+    if (!age_adjacency_directory_entry_matches_terminal_label(
+            entry, target->terminal_label_id))
+    {
+        return false;
+    }
+    if (!age_adjacency_directory_entry_may_match_vertex_set(
+            entry, &target->terminal_vertex_set_filter))
+    {
+        return false;
+    }
+    if (!age_adjacency_directory_entry_label_bloom_may_match(
+            entry, target->terminal_label_id,
+            &target->terminal_vertex_set_filter, NULL))
+    {
+        return false;
+    }
+
+    return !age_adjacency_directory_entry_may_match_wide_vertex_bloom(
+        entry, &target->terminal_vertex_set_filter);
+}
+
+static bool
+age_adjacency_directory_entry_matches_composite_target(
+    AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target,
+    bool *label_mismatch, bool *property_mismatch)
+{
+    bool label_matches;
+    bool property_matches;
+
+    Assert(entry != NULL);
+    Assert(target != NULL);
+
+    label_matches = age_adjacency_directory_entry_matches_terminal_label(
+        entry, target->terminal_label_id);
+    property_matches = age_adjacency_directory_entry_may_match_vertex_set(
+        entry, &target->terminal_vertex_set_filter);
+    if (label_matches && property_matches)
+        property_matches =
+            age_adjacency_directory_entry_label_bloom_may_match(
+                entry, target->terminal_label_id,
+                &target->terminal_vertex_set_filter, NULL);
+    if (label_matches && property_matches)
+        property_matches =
+            age_adjacency_directory_entry_may_match_compressed_vertex(
+                entry, &target->terminal_vertex_set_filter);
+    if (label_matches && property_matches)
+        property_matches =
+            age_adjacency_directory_entry_may_match_value_summary(
+                entry, &target->terminal_vertex_set_filter);
+    if (label_matches && property_matches)
+        property_matches =
+            age_adjacency_directory_entry_may_match_value_posting(
+                entry, target->terminal_label_id,
+                &target->terminal_vertex_set_filter);
+    if (label_matches && property_matches)
+        property_matches =
+            age_adjacency_directory_entry_may_match_wide_vertex_bloom(
+                entry, &target->terminal_vertex_set_filter);
+
+    if (label_mismatch != NULL)
+        *label_mismatch = !label_matches;
+    if (property_mismatch != NULL)
+        *property_mismatch = label_matches && !property_matches;
+
+    return label_matches && property_matches;
+}
+
+static void
+age_adjacency_visible_payload_scan_record_composite_estimate(
+    AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyDirectoryEntry entry)
+{
+    int64 label_postings;
+    int64 estimated_postings;
+
+    Assert(scan != NULL);
+    Assert(entry != NULL);
+
+    if (scan->main_composite_estimate_recorded ||
+        !scan->target.has_terminal_property_summary ||
+        scan->target.terminal_property_match_count < 0)
+    {
+        return;
+    }
+
+    label_postings = age_adjacency_directory_entry_terminal_label_postings(
+        entry, scan->target.terminal_label_id);
+    estimated_postings = Min(label_postings,
+                             scan->target.terminal_property_match_count);
+    if (estimated_postings < label_postings)
+        scan->target.terminal_composite_directory_estimated +=
+            estimated_postings;
+    scan->main_composite_estimate_recorded = true;
+}
+
+static bool
+age_adjacency_visible_payload_scan_apply_directory_vertex_set_filter(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    AgeAdjacencyDirectoryEntryData entry;
+    bool property_mismatch;
+
+    if (scan == NULL || !scan->key_active || !scan->main_active ||
+        scan->main_cache.valid || scan->main_cache.count > 0 ||
+        scan->main_cache_index > 0)
+    {
+        return false;
+    }
+
+    if (!scan->target.terminal_vertex_set_filter.has_range)
+        return false;
+
+    if (!age_adjacency_find_directory_entry_cached(scan, scan->active_key,
+                                                   &entry))
+    {
+        return false;
+    }
+
+    age_adjacency_visible_payload_scan_record_composite_estimate(scan, &entry);
+
+    if (age_adjacency_directory_entry_matches_composite_target(
+            &entry, &scan->target, NULL, &property_mismatch) ||
+        !property_mismatch)
+    {
+        return false;
+    }
+
+    scan->target.terminal_property_filtered += scan->main_remaining;
+    scan->target.terminal_cache_filtered += scan->main_remaining;
+    scan->target.terminal_cache_property_filtered += scan->main_remaining;
+    scan->target.terminal_vertex_set_directory_filtered +=
+        scan->main_remaining;
+    if (age_adjacency_directory_entry_range_rejects(&entry, &scan->target))
+        scan->target.terminal_vertex_set_directory_range_filtered +=
+            scan->main_remaining;
+    if (age_adjacency_directory_entry_exact_rejects(&entry, &scan->target))
+        scan->target.terminal_vertex_set_directory_exact_filtered +=
+            scan->main_remaining;
+    if (age_adjacency_directory_entry_label_bloom_rejects(&entry,
+                                                          &scan->target))
+    {
+        scan->target.terminal_vertex_set_directory_label_bloom_filtered +=
+            scan->main_remaining;
+    }
+    if (age_adjacency_directory_entry_compressed_rejects(
+            &entry, &scan->target))
+    {
+        scan->target.terminal_vertex_set_directory_compressed_filtered +=
+            scan->main_remaining;
+    }
+    if (age_adjacency_directory_entry_value_summary_rejects(
+            &entry, &scan->target))
+    {
+        scan->target.terminal_vertex_set_directory_value_filtered +=
+            scan->main_remaining;
+    }
+    if (age_adjacency_directory_entry_value_posting_rejects(
+            &entry, &scan->target))
+    {
+        scan->target.terminal_vertex_set_directory_value_posting_filtered +=
+            scan->main_remaining;
+    }
+    if (age_adjacency_directory_entry_wide_bloom_rejects(
+            &entry, &scan->target))
+    {
+        scan->target.terminal_vertex_set_directory_wide_bloom_filtered +=
+            scan->main_remaining;
+    }
+    if (scan->target.has_terminal_property_summary)
+        scan->target.terminal_composite_directory_filtered +=
+            scan->main_remaining;
+    scan->main_remaining = 0;
+    scan->main_label_candidate_count = 0;
+    scan->main_active = false;
+    scan->main_blkno = InvalidBlockNumber;
+    scan->main_offnum = FirstOffsetNumber;
+    scan->main_posting_index = 0;
+
+    return true;
+}
+
+static int64
+age_adjacency_directory_entry_terminal_label_postings(
+    AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id)
+{
+    Assert(entry != NULL);
+
+    if (!label_id_is_valid(terminal_label_id))
+        return entry->posting_count;
+    if (!age_adjacency_directory_entry_matches_terminal_label(
+            entry, terminal_label_id))
+    {
+        return 0;
+    }
+    if (entry->min_next_label_id == entry->max_next_label_id ||
+        entry->next_label_count <= 1)
+    {
+        return entry->posting_count;
+    }
+
+    return (entry->posting_count + entry->next_label_count - 1) /
+           entry->next_label_count;
+}
+
+static void
+age_adjacency_form_delta_posting(AgeAdjacencyPosting posting,
+                                 AgeAdjacencyDeltaCompactPosting delta)
+{
+    Assert(posting != NULL);
+    Assert(delta != NULL);
+
+    age_adjacency_store_entry_id48(delta->key_entry_id,
+                                   get_graphid_entry_id(posting->key));
+    memcpy(&delta->heap_tid, &posting->heap_tid, sizeof(ItemPointerData));
+    age_adjacency_store_entry_id48(delta->edge_entry_id,
+                                   get_graphid_entry_id(posting->edge_id));
+    age_adjacency_store_entry_id48(delta->next_entry_id,
+                                   get_graphid_entry_id(
+                                       posting->next_vertex_id));
+}
+
+static void
+age_adjacency_delta_posting_get_posting(AgeAdjacencyDeltaCompactPosting delta,
+                                        AgeAdjacencyPageOpaque opaque,
+                                        AgeAdjacencyPostingData *posting)
+{
+    Assert(delta != NULL);
+    Assert(opaque != NULL);
+    Assert(posting != NULL);
+    Assert((opaque->flags & AGE_ADJACENCY_DELTA_PAGE_COMPACT) != 0);
+
+    posting->key =
+        make_graphid(opaque->key_label_id,
+                     age_adjacency_load_entry_id48(delta->key_entry_id));
+    memcpy(&posting->heap_tid, &delta->heap_tid, sizeof(ItemPointerData));
+    posting->edge_id =
+        make_graphid(opaque->edge_label_id,
+                     age_adjacency_load_entry_id48(delta->edge_entry_id));
+    posting->next_vertex_id =
+        make_graphid(opaque->next_label_id,
+                     age_adjacency_load_entry_id48(delta->next_entry_id));
+}
+
+static void
 age_adjacency_append_item(Relation index_rel, uint16 page_type,
                           const void *item, Size item_size,
+                          graphid item_key,
+                          int32 key_label_id,
+                          int32 edge_label_id,
+                          int32 next_label_id,
+                          uint32 posting_units,
                           BlockNumber *inserted_blkno,
                           OffsetNumber *inserted_offnum)
 {
@@ -633,7 +2430,16 @@ age_adjacency_append_item(Relation index_rel, uint16 page_type,
         }
 
         if (PageGetExactFreeSpace(datapage) <
-            MAXALIGN(item_size) + sizeof(ItemIdData))
+            MAXALIGN(item_size) + sizeof(ItemIdData) ||
+            (page_type == AGE_ADJACENCY_PAGE_DELTA &&
+             ((AgeAdjacencyPageOpaque) PageGetSpecialPointer(datapage))->
+             posting_count > 0 &&
+             (((AgeAdjacencyPageOpaque) PageGetSpecialPointer(datapage))->
+              key_label_id != key_label_id ||
+              ((AgeAdjacencyPageOpaque) PageGetSpecialPointer(datapage))->
+              edge_label_id != edge_label_id ||
+              ((AgeAdjacencyPageOpaque) PageGetSpecialPointer(datapage))->
+              next_label_id != next_label_id)))
         {
             Buffer newbuf;
             Page newpage;
@@ -709,26 +2515,35 @@ age_adjacency_append_item(Relation index_rel, uint16 page_type,
                  errmsg("age_adjacency page is invalid")));
     }
 
+    if (page_type == AGE_ADJACENCY_PAGE_DELTA &&
+        opaque->posting_count == 0)
+    {
+        opaque->flags |= AGE_ADJACENCY_DELTA_PAGE_COMPACT;
+        opaque->key_label_id = key_label_id;
+        opaque->edge_label_id = edge_label_id;
+        opaque->next_label_id = next_label_id;
+    }
+
     if (page_type == AGE_ADJACENCY_PAGE_MAIN ||
         page_type == AGE_ADJACENCY_PAGE_DELTA)
     {
-        AgeAdjacencyPosting posting = (AgeAdjacencyPosting) item;
+        bool page_was_empty = opaque->posting_count == 0;
 
-        opaque->posting_count++;
-        if (opaque->posting_count == 1)
+        opaque->posting_count += posting_units;
+        if (page_was_empty)
         {
-            opaque->min_key = posting->key;
-            opaque->max_key = posting->key;
+            opaque->min_key = item_key;
+            opaque->max_key = item_key;
         }
         else
         {
-            opaque->min_key = Min(opaque->min_key, posting->key);
-            opaque->max_key = Max(opaque->max_key, posting->key);
+            opaque->min_key = Min(opaque->min_key, item_key);
+            opaque->max_key = Max(opaque->max_key, item_key);
         }
-        meta->postings++;
+        meta->postings += posting_units;
         if (page_type == AGE_ADJACENCY_PAGE_DELTA)
         {
-            meta->delta_postings++;
+            meta->delta_postings += posting_units;
         }
     }
     else
@@ -789,20 +2604,109 @@ age_adjacency_append_item(Relation index_rel, uint16 page_type,
 }
 
 static void
-age_adjacency_append_posting(Relation index_rel, AgeAdjacencyPosting posting,
-                             uint16 page_type, BlockNumber *inserted_blkno,
-                             OffsetNumber *inserted_offnum)
+age_adjacency_append_main_run_block(Relation index_rel,
+                                    AgeAdjacencyPostingData *postings,
+                                    Size posting_count,
+                                    graphid run_key,
+                                    BlockNumber *inserted_blkno,
+                                    OffsetNumber *inserted_offnum)
 {
-    if (page_type != AGE_ADJACENCY_PAGE_MAIN &&
-        page_type != AGE_ADJACENCY_PAGE_DELTA)
+    AgeAdjacencyMainRunBlock block;
+    Size block_size;
+    Size i;
+    int32 edge_label_id = INVALID_LABEL_ID;
+    int32 next_label_id = INVALID_LABEL_ID;
+    uint16 flags = AGE_ADJACENCY_MAIN_BLOCK_FULL;
+
+    Assert(posting_count > 0);
+    Assert(posting_count <= AGE_ADJACENCY_MAIN_RUN_BLOCK_FULL_MAX_POSTINGS ||
+           posting_count <= AGE_ADJACENCY_MAIN_RUN_BLOCK_COMPACT_MAX_POSTINGS);
+    if (age_adjacency_main_run_block_can_compact(postings, posting_count,
+                                                 &edge_label_id,
+                                                 &next_label_id))
     {
-        elog(ERROR, "unexpected age_adjacency posting page type %u",
-             page_type);
+        flags = AGE_ADJACENCY_MAIN_BLOCK_COMPACT;
     }
 
-    age_adjacency_append_item(index_rel, page_type, posting,
-                              sizeof(AgeAdjacencyPostingData),
+    block_size = age_adjacency_main_run_block_size(flags, posting_count);
+    block = palloc0(block_size);
+    block->posting_count = (uint16) posting_count;
+    block->flags = flags;
+    block->edge_label_id = edge_label_id;
+    block->next_label_id = next_label_id;
+    block->min_next_vertex_id = postings[0].next_vertex_id;
+    block->max_next_vertex_id = postings[0].next_vertex_id;
+    for (i = 0; i < posting_count; i++)
+    {
+        if (postings[i].next_vertex_id < block->min_next_vertex_id)
+            block->min_next_vertex_id = postings[i].next_vertex_id;
+        if (postings[i].next_vertex_id > block->max_next_vertex_id)
+            block->max_next_vertex_id = postings[i].next_vertex_id;
+        age_adjacency_main_run_block_add_exact_vertex(
+            block, postings[i].next_vertex_id);
+        age_adjacency_main_run_block_add_compressed_vertex(
+            block, postings[i].next_vertex_id);
+        age_adjacency_vertex_bloom256_add(block->next_vertex_bloom,
+                                          postings[i].next_vertex_id);
+        age_adjacency_value_posting_bloom_add(block->value_posting_bloom,
+                                              postings[i].next_vertex_id);
+    }
+
+    if ((flags & AGE_ADJACENCY_MAIN_BLOCK_COMPACT) != 0)
+    {
+        AgeAdjacencyMainCompactPosting compact_postings =
+            (AgeAdjacencyMainCompactPosting) block->data;
+
+        for (i = 0; i < posting_count; i++)
+        {
+            memcpy(&compact_postings[i].heap_tid, &postings[i].heap_tid,
+                   sizeof(ItemPointerData));
+            age_adjacency_store_entry_id48(
+                compact_postings[i].edge_entry_id,
+                get_graphid_entry_id(postings[i].edge_id));
+            age_adjacency_store_entry_id48(
+                compact_postings[i].next_entry_id,
+                get_graphid_entry_id(postings[i].next_vertex_id));
+        }
+    }
+    else
+    {
+        AgeAdjacencyMainPosting full_postings =
+            (AgeAdjacencyMainPosting) block->data;
+
+        for (i = 0; i < posting_count; i++)
+        {
+            ItemPointerCopy(&postings[i].heap_tid,
+                            &full_postings[i].heap_tid);
+            full_postings[i].edge_id = postings[i].edge_id;
+            full_postings[i].next_vertex_id = postings[i].next_vertex_id;
+        }
+    }
+
+    age_adjacency_append_item(index_rel, AGE_ADJACENCY_PAGE_MAIN,
+                              block, block_size, run_key,
+                              INVALID_LABEL_ID, INVALID_LABEL_ID,
+                              INVALID_LABEL_ID,
+                              (uint32) posting_count,
                               inserted_blkno, inserted_offnum);
+    pfree(block);
+}
+
+static void
+age_adjacency_append_delta_posting(Relation index_rel,
+                                   AgeAdjacencyPosting posting)
+{
+    AgeAdjacencyDeltaCompactPostingData delta_posting;
+
+    age_adjacency_form_delta_posting(posting, &delta_posting);
+    age_adjacency_append_item(index_rel, AGE_ADJACENCY_PAGE_DELTA,
+                              &delta_posting,
+                              sizeof(AgeAdjacencyDeltaCompactPostingData),
+                              posting->key,
+                              get_graphid_label_id(posting->key),
+                              get_graphid_label_id(posting->edge_id),
+                              get_graphid_label_id(posting->next_vertex_id),
+                              1, NULL, NULL);
 }
 
 static void
@@ -811,6 +2715,9 @@ age_adjacency_append_directory_entry(Relation index_rel,
 {
     age_adjacency_append_item(index_rel, AGE_ADJACENCY_PAGE_DIRECTORY, entry,
                               sizeof(AgeAdjacencyDirectoryEntryData),
+                              entry->key,
+                              INVALID_LABEL_ID, INVALID_LABEL_ID,
+                              INVALID_LABEL_ID, 1,
                               NULL, NULL);
 }
 
@@ -825,6 +2732,24 @@ age_adjacency_compare_postings(const void *left, const void *right)
         return -1;
     }
     if (l->key > r->key)
+    {
+        return 1;
+    }
+    if (get_graphid_label_id(l->next_vertex_id) <
+        get_graphid_label_id(r->next_vertex_id))
+    {
+        return -1;
+    }
+    if (get_graphid_label_id(l->next_vertex_id) >
+        get_graphid_label_id(r->next_vertex_id))
+    {
+        return 1;
+    }
+    if (get_graphid_label_id(l->edge_id) < get_graphid_label_id(r->edge_id))
+    {
+        return -1;
+    }
+    if (get_graphid_label_id(l->edge_id) > get_graphid_label_id(r->edge_id))
     {
         return 1;
     }
@@ -874,25 +2799,65 @@ age_adjacency_build_main_runs(Relation index_rel,
     {
         Size run_start = i;
         Size run_count = 0;
+        Size run_index;
+        int label_bloom_slot;
+        int32 previous_next_label_id = INVALID_LABEL_ID;
         AgeAdjacencyDirectoryEntryData entry;
 
         memset(&entry, 0, sizeof(entry));
+        for (label_bloom_slot = 0;
+             label_bloom_slot < AGE_ADJACENCY_DIRECTORY_LABEL_BLOOM_SLOTS;
+             label_bloom_slot++)
+        {
+            entry.next_vertex_bloom_label_id[label_bloom_slot] =
+                INVALID_LABEL_ID;
+        }
         entry.key = buildstate->postings[i].key;
+        entry.min_next_label_id = get_graphid_label_id(
+            buildstate->postings[i].next_vertex_id);
+        entry.max_next_label_id = entry.min_next_label_id;
+        entry.min_next_vertex_id = buildstate->postings[i].next_vertex_id;
+        entry.max_next_vertex_id = entry.min_next_vertex_id;
 
         while (i < buildstate->count &&
                buildstate->postings[i].key == entry.key)
         {
-            BlockNumber blkno;
-            OffsetNumber offnum;
+            graphid next_vertex_id = buildstate->postings[i].next_vertex_id;
+            int32 next_label_id = get_graphid_label_id(
+                next_vertex_id);
 
-            age_adjacency_append_posting(index_rel, &buildstate->postings[i],
-                                         AGE_ADJACENCY_PAGE_MAIN,
-                                         &blkno, &offnum);
-            if (i == run_start)
+            if (label_id_is_valid(next_label_id))
             {
-                entry.first_blkno = blkno;
-                entry.first_offnum = offnum;
+                if (next_label_id != previous_next_label_id)
+                {
+                    entry.next_label_count++;
+                    previous_next_label_id = next_label_id;
+                }
+                if (!label_id_is_valid(entry.min_next_label_id) ||
+                    next_label_id < entry.min_next_label_id)
+                    entry.min_next_label_id = next_label_id;
+                if (!label_id_is_valid(entry.max_next_label_id) ||
+                    next_label_id > entry.max_next_label_id)
+                    entry.max_next_label_id = next_label_id;
             }
+            if (next_vertex_id < entry.min_next_vertex_id)
+                entry.min_next_vertex_id = next_vertex_id;
+            if (next_vertex_id > entry.max_next_vertex_id)
+                entry.max_next_vertex_id = next_vertex_id;
+            entry.next_vertex_bloom =
+                age_adjacency_vertex_bloom_add(entry.next_vertex_bloom,
+                                               next_vertex_id);
+            age_adjacency_vertex_bloom256_add(entry.next_vertex_bloom_wide,
+                                              next_vertex_id);
+            age_adjacency_value_posting_bloom_add(entry.value_posting_bloom,
+                                                  next_vertex_id);
+            age_adjacency_directory_entry_add_exact_vertex(&entry,
+                                                           next_vertex_id);
+            age_adjacency_directory_entry_add_compressed_vertex(&entry,
+                                                                next_vertex_id);
+            age_adjacency_directory_entry_add_label_bloom(&entry,
+                                                          next_label_id,
+                                                          next_vertex_id);
             run_count++;
             i++;
         }
@@ -902,6 +2867,46 @@ age_adjacency_build_main_runs(Relation index_rel,
             ereport(ERROR,
                     (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                      errmsg("too many age_adjacency postings for one key")));
+        }
+
+        for (run_index = 0; run_index < run_count;)
+        {
+            BlockNumber blkno;
+            OffsetNumber offnum;
+            Size chunk_count;
+            int32 edge_label_id;
+            int32 next_label_id;
+
+            edge_label_id =
+                get_graphid_label_id(
+                    buildstate->postings[run_start + run_index].edge_id);
+            next_label_id =
+                get_graphid_label_id(
+                    buildstate->postings[run_start + run_index].next_vertex_id);
+            chunk_count = 1;
+            while (run_index + chunk_count < run_count &&
+                   chunk_count <
+                   (Size) AGE_ADJACENCY_MAIN_RUN_BLOCK_COMPACT_MAX_POSTINGS &&
+                   get_graphid_label_id(
+                       buildstate->postings[
+                           run_start + run_index + chunk_count].edge_id) ==
+                   edge_label_id &&
+                   get_graphid_label_id(
+                       buildstate->postings[
+                           run_start + run_index + chunk_count].
+                           next_vertex_id) == next_label_id)
+            {
+                chunk_count++;
+            }
+            age_adjacency_append_main_run_block(
+                index_rel, &buildstate->postings[run_start + run_index],
+                chunk_count, entry.key, &blkno, &offnum);
+            if (run_index == 0)
+            {
+                entry.first_blkno = blkno;
+                entry.first_offnum = offnum;
+            }
+            run_index += chunk_count;
         }
 
         entry.posting_count = (uint32) run_count;
@@ -1025,6 +3030,17 @@ age_adjacency_posting_visible_payload(AgeAdjacencyPosting posting,
     payload->properties = (Datum) 0;
     payload->properties_isnull = true;
 
+    if (!age_adjacency_posting_matches_terminal_label(
+            target, posting->next_vertex_id))
+    {
+        return false;
+    }
+    if (!age_adjacency_posting_matches_terminal_vertex_filter(
+            target, posting->next_vertex_id))
+    {
+        return false;
+    }
+
     if (target != NULL && target->heap_rel != NULL)
     {
         bool fetch_tuple = true;
@@ -1073,6 +3089,132 @@ age_adjacency_posting_visible_payload(AgeAdjacencyPosting posting,
     }
 
     return true;
+}
+
+static bool
+age_adjacency_posting_matches_terminal_label(AgeAdjacencyScanTarget *target,
+                                             graphid next_vertex_id)
+{
+    if (target == NULL || !label_id_is_valid(target->terminal_label_id))
+        return true;
+
+    if (get_graphid_label_id(next_vertex_id) == target->terminal_label_id)
+        return true;
+
+    target->terminal_label_filtered++;
+    return false;
+}
+
+static bool
+age_adjacency_posting_matches_terminal_vertex_filter(
+    AgeAdjacencyScanTarget *target, graphid next_vertex_id)
+{
+    if (target == NULL)
+        return true;
+
+    if (target->terminal_vertex_set_filter.vertex_ids != NULL)
+    {
+        if (target->terminal_vertex_set_filter.has_range &&
+            (next_vertex_id < target->terminal_vertex_set_filter.min_vertex_id ||
+             next_vertex_id > target->terminal_vertex_set_filter.max_vertex_id))
+        {
+            target->terminal_vertex_set_range_filtered++;
+            target->terminal_property_filtered++;
+            return false;
+        }
+
+        if (target->terminal_vertex_set_filter.has_sorted_vertex_ids)
+        {
+            if (age_adjacency_vertex_set_sorted_contains(
+                    &target->terminal_vertex_set_filter, next_vertex_id))
+            {
+                return true;
+            }
+
+            target->terminal_vertex_set_sorted_filtered++;
+            target->terminal_property_filtered++;
+            return false;
+        }
+
+        if (hash_search(target->terminal_vertex_set_filter.vertex_ids,
+                        &next_vertex_id, HASH_FIND, NULL) != NULL)
+        {
+            return true;
+        }
+
+        target->terminal_property_filtered++;
+        return false;
+    }
+
+    if (target->terminal_vertex_filter == NULL)
+        return true;
+
+    if (target->terminal_vertex_filter(next_vertex_id,
+                                       target->terminal_vertex_filter_state))
+        return true;
+
+    target->terminal_property_filtered++;
+    return false;
+}
+
+static bool
+age_adjacency_vertex_set_sorted_contains(
+    const AgeAdjacencyVertexSetFilter *filter, graphid vertex_id)
+{
+    int64 low = 0;
+    int64 high;
+
+    Assert(filter != NULL);
+    Assert(filter->has_sorted_vertex_ids);
+
+    high = filter->sorted_vertex_count;
+    while (low < high)
+    {
+        int64 mid = low + ((high - low) / 2);
+        graphid candidate = filter->sorted_vertex_ids[mid];
+
+        if (candidate == vertex_id)
+            return true;
+        if (candidate < vertex_id)
+            low = mid + 1;
+        else
+            high = mid;
+    }
+
+    return false;
+}
+
+static AgeAdjacencyCacheFilterResult
+age_adjacency_posting_matches_cache_filters(AgeAdjacencyPosting posting,
+                                            AgeAdjacencyScanTarget *target)
+{
+    if (!age_adjacency_posting_matches_terminal_label(
+            target, posting->next_vertex_id))
+    {
+        return AGE_ADJACENCY_CACHE_FILTER_LABEL;
+    }
+    if (!age_adjacency_posting_matches_terminal_vertex_filter(
+            target, posting->next_vertex_id))
+    {
+        return AGE_ADJACENCY_CACHE_FILTER_PROPERTY;
+    }
+
+    return AGE_ADJACENCY_CACHE_FILTER_PASS;
+}
+
+static bool
+age_adjacency_delta_page_may_contain_key(AgeAdjacencyPageOpaque opaque,
+                                         graphid key)
+{
+    Assert(opaque != NULL);
+    Assert(opaque->page_type == AGE_ADJACENCY_PAGE_DELTA);
+
+    if (opaque->posting_count == 0)
+    {
+        return false;
+    }
+
+    return key >= opaque->min_key && key <= opaque->max_key;
 }
 
 static bool
@@ -1152,28 +3294,128 @@ age_adjacency_scan_posting_run(Relation index_rel, BlockNumber blkno,
              offnum = OffsetNumberNext(offnum))
         {
             ItemId item_id = PageGetItemId(page, offnum);
-            AgeAdjacencyPosting posting;
-            int64 emitted;
+            AgeAdjacencyMainRunBlock block;
+            uint16 i;
 
-            remaining--;
             if (!ItemIdIsNormal(item_id))
             {
                 continue;
             }
 
-            posting = (AgeAdjacencyPosting) PageGetItem(page, item_id);
-            if (posting->key != key)
+            block = (AgeAdjacencyMainRunBlock) PageGetItem(page, item_id);
+            if (target != NULL &&
+                !age_adjacency_main_run_block_may_match_vertex_range(
+                    block, &target->terminal_vertex_set_filter))
             {
+                uint32 skipped = Min((uint32)block->posting_count, remaining);
+
+                target->terminal_property_filtered += skipped;
+                target->terminal_vertex_set_block_filtered += skipped;
+                if (target->terminal_vertex_set_filter.has_value_summary)
+                    target->terminal_vertex_set_block_value_filtered += skipped;
+                target->terminal_vertex_set_block_range_filtered += skipped;
+                if (target->has_terminal_property_summary)
+                    target->terminal_composite_block_filtered += skipped;
+                remaining -= skipped;
                 continue;
             }
-
-            emitted = age_adjacency_emit_posting(posting, target);
-            if (emitted < 0)
+            if (target != NULL &&
+                !age_adjacency_main_run_block_may_match_exact_vertex(
+                    block, &target->terminal_vertex_set_filter))
             {
-                UnlockReleaseBuffer(buf);
-                return matches;
+                uint32 skipped = Min((uint32)block->posting_count, remaining);
+
+                target->terminal_property_filtered += skipped;
+                target->terminal_vertex_set_block_filtered += skipped;
+                if (target->terminal_vertex_set_filter.has_value_summary)
+                    target->terminal_vertex_set_block_value_filtered += skipped;
+                target->terminal_vertex_set_block_exact_filtered += skipped;
+                if (target->has_terminal_property_summary)
+                    target->terminal_composite_block_filtered += skipped;
+                remaining -= skipped;
+                continue;
             }
-            matches += emitted;
+            if (target != NULL &&
+                !age_adjacency_main_run_block_may_match_compressed_vertex(
+                    block, &target->terminal_vertex_set_filter))
+            {
+                uint32 skipped = Min((uint32)block->posting_count, remaining);
+
+                target->terminal_property_filtered += skipped;
+                target->terminal_vertex_set_block_filtered += skipped;
+                if (target->terminal_vertex_set_filter.has_value_summary)
+                    target->terminal_vertex_set_block_value_filtered += skipped;
+                target->terminal_vertex_set_block_compressed_filtered += skipped;
+                if (target->has_terminal_property_summary)
+                    target->terminal_composite_block_filtered += skipped;
+                remaining -= skipped;
+                continue;
+            }
+            if (target != NULL &&
+                !age_adjacency_main_run_block_may_match_vertex_bloom(
+                    block, &target->terminal_vertex_set_filter))
+            {
+                uint32 skipped = Min((uint32)block->posting_count, remaining);
+
+                target->terminal_property_filtered += skipped;
+                target->terminal_vertex_set_block_filtered += skipped;
+                if (target->terminal_vertex_set_filter.has_value_summary)
+                    target->terminal_vertex_set_block_value_filtered += skipped;
+                target->terminal_vertex_set_block_bloom_filtered += skipped;
+                if (target->has_terminal_property_summary)
+                    target->terminal_composite_block_filtered += skipped;
+                remaining -= skipped;
+                continue;
+            }
+            if (target != NULL &&
+                !age_adjacency_main_run_block_may_match_value_posting(
+                    block, &target->terminal_vertex_set_filter))
+            {
+                uint32 skipped = Min((uint32)block->posting_count, remaining);
+
+                target->terminal_property_filtered += skipped;
+                target->terminal_vertex_set_block_filtered += skipped;
+                target->terminal_vertex_set_block_value_filtered += skipped;
+                target->terminal_vertex_set_block_value_posting_filtered +=
+                    skipped;
+                if (target->has_terminal_property_summary)
+                    target->terminal_composite_block_filtered += skipped;
+                remaining -= skipped;
+                continue;
+            }
+            if (target != NULL &&
+                !age_adjacency_main_run_block_may_match_compact_postings(
+                    block, 0, &target->terminal_vertex_set_filter))
+            {
+                uint32 skipped = Min((uint32)block->posting_count, remaining);
+
+                target->terminal_property_filtered += skipped;
+                target->terminal_vertex_set_block_filtered += skipped;
+                if (target->terminal_vertex_set_filter.has_value_summary)
+                    target->terminal_vertex_set_block_value_filtered += skipped;
+                target->terminal_vertex_set_block_posting_filtered += skipped;
+                if (target->has_terminal_property_summary)
+                    target->terminal_composite_block_filtered += skipped;
+                remaining -= skipped;
+                continue;
+            }
+            for (i = 0; i < block->posting_count && remaining > 0; i++)
+            {
+                AgeAdjacencyPostingData posting;
+                int64 emitted;
+
+                remaining--;
+                age_adjacency_main_run_block_get_posting(block, i, key,
+                                                         &posting);
+
+                emitted = age_adjacency_emit_posting(&posting, target);
+                if (emitted < 0)
+                {
+                    UnlockReleaseBuffer(buf);
+                    return matches;
+                }
+                matches += emitted;
+            }
         }
 
         blkno = opaque->next_blkno;
@@ -1193,6 +3435,7 @@ age_adjacency_load_main_cache(AgeAdjacencyVisiblePayloadScan *scan,
     AgeAdjacencyPageOpaque opaque;
     OffsetNumber offnum;
     OffsetNumber maxoff;
+    OffsetNumber window_end;
 
     if (scan->main_cache.valid && scan->main_cache.blkno == blkno)
     {
@@ -1202,6 +3445,9 @@ age_adjacency_load_main_cache(AgeAdjacencyVisiblePayloadScan *scan,
     scan->main_cache.valid = false;
     scan->main_cache.blkno = blkno;
     scan->main_cache.next_blkno = InvalidBlockNumber;
+    scan->main_cache.next_offnum = InvalidOffsetNumber;
+    scan->main_cache.next_posting_index = 0;
+    scan->main_cache.maxoff = InvalidOffsetNumber;
     scan->main_cache.count = 0;
 
     buf = ReadBuffer(scan->index_rel, blkno);
@@ -1219,46 +3465,242 @@ age_adjacency_load_main_cache(AgeAdjacencyVisiblePayloadScan *scan,
     }
 
     maxoff = PageGetMaxOffsetNumber(page);
-    for (offnum = FirstOffsetNumber;
-         offnum <= maxoff;
+    scan->main_cache.maxoff = maxoff;
+    window_end = maxoff;
+
+    for (offnum = scan->main_offnum;
+         offnum <= window_end;
          offnum = OffsetNumberNext(offnum))
     {
         ItemId item_id = PageGetItemId(page, offnum);
-        AgeAdjacencyCachedPosting *cached;
-        AgeAdjacencyPosting posting;
+        AgeAdjacencyMainRunBlock block;
+        uint16 posting_index;
 
         if (!ItemIdIsNormal(item_id))
         {
             continue;
         }
 
-        if (scan->main_cache.count == scan->main_cache.capacity)
+        block = (AgeAdjacencyMainRunBlock) PageGetItem(page, item_id);
+        posting_index = offnum == scan->main_offnum ?
+                        scan->main_posting_index : 0;
+        if (!age_adjacency_main_run_block_matches_terminal_label(
+                block, scan->target.terminal_label_id))
         {
-            int new_capacity = scan->main_cache.capacity == 0 ? 64 :
-                               scan->main_cache.capacity * 2;
+            uint32 skipped = Min((uint32)(block->posting_count -
+                                          posting_index),
+                                  scan->main_remaining);
 
-            if (scan->main_cache.postings == NULL)
+            scan->target.terminal_label_filtered += skipped;
+            scan->target.terminal_cache_filtered += skipped;
+            scan->target.terminal_cache_label_filtered += skipped;
+            scan->main_remaining -= skipped;
+            if (scan->main_remaining == 0)
+                break;
+            continue;
+        }
+        if (!age_adjacency_main_run_block_may_match_vertex_range(
+                block, &scan->target.terminal_vertex_set_filter))
+        {
+            uint32 skipped = Min((uint32)(block->posting_count -
+                                          posting_index),
+                                  scan->main_remaining);
+
+            scan->target.terminal_property_filtered += skipped;
+            scan->target.terminal_cache_filtered += skipped;
+            scan->target.terminal_cache_property_filtered += skipped;
+            scan->target.terminal_vertex_set_block_filtered += skipped;
+            if (scan->target.terminal_vertex_set_filter.has_value_summary)
+                scan->target.terminal_vertex_set_block_value_filtered += skipped;
+            scan->target.terminal_vertex_set_block_range_filtered += skipped;
+            if (scan->target.has_terminal_property_summary)
+                scan->target.terminal_composite_block_filtered += skipped;
+            scan->main_remaining -= skipped;
+            if (scan->main_remaining == 0)
+                break;
+            continue;
+        }
+        if (!age_adjacency_main_run_block_may_match_exact_vertex(
+                block, &scan->target.terminal_vertex_set_filter))
+        {
+            uint32 skipped = Min((uint32)(block->posting_count -
+                                          posting_index),
+                                  scan->main_remaining);
+
+            scan->target.terminal_property_filtered += skipped;
+            scan->target.terminal_cache_filtered += skipped;
+            scan->target.terminal_cache_property_filtered += skipped;
+            scan->target.terminal_vertex_set_block_filtered += skipped;
+            if (scan->target.terminal_vertex_set_filter.has_value_summary)
+                scan->target.terminal_vertex_set_block_value_filtered += skipped;
+            scan->target.terminal_vertex_set_block_exact_filtered += skipped;
+            if (scan->target.has_terminal_property_summary)
+                scan->target.terminal_composite_block_filtered += skipped;
+            scan->main_remaining -= skipped;
+            if (scan->main_remaining == 0)
+                break;
+            continue;
+        }
+        if (!age_adjacency_main_run_block_may_match_compressed_vertex(
+                block, &scan->target.terminal_vertex_set_filter))
+        {
+            uint32 skipped = Min((uint32)(block->posting_count -
+                                          posting_index),
+                                  scan->main_remaining);
+
+            scan->target.terminal_property_filtered += skipped;
+            scan->target.terminal_cache_filtered += skipped;
+            scan->target.terminal_cache_property_filtered += skipped;
+            scan->target.terminal_vertex_set_block_filtered += skipped;
+            if (scan->target.terminal_vertex_set_filter.has_value_summary)
+                scan->target.terminal_vertex_set_block_value_filtered += skipped;
+            scan->target.terminal_vertex_set_block_compressed_filtered += skipped;
+            if (scan->target.has_terminal_property_summary)
+                scan->target.terminal_composite_block_filtered += skipped;
+            scan->main_remaining -= skipped;
+            if (scan->main_remaining == 0)
+                break;
+            continue;
+        }
+        if (!age_adjacency_main_run_block_may_match_vertex_bloom(
+                block, &scan->target.terminal_vertex_set_filter))
+        {
+            uint32 skipped = Min((uint32)(block->posting_count -
+                                          posting_index),
+                                  scan->main_remaining);
+
+            scan->target.terminal_property_filtered += skipped;
+            scan->target.terminal_cache_filtered += skipped;
+            scan->target.terminal_cache_property_filtered += skipped;
+            scan->target.terminal_vertex_set_block_filtered += skipped;
+            if (scan->target.terminal_vertex_set_filter.has_value_summary)
+                scan->target.terminal_vertex_set_block_value_filtered += skipped;
+            scan->target.terminal_vertex_set_block_bloom_filtered += skipped;
+            if (scan->target.has_terminal_property_summary)
+                scan->target.terminal_composite_block_filtered += skipped;
+            scan->main_remaining -= skipped;
+            if (scan->main_remaining == 0)
+                break;
+            continue;
+        }
+        if (!age_adjacency_main_run_block_may_match_value_posting(
+                block, &scan->target.terminal_vertex_set_filter))
+        {
+            uint32 skipped = Min((uint32)(block->posting_count -
+                                          posting_index),
+                                  scan->main_remaining);
+
+            scan->target.terminal_property_filtered += skipped;
+            scan->target.terminal_cache_filtered += skipped;
+            scan->target.terminal_cache_property_filtered += skipped;
+            scan->target.terminal_vertex_set_block_filtered += skipped;
+            scan->target.terminal_vertex_set_block_value_filtered += skipped;
+            scan->target.terminal_vertex_set_block_value_posting_filtered +=
+                skipped;
+            if (scan->target.has_terminal_property_summary)
+                scan->target.terminal_composite_block_filtered += skipped;
+            scan->main_remaining -= skipped;
+            if (scan->main_remaining == 0)
+                break;
+            continue;
+        }
+        if (!age_adjacency_main_run_block_may_match_compact_postings(
+                block, posting_index,
+                &scan->target.terminal_vertex_set_filter))
+        {
+            uint32 skipped = Min((uint32)(block->posting_count -
+                                          posting_index),
+                                  scan->main_remaining);
+
+            scan->target.terminal_property_filtered += skipped;
+            scan->target.terminal_cache_filtered += skipped;
+            scan->target.terminal_cache_property_filtered += skipped;
+            scan->target.terminal_vertex_set_block_filtered += skipped;
+            if (scan->target.terminal_vertex_set_filter.has_value_summary)
+                scan->target.terminal_vertex_set_block_value_filtered += skipped;
+            scan->target.terminal_vertex_set_block_posting_filtered += skipped;
+            if (scan->target.has_terminal_property_summary)
+                scan->target.terminal_composite_block_filtered += skipped;
+            scan->main_remaining -= skipped;
+            if (scan->main_remaining == 0)
+                break;
+            continue;
+        }
+        while (posting_index < block->posting_count &&
+               scan->main_cache.count < scan->main_remaining)
+        {
+            AgeAdjacencyCachedPosting *cached;
+            AgeAdjacencyPostingData posting;
+            AgeAdjacencyCacheFilterResult filter_result;
+
+            age_adjacency_main_run_block_get_posting(block, posting_index,
+                                                     scan->active_key,
+                                                     &posting);
+            posting_index++;
+            filter_result = age_adjacency_posting_matches_cache_filters(
+                &posting, &scan->target);
+            if (filter_result != AGE_ADJACENCY_CACHE_FILTER_PASS)
             {
-                scan->main_cache.postings =
-                    palloc_array(AgeAdjacencyCachedPosting, new_capacity);
+                scan->target.terminal_cache_filtered++;
+                if (filter_result == AGE_ADJACENCY_CACHE_FILTER_LABEL)
+                    scan->target.terminal_cache_label_filtered++;
+                else if (filter_result == AGE_ADJACENCY_CACHE_FILTER_PROPERTY)
+                    scan->target.terminal_cache_property_filtered++;
+                scan->main_remaining--;
+                if (scan->main_remaining == 0)
+                    break;
+                continue;
+            }
+
+            if (scan->main_cache.count == scan->main_cache.capacity)
+            {
+                int new_capacity = scan->main_cache.capacity == 0 ? 64 :
+                                   scan->main_cache.capacity * 2;
+
+                if (scan->main_cache.postings == NULL)
+                {
+                    scan->main_cache.postings =
+                        palloc_array(AgeAdjacencyCachedPosting, new_capacity);
+                }
+                else
+                {
+                    scan->main_cache.postings =
+                        repalloc_array(scan->main_cache.postings,
+                                       AgeAdjacencyCachedPosting,
+                                       new_capacity);
+                }
+                scan->main_cache.capacity = new_capacity;
+            }
+
+            cached = &scan->main_cache.postings[scan->main_cache.count++];
+            ItemPointerCopy(&posting.heap_tid, &cached->posting.heap_tid);
+            cached->posting.edge_id = posting.edge_id;
+            cached->posting.next_vertex_id = posting.next_vertex_id;
+        }
+
+        if (scan->main_cache.count >= scan->main_remaining)
+        {
+            if (posting_index < block->posting_count)
+            {
+                scan->main_cache.next_blkno = blkno;
+                scan->main_cache.next_offnum = offnum;
+                scan->main_cache.next_posting_index = posting_index;
             }
             else
             {
-                scan->main_cache.postings =
-                    repalloc_array(scan->main_cache.postings,
-                                   AgeAdjacencyCachedPosting,
-                                   new_capacity);
+                scan->main_cache.next_blkno = opaque->next_blkno;
+                scan->main_cache.next_offnum = FirstOffsetNumber;
+                scan->main_cache.next_posting_index = 0;
             }
-            scan->main_cache.capacity = new_capacity;
+            scan->main_cache.valid = true;
+            UnlockReleaseBuffer(buf);
+            return;
         }
-
-        posting = (AgeAdjacencyPosting) PageGetItem(page, item_id);
-        cached = &scan->main_cache.postings[scan->main_cache.count++];
-        cached->offnum = offnum;
-        cached->posting = *posting;
     }
 
     scan->main_cache.next_blkno = opaque->next_blkno;
+    scan->main_cache.next_offnum = FirstOffsetNumber;
+    scan->main_cache.next_posting_index = 0;
     scan->main_cache.valid = true;
     UnlockReleaseBuffer(buf);
 }
@@ -1377,6 +3819,54 @@ age_adjacency_find_directory_entry_with_meta(
 {
     return age_adjacency_search_directory_with_meta(index_rel, key, meta,
                                                     entry_out, NULL, NULL);
+}
+
+bool
+age_adjacency_estimate_terminal_label_postings(
+    Oid index_oid, graphid key, int32 terminal_label_id,
+    int64 *run_postings, int64 *terminal_postings, int64 *label_groups,
+    const char **value_posting_source)
+{
+    Relation index_rel;
+    AgeAdjacencyMetaPageData meta;
+    AgeAdjacencyDirectoryEntryData entry;
+    bool found;
+
+    if (run_postings != NULL)
+        *run_postings = 0;
+    if (terminal_postings != NULL)
+        *terminal_postings = 0;
+    if (label_groups != NULL)
+        *label_groups = 0;
+    if (value_posting_source != NULL)
+        *value_posting_source = "none";
+    if (!OidIsValid(index_oid))
+        return false;
+
+    index_rel = index_open(index_oid, AccessShareLock);
+    age_adjacency_read_meta(index_rel, &meta);
+    found = age_adjacency_find_directory_entry_with_meta(index_rel, key,
+                                                         &meta, &entry);
+    if (found)
+    {
+        if (run_postings != NULL)
+            *run_postings = entry.posting_count;
+        if (terminal_postings != NULL)
+        {
+            *terminal_postings =
+                age_adjacency_directory_entry_terminal_label_postings(
+                    &entry, terminal_label_id);
+        }
+        if (label_groups != NULL)
+            *label_groups = entry.next_label_count;
+        if (value_posting_source != NULL)
+            *value_posting_source =
+                age_adjacency_directory_entry_value_posting_source(
+                    &entry, terminal_label_id);
+    }
+    index_close(index_rel, AccessShareLock);
+
+    return found;
 }
 
 static void
@@ -1525,6 +4015,184 @@ age_adjacency_probe_directory(Relation index_rel, graphid key, bool *found,
                                             pages_visited, entries_scanned);
 }
 
+static void
+age_adjacency_probe_main_run(Relation index_rel, graphid key,
+                             const AgeAdjacencyMetaPageData *meta,
+                             AgeAdjacencyMainProbeStats *stats)
+{
+    AgeAdjacencyDirectoryEntryData entry;
+    BlockNumber blkno;
+    OffsetNumber offnum;
+    uint32 remaining;
+
+    Assert(meta != NULL);
+    Assert(stats != NULL);
+
+    memset(stats, 0, sizeof(*stats));
+    stats->found = age_adjacency_find_directory_entry_with_meta(
+        index_rel, key, meta, &entry);
+    if (!stats->found)
+    {
+        return;
+    }
+
+    stats->label_groups = entry.next_label_count;
+    blkno = entry.first_blkno;
+    offnum = entry.first_offnum;
+    remaining = entry.posting_count;
+    while (remaining > 0 && BlockNumberIsValid(blkno))
+    {
+        Buffer buf;
+        Page page;
+        AgeAdjacencyPageOpaque opaque;
+        BlockNumber next_blkno;
+        OffsetNumber maxoff;
+        OffsetNumber current;
+        bool in_window = false;
+
+        buf = ReadBuffer(index_rel, blkno);
+        LockBuffer(buf, BUFFER_LOCK_SHARE);
+        page = BufferGetPage(buf);
+
+        opaque = (AgeAdjacencyPageOpaque) PageGetSpecialPointer(page);
+        if (opaque->magic != AGE_ADJACENCY_MAGIC ||
+            opaque->version != AGE_ADJACENCY_VERSION ||
+            opaque->page_type != AGE_ADJACENCY_PAGE_MAIN)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INDEX_CORRUPTED),
+                     errmsg("age_adjacency main page %u is invalid", blkno)));
+        }
+
+        stats->pages_visited++;
+        next_blkno = opaque->next_blkno;
+        maxoff = PageGetMaxOffsetNumber(page);
+
+        if (offnum > maxoff)
+        {
+            blkno = next_blkno;
+            offnum = FirstOffsetNumber;
+            UnlockReleaseBuffer(buf);
+            continue;
+        }
+
+        for (current = FirstOffsetNumber;
+             current <= maxoff;
+             current = OffsetNumberNext(current))
+        {
+            ItemId item_id = PageGetItemId(page, current);
+            AgeAdjacencyMainRunBlock block;
+            uint16 posting_index = 0;
+
+            if (!ItemIdIsNormal(item_id))
+            {
+                continue;
+            }
+
+            block = (AgeAdjacencyMainRunBlock) PageGetItem(page, item_id);
+            stats->block_items++;
+            if ((block->flags & AGE_ADJACENCY_MAIN_BLOCK_COMPACT) != 0)
+            {
+                stats->compact_block_items++;
+            }
+            else
+            {
+                stats->full_block_items++;
+            }
+            stats->page_offsets += block->posting_count;
+            if (current == offnum)
+            {
+                in_window = true;
+            }
+            if (!in_window)
+            {
+                continue;
+            }
+
+            while (posting_index < block->posting_count && remaining > 0)
+            {
+                remaining--;
+                stats->window_offsets++;
+                stats->entries_cached++;
+                posting_index++;
+            }
+
+            if (remaining == 0)
+            {
+                break;
+            }
+        }
+
+        blkno = next_blkno;
+        offnum = FirstOffsetNumber;
+        UnlockReleaseBuffer(buf);
+    }
+}
+
+static void
+age_adjacency_probe_delta_pages(Relation index_rel, graphid key,
+                                const AgeAdjacencyMetaPageData *meta,
+                                AgeAdjacencyDeltaProbeStats *stats)
+{
+    BlockNumber blkno;
+
+    Assert(meta != NULL);
+    Assert(stats != NULL);
+
+    memset(stats, 0, sizeof(*stats));
+
+    blkno = meta->first_delta_blkno;
+    while (BlockNumberIsValid(blkno))
+    {
+        Buffer buf;
+        Page page;
+        AgeAdjacencyPageOpaque opaque;
+        BlockNumber next_blkno;
+        OffsetNumber offnum;
+        OffsetNumber maxoff;
+
+        buf = ReadBuffer(index_rel, blkno);
+        LockBuffer(buf, BUFFER_LOCK_SHARE);
+        page = BufferGetPage(buf);
+
+        opaque = (AgeAdjacencyPageOpaque) PageGetSpecialPointer(page);
+        if (opaque->magic != AGE_ADJACENCY_MAGIC ||
+            opaque->version != AGE_ADJACENCY_VERSION ||
+            opaque->page_type != AGE_ADJACENCY_PAGE_DELTA)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INDEX_CORRUPTED),
+                     errmsg("age_adjacency delta page %u is invalid", blkno)));
+        }
+
+        stats->pages_visited++;
+        next_blkno = opaque->next_blkno;
+        if (!age_adjacency_delta_page_may_contain_key(opaque, key))
+        {
+            stats->pages_skipped++;
+            blkno = next_blkno;
+            UnlockReleaseBuffer(buf);
+            continue;
+        }
+
+        maxoff = PageGetMaxOffsetNumber(page);
+        for (offnum = FirstOffsetNumber;
+             offnum <= maxoff;
+             offnum = OffsetNumberNext(offnum))
+        {
+            ItemId item_id = PageGetItemId(page, offnum);
+
+            if (ItemIdIsNormal(item_id))
+            {
+                stats->entries_scanned++;
+            }
+        }
+
+        blkno = next_blkno;
+        UnlockReleaseBuffer(buf);
+    }
+}
+
 static int64
 age_adjacency_scan_payload(Relation index_rel, graphid key,
                            AgeAdjacencyScanTarget *target)
@@ -1560,6 +4228,7 @@ age_adjacency_scan_payload_with_meta(Relation index_rel, graphid key,
         Buffer buf;
         Page page;
         AgeAdjacencyPageOpaque opaque;
+        BlockNumber next_blkno;
         OffsetNumber offnum;
         OffsetNumber maxoff;
 
@@ -1577,13 +4246,22 @@ age_adjacency_scan_payload_with_meta(Relation index_rel, graphid key,
                      errmsg("age_adjacency delta page %u is invalid", blkno)));
         }
 
+        next_blkno = opaque->next_blkno;
+        if (!age_adjacency_delta_page_may_contain_key(opaque, key))
+        {
+            blkno = next_blkno;
+            UnlockReleaseBuffer(buf);
+            continue;
+        }
+
         maxoff = PageGetMaxOffsetNumber(page);
         for (offnum = FirstOffsetNumber;
              offnum <= maxoff;
              offnum = OffsetNumberNext(offnum))
         {
             ItemId item_id = PageGetItemId(page, offnum);
-            AgeAdjacencyPosting posting;
+            AgeAdjacencyDeltaCompactPosting delta_posting;
+            AgeAdjacencyPostingData posting;
             int64 emitted;
 
             if (!ItemIdIsNormal(item_id))
@@ -1591,13 +4269,16 @@ age_adjacency_scan_payload_with_meta(Relation index_rel, graphid key,
                 continue;
             }
 
-            posting = (AgeAdjacencyPosting) PageGetItem(page, item_id);
-            if (posting->key != key)
+            delta_posting = (AgeAdjacencyDeltaCompactPosting) PageGetItem(
+                page, item_id);
+            age_adjacency_delta_posting_get_posting(delta_posting, opaque,
+                                                    &posting);
+            if (posting.key != key)
             {
                 continue;
             }
 
-            emitted = age_adjacency_emit_posting(posting, target);
+            emitted = age_adjacency_emit_posting(&posting, target);
             if (emitted < 0)
             {
                 UnlockReleaseBuffer(buf);
@@ -1606,7 +4287,7 @@ age_adjacency_scan_payload_with_meta(Relation index_rel, graphid key,
             matches += emitted;
         }
 
-        blkno = opaque->next_blkno;
+        blkno = next_blkno;
         UnlockReleaseBuffer(buf);
     }
 
@@ -1658,8 +4339,7 @@ age_adjacency_insert(Relation index_rel, Datum *values, bool *isnull,
     (void) index_info;
 
     age_adjacency_form_posting(index_rel, values, isnull, heap_tid, &posting);
-    age_adjacency_append_posting(index_rel, &posting,
-                                 AGE_ADJACENCY_PAGE_DELTA, NULL, NULL);
+    age_adjacency_append_delta_posting(index_rel, &posting);
 
     return false;
 }
@@ -1739,18 +4419,102 @@ age_adjacency_bulk_delete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
         for (offnum = maxoff; offnum >= FirstOffsetNumber; offnum--)
         {
             ItemId item_id = PageGetItemId(page, (OffsetNumber) offnum);
-            AgeAdjacencyPosting posting;
 
             if (!ItemIdIsNormal(item_id))
             {
                 continue;
             }
 
-            posting = (AgeAdjacencyPosting) PageGetItem(page, item_id);
-            if (callback(&posting->heap_tid, callback_state))
+            if (opaque->page_type == AGE_ADJACENCY_PAGE_MAIN)
             {
-                PageIndexTupleDelete(page, (OffsetNumber) offnum);
-                removed++;
+                AgeAdjacencyMainRunBlock block;
+                uint16 read_index;
+                uint16 write_index = 0;
+                uint16 block_removed = 0;
+
+                block = (AgeAdjacencyMainRunBlock) PageGetItem(page,
+                                                               item_id);
+                if ((block->flags & AGE_ADJACENCY_MAIN_BLOCK_COMPACT) != 0)
+                {
+                    AgeAdjacencyMainCompactPosting compact_postings =
+                        (AgeAdjacencyMainCompactPosting) block->data;
+
+                    for (read_index = 0;
+                         read_index < block->posting_count;
+                         read_index++)
+                    {
+                        ItemPointerData posting_tid;
+
+                        memcpy(&posting_tid,
+                               &compact_postings[read_index].heap_tid,
+                               sizeof(ItemPointerData));
+                        if (callback(&posting_tid, callback_state))
+                        {
+                            removed++;
+                            block_removed++;
+                            continue;
+                        }
+
+                        if (write_index != read_index)
+                        {
+                            compact_postings[write_index] =
+                                compact_postings[read_index];
+                        }
+                        write_index++;
+                    }
+                }
+                else
+                {
+                    AgeAdjacencyMainPosting full_postings =
+                        (AgeAdjacencyMainPosting) block->data;
+
+                    for (read_index = 0;
+                         read_index < block->posting_count;
+                         read_index++)
+                    {
+                        ItemPointer posting_tid =
+                            &full_postings[read_index].heap_tid;
+
+                        if (callback(posting_tid, callback_state))
+                        {
+                            removed++;
+                            block_removed++;
+                            continue;
+                        }
+
+                        if (write_index != read_index)
+                        {
+                            full_postings[write_index] =
+                                full_postings[read_index];
+                        }
+                        write_index++;
+                    }
+                }
+
+                if (block_removed == block->posting_count)
+                {
+                    PageIndexTupleDelete(page, (OffsetNumber) offnum);
+                }
+                else if (block_removed > 0)
+                {
+                    block->posting_count = write_index;
+                }
+            }
+            else
+            {
+                AgeAdjacencyDeltaCompactPosting posting;
+                ItemPointerData posting_tid;
+
+                posting = (AgeAdjacencyDeltaCompactPosting) PageGetItem(
+                    page, item_id);
+                memcpy(&posting_tid, &posting->heap_tid,
+                       sizeof(ItemPointerData));
+
+                if (callback(&posting_tid, callback_state))
+                {
+                    PageIndexTupleDelete(page, (OffsetNumber) offnum);
+                    removed++;
+                }
             }
         }
 
@@ -1856,6 +4620,143 @@ age_adjacency_read_planner_meta(Oid index_oid,
     return true;
 }
 
+static bool
+age_adjacency_extract_constant_index_key(IndexPath *path, graphid *key_out)
+{
+    ListCell *lc;
+
+    if (path == NULL || key_out == NULL)
+    {
+        return false;
+    }
+
+    foreach(lc, path->indexclauses)
+    {
+        IndexClause *iclause = lfirst_node(IndexClause, lc);
+        ListCell *qlc;
+
+        if (iclause->indexcol != 0)
+        {
+            continue;
+        }
+
+        foreach(qlc, iclause->indexquals)
+        {
+            RestrictInfo *rinfo = lfirst_node(RestrictInfo, qlc);
+            Expr *clause = rinfo->clause;
+            Node *rightop;
+
+            if (!IsA(clause, OpExpr))
+            {
+                continue;
+            }
+
+            rightop = get_rightop(clause);
+            if (rightop != NULL && IsA(rightop, Const))
+            {
+                Const *constant = (Const *) rightop;
+
+                if (!constant->constisnull &&
+                    constant->consttype == GRAPHIDOID)
+                {
+                    *key_out = DATUM_GET_GRAPHID(constant->constvalue);
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool
+age_adjacency_probe_planner_delta(Oid index_oid, graphid key,
+                                  AgeAdjacencyDeltaProbeStats *stats)
+{
+    Relation index_rel;
+    AgeAdjacencyMetaPageData meta;
+
+    if (!OidIsValid(index_oid) || stats == NULL)
+    {
+        return false;
+    }
+
+    index_rel = index_open(index_oid, AccessShareLock);
+    if (RelationGetNumberOfBlocks(index_rel) <= AGE_ADJACENCY_METAPAGE_BLKNO)
+    {
+        index_close(index_rel, AccessShareLock);
+        return false;
+    }
+
+    age_adjacency_read_meta(index_rel, &meta);
+    age_adjacency_probe_delta_pages(index_rel, key, &meta, stats);
+
+    index_close(index_rel, AccessShareLock);
+    return true;
+}
+
+static const char *
+age_adjacency_delta_maintenance_action(
+    const AgeAdjacencyMetaPageData *meta, BlockNumber index_pages,
+    int64 *delta_pages_out, int64 *delta_tuples_per_page_out,
+    const char **reason_out)
+{
+    int64 delta_tuples_per_page;
+    int64 delta_pages;
+    const char *action;
+    const char *reason;
+
+    Assert(meta != NULL);
+
+    delta_tuples_per_page =
+        AGE_ADJACENCY_ITEMS_PER_PAGE(
+            sizeof(AgeAdjacencyDeltaCompactPostingData));
+    delta_pages = meta->delta_postings > 0 ?
+                  (int64) ceil((double) meta->delta_postings /
+                               (double) delta_tuples_per_page) : 0;
+
+    if (meta->delta_postings >= AGE_ADJACENCY_DELTA_REINDEX_THRESHOLD)
+    {
+        action = "reindex-delta";
+        reason = "delta-postings-threshold";
+    }
+    else if (delta_pages > 1)
+    {
+        action = "range-skip-delta";
+        reason = "multi-page-delta-range-summary";
+    }
+    else if (meta->delta_postings > 0)
+    {
+        action = "observe-delta";
+        reason = "single-page-delta";
+    }
+    else
+    {
+        action = "none";
+        reason = "no-delta";
+    }
+
+    if (index_pages <= AGE_ADJACENCY_METAPAGE_BLKNO)
+    {
+        reason = "empty-index";
+    }
+
+    if (delta_pages_out != NULL)
+    {
+        *delta_pages_out = delta_pages;
+    }
+    if (delta_tuples_per_page_out != NULL)
+    {
+        *delta_tuples_per_page_out = delta_tuples_per_page;
+    }
+    if (reason_out != NULL)
+    {
+        *reason_out = reason;
+    }
+
+    return action;
+}
+
 static void
 age_adjacency_cost_estimate(struct PlannerInfo *root, struct IndexPath *path,
                             double loop_count, Cost *index_startup_cost,
@@ -1873,13 +4774,19 @@ age_adjacency_cost_estimate(struct PlannerInfo *root, struct IndexPath *path,
     double main_pages;
     double delta_postings = 0;
     double delta_pages = 0;
-    double tuples_per_page =
-        AGE_ADJACENCY_ITEMS_PER_PAGE(sizeof(AgeAdjacencyPostingData));
+    double delta_cpu_tuples = 0;
+    double main_tuples_per_page =
+        AGE_ADJACENCY_MAIN_RUN_BLOCK_COMPACT_MAX_POSTINGS;
+    double delta_tuples_per_page =
+        AGE_ADJACENCY_ITEMS_PER_PAGE(
+            sizeof(AgeAdjacencyDeltaCompactPostingData));
     double directory_entries_per_page =
         AGE_ADJACENCY_ITEMS_PER_PAGE(sizeof(AgeAdjacencyDirectoryEntryData));
     AgeAdjacencyMetaPageData meta;
     BlockNumber actual_pages;
     bool have_meta = false;
+    bool have_constant_key = false;
+    graphid constant_key = 0;
 
     (void) root;
 
@@ -1914,15 +4821,30 @@ age_adjacency_cost_estimate(struct PlannerInfo *root, struct IndexPath *path,
                                directory_entries_per_page));
     directory_probe_pages = Max(1.0, ceil(log(directory_pages + 1.0) /
                                           log(2.0)));
-    main_pages = Max(1.0, ceil(expected_tuples / tuples_per_page));
+    main_pages = Max(1.0, ceil(expected_tuples / main_tuples_per_page));
     delta_pages = delta_postings > 0 ?
-                  ceil(delta_postings / tuples_per_page) : 0;
+                  ceil(delta_postings / delta_tuples_per_page) : 0;
+    delta_cpu_tuples = delta_postings;
+
+    have_constant_key = age_adjacency_extract_constant_index_key(path,
+                                                                &constant_key);
+    if (have_meta && have_constant_key && delta_postings > 0)
+    {
+        AgeAdjacencyDeltaProbeStats delta_stats;
+
+        if (age_adjacency_probe_planner_delta(path->indexinfo->indexoid,
+                                              constant_key,
+                                              &delta_stats))
+        {
+            delta_cpu_tuples = (double) delta_stats.entries_scanned;
+        }
+    }
 
     *index_startup_cost = random_page_cost;
     *index_total_cost =
         *index_startup_cost +
         (directory_probe_pages + main_pages + delta_pages) * random_page_cost +
-        (expected_tuples + delta_postings) * cpu_index_tuple_cost;
+        (expected_tuples + delta_cpu_tuples) * cpu_index_tuple_cost;
 
     if (delta_postings >= AGE_ADJACENCY_DELTA_REINDEX_THRESHOLD)
     {
@@ -2054,8 +4976,127 @@ age_adjacency_begin_visible_payload_scan(Oid index_oid, Snapshot snapshot,
     scan->target.visibilitymap_cache_valid = false;
     scan->target.visibilitymap_cached_all_visible = false;
     scan->target.fetch_properties = fetch_properties;
+    scan->target.terminal_label_id = INVALID_LABEL_ID;
 
     return scan;
+}
+
+void
+age_adjacency_visible_payload_scan_set_terminal_label(
+    AgeAdjacencyVisiblePayloadScan *scan, int32 terminal_label_id)
+{
+    if (scan == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload scan is required")));
+    }
+
+    scan->target.terminal_label_id = terminal_label_id;
+}
+
+void
+age_adjacency_visible_payload_scan_set_terminal_vertex_filter(
+    AgeAdjacencyVisiblePayloadScan *scan,
+    AgeAdjacencyVertexFilterCallback callback, void *callback_state)
+{
+    AgeAdjacencyCompositeTerminalFilter filter;
+
+    if (scan == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload scan is required")));
+    }
+
+    memset(&filter, 0, sizeof(filter));
+    filter.terminal_label_id = scan->target.terminal_label_id;
+    filter.vertex_filter = callback;
+    filter.vertex_filter_state = callback_state;
+    filter.has_vertex_filter = callback != NULL;
+    filter.source = "callback";
+    age_adjacency_visible_payload_scan_set_composite_terminal_filter(scan,
+                                                                     &filter);
+}
+
+void
+age_adjacency_visible_payload_scan_set_terminal_vertex_set_filter(
+    AgeAdjacencyVisiblePayloadScan *scan,
+    const AgeAdjacencyVertexSetFilter *filter)
+{
+    AgeAdjacencyCompositeTerminalFilter composite_filter;
+
+    if (scan == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload scan is required")));
+    }
+
+    memset(&composite_filter, 0, sizeof(composite_filter));
+    composite_filter.terminal_label_id = scan->target.terminal_label_id;
+    if (filter != NULL)
+    {
+        composite_filter.vertex_set_filter = *filter;
+        composite_filter.source = filter->source;
+        composite_filter.has_vertex_set_filter = true;
+    }
+    age_adjacency_visible_payload_scan_set_composite_terminal_filter(
+        scan, &composite_filter);
+}
+
+void
+age_adjacency_visible_payload_scan_set_composite_terminal_filter(
+    AgeAdjacencyVisiblePayloadScan *scan,
+    const AgeAdjacencyCompositeTerminalFilter *filter)
+{
+    if (scan == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload scan is required")));
+    }
+
+    if (filter == NULL)
+    {
+        scan->target.terminal_label_id = INVALID_LABEL_ID;
+        scan->target.terminal_vertex_filter = NULL;
+        scan->target.terminal_vertex_filter_state = NULL;
+        scan->target.terminal_property_index_oid = InvalidOid;
+        scan->target.terminal_property_filter_id = 0;
+        scan->target.terminal_property_match_count = 0;
+        scan->target.has_terminal_property_summary = false;
+        memset(&scan->target.terminal_vertex_set_filter, 0,
+               sizeof(scan->target.terminal_vertex_set_filter));
+        return;
+    }
+
+    if (filter->has_property_summary)
+        scan->target.terminal_composite_requests++;
+    scan->target.terminal_label_id = filter->terminal_label_id;
+    scan->target.terminal_vertex_filter = filter->has_vertex_filter ?
+        filter->vertex_filter : NULL;
+    scan->target.terminal_vertex_filter_state = filter->has_vertex_filter ?
+        filter->vertex_filter_state : NULL;
+    scan->target.terminal_property_index_oid = filter->property_index_oid;
+    scan->target.terminal_property_filter_id = filter->property_filter_id;
+    scan->target.terminal_property_match_count = filter->property_match_count;
+    scan->target.has_terminal_property_summary = filter->has_property_summary;
+    if (filter->has_vertex_set_filter)
+    {
+        scan->target.terminal_vertex_set_filter =
+            filter->vertex_set_filter;
+        age_adjacency_vertex_set_filter_prepare_value_summary(
+            &scan->target.terminal_vertex_set_filter,
+            filter->property_filter_id);
+    }
+    else
+    {
+        memset(&scan->target.terminal_vertex_set_filter, 0,
+               sizeof(scan->target.terminal_vertex_set_filter));
+    }
+    (void) age_adjacency_visible_payload_scan_apply_directory_vertex_set_filter(
+        scan);
 }
 
 bool
@@ -2075,10 +5116,13 @@ age_adjacency_visible_payload_scan_begin_key(
     scan->key_active = true;
     scan->main_active = false;
     scan->main_remaining = 0;
+    scan->main_label_candidate_count = 0;
     scan->main_blkno = InvalidBlockNumber;
     scan->main_offnum = FirstOffsetNumber;
+    scan->main_posting_index = 0;
     scan->main_cache_index = 0;
-    scan->main_reached_start = false;
+    scan->main_composite_estimate_recorded = false;
+    scan->main_cache.valid = false;
     scan->delta_blkno = scan->meta.first_delta_blkno;
     scan->delta_offnum = FirstOffsetNumber;
     scan->target.callback = NULL;
@@ -2086,13 +5130,115 @@ age_adjacency_visible_payload_scan_begin_key(
 
     if (age_adjacency_find_directory_entry_cached(scan, key, &entry))
     {
-        scan->main_active = true;
-        scan->main_remaining = entry.posting_count;
-        scan->main_blkno = entry.first_blkno;
-        scan->main_offnum = entry.first_offnum;
+        bool label_mismatch;
+        bool property_mismatch;
+
+        if (age_adjacency_directory_entry_matches_composite_target(
+                &entry, &scan->target, &label_mismatch,
+                &property_mismatch))
+        {
+            age_adjacency_visible_payload_scan_record_composite_estimate(
+                scan, &entry);
+            scan->main_active = true;
+            scan->main_remaining = entry.posting_count;
+            scan->main_label_candidate_count =
+                age_adjacency_directory_entry_terminal_label_postings(
+                    &entry, scan->target.terminal_label_id);
+            scan->main_blkno = entry.first_blkno;
+            scan->main_offnum = entry.first_offnum;
+            scan->main_posting_index = 0;
+        }
+        else
+        {
+            if (!label_mismatch)
+                age_adjacency_visible_payload_scan_record_composite_estimate(
+                    scan, &entry);
+            if (label_mismatch)
+            {
+                scan->target.terminal_label_filtered += entry.posting_count;
+                scan->target.terminal_directory_label_filtered +=
+                    entry.posting_count;
+                scan->target.terminal_cache_label_filtered +=
+                    entry.posting_count;
+            }
+            else if (property_mismatch)
+            {
+                scan->target.terminal_property_filtered += entry.posting_count;
+                scan->target.terminal_vertex_set_directory_filtered +=
+                    entry.posting_count;
+                if (age_adjacency_directory_entry_range_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_range_filtered +=
+                        entry.posting_count;
+                }
+                if (age_adjacency_directory_entry_exact_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_exact_filtered +=
+                        entry.posting_count;
+                }
+                if (age_adjacency_directory_entry_label_bloom_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_label_bloom_filtered +=
+                        entry.posting_count;
+                }
+                if (age_adjacency_directory_entry_compressed_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_compressed_filtered +=
+                        entry.posting_count;
+                }
+                if (age_adjacency_directory_entry_value_summary_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_value_filtered +=
+                        entry.posting_count;
+                }
+                if (age_adjacency_directory_entry_value_posting_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_value_posting_filtered +=
+                        entry.posting_count;
+                }
+                if (age_adjacency_directory_entry_wide_bloom_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_wide_bloom_filtered +=
+                        entry.posting_count;
+                }
+                scan->target.terminal_cache_property_filtered +=
+                    entry.posting_count;
+                if (scan->target.has_terminal_property_summary)
+                    scan->target.terminal_composite_directory_filtered +=
+                        entry.posting_count;
+            }
+            scan->target.terminal_cache_filtered += entry.posting_count;
+        }
     }
 
     return scan->main_active || BlockNumberIsValid(scan->delta_blkno);
+}
+
+int64
+age_adjacency_visible_payload_scan_run_postings(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL || !scan->key_active || !scan->main_active)
+        return 0;
+
+    return (int64)scan->main_remaining;
+}
+
+int64
+age_adjacency_visible_payload_scan_active_postings(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL || !scan->key_active || !scan->main_active)
+        return 0;
+
+    return scan->main_label_candidate_count;
 }
 
 bool
@@ -2117,7 +5263,11 @@ age_adjacency_visible_payload_scan_key_known_empty(
         return true;
     }
 
-    return !age_adjacency_find_directory_entry_cached(scan, key, &entry);
+    if (!age_adjacency_find_directory_entry_cached(scan, key, &entry))
+        return true;
+
+    return !age_adjacency_directory_entry_matches_composite_target(
+        &entry, &scan->target, NULL, NULL);
 }
 
 bool
@@ -2149,6 +5299,293 @@ age_adjacency_visible_payload_scan_next(
 
     scan->key_active = false;
     return false;
+}
+
+int64
+age_adjacency_visible_payload_scan_label_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_label_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_directory_label_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_directory_label_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_property_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_property_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_cache_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_cache_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_cache_label_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_cache_label_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_cache_property_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_cache_property_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_range_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_range_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_sorted_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_sorted_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_block_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_block_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_block_value_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_block_value_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_block_value_posting_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_block_value_posting_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_block_posting_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_block_posting_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_block_compressed_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_block_compressed_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_directory_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_directory_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_directory_range_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_directory_range_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_directory_exact_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_directory_exact_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_directory_label_bloom_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_directory_label_bloom_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_directory_compressed_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_directory_compressed_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_directory_wide_bloom_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_directory_wide_bloom_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_directory_value_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_directory_value_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_vertex_set_directory_value_posting_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_vertex_set_directory_value_posting_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_composite_requests(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_composite_requests;
+}
+
+int64
+age_adjacency_visible_payload_scan_composite_block_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_composite_block_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_composite_directory_filtered(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_composite_directory_filtered;
+}
+
+int64
+age_adjacency_visible_payload_scan_composite_directory_estimated(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return 0;
+
+    return scan->target.terminal_composite_directory_estimated;
+}
+
+void
+age_adjacency_visible_payload_scan_reset_runtime(
+    AgeAdjacencyVisiblePayloadScan *scan)
+{
+    if (scan == NULL)
+        return;
+
+    scan->target.terminal_label_filtered = 0;
+    scan->target.terminal_directory_label_filtered = 0;
+    scan->target.terminal_property_filtered = 0;
+    scan->target.terminal_cache_filtered = 0;
+    scan->target.terminal_cache_label_filtered = 0;
+    scan->target.terminal_cache_property_filtered = 0;
+    scan->target.terminal_vertex_set_range_filtered = 0;
+    scan->target.terminal_vertex_set_sorted_filtered = 0;
+    scan->target.terminal_vertex_set_block_filtered = 0;
+    scan->target.terminal_vertex_set_block_value_filtered = 0;
+    scan->target.terminal_vertex_set_block_value_posting_filtered = 0;
+    scan->target.terminal_vertex_set_block_range_filtered = 0;
+    scan->target.terminal_vertex_set_block_exact_filtered = 0;
+    scan->target.terminal_vertex_set_block_compressed_filtered = 0;
+    scan->target.terminal_vertex_set_block_bloom_filtered = 0;
+    scan->target.terminal_vertex_set_block_posting_filtered = 0;
+    scan->target.terminal_vertex_set_directory_filtered = 0;
+    scan->target.terminal_vertex_set_directory_range_filtered = 0;
+    scan->target.terminal_vertex_set_directory_exact_filtered = 0;
+    scan->target.terminal_vertex_set_directory_label_bloom_filtered = 0;
+    scan->target.terminal_vertex_set_directory_compressed_filtered = 0;
+    scan->target.terminal_vertex_set_directory_wide_bloom_filtered = 0;
+    scan->target.terminal_vertex_set_directory_value_filtered = 0;
+    scan->target.terminal_vertex_set_directory_value_posting_filtered = 0;
+    scan->target.terminal_composite_requests = 0;
+    scan->target.terminal_composite_block_filtered = 0;
+    scan->target.terminal_composite_directory_filtered = 0;
+    scan->target.terminal_composite_directory_estimated = 0;
 }
 
 int64
@@ -2196,23 +5633,15 @@ age_adjacency_visible_payload_scan_next_main(
         {
             AgeAdjacencyCachedPosting *cached =
                 &scan->main_cache.postings[scan->main_cache_index++];
-
-            if (!scan->main_reached_start)
-            {
-                if (cached->offnum < scan->main_offnum)
-                {
-                    continue;
-                }
-                scan->main_reached_start = true;
-            }
+            AgeAdjacencyPostingData posting;
 
             scan->main_remaining--;
-            if (cached->posting.key != scan->active_key)
-            {
-                continue;
-            }
+            posting.key = scan->active_key;
+            ItemPointerCopy(&cached->posting.heap_tid, &posting.heap_tid);
+            posting.edge_id = cached->posting.edge_id;
+            posting.next_vertex_id = cached->posting.next_vertex_id;
 
-            if (age_adjacency_posting_visible_payload(&cached->posting,
+            if (age_adjacency_posting_visible_payload(&posting,
                                                       &scan->target,
                                                       payload))
             {
@@ -2221,9 +5650,10 @@ age_adjacency_visible_payload_scan_next_main(
         }
 
         scan->main_blkno = scan->main_cache.next_blkno;
-        scan->main_offnum = FirstOffsetNumber;
+        scan->main_offnum = scan->main_cache.next_offnum;
+        scan->main_posting_index = scan->main_cache.next_posting_index;
         scan->main_cache_index = 0;
-        scan->main_reached_start = false;
+        scan->main_cache.valid = false;
     }
 
     scan->main_active = false;
@@ -2242,6 +5672,7 @@ age_adjacency_visible_payload_scan_next_delta(
         Buffer buf;
         Page page;
         AgeAdjacencyPageOpaque opaque;
+        BlockNumber next_blkno;
         OffsetNumber maxoff;
         OffsetNumber offnum;
 
@@ -2260,21 +5691,35 @@ age_adjacency_visible_payload_scan_next_delta(
                             scan->delta_blkno)));
         }
 
+        next_blkno = opaque->next_blkno;
+        if (!age_adjacency_delta_page_may_contain_key(opaque,
+                                                      scan->active_key))
+        {
+            scan->delta_blkno = next_blkno;
+            scan->delta_offnum = FirstOffsetNumber;
+            UnlockReleaseBuffer(buf);
+            continue;
+        }
+
         maxoff = PageGetMaxOffsetNumber(page);
         for (offnum = scan->delta_offnum;
              offnum <= maxoff;
              offnum = OffsetNumberNext(offnum))
         {
             ItemId item_id = PageGetItemId(page, offnum);
-            AgeAdjacencyPosting posting;
+            AgeAdjacencyDeltaCompactPosting delta_posting;
+            AgeAdjacencyPostingData posting;
 
             if (!ItemIdIsNormal(item_id))
             {
                 continue;
             }
 
-            posting = (AgeAdjacencyPosting) PageGetItem(page, item_id);
-            if (posting->key != scan->active_key)
+            delta_posting = (AgeAdjacencyDeltaCompactPosting) PageGetItem(
+                page, item_id);
+            age_adjacency_delta_posting_get_posting(delta_posting, opaque,
+                                                    &posting);
+            if (posting.key != scan->active_key)
             {
                 continue;
             }
@@ -2282,10 +5727,10 @@ age_adjacency_visible_payload_scan_next_delta(
             scan->delta_offnum = OffsetNumberNext(offnum);
             if (scan->delta_offnum > maxoff)
             {
-                scan->delta_blkno = opaque->next_blkno;
+                scan->delta_blkno = next_blkno;
                 scan->delta_offnum = FirstOffsetNumber;
             }
-            if (age_adjacency_posting_visible_payload(posting,
+            if (age_adjacency_posting_visible_payload(&posting,
                                                       &scan->target,
                                                       payload))
             {
@@ -2294,7 +5739,7 @@ age_adjacency_visible_payload_scan_next_delta(
             }
         }
 
-        scan->delta_blkno = opaque->next_blkno;
+        scan->delta_blkno = next_blkno;
         scan->delta_offnum = FirstOffsetNumber;
         UnlockReleaseBuffer(buf);
     }
@@ -2512,8 +5957,8 @@ age_adjacency_debug_stats(PG_FUNCTION_ARGS)
     Relation index_rel;
     AgeAdjacencyMetaPageData meta;
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-    Datum values[6];
-    bool nulls[6] = {false, false, false, false, false, false};
+    Datum values[7];
+    bool nulls[7] = {false, false, false, false, false, false, false};
 
     if (rsinfo == NULL ||
         !IsA(rsinfo, ReturnSetInfo) ||
@@ -2530,12 +5975,13 @@ age_adjacency_debug_stats(PG_FUNCTION_ARGS)
     age_adjacency_validate_index(index_rel);
     age_adjacency_read_meta(index_rel, &meta);
 
-    values[0] = Int64GetDatum((int64) RelationGetNumberOfBlocks(index_rel));
-    values[1] = Int64GetDatum((int64) meta.postings);
-    values[2] = Int64GetDatum((int64) meta.directory_entries);
-    values[3] = Int64GetDatum((int64) meta.delta_postings);
-    values[4] = Int64GetDatum((int64) AGE_ADJACENCY_DELTA_REINDEX_THRESHOLD);
-    values[5] = BoolGetDatum(meta.delta_postings >=
+    values[0] = Int32GetDatum((int32) meta.version);
+    values[1] = Int64GetDatum((int64) RelationGetNumberOfBlocks(index_rel));
+    values[2] = Int64GetDatum((int64) meta.postings);
+    values[3] = Int64GetDatum((int64) meta.directory_entries);
+    values[4] = Int64GetDatum((int64) meta.delta_postings);
+    values[5] = Int64GetDatum((int64) AGE_ADJACENCY_DELTA_REINDEX_THRESHOLD);
+    values[6] = BoolGetDatum(meta.delta_postings >=
                              AGE_ADJACENCY_DELTA_REINDEX_THRESHOLD);
     tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 
@@ -2580,6 +6026,380 @@ age_adjacency_debug_directory_probe(PG_FUNCTION_ARGS)
     tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 
     index_close(index_rel, AccessShareLock);
+
+    return (Datum) 0;
+}
+
+Datum
+age_adjacency_debug_key_known_empty(PG_FUNCTION_ARGS)
+{
+    Oid index_oid = PG_GETARG_OID(0);
+    graphid key = AG_GETARG_GRAPHID(1);
+    int32 terminal_label_id = PG_GETARG_INT32(2);
+    AgeAdjacencyVisiblePayloadScan *scan;
+    bool known_empty;
+
+    scan = age_adjacency_begin_visible_payload_scan(index_oid,
+                                                    GetActiveSnapshot(),
+                                                    false);
+    age_adjacency_visible_payload_scan_set_terminal_label(scan,
+                                                          terminal_label_id);
+    known_empty = age_adjacency_visible_payload_scan_key_known_empty(scan,
+                                                                    key);
+    age_adjacency_end_visible_payload_scan(scan);
+
+    PG_RETURN_BOOL(known_empty);
+}
+
+Datum
+age_adjacency_debug_key_known_empty_range(PG_FUNCTION_ARGS)
+{
+    Oid index_oid = PG_GETARG_OID(0);
+    graphid key = AG_GETARG_GRAPHID(1);
+    int32 terminal_label_id = PG_GETARG_INT32(2);
+    graphid min_vertex_id = AG_GETARG_GRAPHID(3);
+    graphid max_vertex_id = AG_GETARG_GRAPHID(4);
+    AgeAdjacencyVisiblePayloadScan *scan;
+    AgeAdjacencyVertexSetFilter filter;
+    bool known_empty;
+
+    scan = age_adjacency_begin_visible_payload_scan(index_oid,
+                                                    GetActiveSnapshot(),
+                                                    false);
+    age_adjacency_visible_payload_scan_set_terminal_label(scan,
+                                                          terminal_label_id);
+    memset(&filter, 0, sizeof(filter));
+    filter.min_vertex_id = min_vertex_id;
+    filter.max_vertex_id = max_vertex_id;
+    filter.has_range = true;
+    age_adjacency_visible_payload_scan_set_terminal_vertex_set_filter(scan,
+                                                                      &filter);
+    known_empty = age_adjacency_visible_payload_scan_key_known_empty(scan,
+                                                                    key);
+    age_adjacency_end_visible_payload_scan(scan);
+
+    PG_RETURN_BOOL(known_empty);
+}
+
+Datum
+age_adjacency_debug_composite_probe(PG_FUNCTION_ARGS)
+{
+    Oid index_oid = PG_GETARG_OID(0);
+    graphid key = AG_GETARG_GRAPHID(1);
+    int32 terminal_label_id = PG_GETARG_INT32(2);
+    graphid matched_vertex_id = AG_GETARG_GRAPHID(3);
+    int64 property_match_count = PG_GETARG_INT64(4);
+    AgeAdjacencyVisiblePayloadScan *scan;
+    AgeAdjacencyCompositeTerminalFilter filter;
+    HASHCTL hash_ctl;
+    bool found;
+    int64 emitted = 0;
+    ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    Datum values[24];
+    bool nulls[24] = {false, false, false, false, false, false, false,
+                      false, false, false, false, false, false, false,
+                      false, false, false, false, false, false, false,
+                      false, false, false};
+
+    if (rsinfo == NULL ||
+        !IsA(rsinfo, ReturnSetInfo) ||
+        (rsinfo->allowedModes & SFRM_Materialize) == 0)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("materialize mode required")));
+    }
+
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+
+    memset(&hash_ctl, 0, sizeof(hash_ctl));
+    hash_ctl.keysize = sizeof(graphid);
+    hash_ctl.entrysize = sizeof(graphid);
+    hash_ctl.hcxt = CurrentMemoryContext;
+
+    memset(&filter, 0, sizeof(filter));
+    filter.terminal_label_id = terminal_label_id;
+    filter.property_match_count = property_match_count;
+    filter.vertex_set_filter.vertex_ids =
+        hash_create("AGE adjacency debug composite matched vertices",
+                    1, &hash_ctl,
+                    HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+    (void) hash_search(filter.vertex_set_filter.vertex_ids,
+                       &matched_vertex_id, HASH_ENTER, &found);
+    filter.vertex_set_filter.sorted_vertex_ids = &matched_vertex_id;
+    filter.vertex_set_filter.sorted_vertex_count = 1;
+    filter.vertex_set_filter.min_vertex_id = matched_vertex_id;
+    filter.vertex_set_filter.max_vertex_id = matched_vertex_id;
+    filter.vertex_set_filter.matches = property_match_count;
+    filter.vertex_set_filter.source = "debug-composite";
+    filter.vertex_set_filter.has_range = true;
+    filter.vertex_set_filter.has_sorted_vertex_ids = true;
+    filter.source = "debug-composite";
+    filter.property_filter_id = 1;
+    filter.has_property_summary = true;
+    filter.has_vertex_set_filter = true;
+
+    scan = age_adjacency_begin_visible_payload_scan(index_oid,
+                                                    GetActiveSnapshot(),
+                                                    false);
+    age_adjacency_visible_payload_scan_set_composite_terminal_filter(scan,
+                                                                     &filter);
+    if (age_adjacency_visible_payload_scan_begin_key(scan, key))
+    {
+        AgeAdjacencyPayload payload;
+
+        while (age_adjacency_visible_payload_scan_next(scan, &payload))
+            emitted++;
+    }
+
+    values[0] = Int64GetDatum(emitted);
+    values[1] = Int64GetDatum(
+        age_adjacency_visible_payload_scan_cache_filtered(scan));
+    values[2] = Int64GetDatum(
+        age_adjacency_visible_payload_scan_cache_property_filtered(scan));
+    values[3] = Int64GetDatum(
+        age_adjacency_visible_payload_scan_vertex_set_range_filtered(scan));
+    values[4] = Int64GetDatum(
+        age_adjacency_visible_payload_scan_vertex_set_sorted_filtered(scan));
+    values[5] = Int64GetDatum(
+        age_adjacency_visible_payload_scan_vertex_set_block_filtered(scan));
+    values[6] = Int64GetDatum(
+        scan->target.terminal_vertex_set_block_value_filtered);
+    values[7] = Int64GetDatum(
+        scan->target.terminal_vertex_set_block_value_posting_filtered);
+    values[8] = Int64GetDatum(
+        age_adjacency_visible_payload_scan_vertex_set_directory_filtered(scan));
+    values[9] = Int64GetDatum(
+        age_adjacency_visible_payload_scan_composite_block_filtered(scan));
+    values[10] = Int64GetDatum(
+        age_adjacency_visible_payload_scan_composite_directory_filtered(scan));
+    values[11] = Int64GetDatum(
+        age_adjacency_visible_payload_scan_composite_directory_estimated(scan));
+    values[12] = Int64GetDatum(
+        scan->target.terminal_vertex_set_block_range_filtered);
+    values[13] = Int64GetDatum(
+        scan->target.terminal_vertex_set_block_exact_filtered);
+    values[14] = Int64GetDatum(
+        scan->target.terminal_vertex_set_block_compressed_filtered);
+    values[15] = Int64GetDatum(
+        scan->target.terminal_vertex_set_block_bloom_filtered);
+    values[16] = Int64GetDatum(
+        scan->target.terminal_vertex_set_block_posting_filtered);
+    values[17] = Int64GetDatum(
+        scan->target.terminal_vertex_set_directory_range_filtered);
+    values[18] = Int64GetDatum(
+        scan->target.terminal_vertex_set_directory_exact_filtered);
+    values[19] = Int64GetDatum(
+        scan->target.terminal_vertex_set_directory_label_bloom_filtered);
+    values[20] = Int64GetDatum(
+        scan->target.terminal_vertex_set_directory_compressed_filtered);
+    values[21] = Int64GetDatum(
+        scan->target.terminal_vertex_set_directory_wide_bloom_filtered);
+    values[22] = Int64GetDatum(
+        scan->target.terminal_vertex_set_directory_value_filtered);
+    values[23] = Int64GetDatum(
+        scan->target.terminal_vertex_set_directory_value_posting_filtered);
+    tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+    age_adjacency_end_visible_payload_scan(scan);
+
+    return (Datum) 0;
+}
+
+Datum
+age_adjacency_debug_main_probe(PG_FUNCTION_ARGS)
+{
+    Oid index_oid = PG_GETARG_OID(0);
+    graphid key = AG_GETARG_GRAPHID(1);
+    Relation index_rel;
+    AgeAdjacencyMetaPageData meta;
+    AgeAdjacencyMainProbeStats stats;
+    ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    Datum values[9];
+    bool nulls[9] = {false, false, false, false, false, false, false, false,
+                     false};
+
+    if (rsinfo == NULL ||
+        !IsA(rsinfo, ReturnSetInfo) ||
+        (rsinfo->allowedModes & SFRM_Materialize) == 0)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("materialize mode required")));
+    }
+
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+
+    index_rel = index_open(index_oid, AccessShareLock);
+    age_adjacency_validate_index(index_rel);
+    age_adjacency_read_meta(index_rel, &meta);
+
+    age_adjacency_probe_main_run(index_rel, key, &meta, &stats);
+
+    values[0] = BoolGetDatum(stats.found);
+    values[1] = Int64GetDatum(stats.pages_visited);
+    values[2] = Int64GetDatum(stats.window_offsets);
+    values[3] = Int64GetDatum(stats.page_offsets);
+    values[4] = Int64GetDatum(stats.block_items);
+    values[5] = Int64GetDatum(stats.compact_block_items);
+    values[6] = Int64GetDatum(stats.full_block_items);
+    values[7] = Int64GetDatum(stats.entries_cached);
+    values[8] = Int64GetDatum(stats.label_groups);
+    tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+    index_close(index_rel, AccessShareLock);
+
+    return (Datum) 0;
+}
+
+Datum
+age_adjacency_debug_delta_probe(PG_FUNCTION_ARGS)
+{
+    Oid index_oid = PG_GETARG_OID(0);
+    graphid key = AG_GETARG_GRAPHID(1);
+    Relation index_rel;
+    AgeAdjacencyMetaPageData meta;
+    AgeAdjacencyDeltaProbeStats stats;
+    ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    Datum values[3];
+    bool nulls[3] = {false, false, false};
+
+    if (rsinfo == NULL ||
+        !IsA(rsinfo, ReturnSetInfo) ||
+        (rsinfo->allowedModes & SFRM_Materialize) == 0)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("materialize mode required")));
+    }
+
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+
+    index_rel = index_open(index_oid, AccessShareLock);
+    age_adjacency_validate_index(index_rel);
+    age_adjacency_read_meta(index_rel, &meta);
+
+    age_adjacency_probe_delta_pages(index_rel, key, &meta, &stats);
+
+    values[0] = Int64GetDatum(stats.pages_visited);
+    values[1] = Int64GetDatum(stats.pages_skipped);
+    values[2] = Int64GetDatum(stats.entries_scanned);
+    tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+    index_close(index_rel, AccessShareLock);
+
+    return (Datum) 0;
+}
+
+Datum
+age_adjacency_debug_delta_maintenance(PG_FUNCTION_ARGS)
+{
+    Oid index_oid = PG_GETARG_OID(0);
+    Relation index_rel;
+    AgeAdjacencyMetaPageData meta;
+    BlockNumber index_pages;
+    int64 delta_pages;
+    int64 delta_tuples_per_page;
+    const char *action;
+    const char *reason;
+    ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    Datum values[7];
+    bool nulls[7] = {false, false, false, false, false, false, false};
+
+    if (rsinfo == NULL ||
+        !IsA(rsinfo, ReturnSetInfo) ||
+        (rsinfo->allowedModes & SFRM_Materialize) == 0)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("materialize mode required")));
+    }
+
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+
+    index_rel = index_open(index_oid, AccessShareLock);
+    age_adjacency_validate_index(index_rel);
+    age_adjacency_read_meta(index_rel, &meta);
+    index_pages = RelationGetNumberOfBlocks(index_rel);
+
+    action = age_adjacency_delta_maintenance_action(
+        &meta, index_pages, &delta_pages, &delta_tuples_per_page, &reason);
+
+    values[0] = CStringGetTextDatum(action);
+    values[1] = CStringGetTextDatum(reason);
+    values[2] = Int64GetDatum((int64) meta.delta_postings);
+    values[3] = Int64GetDatum(delta_pages);
+    values[4] = Int64GetDatum(delta_tuples_per_page);
+    values[5] = Int64GetDatum((int64) AGE_ADJACENCY_DELTA_REINDEX_THRESHOLD);
+    values[6] = BoolGetDatum(meta.delta_postings >=
+                             AGE_ADJACENCY_DELTA_REINDEX_THRESHOLD);
+    tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+
+    index_close(index_rel, AccessShareLock);
+
+    return (Datum) 0;
+}
+
+Datum
+age_adjacency_reindex_if_needed(PG_FUNCTION_ARGS)
+{
+    Oid index_oid = PG_GETARG_OID(0);
+    Relation index_rel;
+    AgeAdjacencyMetaPageData before_meta;
+    AgeAdjacencyMetaPageData after_meta;
+    BlockNumber index_pages;
+    int64 delta_pages;
+    int64 delta_tuples_per_page;
+    const char *action;
+    const char *reason;
+    bool should_reindex;
+    ReindexParams params = {0};
+    ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+    Datum values[6];
+    bool nulls[6] = {false, false, false, false, false, false};
+
+    if (rsinfo == NULL ||
+        !IsA(rsinfo, ReturnSetInfo) ||
+        (rsinfo->allowedModes & SFRM_Materialize) == 0)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("materialize mode required")));
+    }
+
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+
+    index_rel = index_open(index_oid, AccessShareLock);
+    age_adjacency_validate_index(index_rel);
+    age_adjacency_read_meta(index_rel, &before_meta);
+    index_pages = RelationGetNumberOfBlocks(index_rel);
+    index_close(index_rel, AccessShareLock);
+
+    action = age_adjacency_delta_maintenance_action(
+        &before_meta, index_pages, &delta_pages, &delta_tuples_per_page,
+        &reason);
+    should_reindex = strcmp(action, "reindex-delta") == 0;
+
+    if (should_reindex)
+    {
+        char persistence = get_rel_persistence(index_oid);
+
+        params.options = REINDEXOPT_REPORT_PROGRESS;
+        params.tablespaceOid = InvalidOid;
+        reindex_index(NULL, index_oid, false, persistence, &params);
+    }
+
+    index_rel = index_open(index_oid, AccessShareLock);
+    age_adjacency_read_meta(index_rel, &after_meta);
+    index_close(index_rel, AccessShareLock);
+
+    values[0] = BoolGetDatum(should_reindex);
+    values[1] = CStringGetTextDatum(action);
+    values[2] = CStringGetTextDatum(reason);
+    values[3] = Int64GetDatum((int64) before_meta.delta_postings);
+    values[4] = Int64GetDatum((int64) after_meta.delta_postings);
+    values[5] = Int64GetDatum((int64) after_meta.postings);
+    tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 
     return (Datum) 0;
 }

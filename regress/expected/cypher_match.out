@@ -33,6 +33,109 @@ ORDER BY p.proname;
  age_array_agg_map_slots:age_array_agg_slots_combine:age_array_agg_slots_serialize:age_array_agg_slots_deserialize
 (2 rows)
 
+BEGIN;
+SET LOCAL max_parallel_workers_per_gather = 4;
+SET LOCAL min_parallel_table_scan_size = 0;
+SET LOCAL parallel_setup_cost = 0;
+SET LOCAL parallel_tuple_cost = 0;
+CREATE TABLE age_slots_parallel_scalar AS
+SELECT CASE WHEN i % 3 = 0 THEN NULL::agtype ELSE '1'::agtype END AS v
+FROM generate_series(1, 20000) AS g(i);
+CREATE TABLE age_slots_parallel_object AS
+SELECT '{"a": 1}'::agtype AS v
+FROM generate_series(1, 20000) AS g(i);
+CREATE TABLE age_slots_parallel_typed AS
+SELECT i::bigint AS i, (i + 0.5)::numeric AS n, ('slot-' || i)::text AS t
+FROM generate_series(1, 20000) AS g(i);
+ALTER TABLE age_slots_parallel_scalar SET (parallel_workers = 4);
+ALTER TABLE age_slots_parallel_object SET (parallel_workers = 4);
+ALTER TABLE age_slots_parallel_typed SET (parallel_workers = 4);
+EXPLAIN (COSTS OFF)
+SELECT array_length(age_array_agg_list_slots(v), 1)
+FROM age_slots_parallel_scalar;
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 4
+         ->  Partial Aggregate
+               ->  Parallel Seq Scan on age_slots_parallel_scalar
+(5 rows)
+
+SELECT array_length(age_array_agg_list_slots(v), 1) AS scalar_slots,
+       count(*) AS scalar_rows
+FROM age_slots_parallel_scalar;
+ scalar_slots | scalar_rows 
+--------------+-------------
+        20000 |       20000
+(1 row)
+
+SELECT age_array_agg_list_slots_summary(v) AS scalar_slot_state
+FROM age_slots_parallel_scalar;
+                                                                                                                              scalar_slot_state                                                                                                                               
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ shape=list slots=1 rows=20000 typed=0 agtype=1 source-groups=1 reused-slots=0 payload-weight=2 final-weight=2 materialization-weight=4 serialized-bytes=375882 null-bitmap-bytes=2500 value-bytes=373352 estimated-wire-width=28 estimated-state-width-weight=4 types=agtype
+(1 row)
+
+SELECT array_length(age_array_agg_list_slots(v), 1) AS object_slots,
+       count(*) AS object_rows
+FROM age_slots_parallel_object;
+ object_slots | object_rows 
+--------------+-------------
+        20000 |       20000
+(1 row)
+
+EXPLAIN (COSTS OFF)
+SELECT array_length(age_array_agg_list_slots(i, n, t), 1)
+FROM age_slots_parallel_typed;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Finalize Aggregate
+   ->  Gather
+         Workers Planned: 4
+         ->  Partial Aggregate
+               ->  Parallel Seq Scan on age_slots_parallel_typed
+(5 rows)
+
+SELECT array_length(age_array_agg_list_slots(i, n, t), 1) AS typed_slots,
+       count(*) AS typed_rows
+FROM age_slots_parallel_typed;
+ typed_slots | typed_rows 
+-------------+------------
+       20000 |      20000
+(1 row)
+
+SELECT age_array_agg_list_slots(1::bigint, 2.5::numeric, 'slot'::text)
+       AS typed_list_slots;
+        typed_list_slots         
+---------------------------------
+ {"[1, 2.5::numeric, \"slot\"]"}
+(1 row)
+
+SELECT age_array_agg_list_slots_summary(i, n, t) AS typed_list_slot_state
+FROM age_slots_parallel_typed;
+                                                                                                                                  typed_list_slot_state                                                                                                                                  
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ shape=list slots=3 rows=20000 typed=3 agtype=0 source-groups=3 reused-slots=0 payload-weight=3 final-weight=3 materialization-weight=6 serialized-bytes=896442 null-bitmap-bytes=7500 value-bytes=888896 estimated-wire-width=44 estimated-state-width-weight=6 types=int8,numeric,text
+(1 row)
+
+SELECT age_array_agg_list_slots_summary(i, i) AS repeated_source_slot_state
+FROM age_slots_parallel_typed;
+                                                                                                                           repeated_source_slot_state                                                                                                                            
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ shape=list slots=2 rows=20000 typed=2 agtype=0 source-groups=1 reused-slots=1 payload-weight=2 final-weight=2 materialization-weight=4 serialized-bytes=485038 null-bitmap-bytes=5000 value-bytes=480000 estimated-wire-width=24 estimated-state-width-weight=4 types=int8,int8
+(1 row)
+
+SELECT age_array_agg_map_slots_summary('i'::text, i, 'n'::text, n,
+                                       't'::text, 'slot'::text)
+       AS typed_map_slot_state
+FROM age_slots_parallel_typed;
+                                                                                                                                  typed_map_slot_state                                                                                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ shape=map slots=3 rows=20000 typed=3 agtype=0 source-groups=3 reused-slots=0 payload-weight=3 final-weight=3 materialization-weight=6 serialized-bytes=787563 null-bitmap-bytes=7500 value-bytes=780002 estimated-wire-width=44 estimated-state-width-weight=6 types=int8,numeric,text
+(1 row)
+
+ROLLBACK;
 SELECT create_graph('cypher_match');
 NOTICE:  graph "cypher_match" has been created
  create_graph 
@@ -75,25 +178,27 @@ EXPLAIN (VERBOSE, COSTS OFF)
 SELECT *
 FROM cypher('cypher_match',
             $$MATCH (n:v) RETURN n.i$$) AS (i agtype);
-                                               QUERY PLAN                                               
---------------------------------------------------------------------------------------------------------
+                                                    QUERY PLAN                                                    
+------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE Property Projection) on cypher_match.v n
    Output: (agtype_object_field_agtype(n.properties, '"i"'::agtype))
    Cached Property Slots: 1:{source=heap-properties, key=i, value=agtype, field=agtype, final-weight=2}
    Cached Property Slot Count: 1
-(4 rows)
+   Cached Property Summary: slots=1 heap-lookups=1 reused=0 final-weight=2 heap-final-weight=2 max-final-weight=2
+(5 rows)
 
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT *
 FROM cypher('cypher_match',
             $$MATCH (n:v) RETURN n.i::pg_bigint$$) AS (i bigint);
-                                               QUERY PLAN                                               
---------------------------------------------------------------------------------------------------------
+                                                    QUERY PLAN                                                    
+------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE Property Projection) on cypher_match.v n
    Output: (agtype_object_field_int8(n.properties, '"i"'::agtype))
    Cached Property Slots: 1:{source=heap-properties, key=i, value=bigint, field=bigint, final-weight=1}
    Cached Property Slot Count: 1
-(4 rows)
+   Cached Property Summary: slots=1 heap-lookups=1 reused=0 final-weight=1 heap-final-weight=1 max-final-weight=1
+(5 rows)
 
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT *
@@ -106,7 +211,8 @@ FROM cypher('cypher_match',
    Output: (agtype_object_field_int8(n.properties, '"i"'::agtype)), (agtype_object_field_float8(n.properties, '"i"'::agtype))
    Cached Property Slots: 1:{source=heap-properties, key=i, value=bigint, field=bigint, final-weight=1}; 2:{source=slot-1, key=i, value=double precision, field=double precision, final-weight=1}
    Cached Property Slot Count: 2
-(4 rows)
+   Cached Property Summary: slots=2 heap-lookups=1 reused=1 final-weight=2 heap-final-weight=1 max-final-weight=1
+(5 rows)
 
 SELECT *
 FROM cypher('cypher_match',
@@ -319,7 +425,8 @@ FROM cypher('cypher_match_numeric_path',
    Output: (agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype))
    Cached Property Slots: 1:{source=heap-properties, key=payload.a, value=numeric, field=numeric, final-weight=1}
    Cached Property Slot Count: 1
-(4 rows)
+   Cached Property Summary: slots=1 heap-lookups=1 reused=0 final-weight=1 heap-final-weight=1 max-final-weight=1
+(5 rows)
 
 SELECT *
 FROM cypher('cypher_match_numeric_path',
@@ -492,6 +599,114 @@ FROM cypher('cypher_match_numeric_path',
          Output: agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype), agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype)
 (4 rows)
 
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(l), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN [n.payload.a::pg_numeric, n.payload.b::pg_bigint]$$)
+     AS (l agtype);
+                                                                                                                                 QUERY PLAN                                                                                                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: array_length(age_array_agg_list_slots((agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)), (agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype))), 1)
+   ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
+         Output: agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype), agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype)
+(4 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT age_array_agg_list_slots_summary(a, b) AS typed_property_slot_state
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.a::pg_numeric, n.payload.b::pg_bigint$$)
+     AS (a numeric, b bigint);
+                                                                                                                          QUERY PLAN                                                                                                                           
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: age_array_agg_list_slots_summary(agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype), agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype))
+   ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
+         Output: n.id, n.properties
+(4 rows)
+
+SELECT age_array_agg_list_slots_summary(a, b) AS typed_property_slot_state
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.a::pg_numeric, n.payload.b::pg_bigint$$)
+     AS (a numeric, b bigint);
+                                                                                                                      typed_property_slot_state                                                                                                                      
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ shape=list slots=2 rows=2 typed=2 agtype=0 source-groups=2 reused-slots=0 payload-weight=2 final-weight=2 materialization-weight=4 serialized-bytes=87 null-bitmap-bytes=1 value-bytes=48 estimated-wire-width=24 estimated-state-width-weight=4 types=numeric,int8
+(1 row)
+
+SELECT age_array_agg_slots_descriptor(NULL::numeric, NULL::bigint)
+       AS typed_property_slot_descriptor,
+       age_array_agg_list_slots_summary(a, b) AS typed_property_slot_state
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.a::pg_numeric, n.payload.b::pg_bigint$$)
+     AS (a numeric, b bigint);
+                                                                                                                     typed_property_slot_descriptor                                                                                                                      |                                                                                                                      typed_property_slot_state                                                                                                                      
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ shape=descriptor slots=2 rows=0 typed=2 agtype=0 source-groups=2 reused-slots=0 payload-weight=2 final-weight=2 materialization-weight=4 serialized-bytes=0 null-bitmap-bytes=0 value-bytes=0 estimated-wire-width=24 estimated-state-width-weight=4 types=numeric,int8 | shape=list slots=2 rows=2 typed=2 agtype=0 source-groups=2 reused-slots=0 payload-weight=2 final-weight=2 materialization-weight=4 serialized-bytes=87 null-bitmap-bytes=1 value-bytes=48 estimated-wire-width=24 estimated-state-width-weight=4 types=numeric,int8
+(1 row)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(m), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN {a: n.payload.a::pg_numeric,
+                      b: n.payload.b::pg_bigint}$$)
+     AS (m agtype);
+                                                                                                                                           QUERY PLAN                                                                                                                                            
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: array_length(age_array_agg_map_slots('a'::text, (agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)), 'b'::text, (agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype))), 1)
+   ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
+         Output: 'a'::text, agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype), 'b'::text, agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype)
+(4 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(m), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN {a: n.payload.a::pg_numeric,
+                      b: n.payload.b::pg_bigint,
+                      c: n.payload.c::pg_text}$$)
+     AS (m agtype);
+                                                                                                                                                                                                         QUERY PLAN                                                                                                                                                                                                          
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: array_length(age_array_agg_map_slots('a'::text, (agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)), 'b'::text, (agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype)), 'c'::text, (agtype_object_field_text_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"c"'::agtype))), 1)
+   ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
+         Output: 'a'::text, agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype), 'b'::text, agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype), 'c'::text, agtype_object_field_text_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"c"'::agtype)
+(4 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(m), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN {a: n.payload.a, again: n.payload.a}$$)
+     AS (m agtype);
+                                                                                                                                              QUERY PLAN                                                                                                                                              
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: array_length(age_array_agg_map_slots('a'::text, (agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)), 'again'::text, (agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype))), 1)
+   ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
+         Output: 'a'::text, agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype), 'again'::text
+(4 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(l), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath) RETURN [n.payload.a, n.payload.a]$$)
+     AS (l agtype);
+                                                                                                                                 QUERY PLAN                                                                                                                                  
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: array_length(age_array_agg_list_slots((agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)), (agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype))), 1)
+   ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
+         Output: agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)
+(4 rows)
+
 DROP FUNCTION cypher_match_normalized_explain(text, text);
 SELECT * FROM cypher('cypher_match_numeric_path', $$
     MATCH (n:NumericPath)
@@ -557,6 +772,39 @@ FROM cypher('cypher_match_numeric_path',
        array_agg       
 -----------------------
  {"[1, 11]","[2, 12]"}
+(1 row)
+
+SELECT array_agg(l)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN [n.payload.a::pg_numeric, n.payload.b::pg_bigint]$$)
+     AS (l agtype);
+                array_agg                
+-----------------------------------------
+ {"[1::numeric, 11]","[2::numeric, 12]"}
+(1 row)
+
+SELECT array_agg(m)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN {a: n.payload.a::pg_numeric,
+                      b: n.payload.b::pg_bigint}$$)
+     AS (m agtype);
+                              array_agg                              
+---------------------------------------------------------------------
+ {"{\"a\": 1::numeric, \"b\": 11}","{\"a\": 2::numeric, \"b\": 12}"}
+(1 row)
+
+SELECT array_agg(m)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN {a: n.payload.a::pg_numeric,
+                      b: n.payload.b::pg_bigint,
+                      c: n.payload.c::pg_text}$$)
+     AS (m agtype);
+                                              array_agg                                              
+-----------------------------------------------------------------------------------------------------
+ {"{\"a\": 1::numeric, \"b\": 11, \"c\": \"101\"}","{\"a\": 2::numeric, \"b\": 12, \"c\": \"102\"}"}
 (1 row)
 
 EXPLAIN (VERBOSE, COSTS OFF)
@@ -1580,6 +1828,22 @@ FROM cypher('cypher_match',
    Index Cond: (agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype) = '1'::agtype)
 (3 rows)
 
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT age_array_agg_slots_descriptor(NULL::agtype)
+       AS index_backed_slot_descriptor,
+       array_length(array_agg(v), 1)
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE n.payload.a = 1 RETURN [n.payload.a]$$)
+     AS (v agtype);
+                                                                                                  QUERY PLAN                                                                                                   
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: age_array_agg_slots_descriptor(NULL::agtype), array_length(age_array_agg_list_slots((agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype))), 1)
+   ->  Index Scan using cypher_match_v_payload_a_direct_idx on cypher_match.v n
+         Output: agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)
+         Index Cond: (agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype) = '1'::agtype)
+(5 rows)
+
 SET enable_seqscan = on;
 DROP INDEX cypher_match.cypher_match_v_payload_a_direct_idx;
 CREATE INDEX cypher_match_v_payload_a_access_idx ON cypher_match.v
@@ -1630,45 +1894,34 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
               RETURN count(p)$$) AS (c agtype)
 $plan$);
-                                                                             plan                                                                             
---------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                   plan                                                                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
    Output: (count(_age_default_alias_0.id))::agtype
-   ->  Hash Join
+   ->  Nested Loop
          Output: _age_default_alias_0.id
-         Inner Unique: true
-         Hash Cond: (_age_default_alias_3.end_id = _age_default_alias_4.id)
-         ->  Hash Join
-               Output: _age_default_alias_0.id, _age_default_alias_3.end_id
-               Hash Cond: (_age_default_alias_1.end_id = _age_default_alias_2.id)
-               Join Filter: _ag_enforce_edge_uniqueness2(_age_default_alias_1.id, _age_default_alias_3.id)
-               ->  Hash Join
-                     Output: _age_default_alias_0.id, _age_default_alias_1.end_id, _age_default_alias_1.id
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_1.start_id = _age_default_alias_0.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_1
-                           Output: _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties
-                     ->  Hash
-                           Output: _age_default_alias_0.id
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_0
-                                 Output: _age_default_alias_0.id
-               ->  Hash
-                     Output: _age_default_alias_2.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.id
-                     ->  Hash Join
-                           Output: _age_default_alias_2.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.id
-                           Inner Unique: true
-                           Hash Cond: (_age_default_alias_3.start_id = _age_default_alias_2.id)
-                           ->  Seq Scan on cypher_match.e1 _age_default_alias_3
-                                 Output: _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-                           ->  Hash
-                                 Output: _age_default_alias_2.id
-                                 ->  Seq Scan on cypher_match.v1 _age_default_alias_2
-                                       Output: _age_default_alias_2.id
-         ->  Hash
-               Output: _age_default_alias_4.id
-               ->  Seq Scan on cypher_match.v1 _age_default_alias_4
-                     Output: _age_default_alias_4.id
-(36 rows)
+         ->  Seq Scan on cypher_match.v1 _age_default_alias_0
+               Output: _age_default_alias_0.id, _age_default_alias_0.properties
+         ->  Custom Scan (AGE VLE Stream)
+               VLE Shape: cypher
+               VLE Arguments: 9
+               VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+               VLE Graph: cypher_match
+               VLE Edge: label=e1, properties=0
+               VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
+               VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
+               VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+               VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
+               VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
+               VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
+               VLE Source Policy: out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
+               VLE Endpoints: start=runtime-id, end=const-id
+               VLE Range: 2..2
+               VLE Direction: right
+               VLE Output: path(requirement=path, grammar=cached, terminal-label=4/all-depth)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+               ->  Values Scan on _age_default_alias_1
+(25 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
 SELECT *
@@ -1750,58 +2003,34 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
               RETURN p$$) AS (p agtype)
 $plan$);
-                                                                                                                                                                                                                                                                                                                              plan                                                                                                                                                                                                                                                                                                                              
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Hash Join
-   Output: _agtype_build_path_raw('<graph_oid>'::oid, _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties, _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties, _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties, _age_default_alias_6.id, _age_default_alias_6.properties)
-   Hash Cond: (_age_default_alias_3.end_id = _age_default_alias_4.id)
-   Join Filter: _ag_enforce_edge_uniqueness3(_age_default_alias_1.id, _age_default_alias_3.id, _age_default_alias_5.id)
-   ->  Hash Join
-         Output: _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties, _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-         Hash Cond: (_age_default_alias_1.end_id = _age_default_alias_2.id)
-         ->  Hash Join
-               Output: _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties
-               Inner Unique: true
-               Hash Cond: (_age_default_alias_1.start_id = _age_default_alias_0.id)
-               ->  Seq Scan on cypher_match.e1 _age_default_alias_1
-                     Output: _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties
-               ->  Hash
-                     Output: _age_default_alias_0.id, _age_default_alias_0.properties
-                     ->  Seq Scan on cypher_match.v1 _age_default_alias_0
-                           Output: _age_default_alias_0.id, _age_default_alias_0.properties
-         ->  Hash
-               Output: _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-               ->  Hash Join
-                     Output: _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_3.start_id = _age_default_alias_2.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_3
-                           Output: _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-                     ->  Hash
-                           Output: _age_default_alias_2.id, _age_default_alias_2.properties
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_2
-                                 Output: _age_default_alias_2.id, _age_default_alias_2.properties
-   ->  Hash
-         Output: _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties, _age_default_alias_6.id, _age_default_alias_6.properties
-         ->  Hash Join
-               Output: _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties, _age_default_alias_6.id, _age_default_alias_6.properties
-               Inner Unique: true
-               Hash Cond: (_age_default_alias_5.end_id = _age_default_alias_6.id)
-               ->  Hash Join
-                     Output: _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_5.start_id = _age_default_alias_4.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_5
-                           Output: _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-                     ->  Hash
-                           Output: _age_default_alias_4.id, _age_default_alias_4.properties
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_4
-                                 Output: _age_default_alias_4.id, _age_default_alias_4.properties
-               ->  Hash
-                     Output: _age_default_alias_6.id, _age_default_alias_6.properties
-                     ->  Seq Scan on cypher_match.v1 _age_default_alias_6
-                           Output: _age_default_alias_6.id, _age_default_alias_6.properties
-(49 rows)
+                                                                                                                plan                                                                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: age_materialize_vle_path(_age_default_alias_1.edges)
+   ->  Seq Scan on cypher_match.v1 _age_default_alias_0
+         Output: _age_default_alias_0.id, _age_default_alias_0.properties
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_1.edges
+         VLE Shape: cypher
+         VLE Arguments: 9
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+         VLE Graph: cypher_match
+         VLE Edge: label=e1, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
+         VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+         VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
+         VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
+         VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
+         VLE Source Policy: out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/3,in:0/3) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 3..3
+         VLE Direction: right
+         VLE Output: path(requirement=path, grammar=cached, terminal-label=4/all-depth)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+         ->  Values Scan on _age_default_alias_1
+               Output: _age_default_alias_1.edges
+(25 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
 SELECT *
@@ -1809,73 +2038,34 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
               RETURN p$$) AS (p agtype)
 $plan$);
-                                                                                                                                                                                                                                                                                                                                                                                                                      plan                                                                                                                                                                                                                                                                                                                                                                                                                      
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Hash Join
-   Output: _agtype_build_path_raw('<graph_oid>'::oid, _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties, _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties, _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties, _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties, _age_default_alias_8.id, _age_default_alias_8.properties)
-   Hash Cond: (_age_default_alias_3.end_id = _age_default_alias_4.id)
-   Join Filter: _ag_enforce_edge_uniqueness4(_age_default_alias_1.id, _age_default_alias_3.id, _age_default_alias_5.id, _age_default_alias_7.id)
-   ->  Hash Join
-         Output: _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties, _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-         Hash Cond: (_age_default_alias_1.end_id = _age_default_alias_2.id)
-         ->  Hash Join
-               Output: _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties
-               Inner Unique: true
-               Hash Cond: (_age_default_alias_1.start_id = _age_default_alias_0.id)
-               ->  Seq Scan on cypher_match.e1 _age_default_alias_1
-                     Output: _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties
-               ->  Hash
-                     Output: _age_default_alias_0.id, _age_default_alias_0.properties
-                     ->  Seq Scan on cypher_match.v1 _age_default_alias_0
-                           Output: _age_default_alias_0.id, _age_default_alias_0.properties
-         ->  Hash
-               Output: _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-               ->  Hash Join
-                     Output: _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_3.start_id = _age_default_alias_2.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_3
-                           Output: _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-                     ->  Hash
-                           Output: _age_default_alias_2.id, _age_default_alias_2.properties
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_2
-                                 Output: _age_default_alias_2.id, _age_default_alias_2.properties
-   ->  Hash
-         Output: _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties, _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties, _age_default_alias_8.id, _age_default_alias_8.properties
-         ->  Hash Join
-               Output: _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties, _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties, _age_default_alias_8.id, _age_default_alias_8.properties
-               Hash Cond: (_age_default_alias_5.end_id = _age_default_alias_6.id)
-               ->  Hash Join
-                     Output: _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_5.start_id = _age_default_alias_4.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_5
-                           Output: _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-                     ->  Hash
-                           Output: _age_default_alias_4.id, _age_default_alias_4.properties
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_4
-                                 Output: _age_default_alias_4.id, _age_default_alias_4.properties
-               ->  Hash
-                     Output: _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties, _age_default_alias_8.id, _age_default_alias_8.properties
-                     ->  Hash Join
-                           Output: _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties, _age_default_alias_8.id, _age_default_alias_8.properties
-                           Inner Unique: true
-                           Hash Cond: (_age_default_alias_7.end_id = _age_default_alias_8.id)
-                           ->  Hash Join
-                                 Output: _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties
-                                 Inner Unique: true
-                                 Hash Cond: (_age_default_alias_7.start_id = _age_default_alias_6.id)
-                                 ->  Seq Scan on cypher_match.e1 _age_default_alias_7
-                                       Output: _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties
-                                 ->  Hash
-                                       Output: _age_default_alias_6.id, _age_default_alias_6.properties
-                                       ->  Seq Scan on cypher_match.v1 _age_default_alias_6
-                                             Output: _age_default_alias_6.id, _age_default_alias_6.properties
-                           ->  Hash
-                                 Output: _age_default_alias_8.id, _age_default_alias_8.properties
-                                 ->  Seq Scan on cypher_match.v1 _age_default_alias_8
-                                       Output: _age_default_alias_8.id, _age_default_alias_8.properties
-(64 rows)
+                                                                                                                plan                                                                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: age_materialize_vle_path(_age_default_alias_1.edges)
+   ->  Seq Scan on cypher_match.v1 _age_default_alias_0
+         Output: _age_default_alias_0.id, _age_default_alias_0.properties
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_1.edges
+         VLE Shape: cypher
+         VLE Arguments: 9
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+         VLE Graph: cypher_match
+         VLE Edge: label=e1, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
+         VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+         VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
+         VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
+         VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
+         VLE Source Policy: out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/4,in:0/4) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 4..4
+         VLE Direction: right
+         VLE Output: path(requirement=path, grammar=cached, terminal-label=4/all-depth)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+         ->  Values Scan on _age_default_alias_1
+               Output: _age_default_alias_1.edges
+(25 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
 SELECT *
@@ -1884,88 +2074,34 @@ FROM cypher('cypher_match',
               RETURN size(nodes(p)), size(relationships(p))$$)
      AS (nodes agtype, rels agtype)
 $plan$);
-                                                                                           plan                                                                                           
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Hash Join
-   Output: CASE WHEN (_age_default_alias_1.id IS NOT NULL) THEN '6'::agtype ELSE NULL::agtype END, CASE WHEN (_age_default_alias_1.id IS NOT NULL) THEN '5'::agtype ELSE NULL::agtype END
-   Hash Cond: (_age_default_alias_5.end_id = _age_default_alias_6.id)
-   Join Filter: _ag_enforce_edge_uniqueness(_age_default_alias_1.id, _age_default_alias_3.id, _age_default_alias_5.id, _age_default_alias_7.id, _age_default_alias_9.id)
-   ->  Hash Join
-         Output: _age_default_alias_1.id, _age_default_alias_3.id, _age_default_alias_5.end_id, _age_default_alias_5.id
-         Hash Cond: (_age_default_alias_3.end_id = _age_default_alias_4.id)
-         ->  Hash Join
-               Output: _age_default_alias_1.id, _age_default_alias_3.end_id, _age_default_alias_3.id
-               Hash Cond: (_age_default_alias_1.end_id = _age_default_alias_2.id)
-               ->  Hash Join
-                     Output: _age_default_alias_1.id, _age_default_alias_1.end_id
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_1.start_id = _age_default_alias_0.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_1
-                           Output: _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties
-                     ->  Hash
-                           Output: _age_default_alias_0.id
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_0
-                                 Output: _age_default_alias_0.id
-               ->  Hash
-                     Output: _age_default_alias_2.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.id
-                     ->  Hash Join
-                           Output: _age_default_alias_2.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.id
-                           Inner Unique: true
-                           Hash Cond: (_age_default_alias_3.start_id = _age_default_alias_2.id)
-                           ->  Seq Scan on cypher_match.e1 _age_default_alias_3
-                                 Output: _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-                           ->  Hash
-                                 Output: _age_default_alias_2.id
-                                 ->  Seq Scan on cypher_match.v1 _age_default_alias_2
-                                       Output: _age_default_alias_2.id
-         ->  Hash
-               Output: _age_default_alias_4.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.id
-               ->  Hash Join
-                     Output: _age_default_alias_4.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.id
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_5.start_id = _age_default_alias_4.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_5
-                           Output: _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-                     ->  Hash
-                           Output: _age_default_alias_4.id
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_4
-                                 Output: _age_default_alias_4.id
-   ->  Hash
-         Output: _age_default_alias_6.id, _age_default_alias_7.start_id, _age_default_alias_7.id, _age_default_alias_9.id
-         ->  Hash Join
-               Output: _age_default_alias_6.id, _age_default_alias_7.start_id, _age_default_alias_7.id, _age_default_alias_9.id
-               Hash Cond: (_age_default_alias_7.end_id = _age_default_alias_8.id)
-               ->  Hash Join
-                     Output: _age_default_alias_6.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.id
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_7.start_id = _age_default_alias_6.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_7
-                           Output: _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties
-                     ->  Hash
-                           Output: _age_default_alias_6.id
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_6
-                                 Output: _age_default_alias_6.id
-               ->  Hash
-                     Output: _age_default_alias_8.id, _age_default_alias_9.start_id, _age_default_alias_9.id
-                     ->  Hash Join
-                           Output: _age_default_alias_8.id, _age_default_alias_9.start_id, _age_default_alias_9.id
-                           Inner Unique: true
-                           Hash Cond: (_age_default_alias_9.end_id = _age_default_alias_10.id)
-                           ->  Hash Join
-                                 Output: _age_default_alias_8.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.id
-                                 Inner Unique: true
-                                 Hash Cond: (_age_default_alias_9.start_id = _age_default_alias_8.id)
-                                 ->  Seq Scan on cypher_match.e1 _age_default_alias_9
-                                       Output: _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties
-                                 ->  Hash
-                                       Output: _age_default_alias_8.id
-                                       ->  Seq Scan on cypher_match.v1 _age_default_alias_8
-                                             Output: _age_default_alias_8.id
-                           ->  Hash
-                                 Output: _age_default_alias_10.id
-                                 ->  Seq Scan on cypher_match.v1 _age_default_alias_10
-                                       Output: _age_default_alias_10.id
-(79 rows)
+                                                                                                                plan                                                                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: age_vle_path_node_count(_age_default_alias_1.edges), age_vle_path_length(_age_default_alias_1.edges)
+   ->  Seq Scan on cypher_match.v1 _age_default_alias_0
+         Output: _age_default_alias_0.id, _age_default_alias_0.properties
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_1.edges
+         VLE Shape: cypher
+         VLE Arguments: 9
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+         VLE Graph: cypher_match
+         VLE Edge: label=e1, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
+         VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+         VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
+         VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
+         VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
+         VLE Source Policy: out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/5,in:0/5) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 5..5
+         VLE Direction: right
+         VLE Output: path(requirement=path, grammar=cached, terminal-label=4/all-depth)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+         ->  Values Scan on _age_default_alias_1
+               Output: _age_default_alias_1.edges
+(25 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
 SELECT *
@@ -1974,88 +2110,34 @@ FROM cypher('cypher_match',
               RETURN nodes(p), relationships(p)$$)
      AS (nodes agtype, rels agtype)
 $plan$);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       plan                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Hash Join
-   Output: CASE WHEN (_age_default_alias_1.id IS NOT NULL) THEN agtype_build_list(CASE WHEN (_age_default_alias_0.id IS NOT NULL) THEN _agtype_build_vertex_label('<graph_oid>'::oid, _age_default_alias_0.id, _age_default_alias_0.properties) ELSE NULL::agtype END, CASE WHEN (_age_default_alias_2.id IS NOT NULL) THEN _agtype_build_vertex_label('<graph_oid>'::oid, _age_default_alias_2.id, _age_default_alias_2.properties) ELSE NULL::agtype END, CASE WHEN (_age_default_alias_4.id IS NOT NULL) THEN _agtype_build_vertex_label('<graph_oid>'::oid, _age_default_alias_4.id, _age_default_alias_4.properties) ELSE NULL::agtype END, CASE WHEN (_age_default_alias_6.id IS NOT NULL) THEN _agtype_build_vertex_label('<graph_oid>'::oid, _age_default_alias_6.id, _age_default_alias_6.properties) ELSE NULL::agtype END, CASE WHEN (_age_default_alias_8.id IS NOT NULL) THEN _agtype_build_vertex_label('<graph_oid>'::oid, _age_default_alias_8.id, _age_default_alias_8.properties) ELSE NULL::agtype END, CASE WHEN (_age_default_alias_10.id IS NOT NULL) THEN _agtype_build_vertex_label('<graph_oid>'::oid, _age_default_alias_10.id, _age_default_alias_10.properties) ELSE NULL::agtype END) ELSE NULL::agtype END, CASE WHEN (_age_default_alias_1.id IS NOT NULL) THEN agtype_build_list(CASE WHEN (_age_default_alias_1.id IS NOT NULL) THEN _agtype_build_edge_label('<graph_oid>'::oid, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties) ELSE NULL::agtype END, CASE WHEN (_age_default_alias_3.id IS NOT NULL) THEN _agtype_build_edge_label('<graph_oid>'::oid, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties) ELSE NULL::agtype END, CASE WHEN (_age_default_alias_5.id IS NOT NULL) THEN _agtype_build_edge_label('<graph_oid>'::oid, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties) ELSE NULL::agtype END, CASE WHEN (_age_default_alias_7.id IS NOT NULL) THEN _agtype_build_edge_label('<graph_oid>'::oid, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties) ELSE NULL::agtype END, CASE WHEN (_age_default_alias_9.id IS NOT NULL) THEN _agtype_build_edge_label('<graph_oid>'::oid, _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties) ELSE NULL::agtype END) ELSE NULL::agtype END
-   Hash Cond: (_age_default_alias_5.end_id = _age_default_alias_6.id)
-   Join Filter: _ag_enforce_edge_uniqueness(_age_default_alias_1.id, _age_default_alias_3.id, _age_default_alias_5.id, _age_default_alias_7.id, _age_default_alias_9.id)
-   ->  Hash Join
-         Output: _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties, _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties, _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-         Hash Cond: (_age_default_alias_3.end_id = _age_default_alias_4.id)
-         ->  Hash Join
-               Output: _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties, _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-               Hash Cond: (_age_default_alias_1.end_id = _age_default_alias_2.id)
-               ->  Hash Join
-                     Output: _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_1.start_id = _age_default_alias_0.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_1
-                           Output: _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties
-                     ->  Hash
-                           Output: _age_default_alias_0.id, _age_default_alias_0.properties
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_0
-                                 Output: _age_default_alias_0.id, _age_default_alias_0.properties
-               ->  Hash
-                     Output: _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-                     ->  Hash Join
-                           Output: _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-                           Inner Unique: true
-                           Hash Cond: (_age_default_alias_3.start_id = _age_default_alias_2.id)
-                           ->  Seq Scan on cypher_match.e1 _age_default_alias_3
-                                 Output: _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-                           ->  Hash
-                                 Output: _age_default_alias_2.id, _age_default_alias_2.properties
-                                 ->  Seq Scan on cypher_match.v1 _age_default_alias_2
-                                       Output: _age_default_alias_2.id, _age_default_alias_2.properties
-         ->  Hash
-               Output: _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-               ->  Hash Join
-                     Output: _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_5.start_id = _age_default_alias_4.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_5
-                           Output: _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-                     ->  Hash
-                           Output: _age_default_alias_4.id, _age_default_alias_4.properties
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_4
-                                 Output: _age_default_alias_4.id, _age_default_alias_4.properties
-   ->  Hash
-         Output: _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties, _age_default_alias_8.id, _age_default_alias_8.properties, _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties, _age_default_alias_10.id, _age_default_alias_10.properties
-         ->  Hash Join
-               Output: _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties, _age_default_alias_8.id, _age_default_alias_8.properties, _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties, _age_default_alias_10.id, _age_default_alias_10.properties
-               Hash Cond: (_age_default_alias_7.end_id = _age_default_alias_8.id)
-               ->  Hash Join
-                     Output: _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_7.start_id = _age_default_alias_6.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_7
-                           Output: _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties
-                     ->  Hash
-                           Output: _age_default_alias_6.id, _age_default_alias_6.properties
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_6
-                                 Output: _age_default_alias_6.id, _age_default_alias_6.properties
-               ->  Hash
-                     Output: _age_default_alias_8.id, _age_default_alias_8.properties, _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties, _age_default_alias_10.id, _age_default_alias_10.properties
-                     ->  Hash Join
-                           Output: _age_default_alias_8.id, _age_default_alias_8.properties, _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties, _age_default_alias_10.id, _age_default_alias_10.properties
-                           Inner Unique: true
-                           Hash Cond: (_age_default_alias_9.end_id = _age_default_alias_10.id)
-                           ->  Hash Join
-                                 Output: _age_default_alias_8.id, _age_default_alias_8.properties, _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties
-                                 Inner Unique: true
-                                 Hash Cond: (_age_default_alias_9.start_id = _age_default_alias_8.id)
-                                 ->  Seq Scan on cypher_match.e1 _age_default_alias_9
-                                       Output: _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties
-                                 ->  Hash
-                                       Output: _age_default_alias_8.id, _age_default_alias_8.properties
-                                       ->  Seq Scan on cypher_match.v1 _age_default_alias_8
-                                             Output: _age_default_alias_8.id, _age_default_alias_8.properties
-                           ->  Hash
-                                 Output: _age_default_alias_10.id, _age_default_alias_10.properties
-                                 ->  Seq Scan on cypher_match.v1 _age_default_alias_10
-                                       Output: _age_default_alias_10.id, _age_default_alias_10.properties
-(79 rows)
+                                                                                                                plan                                                                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: age_materialize_vle_nodes(_age_default_alias_1.edges), age_materialize_vle_edges(_age_default_alias_1.edges)
+   ->  Seq Scan on cypher_match.v1 _age_default_alias_0
+         Output: _age_default_alias_0.id, _age_default_alias_0.properties
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_1.edges
+         VLE Shape: cypher
+         VLE Arguments: 9
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+         VLE Graph: cypher_match
+         VLE Edge: label=e1, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
+         VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+         VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
+         VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
+         VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
+         VLE Source Policy: out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/5,in:0/5) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 5..5
+         VLE Direction: right
+         VLE Output: path(requirement=path, grammar=cached, terminal-label=4/all-depth)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+         ->  Values Scan on _age_default_alias_1
+               Output: _age_default_alias_1.edges
+(25 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
 SELECT *
@@ -2063,88 +2145,34 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
               RETURN p$$) AS (p agtype)
 $plan$);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               plan                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Hash Join
-   Output: _agtype_build_path_raw('<graph_oid>'::oid, _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties, _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties, _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties, _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties, _age_default_alias_8.id, _age_default_alias_8.properties, _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties, _age_default_alias_10.id, _age_default_alias_10.properties)
-   Hash Cond: (_age_default_alias_5.end_id = _age_default_alias_6.id)
-   Join Filter: _ag_enforce_edge_uniqueness(_age_default_alias_1.id, _age_default_alias_3.id, _age_default_alias_5.id, _age_default_alias_7.id, _age_default_alias_9.id)
-   ->  Hash Join
-         Output: _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties, _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties, _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-         Hash Cond: (_age_default_alias_3.end_id = _age_default_alias_4.id)
-         ->  Hash Join
-               Output: _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties, _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-               Hash Cond: (_age_default_alias_1.end_id = _age_default_alias_2.id)
-               ->  Hash Join
-                     Output: _age_default_alias_0.id, _age_default_alias_0.properties, _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_1.start_id = _age_default_alias_0.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_1
-                           Output: _age_default_alias_1.id, _age_default_alias_1.start_id, _age_default_alias_1.end_id, _age_default_alias_1.properties
-                     ->  Hash
-                           Output: _age_default_alias_0.id, _age_default_alias_0.properties
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_0
-                                 Output: _age_default_alias_0.id, _age_default_alias_0.properties
-               ->  Hash
-                     Output: _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-                     ->  Hash Join
-                           Output: _age_default_alias_2.id, _age_default_alias_2.properties, _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-                           Inner Unique: true
-                           Hash Cond: (_age_default_alias_3.start_id = _age_default_alias_2.id)
-                           ->  Seq Scan on cypher_match.e1 _age_default_alias_3
-                                 Output: _age_default_alias_3.id, _age_default_alias_3.start_id, _age_default_alias_3.end_id, _age_default_alias_3.properties
-                           ->  Hash
-                                 Output: _age_default_alias_2.id, _age_default_alias_2.properties
-                                 ->  Seq Scan on cypher_match.v1 _age_default_alias_2
-                                       Output: _age_default_alias_2.id, _age_default_alias_2.properties
-         ->  Hash
-               Output: _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-               ->  Hash Join
-                     Output: _age_default_alias_4.id, _age_default_alias_4.properties, _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_5.start_id = _age_default_alias_4.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_5
-                           Output: _age_default_alias_5.id, _age_default_alias_5.start_id, _age_default_alias_5.end_id, _age_default_alias_5.properties
-                     ->  Hash
-                           Output: _age_default_alias_4.id, _age_default_alias_4.properties
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_4
-                                 Output: _age_default_alias_4.id, _age_default_alias_4.properties
-   ->  Hash
-         Output: _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties, _age_default_alias_8.id, _age_default_alias_8.properties, _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties, _age_default_alias_10.id, _age_default_alias_10.properties
-         ->  Hash Join
-               Output: _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties, _age_default_alias_8.id, _age_default_alias_8.properties, _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties, _age_default_alias_10.id, _age_default_alias_10.properties
-               Hash Cond: (_age_default_alias_7.end_id = _age_default_alias_8.id)
-               ->  Hash Join
-                     Output: _age_default_alias_6.id, _age_default_alias_6.properties, _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties
-                     Inner Unique: true
-                     Hash Cond: (_age_default_alias_7.start_id = _age_default_alias_6.id)
-                     ->  Seq Scan on cypher_match.e1 _age_default_alias_7
-                           Output: _age_default_alias_7.id, _age_default_alias_7.start_id, _age_default_alias_7.end_id, _age_default_alias_7.properties
-                     ->  Hash
-                           Output: _age_default_alias_6.id, _age_default_alias_6.properties
-                           ->  Seq Scan on cypher_match.v1 _age_default_alias_6
-                                 Output: _age_default_alias_6.id, _age_default_alias_6.properties
-               ->  Hash
-                     Output: _age_default_alias_8.id, _age_default_alias_8.properties, _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties, _age_default_alias_10.id, _age_default_alias_10.properties
-                     ->  Hash Join
-                           Output: _age_default_alias_8.id, _age_default_alias_8.properties, _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties, _age_default_alias_10.id, _age_default_alias_10.properties
-                           Inner Unique: true
-                           Hash Cond: (_age_default_alias_9.end_id = _age_default_alias_10.id)
-                           ->  Hash Join
-                                 Output: _age_default_alias_8.id, _age_default_alias_8.properties, _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties
-                                 Inner Unique: true
-                                 Hash Cond: (_age_default_alias_9.start_id = _age_default_alias_8.id)
-                                 ->  Seq Scan on cypher_match.e1 _age_default_alias_9
-                                       Output: _age_default_alias_9.id, _age_default_alias_9.start_id, _age_default_alias_9.end_id, _age_default_alias_9.properties
-                                 ->  Hash
-                                       Output: _age_default_alias_8.id, _age_default_alias_8.properties
-                                       ->  Seq Scan on cypher_match.v1 _age_default_alias_8
-                                             Output: _age_default_alias_8.id, _age_default_alias_8.properties
-                           ->  Hash
-                                 Output: _age_default_alias_10.id, _age_default_alias_10.properties
-                                 ->  Seq Scan on cypher_match.v1 _age_default_alias_10
-                                       Output: _age_default_alias_10.id, _age_default_alias_10.properties
-(79 rows)
+                                                                                                                plan                                                                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: age_materialize_vle_path(_age_default_alias_1.edges)
+   ->  Seq Scan on cypher_match.v1 _age_default_alias_0
+         Output: _age_default_alias_0.id, _age_default_alias_0.properties
+   ->  Custom Scan (AGE VLE Stream)
+         Output: _age_default_alias_1.edges
+         VLE Shape: cypher
+         VLE Arguments: 9
+         VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+         VLE Graph: cypher_match
+         VLE Edge: label=e1, properties=0
+         VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
+         VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+         VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
+         VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
+         VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
+         VLE Source Policy: out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/5,in:0/5) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
+         VLE Endpoints: start=runtime-id, end=const-id
+         VLE Range: 5..5
+         VLE Direction: right
+         VLE Output: path(requirement=path, grammar=cached, terminal-label=4/all-depth)
+         VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+         ->  Values Scan on _age_default_alias_1
+               Output: _age_default_alias_1.edges
+(25 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
 SELECT *
@@ -2152,8 +2180,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
               RETURN relationships(p)$$) AS (r agtype)
 $plan$);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                      plan                                                                                                                                                                                                                                                                                                                                                                                                                                                       
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                   plan                                                                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_edges(_age_default_alias_0.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_vle_function_end_var_2
@@ -2165,17 +2193,25 @@ $plan$);
          ->  Custom Scan (AGE VLE Stream)
                Output: _age_default_alias_0.edges
                VLE Shape: cypher
-               VLE Arguments: 8
-               VLE Argument Slots: graph=const, start=dynamic, end=dynamic, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+               VLE Arguments: 9
+               VLE Argument Slots: graph=const, start=dynamic, end=dynamic, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
                VLE Graph: cypher_match
                VLE Edge: label=e1, properties=0
-               VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
+               VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
+               VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
+               VLE Join Order: component=vle connector=vle-expand-into bound=out property=expand-into-verification rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+               VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
+               VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
+               VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
+               VLE Source Policy: out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
                VLE Endpoints: start=runtime-id, end=runtime-id
                VLE Range: 1..2
                VLE Direction: right
-               VLE Output: path(requirement=path, grammar=cached)
+               VLE Output: path(requirement=path, grammar=cached, terminal-label=4/endpoint)
                VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
-(21 rows)
+               ->  Values Scan on _age_default_alias_0
+                     Output: _age_default_alias_0.edges
+(29 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
 SELECT *
@@ -2185,8 +2221,8 @@ FROM cypher('cypher_match',
               ORDER BY last(relationships(p)).payload.a$$)
      AS (payload agtype, count agtype)
 $plan$);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                               plan                                                                                                                                                                                                                                                                                                                                                                                                                                                                
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                         plan                                                                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Result
    Output: (agtype_object_field_agtype(agtype_object_field_agtype(age_vle_edge_properties_at(_age_default_alias_0.edges, '-1'::agtype), '"payload"'::agtype), '"a"'::agtype)), ((count(*)))::agtype
    ->  Sort
@@ -2195,31 +2231,31 @@ $plan$);
          ->  HashAggregate
                Output: (agtype_object_field_agtype(agtype_object_field_agtype(age_vle_edge_properties_at(_age_default_alias_0.edges, '-1'::agtype), '"payload"'::agtype), '"a"'::agtype)), count(*)
                Group Key: agtype_object_field_agtype(agtype_object_field_agtype(age_vle_edge_properties_at(_age_default_alias_0.edges, '-1'::agtype), '"payload"'::agtype), '"a"'::agtype)
-               ->  Hash Join
+               ->  Nested Loop
                      Output: agtype_object_field_agtype(agtype_object_field_agtype(age_vle_edge_properties_at(_age_default_alias_0.edges, '-1'::agtype), '"payload"'::agtype), '"a"'::agtype)
-                     Inner Unique: true
-                     Hash Cond: (age_vle_terminal_id(_age_default_alias_0.edges) = b.id)
-                     ->  Nested Loop
+                     ->  Seq Scan on cypher_match.v1 a
+                           Output: a.id, a.properties
+                     ->  Custom Scan (AGE VLE Stream)
                            Output: _age_default_alias_0.edges
-                           ->  Seq Scan on cypher_match.v1 a
-                                 Output: a.id, a.properties
-                           ->  Custom Scan (AGE VLE Stream)
+                           VLE Shape: cypher
+                           VLE Arguments: 9
+                           VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+                           VLE Graph: cypher_match
+                           VLE Edge: label=e1, properties=0
+                           VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
+                           VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
+                           VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+                           VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
+                           VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
+                           VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
+                           VLE Source Policy: out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
+                           VLE Endpoints: start=runtime-id, end=const-id
+                           VLE Range: 1..2
+                           VLE Direction: right
+                           VLE Output: path(requirement=path, grammar=cached, terminal-label=4/endpoint)
+                           VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+                           ->  Values Scan on _age_default_alias_0
                                  Output: _age_default_alias_0.edges
-                                 VLE Shape: cypher
-                                 VLE Arguments: 8
-                                 VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
-                                 VLE Graph: cypher_match
-                                 VLE Edge: label=e1, properties=0
-                                 VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
-                                 VLE Endpoints: start=runtime-id, end=const-id
-                                 VLE Range: 1..2
-                                 VLE Direction: right
-                                 VLE Output: path(requirement=path, grammar=cached)
-                                 VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
-                     ->  Hash
-                           Output: b.id
-                           ->  Seq Scan on cypher_match.v1 b
-                                 Output: b.id
 (33 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
@@ -2230,8 +2266,8 @@ FROM cypher('cypher_match',
               ORDER BY last(nodes(p)).payload.a$$)
      AS (payload agtype, count agtype)
 $plan$);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                               plan                                                                                                                                                                                                                                                                                                                                                                                                                                                                
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                         plan                                                                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Result
    Output: (agtype_object_field_agtype(agtype_object_field_agtype(age_vle_node_properties_at(_age_default_alias_0.edges, '-1'::agtype), '"payload"'::agtype), '"a"'::agtype)), ((count(*)))::agtype
    ->  Sort
@@ -2240,31 +2276,31 @@ $plan$);
          ->  HashAggregate
                Output: (agtype_object_field_agtype(agtype_object_field_agtype(age_vle_node_properties_at(_age_default_alias_0.edges, '-1'::agtype), '"payload"'::agtype), '"a"'::agtype)), count(*)
                Group Key: agtype_object_field_agtype(agtype_object_field_agtype(age_vle_node_properties_at(_age_default_alias_0.edges, '-1'::agtype), '"payload"'::agtype), '"a"'::agtype)
-               ->  Hash Join
+               ->  Nested Loop
                      Output: agtype_object_field_agtype(agtype_object_field_agtype(age_vle_node_properties_at(_age_default_alias_0.edges, '-1'::agtype), '"payload"'::agtype), '"a"'::agtype)
-                     Inner Unique: true
-                     Hash Cond: (age_vle_terminal_id(_age_default_alias_0.edges) = b.id)
-                     ->  Nested Loop
+                     ->  Seq Scan on cypher_match.v1 a
+                           Output: a.id, a.properties
+                     ->  Custom Scan (AGE VLE Stream)
                            Output: _age_default_alias_0.edges
-                           ->  Seq Scan on cypher_match.v1 a
-                                 Output: a.id, a.properties
-                           ->  Custom Scan (AGE VLE Stream)
+                           VLE Shape: cypher
+                           VLE Arguments: 9
+                           VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
+                           VLE Graph: cypher_match
+                           VLE Edge: label=e1, properties=0
+                           VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
+                           VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
+                           VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+                           VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
+                           VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
+                           VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
+                           VLE Source Policy: out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
+                           VLE Endpoints: start=runtime-id, end=const-id
+                           VLE Range: 1..2
+                           VLE Direction: right
+                           VLE Output: path(requirement=path, grammar=cached, terminal-label=4/endpoint)
+                           VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
+                           ->  Values Scan on _age_default_alias_0
                                  Output: _age_default_alias_0.edges
-                                 VLE Shape: cypher
-                                 VLE Arguments: 8
-                                 VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
-                                 VLE Graph: cypher_match
-                                 VLE Edge: label=e1, properties=0
-                                 VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
-                                 VLE Endpoints: start=runtime-id, end=const-id
-                                 VLE Range: 1..2
-                                 VLE Direction: right
-                                 VLE Output: path(requirement=path, grammar=cached)
-                                 VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
-                     ->  Hash
-                           Output: b.id
-                           ->  Seq Scan on cypher_match.v1 b
-                                 Output: b.id
 (33 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
@@ -2273,8 +2309,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
               RETURN p$$) AS (p agtype)
 $plan$);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                      plan                                                                                                                                                                                                                                                                                                                                                                                                                                                       
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                   plan                                                                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_vle_function_end_var_7
@@ -2286,17 +2322,25 @@ $plan$);
          ->  Custom Scan (AGE VLE Stream)
                Output: _age_default_alias_0.edges
                VLE Shape: cypher
-               VLE Arguments: 8
-               VLE Argument Slots: graph=const, start=dynamic, end=dynamic, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+               VLE Arguments: 9
+               VLE Argument Slots: graph=const, start=dynamic, end=dynamic, edge=const, lower=const, upper=const, direction=const, grammar-node=const, terminal-property=const
                VLE Graph: cypher_match
                VLE Edge: label=e1, properties=0
-               VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local, cost=reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown profile=consumer:path/class:path-materialized/active:out/budget:1/weight:3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0 threshold-input=none/headroom:0/batch:0/source:none/reason:none threshold-cache=observed:0/saturated:0/relaxed:0 payload-input=none/headroom:0/scan-runs:0/replay-runs:0/seed-runs:0/replay-percent:0/seed-percent:0/observed:0/reason:none policy=out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
+               VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
+               VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
+               VLE Join Order: component=vle connector=vle-expand-into bound=out property=expand-into-verification rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+               VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
+               VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
+               VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
+               VLE Source Policy: out=endpoint-btree/in=none depth=costed endpoint-work=sum(out:0/2,in:0/2) combined-work=all:0/0 reason=out:unknown-fanout/in:inactive-direction class=endpoint-direct recommendation=keep-endpoint-btree
                VLE Endpoints: start=runtime-id, end=runtime-id
                VLE Range: 1..2
                VLE Direction: right
-               VLE Output: path(requirement=path, grammar=cached)
+               VLE Output: path(requirement=path, grammar=cached, terminal-label=4/endpoint)
                VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
-(21 rows)
+               ->  Values Scan on _age_default_alias_0
+                     Output: _age_default_alias_0.edges
+(29 rows)
 
 --Undirected Path Tests
 SELECT * FROM cypher('cypher_match', $$
@@ -6022,6 +6066,26 @@ drop cascades to table path_payload_smoke._ag_label_edge
 drop cascades to table path_payload_smoke.vfast
 drop cascades to table path_payload_smoke.efast
 NOTICE:  graph "path_payload_smoke" has been dropped
+SELECT create_property_source_index_named(
+    'cypher_match_numeric_path', 'NumericPath', 'payload.a',
+    'numeric_path_payload_a_source', 'agtype');
+ create_property_source_index_named 
+------------------------------------
+ numeric_path_payload_a_source
+(1 row)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(v), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath) RETURN n.payload.a$$) AS (v agtype);
+                                                            QUERY PLAN                                                            
+----------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: array_length(array_agg((agtype_access_operator(VARIADIC ARRAY[n.properties, '"payload"'::agtype, '"a"'::agtype]))), 1)
+   ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
+         Output: agtype_access_operator(VARIADIC ARRAY[n.properties, '"payload"'::agtype, '"a"'::agtype])
+(4 rows)
+
 --
 -- Clean up
 --
@@ -6045,6 +6109,18 @@ drop cascades to table cypher_match.opt_match_v
 drop cascades to table cypher_match.opt_match_e
 drop cascades to table cypher_match.knows
 NOTICE:  graph "cypher_match" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
+SELECT drop_graph('cypher_match_plan', true);
+NOTICE:  drop cascades to 4 other objects
+DETAIL:  drop cascades to table cypher_match_plan._ag_label_vertex
+drop cascades to table cypher_match_plan._ag_label_edge
+drop cascades to table cypher_match_plan.join_v
+drop cascades to table cypher_match_plan.order_e
+NOTICE:  graph "cypher_match_plan" has been dropped
  drop_graph 
 ------------
  

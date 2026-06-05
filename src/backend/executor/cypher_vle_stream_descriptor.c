@@ -172,6 +172,15 @@ void read_age_vle_stream_output(CustomScan *cscan,
     output->terminal_key_is_char =
         age_vle_stream_private_bool(
             descriptor, AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_IS_CHAR);
+    output->terminal_label_known =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_OUTPUT_TERMINAL_LABEL_KNOWN);
+    output->terminal_label_id =
+        (int32)age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_OUTPUT_TERMINAL_LABEL_ID);
+    output->terminal_label_mode =
+        (AgeVLETerminalLabelMode)age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_OUTPUT_TERMINAL_LABEL_MODE);
     output->materializer_vertex_prefetch =
         age_vle_stream_private_bool(
             descriptor,
@@ -239,6 +248,20 @@ void read_age_vle_stream_edge_source(CustomScan *cscan,
     source->end_fanout_known =
         age_vle_stream_private_bool(
             descriptor, AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT_KNOWN);
+    source->start_fanout_source =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_START_FANOUT_SOURCE);
+    source->end_fanout_source =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT_SOURCE);
+    source->start_value_posting_source =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_START_VALUE_POSTING_SOURCE);
+    source->end_value_posting_source =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_END_VALUE_POSTING_SOURCE);
     source->cost_policy =
         age_vle_stream_private_text(
             descriptor, AGE_VLE_STREAM_EDGE_SOURCE_COST_POLICY);
@@ -316,6 +339,9 @@ void read_age_vle_stream_edge_source(CustomScan *cscan,
     source->threshold_input_reason =
         age_vle_stream_private_text(
             descriptor, AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_REASON);
+    source->threshold_input_class =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_CLASS);
     source->payload_input_known =
         age_vle_stream_private_bool(
             descriptor, AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_KNOWN);
@@ -344,9 +370,118 @@ void read_age_vle_stream_edge_source(CustomScan *cscan,
         age_vle_stream_private_int64(
             descriptor,
             AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_OBSERVED_COUNT);
+    source->payload_input_value_posting_observed_count =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_VALUE_POSTING_OBSERVED_COUNT);
     source->payload_input_reason =
         age_vle_stream_private_text(
             descriptor, AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_REASON);
+    source->payload_input_class =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_CLASS);
+    source->payload_input_value_posting_source =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_VALUE_POSTING_SOURCE);
+    source->terminal_property_source_known =
+        age_vle_stream_private_bool(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_SOURCE_KNOWN);
+    source->terminal_label_id =
+        (int32)age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_LABEL_ID);
+    source->terminal_property_index_oid =
+        (Oid)age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_INDEX_OID);
+    source->terminal_property_filter_id =
+        (uint32)age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_FILTER_ID);
+    source->terminal_property_label =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_LABEL);
+    source->terminal_property_source =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_SOURCE);
+    source->terminal_property_provider =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PROVIDER);
+    source->terminal_property_type =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_TYPE);
+    source->terminal_property_match_count =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_MATCH_COUNT);
+    source->composite_source_known =
+        age_vle_stream_private_bool(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_KNOWN);
+    source->composite_source_status =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_STATUS);
+    source->composite_source_reason =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_REASON);
+    source->composite_source_property_tuples =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_PROPERTY_TUPLES);
+    source->composite_source_candidate_fanout =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_CANDIDATE_FANOUT);
+    source->composite_source_fanout =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_FANOUT);
+    source->composite_source_selectivity_ppm =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_SELECTIVITY_PPM);
+    source->composite_source_selectivity_source =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_SELECTIVITY_SOURCE);
+    source->composite_source_planned =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_PLANNED);
+    source->terminal_property_predicate_known =
+        age_vle_stream_private_bool(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREDICATE_KNOWN);
+    source->terminal_property_predicate_key =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREDICATE_KEY);
+    source->terminal_property_predicate_null =
+        age_vle_stream_private_bool(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREDICATE_NULL);
+    source->terminal_property_predicate_value =
+        list_nth_node(Const, descriptor,
+                      AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREDICATE_VALUE)->constvalue;
+    source->terminal_property_value_kind =
+        age_vle_stream_private_text(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_VALUE_KIND);
+    source->terminal_property_prefilter_eligible =
+        age_vle_stream_private_bool(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREFILTER_ELIGIBLE);
+    source->terminal_property_prefetch_threshold =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREFETCH_THRESHOLD);
 }
 
 const char *age_vle_stream_shape_name(AgeVLEStreamOutput *output, int nargs)
@@ -367,6 +502,12 @@ const char *age_vle_stream_shape_name(AgeVLEStreamOutput *output, int nargs)
     if (nargs == AGE_VLE_STREAM_ARG_GRAMMAR_NODE + 1)
         return "cypher";
     if (nargs == AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 1)
+    {
+        if (output != NULL && output->terminal_label_known)
+            return "cypher";
+        return "terminal-property";
+    }
+    if (nargs == AGE_VLE_STREAM_ARG_TERMINAL_LABEL + 1)
         return "terminal-property";
 
     return "unknown";
@@ -472,6 +613,7 @@ const char *format_age_vle_stream_direction(AgeVLEStreamRangeDirection *range)
 char *format_age_vle_stream_output(AgeVLEStreamOutput *output, int nargs)
 {
     const char *grammar_text;
+    const char *terminal_label_text;
 
     if (!output->grammar_known)
         grammar_text = "dynamic";
@@ -481,6 +623,11 @@ char *format_age_vle_stream_output(AgeVLEStreamOutput *output, int nargs)
         grammar_text = "terminal-only";
     else
         grammar_text = "cached";
+    terminal_label_text = output->terminal_label_known ?
+        psprintf(", terminal-label=%d/%s", output->terminal_label_id,
+                 output->terminal_label_mode ==
+                 AGE_VLE_TERMINAL_LABEL_ENDPOINT_ONLY ?
+                 "endpoint" : "all-depth") : "";
 
     if (output->requirement == AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY)
     {
@@ -493,28 +640,29 @@ char *format_age_vle_stream_output(AgeVLEStreamOutput *output, int nargs)
             "dynamic";
 
         return psprintf("terminal-property(requirement=%s, grammar=%s, "
-                        "key=%s, len=%d, char-fast=%s)",
+                        "key=%s, len=%d, char-fast=%s%s)",
                         age_vle_output_requirement_name(output->requirement),
                         grammar_text, key_text, output->terminal_key_len,
-                        output->terminal_key_is_char ? "true" : "false");
+                        output->terminal_key_is_char ? "true" : "false",
+                        terminal_label_text);
     }
     if (output->requirement == AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_VERTEX)
     {
-        return psprintf("terminal-vertex(requirement=%s, grammar=%s)",
+        return psprintf("terminal-vertex(requirement=%s, grammar=%s%s)",
                         age_vle_output_requirement_name(output->requirement),
-                        grammar_text);
+                        grammar_text, terminal_label_text);
     }
     if (output->requirement ==
         AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES)
     {
-        return psprintf("terminal-properties(requirement=%s, grammar=%s)",
+        return psprintf("terminal-properties(requirement=%s, grammar=%s%s)",
                         age_vle_output_requirement_name(output->requirement),
-                        grammar_text);
+                        grammar_text, terminal_label_text);
     }
 
-    return psprintf("path(requirement=%s, grammar=%s)",
+    return psprintf("path(requirement=%s, grammar=%s%s)",
                     age_vle_output_requirement_name(output->requirement),
-                    grammar_text);
+                    grammar_text, terminal_label_text);
 }
 
 const char *format_age_vle_stream_materialization(
@@ -622,6 +770,8 @@ static const char *age_vle_stream_arg_name(int argno)
             return "grammar-node";
         case AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY:
             return "terminal-property";
+        case AGE_VLE_STREAM_ARG_TERMINAL_LABEL:
+            return "terminal-label";
     }
 
     return "unknown";

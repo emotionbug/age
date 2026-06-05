@@ -29,6 +29,8 @@ typedef struct VLEAdjacencyPayloadCacheKey
 {
     Oid index_oid;
     graphid source_vertex_id;
+    int32 terminal_label_id;
+    uint32 terminal_property_filter_id;
 } VLEAdjacencyPayloadCacheKey;
 
 typedef struct VLEAdjacencyPayloadCacheEntry
@@ -42,9 +44,10 @@ typedef struct VLEAdjacencyPayloadCacheEntry
 
 extern VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_get(
     HTAB **payload_cache, Oid index_oid, graphid source_vertex_id,
-    bool *found);
+    int32 terminal_label_id, uint32 terminal_property_filter_id, bool *found);
 extern VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_lookup(
-    HTAB *payload_cache, Oid index_oid, graphid source_vertex_id);
+    HTAB *payload_cache, Oid index_oid, graphid source_vertex_id,
+    int32 terminal_label_id, uint32 terminal_property_filter_id);
 extern void age_vle_adjacency_payload_cache_append(
     VLEAdjacencyPayloadCacheEntry *cache_entry,
     const AgeAdjacencyPayload *payload);

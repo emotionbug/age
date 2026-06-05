@@ -38,6 +38,7 @@ typedef enum AgeVLEStreamArgIndex
     AGE_VLE_STREAM_ARG_DIRECTION,
     AGE_VLE_STREAM_ARG_GRAMMAR_NODE,
     AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY,
+    AGE_VLE_STREAM_ARG_TERMINAL_LABEL,
     AGE_VLE_STREAM_ARG_COUNT
 } AgeVLEStreamArgIndex;
 
@@ -50,6 +51,7 @@ typedef enum AgeVLEStreamPrivateIndex
     AGE_VLE_STREAM_PRIVATE_RANGE_DIRECTION,
     AGE_VLE_STREAM_PRIVATE_OUTPUT,
     AGE_VLE_STREAM_PRIVATE_EDGE_SOURCE,
+    AGE_VLE_STREAM_PRIVATE_TERMINAL_PROPERTY_PREDICATE_EXPR,
     AGE_VLE_STREAM_PRIVATE_COUNT
 } AgeVLEStreamPrivateIndex;
 
@@ -98,6 +100,9 @@ typedef enum AgeVLEStreamOutputIndex
     AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_VALUE,
     AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_LEN,
     AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_IS_CHAR,
+    AGE_VLE_STREAM_OUTPUT_TERMINAL_LABEL_KNOWN,
+    AGE_VLE_STREAM_OUTPUT_TERMINAL_LABEL_ID,
+    AGE_VLE_STREAM_OUTPUT_TERMINAL_LABEL_MODE,
     AGE_VLE_STREAM_OUTPUT_MATERIALIZER_VERTEX_PREFETCH,
     AGE_VLE_STREAM_OUTPUT_MATERIALIZER_PREFETCH_MIN_REL_CANDIDATES,
     AGE_VLE_STREAM_OUTPUT_COUNT
@@ -134,6 +139,10 @@ typedef enum AgeVLEStreamEdgeSourceIndex
     AGE_VLE_STREAM_EDGE_SOURCE_RELATION_TUPLES_KNOWN,
     AGE_VLE_STREAM_EDGE_SOURCE_START_FANOUT_KNOWN,
     AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT_KNOWN,
+    AGE_VLE_STREAM_EDGE_SOURCE_START_FANOUT_SOURCE,
+    AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT_SOURCE,
+    AGE_VLE_STREAM_EDGE_SOURCE_START_VALUE_POSTING_SOURCE,
+    AGE_VLE_STREAM_EDGE_SOURCE_END_VALUE_POSTING_SOURCE,
     AGE_VLE_STREAM_EDGE_SOURCE_COST_POLICY,
     AGE_VLE_STREAM_EDGE_SOURCE_POLICY_OUTGOING_KIND,
     AGE_VLE_STREAM_EDGE_SOURCE_POLICY_INCOMING_KIND,
@@ -157,6 +166,7 @@ typedef enum AgeVLEStreamEdgeSourceIndex
     AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_RELAXED_COUNT,
     AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_SOURCE,
     AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_REASON,
+    AGE_VLE_STREAM_EDGE_SOURCE_THRESHOLD_INPUT_CLASS,
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_KNOWN,
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_HEADROOM_PERCENT,
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_SCAN_RUNS,
@@ -165,7 +175,35 @@ typedef enum AgeVLEStreamEdgeSourceIndex
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_REPLAY_PERCENT,
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_SEED_PERCENT,
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_OBSERVED_COUNT,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_VALUE_POSTING_OBSERVED_COUNT,
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_REASON,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_CLASS,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_VALUE_POSTING_SOURCE,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_SOURCE_KNOWN,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_LABEL_ID,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_INDEX_OID,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_FILTER_ID,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_LABEL,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_SOURCE,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PROVIDER,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_TYPE,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_MATCH_COUNT,
+    AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_KNOWN,
+    AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_STATUS,
+    AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_REASON,
+    AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_PROPERTY_TUPLES,
+    AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_CANDIDATE_FANOUT,
+    AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_FANOUT,
+    AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_SELECTIVITY_PPM,
+    AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_SELECTIVITY_SOURCE,
+    AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_PLANNED,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREDICATE_KNOWN,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREDICATE_KEY,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREDICATE_NULL,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREDICATE_VALUE,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_VALUE_KIND,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREFILTER_ELIGIBLE,
+    AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREFETCH_THRESHOLD,
     AGE_VLE_STREAM_EDGE_SOURCE_COUNT
 } AgeVLEStreamEdgeSourceIndex;
 
@@ -211,6 +249,9 @@ typedef struct AgeVLEStreamOutput
     char *terminal_key_value;
     int terminal_key_len;
     bool terminal_key_is_char;
+    bool terminal_label_known;
+    int32 terminal_label_id;
+    AgeVLETerminalLabelMode terminal_label_mode;
     bool materializer_vertex_prefetch;
     int materializer_prefetch_min_rel_candidates;
 } AgeVLEStreamOutput;
@@ -232,6 +273,10 @@ typedef struct AgeVLEStreamEdgeSource
     bool relation_tuples_known;
     bool start_fanout_known;
     bool end_fanout_known;
+    char *start_fanout_source;
+    char *end_fanout_source;
+    char *start_value_posting_source;
+    char *end_value_posting_source;
     char *cost_policy;
     AgeVLEStreamDirectedSourceKind policy_outgoing_kind;
     AgeVLEStreamDirectedSourceKind policy_incoming_kind;
@@ -255,6 +300,7 @@ typedef struct AgeVLEStreamEdgeSource
     int64 threshold_input_relaxed_count;
     char *threshold_input_source;
     char *threshold_input_reason;
+    char *threshold_input_class;
     bool payload_input_known;
     int64 payload_input_headroom_percent;
     int64 payload_input_scan_runs;
@@ -263,7 +309,35 @@ typedef struct AgeVLEStreamEdgeSource
     int64 payload_input_replay_percent;
     int64 payload_input_seed_percent;
     int64 payload_input_observed_count;
+    int64 payload_input_value_posting_observed_count;
     char *payload_input_reason;
+    char *payload_input_class;
+    char *payload_input_value_posting_source;
+    bool terminal_property_source_known;
+    int32 terminal_label_id;
+    Oid terminal_property_index_oid;
+    uint32 terminal_property_filter_id;
+    char *terminal_property_label;
+    char *terminal_property_source;
+    char *terminal_property_provider;
+    char *terminal_property_type;
+    int64 terminal_property_match_count;
+    bool composite_source_known;
+    char *composite_source_status;
+    char *composite_source_reason;
+    int64 composite_source_property_tuples;
+    int64 composite_source_candidate_fanout;
+    int64 composite_source_fanout;
+    int64 composite_source_selectivity_ppm;
+    char *composite_source_selectivity_source;
+    char *composite_source_planned;
+    bool terminal_property_predicate_known;
+    char *terminal_property_predicate_key;
+    bool terminal_property_predicate_null;
+    Datum terminal_property_predicate_value;
+    char *terminal_property_value_kind;
+    bool terminal_property_prefilter_eligible;
+    int64 terminal_property_prefetch_threshold;
 } AgeVLEStreamEdgeSource;
 
 extern const CustomScanMethods age_vle_stream_scan_methods;

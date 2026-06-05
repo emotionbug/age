@@ -25,7 +25,7 @@
 
 VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_get(
     HTAB **payload_cache, Oid index_oid, graphid source_vertex_id,
-    bool *found)
+    int32 terminal_label_id, uint32 terminal_property_filter_id, bool *found)
 {
     VLEAdjacencyPayloadCacheKey cache_key;
     VLEAdjacencyPayloadCacheEntry *entry;
@@ -47,6 +47,8 @@ VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_get(
     MemSet(&cache_key, 0, sizeof(cache_key));
     cache_key.index_oid = index_oid;
     cache_key.source_vertex_id = source_vertex_id;
+    cache_key.terminal_label_id = terminal_label_id;
+    cache_key.terminal_property_filter_id = terminal_property_filter_id;
 
     entry = hash_search(*payload_cache, &cache_key, HASH_ENTER, found);
     if (!*found)
@@ -61,7 +63,8 @@ VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_get(
 }
 
 VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_lookup(
-    HTAB *payload_cache, Oid index_oid, graphid source_vertex_id)
+    HTAB *payload_cache, Oid index_oid, graphid source_vertex_id,
+    int32 terminal_label_id, uint32 terminal_property_filter_id)
 {
     VLEAdjacencyPayloadCacheKey cache_key;
 
@@ -71,6 +74,8 @@ VLEAdjacencyPayloadCacheEntry *age_vle_adjacency_payload_cache_lookup(
     MemSet(&cache_key, 0, sizeof(cache_key));
     cache_key.index_oid = index_oid;
     cache_key.source_vertex_id = source_vertex_id;
+    cache_key.terminal_label_id = terminal_label_id;
+    cache_key.terminal_property_filter_id = terminal_property_filter_id;
 
     return hash_search(payload_cache, &cache_key, HASH_FIND, NULL);
 }

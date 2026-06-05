@@ -54,6 +54,11 @@ ON age_adjacency_smoke USING age_adjacency (start_id);
 CREATE INDEX age_adjacency_smoke_start_idx
 ON age_adjacency_smoke USING age_adjacency (start_id, id, end_id);
 
+COPY (
+SELECT index_version::text || ':' || directory_entries::text
+FROM age_adjacency_debug_stats('age_adjacency_smoke_start_idx'::regclass)
+) TO STDOUT;
+
 INSERT INTO age_adjacency_smoke VALUES
 (_graphid(2, 4), _graphid(1, 1), _graphid(1, 6));
 
@@ -74,6 +79,469 @@ FROM age_adjacency_debug_payload('age_adjacency_smoke_start_idx'::regclass,
 ORDER BY edge_id
 ) TO STDOUT;
 
+COPY (
+SELECT found::text || ':' ||
+       (main_pages_visited = 1)::text || ':' ||
+       (main_block_items < main_page_offsets)::text || ':' ||
+       (main_compact_block_items > 0)::text || ':' ||
+       (main_full_block_items = 0)::text || ':' ||
+       (main_entries_cached = 2)::text || ':' ||
+       (main_label_groups = 1)::text
+FROM age_adjacency_debug_main_probe('age_adjacency_smoke_start_idx'::regclass,
+                                    _graphid(1, 1))
+) TO STDOUT;
+
+CREATE TEMP TABLE age_adjacency_label_grouping
+(
+    id graphid NOT NULL,
+    start_id graphid NOT NULL,
+    end_id graphid NOT NULL
+);
+
+INSERT INTO age_adjacency_label_grouping VALUES
+(_graphid(2, 1), _graphid(1, 1), _graphid(1, 10)),
+(_graphid(2, 2), _graphid(1, 1), _graphid(2, 10)),
+(_graphid(2, 3), _graphid(1, 1), _graphid(1, 11)),
+(_graphid(2, 4), _graphid(1, 1), _graphid(2, 11)),
+(_graphid(2, 5), _graphid(1, 1), _graphid(1, 12)),
+(_graphid(2, 6), _graphid(1, 1), _graphid(2, 12));
+
+CREATE INDEX age_adjacency_label_grouping_idx
+ON age_adjacency_label_grouping USING age_adjacency (start_id, id, end_id);
+
+COPY (
+SELECT found::text || ':' ||
+       (main_block_items = 2)::text || ':' ||
+       (main_page_offsets = 6)::text || ':' ||
+       (main_compact_block_items = 2)::text || ':' ||
+       (main_full_block_items = 0)::text || ':' ||
+       (main_entries_cached = 6)::text || ':' ||
+       (main_label_groups = 2)::text
+FROM age_adjacency_debug_main_probe(
+    'age_adjacency_label_grouping_idx'::regclass, _graphid(1, 1))
+) TO STDOUT;
+
+COPY (
+SELECT age_adjacency_debug_key_known_empty(
+           'age_adjacency_label_grouping_idx'::regclass,
+           _graphid(1, 1), 1)::text || ':' ||
+       age_adjacency_debug_key_known_empty(
+           'age_adjacency_label_grouping_idx'::regclass,
+           _graphid(1, 1), 3)::text
+) TO STDOUT;
+
+COPY (
+SELECT age_adjacency_debug_key_known_empty_range(
+           'age_adjacency_label_grouping_idx'::regclass,
+           _graphid(1, 1), 1, _graphid(1, 10), _graphid(1, 10))::text || ':' ||
+       age_adjacency_debug_key_known_empty_range(
+           'age_adjacency_label_grouping_idx'::regclass,
+           _graphid(1, 1), 1, _graphid(1, 1), _graphid(1, 5))::text
+) TO STDOUT;
+
+COPY (
+SELECT emitted::text || ':' ||
+       cache_filtered::text || ':' ||
+       cache_property::text || ':' ||
+       set_range_filter::text || ':' ||
+       set_sorted_filter::text || ':' ||
+       set_block_filter::text || ':' ||
+       set_block_value_filter::text || ':' ||
+       set_block_value_posting_filter::text || ':' ||
+       set_directory_filter::text || ':' ||
+       composite_block_filter::text || ':' ||
+       composite_directory_filter::text || ':' ||
+       composite_directory_estimate::text || ':' ||
+       set_block_range_filter::text || ':' ||
+       set_block_exact_filter::text || ':' ||
+       set_block_compressed_filter::text || ':' ||
+       set_block_bloom_filter::text || ':' ||
+       set_block_posting_filter::text || ':' ||
+       set_directory_range_filter::text || ':' ||
+       set_directory_exact_filter::text || ':' ||
+       set_directory_label_bloom_filter::text || ':' ||
+       set_directory_compressed_filter::text || ':' ||
+       set_directory_wide_bloom_filter::text || ':' ||
+       set_directory_value_filter::text || ':' ||
+       set_directory_value_posting_filter::text
+FROM age_adjacency_debug_composite_probe(
+    'age_adjacency_label_grouping_idx'::regclass,
+    _graphid(1, 1), 0, _graphid(2, 10), 1)
+) TO STDOUT;
+
+COPY (
+SELECT emitted::text || ':' ||
+       cache_filtered::text || ':' ||
+       cache_property::text || ':' ||
+       set_range_filter::text || ':' ||
+       set_sorted_filter::text || ':' ||
+       set_block_filter::text || ':' ||
+       set_block_value_filter::text || ':' ||
+       set_block_value_posting_filter::text || ':' ||
+       set_directory_filter::text || ':' ||
+       composite_block_filter::text || ':' ||
+       composite_directory_filter::text || ':' ||
+       composite_directory_estimate::text || ':' ||
+       set_block_range_filter::text || ':' ||
+       set_block_exact_filter::text || ':' ||
+       set_block_compressed_filter::text || ':' ||
+       set_block_bloom_filter::text || ':' ||
+       set_block_posting_filter::text || ':' ||
+       set_directory_range_filter::text || ':' ||
+       set_directory_exact_filter::text || ':' ||
+       set_directory_label_bloom_filter::text || ':' ||
+       set_directory_compressed_filter::text || ':' ||
+       set_directory_wide_bloom_filter::text || ':' ||
+       set_directory_value_filter::text || ':' ||
+       set_directory_value_posting_filter::text
+FROM age_adjacency_debug_composite_probe(
+    'age_adjacency_label_grouping_idx'::regclass,
+    _graphid(1, 1), 0, _graphid(1, 13), 1)
+) TO STDOUT;
+
+COPY (
+SELECT emitted::text || ':' ||
+       cache_filtered::text || ':' ||
+       cache_property::text || ':' ||
+       set_range_filter::text || ':' ||
+       set_sorted_filter::text || ':' ||
+       set_block_filter::text || ':' ||
+       set_block_value_filter::text || ':' ||
+       set_block_value_posting_filter::text || ':' ||
+       set_directory_filter::text || ':' ||
+       composite_block_filter::text || ':' ||
+       composite_directory_filter::text || ':' ||
+       composite_directory_estimate::text || ':' ||
+       set_block_range_filter::text || ':' ||
+       set_block_exact_filter::text || ':' ||
+       set_block_compressed_filter::text || ':' ||
+       set_block_bloom_filter::text || ':' ||
+       set_block_posting_filter::text || ':' ||
+       set_directory_range_filter::text || ':' ||
+       set_directory_exact_filter::text || ':' ||
+       set_directory_label_bloom_filter::text || ':' ||
+       set_directory_compressed_filter::text || ':' ||
+       set_directory_wide_bloom_filter::text || ':' ||
+       set_directory_value_filter::text || ':' ||
+       set_directory_value_posting_filter::text
+FROM age_adjacency_debug_composite_probe(
+    'age_adjacency_label_grouping_idx'::regclass,
+    _graphid(1, 1), 0, _graphid(1, 87), 1)
+) TO STDOUT;
+
+COPY (
+SELECT emitted::text || ':' ||
+       cache_filtered::text || ':' ||
+       cache_property::text || ':' ||
+       set_range_filter::text || ':' ||
+       set_sorted_filter::text || ':' ||
+       set_block_filter::text || ':' ||
+       set_block_value_filter::text || ':' ||
+       set_block_value_posting_filter::text || ':' ||
+       set_directory_filter::text || ':' ||
+       composite_block_filter::text || ':' ||
+       composite_directory_filter::text || ':' ||
+       composite_directory_estimate::text || ':' ||
+       set_block_range_filter::text || ':' ||
+       set_block_exact_filter::text || ':' ||
+       set_block_compressed_filter::text || ':' ||
+       set_block_bloom_filter::text || ':' ||
+       set_block_posting_filter::text || ':' ||
+       set_directory_range_filter::text || ':' ||
+       set_directory_exact_filter::text || ':' ||
+       set_directory_label_bloom_filter::text || ':' ||
+       set_directory_compressed_filter::text || ':' ||
+       set_directory_wide_bloom_filter::text || ':' ||
+       set_directory_value_filter::text || ':' ||
+       set_directory_value_posting_filter::text
+FROM age_adjacency_debug_composite_probe(
+    'age_adjacency_label_grouping_idx'::regclass,
+    _graphid(1, 1), 1, _graphid(2, 10), 1)
+) TO STDOUT;
+
+CREATE TEMP TABLE age_adjacency_directory_wide_bloom
+(
+    id graphid NOT NULL,
+    start_id graphid NOT NULL,
+    end_id graphid NOT NULL
+);
+
+INSERT INTO age_adjacency_directory_wide_bloom
+SELECT _graphid(2, g), _graphid(1, 1), _graphid(1, g)
+FROM generate_series(1, 20) g
+WHERE g <> 2;
+
+CREATE INDEX age_adjacency_directory_wide_bloom_idx
+ON age_adjacency_directory_wide_bloom USING age_adjacency (start_id, id, end_id);
+
+COPY (
+SELECT emitted::text || ':' ||
+       cache_filtered::text || ':' ||
+       cache_property::text || ':' ||
+       set_range_filter::text || ':' ||
+       set_sorted_filter::text || ':' ||
+       set_block_filter::text || ':' ||
+       set_block_value_filter::text || ':' ||
+       set_block_value_posting_filter::text || ':' ||
+       set_directory_filter::text || ':' ||
+       composite_block_filter::text || ':' ||
+       composite_directory_filter::text || ':' ||
+       composite_directory_estimate::text || ':' ||
+       set_block_range_filter::text || ':' ||
+       set_block_exact_filter::text || ':' ||
+       set_block_compressed_filter::text || ':' ||
+       set_block_bloom_filter::text || ':' ||
+       set_block_posting_filter::text || ':' ||
+       set_directory_range_filter::text || ':' ||
+       set_directory_exact_filter::text || ':' ||
+       set_directory_label_bloom_filter::text || ':' ||
+       set_directory_compressed_filter::text || ':' ||
+       set_directory_wide_bloom_filter::text || ':' ||
+       set_directory_value_filter::text || ':' ||
+       set_directory_value_posting_filter::text
+FROM age_adjacency_debug_composite_probe(
+    'age_adjacency_directory_wide_bloom_idx'::regclass,
+    _graphid(1, 1), 0, _graphid(1, 2), 1)
+) TO STDOUT;
+
+CREATE TEMP TABLE age_adjacency_value_posting
+(
+    id graphid NOT NULL,
+    start_id graphid NOT NULL,
+    end_id graphid NOT NULL
+);
+
+INSERT INTO age_adjacency_value_posting
+SELECT _graphid(2, g), _graphid(1, 99), _graphid(1, g)
+FROM (
+    SELECT 1 AS g
+    UNION ALL
+    SELECT generate_series(220, 252)
+) s;
+
+CREATE INDEX age_adjacency_value_posting_idx
+ON age_adjacency_value_posting USING age_adjacency (start_id, id, end_id);
+
+COPY (
+SELECT emitted::text || ':' ||
+       cache_filtered::text || ':' ||
+       cache_property::text || ':' ||
+       set_range_filter::text || ':' ||
+       set_sorted_filter::text || ':' ||
+       set_block_filter::text || ':' ||
+       set_block_value_filter::text || ':' ||
+       set_block_value_posting_filter::text || ':' ||
+       set_directory_filter::text || ':' ||
+       composite_block_filter::text || ':' ||
+       composite_directory_filter::text || ':' ||
+       composite_directory_estimate::text || ':' ||
+       set_block_range_filter::text || ':' ||
+       set_block_exact_filter::text || ':' ||
+       set_block_compressed_filter::text || ':' ||
+       set_block_bloom_filter::text || ':' ||
+       set_block_posting_filter::text || ':' ||
+       set_directory_range_filter::text || ':' ||
+       set_directory_exact_filter::text || ':' ||
+       set_directory_label_bloom_filter::text || ':' ||
+       set_directory_compressed_filter::text || ':' ||
+       set_directory_wide_bloom_filter::text || ':' ||
+       set_directory_value_filter::text || ':' ||
+       set_directory_value_posting_filter::text
+FROM age_adjacency_debug_composite_probe(
+    'age_adjacency_value_posting_idx'::regclass,
+    _graphid(1, 99), 0, _graphid(1, 59), 1)
+) TO STDOUT;
+
+CREATE TEMP TABLE age_adjacency_label_value_posting
+(
+    id graphid NOT NULL,
+    start_id graphid NOT NULL,
+    end_id graphid NOT NULL
+);
+
+INSERT INTO age_adjacency_label_value_posting
+SELECT _graphid(2, g), _graphid(1, 199), _graphid(1, g)
+FROM (
+    SELECT 1 AS g
+    UNION ALL
+    SELECT generate_series(220, 252)
+) s
+UNION ALL
+SELECT _graphid(3, g), _graphid(1, 199), _graphid(2, g)
+FROM generate_series(1, 4) g;
+
+CREATE INDEX age_adjacency_label_value_posting_idx
+ON age_adjacency_label_value_posting USING age_adjacency (start_id, id, end_id);
+
+COPY (
+SELECT emitted::text || ':' ||
+       cache_filtered::text || ':' ||
+       cache_property::text || ':' ||
+       set_range_filter::text || ':' ||
+       set_sorted_filter::text || ':' ||
+       set_block_filter::text || ':' ||
+       set_block_value_filter::text || ':' ||
+       set_block_value_posting_filter::text || ':' ||
+       set_directory_filter::text || ':' ||
+       composite_block_filter::text || ':' ||
+       composite_directory_filter::text || ':' ||
+       composite_directory_estimate::text || ':' ||
+       set_block_range_filter::text || ':' ||
+       set_block_exact_filter::text || ':' ||
+       set_block_compressed_filter::text || ':' ||
+       set_block_bloom_filter::text || ':' ||
+       set_block_posting_filter::text || ':' ||
+       set_directory_range_filter::text || ':' ||
+       set_directory_exact_filter::text || ':' ||
+       set_directory_label_bloom_filter::text || ':' ||
+       set_directory_compressed_filter::text || ':' ||
+       set_directory_wide_bloom_filter::text || ':' ||
+       set_directory_value_filter::text || ':' ||
+       set_directory_value_posting_filter::text
+FROM age_adjacency_debug_composite_probe(
+    'age_adjacency_label_value_posting_idx'::regclass,
+    _graphid(1, 199), 1, _graphid(1, 59), 1)
+) TO STDOUT;
+
+CREATE TEMP TABLE age_adjacency_block_range
+(
+    id graphid NOT NULL,
+    start_id graphid NOT NULL,
+    end_id graphid NOT NULL
+);
+
+INSERT INTO age_adjacency_block_range
+SELECT _graphid(2, g), _graphid(1, 1), _graphid(1, g)
+FROM generate_series(1, 10) g
+UNION ALL
+SELECT _graphid(2, g + 10), _graphid(1, 1), _graphid(2, g)
+FROM generate_series(1, 10) g;
+
+CREATE INDEX age_adjacency_block_range_idx
+ON age_adjacency_block_range USING age_adjacency (start_id, id, end_id);
+
+COPY (
+SELECT emitted::text || ':' ||
+       cache_filtered::text || ':' ||
+       cache_property::text || ':' ||
+       set_range_filter::text || ':' ||
+       set_sorted_filter::text || ':' ||
+       set_block_filter::text || ':' ||
+       set_block_value_filter::text || ':' ||
+       set_block_value_posting_filter::text || ':' ||
+       set_directory_filter::text || ':' ||
+       composite_block_filter::text || ':' ||
+       composite_directory_filter::text || ':' ||
+       composite_directory_estimate::text || ':' ||
+       set_block_range_filter::text || ':' ||
+       set_block_exact_filter::text || ':' ||
+       set_block_compressed_filter::text || ':' ||
+       set_block_bloom_filter::text || ':' ||
+       set_block_posting_filter::text || ':' ||
+       set_directory_range_filter::text || ':' ||
+       set_directory_exact_filter::text || ':' ||
+       set_directory_label_bloom_filter::text || ':' ||
+       set_directory_compressed_filter::text || ':' ||
+       set_directory_wide_bloom_filter::text || ':' ||
+       set_directory_value_filter::text || ':' ||
+       set_directory_value_posting_filter::text
+FROM age_adjacency_debug_composite_probe(
+    'age_adjacency_block_range_idx'::regclass,
+    _graphid(1, 1), 0, _graphid(1, 297), 1)
+) TO STDOUT;
+
+CREATE TEMP TABLE age_adjacency_block_compressed
+(
+    id graphid NOT NULL,
+    start_id graphid NOT NULL,
+    end_id graphid NOT NULL
+);
+
+INSERT INTO age_adjacency_block_compressed
+SELECT _graphid(2, g), _graphid(1, 1), _graphid(1, g)
+FROM generate_series(1, 20) g
+WHERE g <> 2
+UNION ALL
+SELECT _graphid(3, 1), _graphid(1, 1), _graphid(1, 2);
+
+CREATE INDEX age_adjacency_block_compressed_idx
+ON age_adjacency_block_compressed USING age_adjacency (start_id, id, end_id);
+
+COPY (
+SELECT emitted::text || ':' ||
+       cache_filtered::text || ':' ||
+       cache_property::text || ':' ||
+       set_range_filter::text || ':' ||
+       set_sorted_filter::text || ':' ||
+       set_block_filter::text || ':' ||
+       set_block_value_filter::text || ':' ||
+       set_block_value_posting_filter::text || ':' ||
+       set_directory_filter::text || ':' ||
+       composite_block_filter::text || ':' ||
+       composite_directory_filter::text || ':' ||
+       composite_directory_estimate::text || ':' ||
+       set_block_range_filter::text || ':' ||
+       set_block_exact_filter::text || ':' ||
+       set_block_compressed_filter::text || ':' ||
+       set_block_bloom_filter::text || ':' ||
+       set_block_posting_filter::text || ':' ||
+       set_directory_range_filter::text || ':' ||
+       set_directory_exact_filter::text || ':' ||
+       set_directory_label_bloom_filter::text || ':' ||
+       set_directory_compressed_filter::text || ':' ||
+       set_directory_wide_bloom_filter::text || ':' ||
+       set_directory_value_filter::text || ':' ||
+       set_directory_value_posting_filter::text
+FROM age_adjacency_debug_composite_probe(
+    'age_adjacency_block_compressed_idx'::regclass,
+    _graphid(1, 1), 0, _graphid(1, 2), 1)
+) TO STDOUT;
+
+CREATE TEMP TABLE age_adjacency_block_posting
+(
+    id graphid NOT NULL,
+    start_id graphid NOT NULL,
+    end_id graphid NOT NULL
+);
+
+INSERT INTO age_adjacency_block_posting
+SELECT _graphid(2, g), _graphid(1, 1), _graphid(1, g)
+FROM generate_series(1, 200) g
+WHERE g <> 100;
+
+CREATE INDEX age_adjacency_block_posting_idx
+ON age_adjacency_block_posting USING age_adjacency (start_id, id, end_id);
+
+COPY (
+SELECT emitted::text || ':' ||
+       cache_filtered::text || ':' ||
+       cache_property::text || ':' ||
+       set_range_filter::text || ':' ||
+       set_sorted_filter::text || ':' ||
+       set_block_filter::text || ':' ||
+       set_block_value_filter::text || ':' ||
+       set_block_value_posting_filter::text || ':' ||
+       set_directory_filter::text || ':' ||
+       composite_block_filter::text || ':' ||
+       composite_directory_filter::text || ':' ||
+       composite_directory_estimate::text || ':' ||
+       set_block_range_filter::text || ':' ||
+       set_block_exact_filter::text || ':' ||
+       set_block_compressed_filter::text || ':' ||
+       set_block_bloom_filter::text || ':' ||
+       set_block_posting_filter::text || ':' ||
+       set_directory_range_filter::text || ':' ||
+       set_directory_exact_filter::text || ':' ||
+       set_directory_label_bloom_filter::text || ':' ||
+       set_directory_compressed_filter::text || ':' ||
+       set_directory_wide_bloom_filter::text || ':' ||
+       set_directory_value_filter::text || ':' ||
+       set_directory_value_posting_filter::text
+FROM age_adjacency_debug_composite_probe(
+    'age_adjacency_block_posting_idx'::regclass,
+    _graphid(1, 1), 0, _graphid(1, 100), 1)
+) TO STDOUT;
+
 DELETE FROM age_adjacency_smoke
 WHERE id = _graphid(2, 2);
 
@@ -88,6 +556,91 @@ COPY (
 SELECT postings::text
 FROM age_adjacency_debug_stats('age_adjacency_smoke_start_idx'::regclass)
 ) TO STDOUT;
+
+CREATE TEMP TABLE age_adjacency_delta_range
+(
+    id graphid NOT NULL,
+    start_id graphid NOT NULL,
+    end_id graphid NOT NULL
+);
+
+CREATE INDEX age_adjacency_delta_range_idx
+ON age_adjacency_delta_range USING age_adjacency (start_id, id, end_id);
+
+INSERT INTO age_adjacency_delta_range
+SELECT _graphid(2, g + 10), _graphid(1, g), _graphid(1, g + 1000)
+FROM generate_series(10, 709) AS gs(g);
+
+COPY (
+SELECT count(*)::text
+FROM age_adjacency_debug_payload('age_adjacency_delta_range_idx'::regclass,
+                                 _graphid(1, 709))
+) TO STDOUT;
+
+COPY (
+SELECT action || ':' || reason || ':' || delta_reindex_recommended::text
+FROM age_adjacency_debug_delta_maintenance(
+    'age_adjacency_delta_range_idx'::regclass)
+) TO STDOUT;
+
+COPY (
+SELECT (delta_tuples_per_page > 226)::text
+FROM age_adjacency_debug_delta_maintenance(
+    'age_adjacency_delta_range_idx'::regclass)
+) TO STDOUT;
+
+COPY (
+SELECT (delta_pages_visited > delta_pages_skipped)::text || ':' ||
+       (delta_pages_skipped > 0)::text || ':' ||
+       (delta_entries_scanned < 700)::text
+FROM age_adjacency_debug_delta_probe('age_adjacency_delta_range_idx'::regclass,
+                                     _graphid(1, 709))
+) TO STDOUT;
+
+COPY (
+SELECT count(*)::text
+FROM age_adjacency_debug_payload('age_adjacency_delta_range_idx'::regclass,
+                                 _graphid(1, 9999))
+) TO STDOUT;
+
+COPY (
+SELECT (delta_pages_visited = delta_pages_skipped)::text || ':' ||
+       (delta_entries_scanned = 0)::text
+FROM age_adjacency_debug_delta_probe('age_adjacency_delta_range_idx'::regclass,
+                                     _graphid(1, 9999))
+) TO STDOUT;
+
+DROP TABLE age_adjacency_delta_range;
+
+CREATE TEMP TABLE age_adjacency_delta_threshold
+(
+    id graphid NOT NULL,
+    start_id graphid NOT NULL,
+    end_id graphid NOT NULL
+);
+
+CREATE INDEX age_adjacency_delta_threshold_idx
+ON age_adjacency_delta_threshold USING age_adjacency (start_id, id, end_id);
+
+INSERT INTO age_adjacency_delta_threshold
+SELECT _graphid(2, g), _graphid(1, g), _graphid(1, g + 10000)
+FROM generate_series(1, 4096) AS gs(g);
+
+COPY (
+SELECT action || ':' || reason || ':' || delta_reindex_recommended::text
+FROM age_adjacency_debug_delta_maintenance(
+    'age_adjacency_delta_threshold_idx'::regclass)
+) TO STDOUT;
+
+COPY (
+SELECT reindexed::text || ':' || action || ':' || reason || ':' ||
+       (before_delta_postings >= 4096)::text || ':' ||
+       (after_delta_postings = 0)::text
+FROM age_adjacency_reindex_if_needed(
+    'age_adjacency_delta_threshold_idx'::regclass)
+) TO STDOUT;
+
+DROP TABLE age_adjacency_delta_threshold;
 
 DO $$
 BEGIN
@@ -149,6 +702,151 @@ BEGIN
 END
 $$;
 
+--
+-- AGE Adjacency Match descriptor surface
+--
+SELECT create_graph('age_adj_match_descriptor');
+SELECT create_vlabel('age_adj_match_descriptor', 'N');
+SELECT create_vlabel('age_adj_match_descriptor', 'M');
+SELECT create_vlabel('age_adj_match_descriptor', 'Z');
+SELECT create_elabel('age_adj_match_descriptor', 'R');
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    CREATE (:N {i: 0})-[:R {kind: "keep"}]->(:N {i: 1})
+$$) AS (a agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    MATCH (n:N {i: 0})
+    CREATE (n)-[:R {kind: "skip-label"}]->(:M {i: 1})
+$$) AS (a agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    MATCH (n:N {i: 0})
+    CREATE (n)-[:R {kind: "skip-property"}]->(:N {i: 8})
+$$) AS (a agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    CREATE INDEX r_adj_out FOR ()-[r:R]->() ON (ADJACENCY)
+$$) AS (create_index text);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    CREATE INDEX n_i_source FOR (n:N) ON (n.i)
+$$) AS (create_index text);
+SELECT create_property_source_index_named(
+    'age_adj_match_descriptor', 'M', 'i', 'm_i_int8_source', 'int8');
+SELECT name, type, entity_type, labels_or_types, properties, state, provider
+FROM cypher('age_adj_match_descriptor', $$
+    SHOW INDEXES
+$$) AS (name name, type text, entity_type text, labels_or_types name[],
+        properties name[], state text, provider text, options jsonb);
+SELECT name, options->>'property_type' AS property_type
+FROM cypher('age_adj_match_descriptor', $$
+    SHOW INDEXES
+$$) AS (name name, type text, entity_type text, labels_or_types name[],
+        properties name[], state text, provider text, options jsonb)
+WHERE name = 'm_i_int8_source';
+CREATE INDEX age_adj_match_descriptor_n_properties_gin_idx
+ON age_adj_match_descriptor."N" USING gin (properties);
+ANALYZE age_adj_match_descriptor."N";
+ANALYZE age_adj_match_descriptor."M";
+ANALYZE age_adj_match_descriptor."R";
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    MATCH (:N {i: 0})-[:R]->(n:N {i: 1})
+    RETURN n.i
+$$) AS (i agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    MATCH (:N {i: 0})-[:R]->(m:M {i: 1})
+    RETURN m.i
+$$) AS (i agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    MATCH (:N {i: 0})-[:R]->(n:N {i: 9})
+    RETURN n.i
+$$) AS (i agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    MATCH (:N {i: 0})-[:R]->(n:N {i: 1 + 0})
+    RETURN n.i
+$$) AS (i agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    MATCH (m:N {i: 1})
+    MATCH (:N {i: 0})-[:R]->(n:N {i: m.i})
+    RETURN n.i
+$$) AS (i agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+    MATCH (m:N {i: 1})
+    MATCH (:N {i: 0})-[:R]->(n:N {i: m.i})
+    RETURN n.i
+$$) AS (plan agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (:N {i: 0})-[:R]->(n:N {i: 1})
+    RETURN n.i
+$$) AS (plan agtype);
+SET enable_seqscan = off;
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (s:N)
+    WHERE id(s) = 844424930131969
+    MATCH (s)-[:R]->(n:N)
+    RETURN n.i
+$$) AS (plan agtype);
+RESET enable_bitmapscan;
+RESET enable_indexscan;
+RESET enable_seqscan;
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+    MATCH (:N {i: 0})-[:R]->(n:N {i: 1})
+    RETURN n.i
+$$) AS (plan agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+    MATCH (:N {i: 0})-[:R]->(m:M {i: 1})
+    RETURN m.i
+$$) AS (plan agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+    MATCH (:N {i: 0})-[:R]->(:Z)
+    RETURN count(*)
+$$) AS (plan agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+    MATCH (:N {i: 0})-[:R]->(n:N {i: 1 + 0})
+    RETURN n.i
+$$) AS (plan agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (:N {i: 0})-[e:R {kind: "keep"}]->(n:N {i: 1})
+    RETURN n.i
+$$) AS (plan agtype);
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    DROP INDEX n_i_source
+$$) AS (drop_index text);
+SELECT name, type, entity_type, labels_or_types, properties, state, provider
+FROM cypher('age_adj_match_descriptor', $$
+    SHOW INDEXES
+$$) AS (name name, type text, entity_type text, labels_or_types name[],
+        properties name[], state text, provider text, options jsonb)
+WHERE name = 'n_i_source';
+SELECT drop_graph('age_adj_match_descriptor', true);
+
+SELECT create_graph('age_adj_match_prefetch_gate');
+SELECT create_vlabel('age_adj_match_prefetch_gate', 'N');
+SELECT create_elabel('age_adj_match_prefetch_gate', 'R');
+SELECT * FROM cypher('age_adj_match_prefetch_gate', $$
+    CREATE (:N {i: 10})-[:R]->(:N {i: 11})
+$$) AS (a agtype);
+SELECT * FROM cypher('age_adj_match_prefetch_gate', $$
+    CREATE INDEX r_adj_out FOR ()-[r:R]->() ON (ADJACENCY)
+$$) AS (create_index text);
+SELECT * FROM cypher('age_adj_match_prefetch_gate', $$
+    CREATE INDEX n_i_source FOR (n:N) ON (n.i)
+$$) AS (create_index text);
+ANALYZE age_adj_match_prefetch_gate."N";
+ANALYZE age_adj_match_prefetch_gate."R";
+SELECT * FROM cypher('age_adj_match_prefetch_gate', $$
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+    MATCH (:N {i: 10})-[:R]->(n:N {i: 11})
+    RETURN n.i
+$$) AS (plan agtype);
+SELECT drop_graph('age_adj_match_prefetch_gate', true);
+
 DO $age_custom_path$
 DECLARE
     graph_name text := 'age_adj_custom_path';
@@ -157,12 +855,12 @@ DECLARE
     plan_text text;
     first_cost_line text;
     cost_match text[];
-    has_disabled_custom_scan boolean := false;
     has_custom_scan boolean := false;
     has_left_direction_custom_scan boolean := false;
     has_right_label_custom_scan boolean := false;
-    has_excluded_custom_scan boolean := false;
-    has_join_build_vertex boolean := false;
+    has_edge_property_custom_scan boolean := false;
+    has_edge_projection_custom_scan boolean := false;
+    has_right_property_custom_scan boolean := false;
     has_direct_id_qual boolean := false;
     has_direct_edge_id_qual boolean := false;
     has_direct_edge_start_id_qual boolean := false;
@@ -450,40 +1148,6 @@ BEGIN
     EXECUTE format('ANALYZE %I."N"', graph_name);
     EXECUTE format('ANALYZE %I."R"', graph_name);
 
-    SET LOCAL age.enable_adjacency_match = off;
-    SET LOCAL age.enable_adjacency_match_custom_path = off;
-
-    FOR plan_text IN EXECUTE format(
-        'SELECT plan::text
-         FROM cypher(%L,
-                     $cypher$EXPLAIN MATCH (:N {i: 0})-[:R]->(n) RETURN n.i$cypher$)
-         AS (plan agtype)',
-        graph_name)
-    LOOP
-        IF plan_text LIKE '%Custom Scan (AGE Adjacency Match)%' THEN
-            has_disabled_custom_scan := true;
-        END IF;
-        IF plan_text LIKE '%_agtype_build_vertex%' OR
-           plan_text LIKE '%age_id(%' THEN
-            has_join_build_vertex := true;
-        END IF;
-        IF plan_text LIKE '%properties @> ''{"i": 0}''::agtype%' THEN
-            has_vertex_property_prefilter := true;
-        END IF;
-    END LOOP;
-
-    IF has_disabled_custom_scan THEN
-        RAISE EXCEPTION 'unexpected AGE Adjacency Match Custom Scan while disabled';
-    END IF;
-    IF has_join_build_vertex THEN
-        RAISE EXCEPTION 'expected simple edge join quals to avoid vertex build';
-    END IF;
-    IF NOT has_vertex_property_prefilter THEN
-        RAISE EXCEPTION 'expected ordinary vertex map literal to expose properties containment prefilter';
-    END IF;
-
-    SET LOCAL age.enable_adjacency_match_custom_path = on;
-
     FOR plan_text IN EXECUTE format(
         'SELECT plan::text
          FROM cypher(%L,
@@ -497,10 +1161,16 @@ BEGIN
         IF plan_text LIKE '%Custom Scan (AGE Adjacency Match)%' THEN
             has_custom_scan := true;
         END IF;
+        IF plan_text LIKE '%properties @> ''{"i": 0}''::agtype%' THEN
+            has_vertex_property_prefilter := true;
+        END IF;
     END LOOP;
 
     IF NOT has_custom_scan THEN
         RAISE EXCEPTION 'expected AGE Adjacency Match Custom Scan';
+    END IF;
+    IF NOT has_vertex_property_prefilter THEN
+        RAISE EXCEPTION 'expected ordinary vertex map literal to expose properties containment prefilter';
     END IF;
 
     cost_match := regexp_match(first_cost_line, 'rows=([0-9]+)');
@@ -549,7 +1219,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%Custom Scan (AGE Adjacency Match)%' THEN
-            has_excluded_custom_scan := true;
+            has_edge_property_custom_scan := true;
         END IF;
     END LOOP;
 
@@ -561,7 +1231,7 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%Custom Scan (AGE Adjacency Match)%' THEN
-            has_excluded_custom_scan := true;
+            has_edge_projection_custom_scan := true;
         END IF;
     END LOOP;
 
@@ -573,12 +1243,18 @@ BEGIN
         graph_name)
     LOOP
         IF plan_text LIKE '%Custom Scan (AGE Adjacency Match)%' THEN
-            has_excluded_custom_scan := true;
+            has_right_property_custom_scan := true;
         END IF;
     END LOOP;
 
-    IF has_excluded_custom_scan THEN
-        RAISE EXCEPTION 'unexpected AGE Adjacency Match Custom Scan for excluded shape';
+    IF NOT has_edge_property_custom_scan THEN
+        RAISE EXCEPTION 'expected AGE Adjacency Match Custom Scan for edge property shape';
+    END IF;
+    IF NOT has_edge_projection_custom_scan THEN
+        RAISE EXCEPTION 'expected AGE Adjacency Match Custom Scan for edge projection shape';
+    END IF;
+    IF NOT has_right_property_custom_scan THEN
+        RAISE EXCEPTION 'expected AGE Adjacency Match Custom Scan for right property shape';
     END IF;
 
     FOR plan_text IN EXECUTE format(
@@ -4657,8 +5333,9 @@ BEGIN
          AS (plan agtype)',
         graph_name, edge_id)
     LOOP
-        IF (plan_text LIKE '%Index Cond: (id = %' OR
-            plan_text LIKE '%Filter: (id = %') AND
+        IF ((plan_text LIKE '%Custom Scan (AGE Adjacency Match)%' OR
+            plan_text LIKE '%Index Cond: (id = %' OR
+            plan_text LIKE '%Filter: (id = %')) AND
            plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_id(%' THEN
             has_direct_edge_id_qual := true;
@@ -4676,8 +5353,9 @@ BEGIN
          AS (plan agtype)',
         graph_name, endpoint_id)
     LOOP
-        IF (plan_text LIKE '%Index Cond: (start_id = %' OR
-            plan_text LIKE '%Filter: (start_id = %') AND
+        IF ((plan_text LIKE '%Custom Scan (AGE Adjacency Match)%' OR
+            plan_text LIKE '%Index Cond: (start_id = %' OR
+            plan_text LIKE '%Filter: (start_id = %')) AND
            plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_start_id(%' THEN
             has_direct_edge_start_id_qual := true;
@@ -4695,8 +5373,9 @@ BEGIN
          AS (plan agtype)',
         graph_name, end_endpoint_id)
     LOOP
-        IF (plan_text LIKE '%Index Cond: (end_id = %' OR
-            plan_text LIKE '%Filter: (end_id = %') AND
+        IF ((plan_text LIKE '%Custom Scan (AGE Adjacency Match)%' OR
+            plan_text LIKE '%Index Cond: (end_id = %' OR
+            plan_text LIKE '%Filter: (end_id = %')) AND
            plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_end_id(%' THEN
             has_direct_edge_end_id_qual := true;
@@ -4714,7 +5393,8 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%Filter: (properties = %' AND
+        IF ((plan_text LIKE '%Custom Scan (AGE Adjacency Match)%' OR
+             plan_text LIKE '%Filter: (properties = %')) AND
            plan_text NOT LIKE '%_agtype_build_edge(%' AND
            plan_text NOT LIKE '%age_properties(%' THEN
             has_direct_edge_properties_qual := true;

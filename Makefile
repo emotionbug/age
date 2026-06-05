@@ -61,6 +61,7 @@ OBJS = src/backend/age.o \
        src/backend/commands/label_commands.o \
        src/backend/executor/cypher_create.o \
        src/backend/executor/cypher_adjacency_match.o \
+       src/backend/executor/cypher_adjacency_match_terminal.o \
        src/backend/executor/cypher_property_projection.o \
        src/backend/executor/cypher_vle_stream.o \
        src/backend/executor/cypher_vle_stream_descriptor.o \
@@ -72,6 +73,7 @@ OBJS = src/backend/age.o \
        src/backend/nodes/cypher_outfuncs.o \
        src/backend/nodes/cypher_readfuncs.o \
        src/backend/optimizer/cypher_createplan.o \
+       src/backend/optimizer/cypher_graph_join.o \
        src/backend/optimizer/cypher_pathnode.o \
        src/backend/optimizer/cypher_property_paths.o \
        src/backend/optimizer/cypher_paths.o \

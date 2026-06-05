@@ -111,6 +111,8 @@ typedef struct VLEContextRefreshInput
     graphid start_vertex_id;
     bool end_valid;
     graphid end_vertex_id;
+    int32 terminal_label_id;
+    int32 terminal_endpoint_label_id;
     bool source_policy_known;
     VLETraversalSourceKind source_policy_outgoing_kind;
     VLETraversalSourceKind source_policy_incoming_kind;

@@ -79,6 +79,7 @@ SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[e*0..2 {name: "main edge"}
 SELECT * FROM cypher('cypher_vle', $$EXPLAIN (COSTS OFF) MATCH (:begin)-[e*0..2 {name: "main edge"}]->(:end) RETURN count(*) $$) AS (plan agtype);
 -- Terminal property output should retarget the marker stream descriptor, not a SQL function OID.
 SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)-[*1..2]->(n) RETURN n $$) AS (plan agtype);
+SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)-[:edge*1..1]->(:end) RETURN count(*) $$) AS (plan agtype);
 SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)-[*1..2]->(n) RETURN properties(n) $$) AS (plan agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (:begin)-[*1..2]->(n) RETURN count(n), count(properties(n)) $$) AS (nodes agtype, props agtype);
 SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)-[*1..2]->(n) RETURN n.name $$) AS (plan agtype);
@@ -500,13 +501,23 @@ SELECT drop_graph('issue_2092', true);
 SELECT create_graph('vle_index_probe');
 
 SELECT * FROM cypher('vle_index_probe', $$
-    CREATE (n0:N {i: 0}),
-           (n1:N {i: 1}),
+    CREATE (n0:N {i: 0, rare: true, isolated: true}),
+           (n1:N {i: 1, rare: true}),
            (n2:N {i: 2}),
-           (n3:N {i: 3}),
-           (n4:N {i: 4})
+           (n3:N {i: 3, rare: true}),
+           (n4:N {i: 4}),
+           (n5:N {i: 5}),
+           (n6:N {i: 6}),
+           (n7:N {i: 7}),
+           (n8:N {i: 8}),
+           (n9:N {i: 9})
     CREATE (n0)-[:R]->(n1),
            (n0)-[:R]->(n2),
+           (n0)-[:R]->(n5),
+           (n0)-[:R]->(n6),
+           (n0)-[:R]->(n7),
+           (n0)-[:R]->(n8),
+           (n0)-[:R]->(n9),
            (n1)-[:R]->(n3),
            (n1)-[:R]->(n4),
            (n2)-[:R]->(n3),
@@ -515,6 +526,15 @@ $$) AS (result agtype);
 
 CREATE INDEX vle_index_probe_n_properties_gin_idx
 ON vle_index_probe."N" USING gin (properties);
+SELECT * FROM cypher('vle_index_probe', $$
+    CREATE INDEX n_i_source FOR (n:N) ON (n.i)
+$$) AS (create_index text);
+SELECT * FROM cypher('vle_index_probe', $$
+    CREATE INDEX n_rare_source FOR (n:N) ON (n.rare)
+$$) AS (create_index text);
+SELECT * FROM cypher('vle_index_probe', $$
+    CREATE INDEX n_isolated_source FOR (n:N) ON (n.isolated)
+$$) AS (create_index text);
 CREATE INDEX vle_index_probe_r_start_idx
 ON vle_index_probe."R" USING btree (start_id);
 ANALYZE vle_index_probe."N";
@@ -531,7 +551,7 @@ SELECT * FROM cypher('vle_index_probe',
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_index_probe',
-                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
 AS (plan agtype);
 
 CREATE INDEX vle_index_probe_r_start_adj_idx
@@ -541,7 +561,31 @@ ON vle_index_probe."R" USING age_adjacency (end_id, id, start_id);
 ANALYZE vle_index_probe."R";
 
 SELECT * FROM cypher('vle_index_probe',
-                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) WHERE n.rare = true RETURN n.rare$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) WHERE n.rare = true RETURN n.rare$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) WHERE n.isolated = true RETURN n.isolated$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) WHERE n.rare = s.rare RETURN n.rare$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) WHERE n.rare = s.rare RETURN n.rare$$)
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_index_probe',
@@ -557,7 +601,7 @@ SELECT * FROM cypher('vle_index_probe',
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_index_probe',
-                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n$$)
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n$$)
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_index_probe',
@@ -565,16 +609,37 @@ SELECT * FROM cypher('vle_index_probe',
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_index_probe',
-                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N)-[:R*1..1]->(n) RETURN n.i$$)
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:N)-[:R*1..1]->(n) RETURN n.i$$)
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_index_probe',
-                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
 AS (plan agtype);
 
 SET enable_seqscan = on;
 
 SELECT drop_graph('vle_index_probe', true);
+
+SELECT create_graph('vle_directory_label_cost');
+
+SELECT * FROM cypher('vle_directory_label_cost', $$
+    CREATE (s:N {i: 0}), (n:N {i: 1}), (m:M {i: 2})
+    CREATE (s)-[:R]->(n), (s)-[:R]->(m)
+$$) AS (result agtype);
+
+CREATE INDEX vle_directory_label_cost_r_start_adj_idx
+ON vle_directory_label_cost."R" USING age_adjacency (start_id, id, end_id);
+ANALYZE vle_directory_label_cost."R";
+
+SET enable_seqscan = off;
+
+SELECT * FROM cypher('vle_directory_label_cost',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) RETURN n.i$$)
+AS (plan agtype);
+
+SET enable_seqscan = on;
+
+SELECT drop_graph('vle_directory_label_cost', true);
 
 SELECT create_graph('vle_fanout_policy');
 
@@ -727,16 +792,62 @@ ANALYZE vle_empty_cache_policy."R";
 SET enable_seqscan = off;
 
 SELECT * FROM cypher('vle_empty_cache_policy',
-                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_empty_cache_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
 AS (plan agtype);
 
+SELECT * FROM cypher('vle_empty_cache_policy',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_empty_cache_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_empty_cache_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]-(n) RETURN p$$)
+AS (plan agtype);
+
 SET enable_seqscan = on;
 
 SELECT drop_graph('vle_empty_cache_policy', true);
+
+SELECT create_graph('vle_directional_feedback_policy');
+
+SELECT * FROM cypher('vle_directional_feedback_policy', $$
+    CREATE (s:N {i: 0}),
+           (a0:N {i: 1}), (a1:N {i: 2}), (a2:N {i: 3}),
+           (a3:N {i: 4}), (a4:N {i: 5}), (a5:N {i: 6})
+    CREATE (s)-[:R]->(a0), (s)-[:R]->(a1),
+           (s)-[:R]->(a2), (s)-[:R]->(a3),
+           (s)-[:R]->(a4), (s)-[:R]->(a5)
+$$) AS (result agtype);
+
+CREATE INDEX vle_directional_feedback_policy_n_properties_gin_idx
+ON vle_directional_feedback_policy."N" USING gin (properties);
+CREATE INDEX vle_directional_feedback_policy_r_start_adj_idx
+ON vle_directional_feedback_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_directional_feedback_policy_r_end_adj_idx
+ON vle_directional_feedback_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_directional_feedback_policy."N";
+ANALYZE vle_directional_feedback_policy."R";
+
+SET enable_seqscan = off;
+
+SELECT * FROM cypher('vle_directional_feedback_policy',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH p=(:N {i: 0})-[:R*1..3]-(n) RETURN p$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_directional_feedback_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+AS (plan agtype);
+
+SET enable_seqscan = on;
+
+SELECT drop_graph('vle_directional_feedback_policy', true);
 
 SELECT create_graph('vle_payload_replay_policy');
 
@@ -760,7 +871,7 @@ ANALYZE vle_payload_replay_policy."R";
 SET enable_seqscan = off;
 
 SELECT * FROM cypher('vle_payload_replay_policy',
-                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_payload_replay_policy',
@@ -768,7 +879,11 @@ SELECT * FROM cypher('vle_payload_replay_policy',
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_payload_replay_policy',
-                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n.i$$)
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_payload_replay_policy',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n.i$$)
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_payload_replay_policy',
@@ -808,6 +923,37 @@ AS (plan agtype);
 SET enable_seqscan = on;
 
 SELECT drop_graph('vle_adjacency_only_policy', true);
+
+SELECT create_graph('vle_anonymous_label_source_policy');
+
+SELECT * FROM cypher('vle_anonymous_label_source_policy', $$
+    CREATE (s:N {i: 0}), (a:N {i: 1})
+    CREATE (s)-[:R]->(a)
+$$) AS (result agtype);
+
+CREATE INDEX vle_anonymous_label_source_policy_n_properties_gin_idx
+ON vle_anonymous_label_source_policy."N" USING gin (properties);
+CREATE INDEX vle_anonymous_label_source_policy_edge_start_adj_idx
+ON vle_anonymous_label_source_policy._ag_label_edge USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_anonymous_label_source_policy_edge_end_adj_idx
+ON vle_anonymous_label_source_policy._ag_label_edge USING age_adjacency (end_id, id, start_id);
+CREATE INDEX vle_anonymous_label_source_policy_r_start_adj_idx
+ON vle_anonymous_label_source_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_anonymous_label_source_policy_r_end_adj_idx
+ON vle_anonymous_label_source_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_anonymous_label_source_policy."N";
+ANALYZE vle_anonymous_label_source_policy._ag_label_edge;
+ANALYZE vle_anonymous_label_source_policy."R";
+
+SET enable_seqscan = off;
+
+SELECT * FROM cypher('vle_anonymous_label_source_policy',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH p=(:N {i: 0})-[*1..1]->(n) RETURN p$$)
+AS (plan agtype);
+
+SET enable_seqscan = on;
+
+SELECT drop_graph('vle_anonymous_label_source_policy', true);
 
 SELECT * FROM cypher('cypher_vle',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN length(p)$$)
@@ -905,12 +1051,266 @@ ANALYZE vle_frontier_empty_policy."R";
 SET enable_seqscan = off;
 
 SELECT * FROM cypher('vle_frontier_empty_policy',
-                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH p=(:N {i: 0})-[:R*1..2]->(n) RETURN p$$)
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH p=(:N {i: 0})-[:R*1..2]->(n) RETURN p$$)
 AS (plan agtype);
 
 SET enable_seqscan = on;
 
 SELECT drop_graph('vle_frontier_empty_policy', true);
+
+SELECT create_graph('vle_fixed_label_chain');
+
+SELECT * FROM cypher('vle_fixed_label_chain', $$
+    CREATE (a:v1 {i: 0}), (b:v1 {i: 1}), (c:v1 {i: 2}),
+           (d:v1 {i: 3}), (e:v1 {i: 4}), (f:v1 {i: 5}),
+           (g0:v1 {i: 10}), (g1:v1 {i: 11}), (g2:v1 {i: 12}),
+           (g3:v1 {i: 13}), (g4:v1 {i: 14}), (g5:v1 {i: 15}),
+           (x:other {i: 99})
+    CREATE (a)-[:e1]->(b)-[:e1]->(c)-[:e1]->(d)-[:e1]->(e)-[:e1]->(f),
+           (a)-[:e1]->(x)-[:e1]->(c),
+           (a)-[:e1]->(g0), (a)-[:e1]->(g1), (a)-[:e1]->(g2),
+           (a)-[:e1]->(g3), (a)-[:e1]->(g4), (a)-[:e1]->(g5)
+$$) AS (result agtype);
+
+CREATE INDEX vle_fixed_label_chain_e1_start_idx
+ON vle_fixed_label_chain."e1" (start_id);
+CREATE INDEX vle_fixed_label_chain_e1_end_idx
+ON vle_fixed_label_chain."e1" (end_id);
+CREATE INDEX vle_fixed_label_chain_e1_start_adj_idx
+ON vle_fixed_label_chain."e1" USING age_adjacency (start_id, id, end_id);
+SELECT * FROM cypher('vle_fixed_label_chain', $$
+    CREATE INDEX v1_i_source FOR (n:v1) ON (n.i)
+$$) AS (create_index text);
+ANALYZE vle_fixed_label_chain."v1";
+ANALYZE vle_fixed_label_chain."e1";
+
+SELECT * FROM cypher('vle_fixed_label_chain',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1) RETURN count(*)$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_fixed_label_chain',
+                    $$MATCH (:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1) RETURN count(*)$$)
+AS (paths agtype);
+
+SELECT * FROM cypher('vle_fixed_label_chain',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(n:v1) WHERE n.i = 5 RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_fixed_label_chain',
+                    $$MATCH (:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(n:v1) WHERE n.i = 5 RETURN n.i$$)
+AS (terminal_i agtype);
+
+SELECT drop_graph('vle_fixed_label_chain', true);
+
+SELECT create_graph('vle_typed_selectivity');
+
+SELECT * FROM cypher('vle_typed_selectivity', $$
+    CREATE (n0:N {i: 0}),
+           (n1:N {i: 1}),
+           (n2:N {i: 1}),
+           (n3:N {i: 3}),
+           (n4:N {i: 4}),
+           (n5:N {i: 5}),
+           (n6:N {i: 6}),
+           (n7:N {i: 7}),
+           (n8:N {i: 8}),
+           (n9:N {i: 9}),
+           (n10:N {i: 10}),
+           (n11:N {i: 11}),
+           (n12:N {i: 12}),
+           (n13:N {i: 13}),
+           (n14:N {i: 14}),
+           (n15:N {i: 15}),
+           (n16:N {i: 16}),
+           (n17:N {i: 17}),
+           (n18:N {i: 18}),
+           (n19:N {i: 19})
+    CREATE (n0)-[:R]->(n1),
+           (n0)-[:R]->(n2),
+           (n0)-[:R]->(n3),
+           (n0)-[:R]->(n4),
+           (n0)-[:R]->(n5),
+           (n0)-[:R]->(n6),
+           (n0)-[:R]->(n7),
+           (n0)-[:R]->(n8),
+           (n0)-[:R]->(n9),
+           (n0)-[:R]->(n10),
+           (n0)-[:R]->(n11),
+           (n0)-[:R]->(n12),
+           (n0)-[:R]->(n13),
+           (n0)-[:R]->(n14),
+           (n0)-[:R]->(n15),
+           (n0)-[:R]->(n16),
+           (n0)-[:R]->(n17),
+           (n0)-[:R]->(n18),
+           (n0)-[:R]->(n19)
+$$) AS (result agtype);
+
+SELECT * FROM cypher('vle_typed_selectivity', $$
+    CREATE INDEX n_i_source FOR (n:N) ON (n.i)
+$$) AS (create_index text);
+CREATE INDEX vle_typed_selectivity_r_start_adj_idx
+ON vle_typed_selectivity."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_typed_selectivity_r_end_adj_idx
+ON vle_typed_selectivity."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_typed_selectivity."N";
+ANALYZE vle_typed_selectivity."R";
+
+SELECT * FROM cypher('vle_typed_selectivity',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) WHERE n.i = 1 RETURN n.i$$)
+AS (plan agtype);
+
+SELECT drop_graph('vle_typed_selectivity', true);
+
+SELECT create_graph('vle_value_posting_feedback');
+SELECT create_vlabel('vle_value_posting_feedback', 'N');
+SELECT create_vlabel('vle_value_posting_feedback', 'M');
+SELECT create_elabel('vle_value_posting_feedback', 'R');
+
+INSERT INTO vle_value_posting_feedback."N"(id, properties)
+SELECT _graphid(_label_id('vle_value_posting_feedback', 'N'), g),
+       format('{"i": %s}', CASE WHEN g = 62 THEN 59 ELSE g END)::agtype
+FROM (
+    SELECT 1 AS g
+    UNION ALL SELECT 62
+    UNION ALL SELECT 199
+    UNION ALL SELECT generate_series(220, 252)
+) s;
+
+INSERT INTO vle_value_posting_feedback."M"(id, properties)
+SELECT _graphid(_label_id('vle_value_posting_feedback', 'M'), g),
+       '{}'::agtype
+FROM generate_series(1, 14) g;
+
+INSERT INTO vle_value_posting_feedback."R"(id, start_id, end_id, properties)
+SELECT _graphid(_label_id('vle_value_posting_feedback', 'R'), g),
+       _graphid(_label_id('vle_value_posting_feedback', 'N'), 199),
+       _graphid(_label_id('vle_value_posting_feedback', 'N'), g),
+       '{}'::agtype
+FROM (
+    SELECT 1 AS g
+    UNION ALL SELECT generate_series(220, 252)
+) s
+UNION ALL
+SELECT _graphid(_label_id('vle_value_posting_feedback', 'R'), g + 1000),
+       _graphid(_label_id('vle_value_posting_feedback', 'N'), 199),
+       _graphid(_label_id('vle_value_posting_feedback', 'M'), g),
+       '{}'::agtype
+FROM generate_series(1, 4) g
+UNION ALL
+SELECT _graphid(_label_id('vle_value_posting_feedback', 'R'), g + 2000),
+       _graphid(_label_id('vle_value_posting_feedback', 'M'), g),
+       _graphid(_label_id('vle_value_posting_feedback', 'M'), g + 10),
+       '{}'::agtype
+FROM generate_series(1, 4) g
+UNION ALL
+SELECT _graphid(_label_id('vle_value_posting_feedback', 'R'), g + 3000),
+       _graphid(_label_id('vle_value_posting_feedback', 'M'), g + 10),
+       _graphid(_label_id('vle_value_posting_feedback', 'N'), 62),
+       '{}'::agtype
+FROM generate_series(1, 4) g;
+
+SELECT * FROM cypher('vle_value_posting_feedback', $$
+    CREATE INDEX n_i_source FOR (n:N) ON (n.i)
+$$) AS (create_index text);
+CREATE INDEX vle_value_posting_feedback_r_start_adj_idx
+ON vle_value_posting_feedback."R" USING age_adjacency (start_id, id, end_id);
+ANALYZE vle_value_posting_feedback."N";
+ANALYZE vle_value_posting_feedback."R";
+
+SELECT * FROM cypher('vle_value_posting_feedback',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..1]->(n:N) WHERE n.i = 59 RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_value_posting_feedback',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..1]->(n:N) WHERE n.i = 59 RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_value_posting_feedback',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..1]->(n:N) WHERE n.i = 1 RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_value_posting_feedback',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..3]->(n:N) WHERE n.i = 59 RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_value_posting_feedback',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..3]->(n:N) WHERE n.i = 59 RETURN n.i$$)
+AS (plan agtype);
+
+SELECT drop_graph('vle_value_posting_feedback', true);
+
+SELECT create_graph('vle_fixed_chain_value_replay');
+SELECT create_vlabel('vle_fixed_chain_value_replay', 'N');
+SELECT create_vlabel('vle_fixed_chain_value_replay', 'M');
+SELECT create_elabel('vle_fixed_chain_value_replay', 'R');
+
+INSERT INTO vle_fixed_chain_value_replay."N"(id, properties)
+SELECT _graphid(_label_id('vle_fixed_chain_value_replay', 'N'), g),
+       format('{"i": %s}', CASE WHEN g = 921 THEN 59 ELSE g END)::agtype
+FROM (
+    SELECT 900 AS g
+    UNION ALL SELECT 901
+    UNION ALL SELECT 902
+    UNION ALL SELECT 920
+    UNION ALL SELECT generate_series(921, 950)
+) s;
+
+INSERT INTO vle_fixed_chain_value_replay."M"(id, properties)
+SELECT _graphid(_label_id('vle_fixed_chain_value_replay', 'M'), g),
+       '{}'::agtype
+FROM generate_series(1, 16) g;
+
+INSERT INTO vle_fixed_chain_value_replay."R"(id, start_id, end_id, properties)
+VALUES
+    (_graphid(_label_id('vle_fixed_chain_value_replay', 'R'), 1),
+     _graphid(_label_id('vle_fixed_chain_value_replay', 'N'), 900),
+     _graphid(_label_id('vle_fixed_chain_value_replay', 'N'), 901),
+     '{}'::agtype),
+    (_graphid(_label_id('vle_fixed_chain_value_replay', 'R'), 2),
+     _graphid(_label_id('vle_fixed_chain_value_replay', 'N'), 900),
+     _graphid(_label_id('vle_fixed_chain_value_replay', 'N'), 902),
+     '{}'::agtype),
+    (_graphid(_label_id('vle_fixed_chain_value_replay', 'R'), 3),
+     _graphid(_label_id('vle_fixed_chain_value_replay', 'N'), 901),
+     _graphid(_label_id('vle_fixed_chain_value_replay', 'N'), 920),
+     '{}'::agtype),
+    (_graphid(_label_id('vle_fixed_chain_value_replay', 'R'), 4),
+     _graphid(_label_id('vle_fixed_chain_value_replay', 'N'), 902),
+     _graphid(_label_id('vle_fixed_chain_value_replay', 'N'), 920),
+     '{}'::agtype);
+
+INSERT INTO vle_fixed_chain_value_replay."R"(id, start_id, end_id, properties)
+SELECT _graphid(_label_id('vle_fixed_chain_value_replay', 'R'), g),
+       _graphid(_label_id('vle_fixed_chain_value_replay', 'N'), 920),
+       _graphid(_label_id('vle_fixed_chain_value_replay', 'N'), g + 916),
+       '{}'::agtype
+FROM generate_series(5, 34) g;
+
+INSERT INTO vle_fixed_chain_value_replay."R"(id, start_id, end_id, properties)
+SELECT _graphid(_label_id('vle_fixed_chain_value_replay', 'R'), g + 100),
+       _graphid(_label_id('vle_fixed_chain_value_replay', 'N'), 920),
+       _graphid(_label_id('vle_fixed_chain_value_replay', 'M'), g),
+       '{}'::agtype
+FROM generate_series(1, 16) g;
+
+SELECT * FROM cypher('vle_fixed_chain_value_replay', $$
+    CREATE INDEX n_i_source FOR (n:N) ON (n.i)
+$$) AS (create_index text);
+CREATE INDEX vle_fixed_chain_value_replay_r_start_adj_idx
+ON vle_fixed_chain_value_replay."R" USING age_adjacency (start_id, id, end_id);
+ANALYZE vle_fixed_chain_value_replay."N";
+ANALYZE vle_fixed_chain_value_replay."R";
+
+SELECT * FROM cypher('vle_fixed_chain_value_replay',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (s:N) WHERE id(s) = 844424930132868 MATCH (s)-[:R]->(:N)-[:R]->(:N)-[:R]->(n:N) WHERE n.i = 59 RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_fixed_chain_value_replay',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930132868 MATCH (s)-[:R]->(:N)-[:R]->(:N)-[:R]->(n:N) WHERE n.i = 59 RETURN n.i$$)
+AS (plan agtype);
+
+SELECT drop_graph('vle_fixed_chain_value_replay', true);
 
 --
 -- Clean up

@@ -54,6 +54,7 @@ typedef struct AgePropertyProjectionScanState
     agtype *bool_true_value;
     AgePropertyProjectionSlot *slots;
     agtype_value *slot_values;
+    bool *slot_value_ready;
     bool *slot_value_found;
     bool *slot_value_needs_free;
     int slot_count;
@@ -75,6 +76,9 @@ static void load_property_projection_slot(AgePropertyProjectionSlot *slot,
                                           List *descriptor);
 static void link_property_projection_duplicate_slots(
     AgePropertyProjectionScanState *state);
+static bool load_property_projection_slot_value(
+    AgePropertyProjectionScanState *state, int slot_index,
+    agtype *properties);
 static bool property_projection_slots_same_path(
     const AgePropertyProjectionSlot *left,
     const AgePropertyProjectionSlot *right);
@@ -85,6 +89,8 @@ static const char *format_property_projection_type(Oid type_oid);
 static char *format_property_projection_slot(
     AgePropertyProjectionSlot *slot);
 static char *format_property_projection_slots(
+    AgePropertyProjectionScanState *state);
+static char *format_property_projection_summary(
     AgePropertyProjectionScanState *state);
 static bool property_projection_find_path(
     AgePropertyProjectionSlot *slot, agtype *properties, agtype_value *value,
@@ -194,6 +200,8 @@ static TupleTableSlot *access_age_property_projection_scan(ScanState *node)
             properties = DATUM_GET_AGTYPE_P(properties_datum);
             memset(state->slot_value_found, 0,
                    sizeof(bool) * state->slot_count);
+            memset(state->slot_value_ready, 0,
+                   sizeof(bool) * state->slot_count);
             memset(state->slot_value_needs_free, 0,
                    sizeof(bool) * state->slot_count);
             for (i = 0; i < state->slot_count; i++)
@@ -202,21 +210,9 @@ static TupleTableSlot *access_age_property_projection_scan(ScanState *node)
                 bool found;
                 agtype_value *value;
 
-                if (projection_slot->source_slot_index >= 0)
-                {
-                    int source_slot_index = projection_slot->source_slot_index;
-
-                    found = state->slot_value_found[source_slot_index];
-                    value = &state->slot_values[source_slot_index];
-                }
-                else
-                {
-                    found = property_projection_find_path(
-                        projection_slot, properties, &state->slot_values[i],
-                        &state->slot_value_needs_free[i]);
-                    state->slot_value_found[i] = found;
-                    value = &state->slot_values[i];
-                }
+                found = load_property_projection_slot_value(state, i,
+                                                            properties);
+                value = &state->slot_values[i];
 
                 if (!found || value->type == AGTV_NULL)
                 {
@@ -275,9 +271,11 @@ static void end_age_property_projection_scan(CustomScanState *node)
         state->slot_count = 0;
     }
     pfree_if_not_null(state->slot_values);
+    pfree_if_not_null(state->slot_value_ready);
     pfree_if_not_null(state->slot_value_found);
     pfree_if_not_null(state->slot_value_needs_free);
     state->slot_values = NULL;
+    state->slot_value_ready = NULL;
     state->slot_value_found = NULL;
     state->slot_value_needs_free = NULL;
 }
@@ -308,6 +306,9 @@ static void explain_age_property_projection_scan(CustomScanState *node,
                         es);
     ExplainPropertyInteger("Cached Property Slot Count", NULL,
                            state->slot_count, es);
+    ExplainPropertyText("Cached Property Summary",
+                        format_property_projection_summary(state),
+                        es);
 }
 
 static void load_property_projection_slots(AgePropertyProjectionScanState *state,
@@ -322,6 +323,7 @@ static void load_property_projection_slots(AgePropertyProjectionScanState *state
     state->slots = palloc0(sizeof(AgePropertyProjectionSlot) *
                            state->slot_count);
     state->slot_values = palloc0(sizeof(agtype_value) * state->slot_count);
+    state->slot_value_ready = palloc0(sizeof(bool) * state->slot_count);
     state->slot_value_found = palloc0(sizeof(bool) * state->slot_count);
     state->slot_value_needs_free = palloc0(sizeof(bool) *
                                            state->slot_count);
@@ -397,19 +399,63 @@ static void link_property_projection_duplicate_slots(
 
     for (slot_index = 0; slot_index < state->slot_count; slot_index++)
     {
+        int best_source_index = slot_index;
         int source_index;
 
-        for (source_index = 0; source_index < slot_index; source_index++)
+        for (source_index = 0; source_index < state->slot_count;
+             source_index++)
         {
+            AgePropertyProjectionSlot *source_slot;
+            AgePropertyProjectionSlot *slot;
+
+            source_slot = &state->slots[source_index];
+            slot = &state->slots[slot_index];
             if (property_projection_slots_same_path(
-                    &state->slots[source_index],
-                    &state->slots[slot_index]))
+                    source_slot, slot) &&
+                (source_slot->final_materialization_weight <
+                 state->slots[best_source_index].final_materialization_weight ||
+                 (source_slot->final_materialization_weight ==
+                  state->slots[best_source_index].final_materialization_weight &&
+                  source_index < best_source_index)))
             {
-                state->slots[slot_index].source_slot_index = source_index;
-                break;
+                best_source_index = source_index;
             }
         }
+
+        state->slots[slot_index].source_slot_index =
+            best_source_index == slot_index ? -1 : best_source_index;
     }
+}
+
+static bool load_property_projection_slot_value(
+    AgePropertyProjectionScanState *state, int slot_index, agtype *properties)
+{
+    AgePropertyProjectionSlot *slot = &state->slots[slot_index];
+    int source_slot_index;
+    bool found;
+
+    if (state->slot_value_ready[slot_index])
+        return state->slot_value_found[slot_index];
+
+    source_slot_index = slot->source_slot_index;
+    if (source_slot_index >= 0)
+    {
+        found = load_property_projection_slot_value(state, source_slot_index,
+                                                   properties);
+        state->slot_values[slot_index] =
+            state->slot_values[source_slot_index];
+        state->slot_value_found[slot_index] = found;
+        state->slot_value_ready[slot_index] = true;
+        return found;
+    }
+
+    found = property_projection_find_path(
+        slot, properties, &state->slot_values[slot_index],
+        &state->slot_value_needs_free[slot_index]);
+    state->slot_value_found[slot_index] = found;
+    state->slot_value_ready[slot_index] = true;
+
+    return found;
 }
 
 static bool property_projection_slots_same_path(
@@ -513,6 +559,43 @@ static char *format_property_projection_slots(
     }
 
     return buf.data;
+}
+
+static char *format_property_projection_summary(
+    AgePropertyProjectionScanState *state)
+{
+    int heap_lookup_count = 0;
+    int reused_slot_count = 0;
+    int total_final_weight = 0;
+    int heap_final_weight = 0;
+    int max_final_weight = 0;
+    int i;
+
+    Assert(state != NULL);
+
+    for (i = 0; i < state->slot_count; i++)
+    {
+        AgePropertyProjectionSlot *slot = &state->slots[i];
+
+        total_final_weight += slot->final_materialization_weight;
+        max_final_weight = Max(max_final_weight,
+                               slot->final_materialization_weight);
+        if (slot->source_slot_index >= 0)
+        {
+            reused_slot_count++;
+        }
+        else
+        {
+            heap_lookup_count++;
+            heap_final_weight += slot->final_materialization_weight;
+        }
+    }
+
+    return psprintf("slots=%d heap-lookups=%d reused=%d "
+                    "final-weight=%d heap-final-weight=%d "
+                    "max-final-weight=%d",
+                    state->slot_count, heap_lookup_count, reused_slot_count,
+                    total_final_weight, heap_final_weight, max_final_weight);
 }
 
 static bool property_projection_find_path(

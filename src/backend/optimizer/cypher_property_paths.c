@@ -145,11 +145,14 @@ static bool extract_map2_property_access_args(Expr *expr, Node **properties,
                                               Node **prop_key1,
                                               Node **out_key2,
                                               Node **prop_key2);
+static bool map2_property_access_has_typed_slots(Expr *expr);
 static bool extract_map_property_access_args(Expr *expr, Node **properties,
                                              List **out_keys,
                                              List **prop_keys);
+static bool map_property_access_has_typed_slots(Expr *expr);
 static bool extract_list_property_access_args(Expr *expr, Node **properties,
                                               List **prop_keys);
+static bool list_property_access_has_typed_slots(Expr *expr);
 static bool same_property_source(Node *left, Node *right);
 static bool cached_property_slots_share_key_source(
     const CypherCachedPropertySlotDescriptor *left,
@@ -159,8 +162,38 @@ static bool cached_property_slots_same_physical_signature(
     const CypherCachedPropertySlotDescriptor *right);
 static bool cached_property_slot_uses_typed_physical_result(
     const CypherCachedPropertySlotDescriptor *slot);
+static RelOptInfo *base_rel_for_cached_property_slot(
+    PlannerInfo *root, const CypherCachedPropertySlotDescriptor *slot);
+static bool replace_array_agg_property_arg_expr(
+    CypherArrayAggPropertyHandoff *handoff, Node *old_expr, Node *new_expr);
+static bool property_signature_uses_typed_physical_result(
+    const CypherPropertyAccessSignature *signature);
 static int cached_property_slot_final_materialization_weight(
     Oid field_result_type);
+static int estimated_array_agg_slot_wire_width(Oid value_type);
+static int array_agg_state_width_weight(CypherArrayAggPropertyHandoff *handoff);
+static double row_scaled_materialization_credit(double base_weight,
+                                                double input_rows);
+static double row_scaled_index_domain_credit(int index_match_slot_count,
+                                             int index_width_weight,
+                                             double input_rows);
+static int array_agg_index_domain_width_weight(
+    CypherArrayAggPropertyHandoff *handoff);
+static bool array_agg_slot_reuses_prior_key_source(
+    CypherArrayAggPropertyHandoff *handoff,
+    const CypherCachedPropertySlotDescriptor *slot, ListCell *slot_cell);
+static int array_agg_heap_lookup_slot_count(
+    CypherArrayAggPropertyHandoff *handoff);
+static int array_agg_reused_slot_count(CypherArrayAggPropertyHandoff *handoff);
+static int array_agg_heap_final_materialization_weight(
+    CypherArrayAggPropertyHandoff *handoff);
+static int array_agg_source_reuse_width_weight(
+    CypherArrayAggPropertyHandoff *handoff);
+static int array_agg_materialization_cost_weight(
+    CypherArrayAggPropertyHandoff *handoff);
+static bool cached_property_slot_keys_are_strings(List *keys);
+static bool pathtarget_has_array_agg_property_arg(
+    PathTarget *target, const CypherArrayAggPropertyArgPlan *arg_plan);
 static List *extract_map_build_args(FuncExpr *map_expr);
 static Const *make_property_path_agtype_const(List *keys);
 static bool extract_agtype_const_string(Const *key, agtype_value *value);
@@ -186,8 +219,8 @@ static void init_property_index_handoff(Node *expr,
 static bool property_index_expr_matches(Node *index_expr,
                                         CypherPropertyIndexHandoff *handoff);
 static void set_property_index_handoff_expr(Node *index_expr,
-                                            CypherPropertyIndexHandoff *handoff,
-                                            bool copy_expr);
+                                            Oid index_oid,
+                                            CypherPropertyIndexHandoff *handoff);
 static bool detect_simple_property_projection_target(PathTarget *target,
                                                      List **slots);
 static bool is_simple_property_access_target(
@@ -250,6 +283,22 @@ static bool find_array_agg_property_handoff_walker(Node *node,
 static Node *rewrite_array_agg_property_target_mutator(Node *node,
                                                        void *context);
 static bool make_array_agg_property_handoff_args(
+    Aggref *aggref, CypherArrayAggPropertyHandoff *handoff);
+static void stamp_array_agg_property_slot_agg_oid(
+    CypherArrayAggPropertyHandoff *handoff);
+static bool make_array_agg_original_property_args(
+    Aggref *aggref, CypherArrayAggPropertyHandoff *handoff);
+static Node *make_array_agg_property_slot_arg(
+    CypherArrayAggPropertyHandoff *handoff, Node *container, Node *path,
+    Oid value_type, Oid field_result_type);
+static Node *make_array_agg_property_signature_slot_arg(
+    CypherArrayAggPropertyHandoff *handoff,
+    CypherPropertyAccessSignature *signature);
+static bool make_array_agg_original_map2_property_args(
+    Aggref *aggref, CypherArrayAggPropertyHandoff *handoff);
+static bool make_array_agg_original_map_property_args(
+    Aggref *aggref, CypherArrayAggPropertyHandoff *handoff);
+static bool make_array_agg_original_list_property_args(
     Aggref *aggref, CypherArrayAggPropertyHandoff *handoff);
 static bool make_array_agg_single_property_args(
     Aggref *aggref, CypherArrayAggPropertyHandoff *handoff);
@@ -450,6 +499,9 @@ static bool rewrite_array_agg_map2_property_access_expr(Node *node)
         return false;
 
     arg_tle = linitial_node(TargetEntry, aggref->args);
+    if (arg_tle != NULL && map2_property_access_has_typed_slots(arg_tle->expr))
+        return false;
+
     if (arg_tle == NULL ||
         !extract_map2_property_access_args(arg_tle->expr, &properties,
                                            &out_key1, &prop_key1,
@@ -498,6 +550,9 @@ static bool rewrite_array_agg_map_property_access_expr(Node *node)
         return false;
 
     arg_tle = linitial_node(TargetEntry, aggref->args);
+    if (arg_tle != NULL && map_property_access_has_typed_slots(arg_tle->expr))
+        return false;
+
     if (arg_tle == NULL ||
         !extract_map_property_access_args(arg_tle->expr, &properties,
                                           &out_keys, &prop_keys))
@@ -540,6 +595,9 @@ static bool rewrite_array_agg_list_property_access_expr(Node *node)
         return false;
 
     arg_tle = linitial_node(TargetEntry, aggref->args);
+    if (arg_tle != NULL && list_property_access_has_typed_slots(arg_tle->expr))
+        return false;
+
     if (arg_tle == NULL ||
         !extract_list_property_access_args(arg_tle->expr, &properties,
                                            &prop_keys))
@@ -672,7 +730,8 @@ bool cypher_find_matching_property_index_handoff(
 
             if (property_index_expr_matches(index_expr, handoff))
             {
-                set_property_index_handoff_expr(index_expr, handoff, false);
+                set_property_index_handoff_expr(index_expr, index->indexoid,
+                                                handoff);
                 return true;
             }
         }
@@ -713,7 +772,7 @@ bool cypher_find_matching_property_index_handoff_for_rte(
             continue;
         }
 
-        index_exprs = RelationGetIndexExpressions(index_rel);
+        index_exprs = copyObject(RelationGetIndexExpressions(index_rel));
         if (index_exprs != NIL && rti != 1)
             ChangeVarNodes((Node *)index_exprs, 1, rti, 0);
 
@@ -723,7 +782,8 @@ bool cypher_find_matching_property_index_handoff_for_rte(
 
             if (property_index_expr_matches(index_expr, handoff))
             {
-                set_property_index_handoff_expr(index_expr, handoff, true);
+                set_property_index_handoff_expr(index_expr, index_oid,
+                                                handoff);
                 break;
             }
         }
@@ -747,6 +807,14 @@ Node *cypher_make_property_index_handoff_expr(
     if (handoff == NULL || handoff->index_expr == NULL)
         return NULL;
 
+    if (handoff->index_domain_matches_cached_slot)
+    {
+        slot_expr = cypher_make_cached_property_slot_expr(
+            &handoff->index_cached_property_slot);
+        if (slot_expr != NULL)
+            return slot_expr;
+    }
+
     if (handoff->has_cached_property_slot)
     {
         slot_expr = cypher_make_cached_property_slot_expr(
@@ -756,6 +824,53 @@ Node *cypher_make_property_index_handoff_expr(
     }
 
     return copyObject(handoff->index_expr);
+}
+
+void cypher_refresh_array_agg_property_index_domains(
+    PlannerInfo *root, CypherArrayAggPropertyHandoff *handoff)
+{
+    ListCell *lc;
+
+    if (root == NULL || handoff == NULL ||
+        handoff->cached_property_slots == NIL)
+    {
+        return;
+    }
+
+    handoff->index_domain_match_slot_count = 0;
+    foreach(lc, handoff->cached_property_slots)
+    {
+        CypherCachedPropertySlotDescriptor *slot = lfirst(lc);
+        CypherPropertyIndexHandoff index_handoff;
+        RelOptInfo *rel;
+        Node *old_expr;
+        Node *new_expr;
+
+        if (slot == NULL || !slot->has_property_descriptor)
+            continue;
+
+        rel = base_rel_for_cached_property_slot(root, slot);
+        if (rel == NULL || rel->indexlist == NIL)
+            continue;
+
+        old_expr = cypher_make_cached_property_slot_expr(slot);
+        if (old_expr == NULL ||
+            !cypher_find_matching_property_index_handoff(rel, old_expr,
+                                                         &index_handoff) ||
+            !index_handoff.index_domain_matches_cached_slot)
+        {
+            continue;
+        }
+
+        slot->index_expr = copyObject(index_handoff.index_expr);
+        slot->property_descriptor.index_expr = slot->index_expr;
+        new_expr = cypher_make_cached_property_slot_expr(slot);
+        if (new_expr == NULL)
+            continue;
+
+        if (replace_array_agg_property_arg_expr(handoff, old_expr, new_expr))
+            handoff->index_domain_match_slot_count++;
+    }
 }
 
 Node *cypher_replace_property_index_side(OpExpr *op, bool replace_left,
@@ -1026,7 +1141,9 @@ static bool make_cached_property_slot_descriptor(
 
     memset(slot, 0, sizeof(CypherCachedPropertySlotDescriptor));
     if (handoff->property_signature.container == NULL ||
-        handoff->property_signature.keys == NIL)
+        handoff->property_signature.keys == NIL ||
+        !cached_property_slot_keys_are_strings(
+            handoff->property_signature.keys))
     {
         return false;
     }
@@ -1384,6 +1501,37 @@ PathTarget *cypher_build_typed_collect_agg_target(
     return set_pathtarget_cost_width(root, new_target);
 }
 
+double cypher_typed_collect_materialization_credit(List *arg_plans,
+                                                   double input_rows)
+{
+    double base_weight = 0.0;
+    ListCell *lc;
+
+    foreach(lc, arg_plans)
+    {
+        CypherTypedCollectArgPlan *arg_plan = lfirst(lc);
+        CypherTypedCollectHandoff *handoff;
+        int weight;
+
+        if (arg_plan == NULL || arg_plan->handoff == NULL)
+            continue;
+
+        handoff = arg_plan->handoff;
+        if (handoff->has_cached_property_slot)
+        {
+            weight = handoff->cached_property_slot.final_materialization_weight;
+            base_weight += Max(1, weight);
+            base_weight += 1.0;
+        }
+        else
+        {
+            base_weight += 1.0;
+        }
+    }
+
+    return row_scaled_materialization_credit(base_weight, input_rows);
+}
+
 static Node *find_typed_collect_rewrite_arg(Aggref *aggref, List *arg_plans)
 {
     ListCell *lc;
@@ -1447,6 +1595,10 @@ bool cypher_find_array_agg_property_handoff(
                                        handoff);
     return !duplicate && handoff->aggref != NULL &&
         handoff->arg_exprs != NIL && handoff->arg_types != NIL &&
+        list_length(handoff->payload_value_types) ==
+        handoff->cached_property_slot_count &&
+        handoff->property_descriptor_slot_count ==
+        handoff->cached_property_slot_count &&
         OidIsValid(handoff->agg_func_oid);
 }
 
@@ -1478,6 +1630,7 @@ static bool find_array_agg_property_handoff_walker(Node *node,
     if (!make_array_agg_property_handoff_args(aggref, handoff))
         return false;
 
+    stamp_array_agg_property_slot_agg_oid(handoff);
     handoff->aggref = aggref;
 
     return false;
@@ -1505,10 +1658,28 @@ List *cypher_build_array_agg_property_arg_plans(
     foreach(lc, handoff->arg_exprs)
     {
         CypherArrayAggPropertyArgPlan *arg_plan;
+        ListCell *plan_lc;
+        Index arg_sortgroupref;
+        Node *arg;
 
         arg_plan = palloc(sizeof(*arg_plan));
-        arg_plan->arg = lfirst(lc);
-        arg_plan->sortgroupref = sortgroupref++;
+        arg = lfirst(lc);
+        arg_sortgroupref = 0;
+        foreach(plan_lc, arg_plans)
+        {
+            CypherArrayAggPropertyArgPlan *existing_plan = lfirst(plan_lc);
+
+            if (equal(existing_plan->arg, arg))
+            {
+                arg_sortgroupref = existing_plan->sortgroupref;
+                break;
+            }
+        }
+        if (arg_sortgroupref == 0)
+            arg_sortgroupref = sortgroupref++;
+
+        arg_plan->arg = arg;
+        arg_plan->sortgroupref = arg_sortgroupref;
         arg_plans = lappend(arg_plans, arg_plan);
     }
 
@@ -1527,11 +1698,39 @@ bool cypher_add_array_agg_property_arg_plans_to_target(PathTarget *target,
     {
         CypherArrayAggPropertyArgPlan *arg_plan = lfirst(lc);
 
+        if (pathtarget_has_array_agg_property_arg(target, arg_plan))
+            continue;
+
         add_column_to_pathtarget(target, (Expr *)copyObject(arg_plan->arg),
                                  arg_plan->sortgroupref);
     }
 
     return true;
+}
+
+static bool pathtarget_has_array_agg_property_arg(
+    PathTarget *target, const CypherArrayAggPropertyArgPlan *arg_plan)
+{
+    ListCell *lc;
+    int expr_index = 0;
+
+    if (target == NULL || arg_plan == NULL || arg_plan->arg == NULL)
+        return false;
+
+    foreach(lc, target->exprs)
+    {
+        if (equal(lfirst(lc), arg_plan->arg))
+        {
+            Index sortgroupref;
+
+            sortgroupref = get_pathtarget_sortgroupref(target, expr_index);
+            return sortgroupref == 0 ||
+                sortgroupref == arg_plan->sortgroupref;
+        }
+        expr_index++;
+    }
+
+    return false;
 }
 
 PathTarget *cypher_build_array_agg_property_target(
@@ -1558,6 +1757,288 @@ PathTarget *cypher_build_array_agg_property_target(
         return NULL;
 
     return set_pathtarget_cost_width(root, new_target);
+}
+
+double cypher_array_agg_property_materialization_credit(
+    CypherArrayAggPropertyHandoff *handoff, double input_rows)
+{
+    double type_vector_credit;
+    double index_domain_credit;
+
+    cypher_array_agg_property_materialization_credits(handoff, input_rows,
+                                                      &type_vector_credit,
+                                                      &index_domain_credit);
+
+    return type_vector_credit + index_domain_credit;
+}
+
+void cypher_array_agg_property_materialization_credits(
+    CypherArrayAggPropertyHandoff *handoff, double input_rows,
+    double *type_vector_credit, double *index_domain_credit)
+{
+    double base_weight;
+
+    if (type_vector_credit != NULL)
+        *type_vector_credit = 1.0;
+    if (index_domain_credit != NULL)
+        *index_domain_credit = 0.0;
+
+    if (handoff == NULL)
+        return;
+
+    base_weight = (double)array_agg_materialization_cost_weight(handoff);
+    if (type_vector_credit != NULL)
+        *type_vector_credit =
+            row_scaled_materialization_credit(base_weight, input_rows);
+    if (index_domain_credit != NULL)
+        *index_domain_credit =
+            row_scaled_index_domain_credit(
+                handoff->index_domain_match_slot_count,
+                array_agg_index_domain_width_weight(handoff), input_rows);
+}
+
+static double row_scaled_materialization_credit(double base_weight,
+                                                double input_rows)
+{
+    double rows;
+    double scaled_credit;
+
+    base_weight = Max(1.0, base_weight);
+    rows = Max(1.0, input_rows);
+    scaled_credit = base_weight * rows * cpu_operator_cost;
+
+    return Max(base_weight, scaled_credit);
+}
+
+static double row_scaled_index_domain_credit(int index_match_slot_count,
+                                             int index_width_weight,
+                                             double input_rows)
+{
+    double rows;
+    double base_weight;
+    double width_credit;
+
+    if (index_match_slot_count <= 0)
+        return 0.0;
+
+    rows = Max(1.0, input_rows);
+    index_width_weight = Max(index_match_slot_count * 2,
+                             index_width_weight);
+    base_weight = (double)index_width_weight;
+    width_credit = (double)index_width_weight * rows * cpu_tuple_cost;
+
+    return row_scaled_materialization_credit(base_weight, input_rows) +
+        width_credit;
+}
+
+static int estimated_array_agg_slot_wire_width(Oid value_type)
+{
+    if (value_type == INT8OID || value_type == FLOAT8OID)
+        return sizeof(int32) + sizeof(int64);
+
+    if (value_type == NUMERICOID)
+        return sizeof(int32) + 8;
+
+    if (value_type == TEXTOID)
+        return sizeof(int32) + 16;
+
+    if (value_type == AGTYPEOID)
+        return sizeof(int32) + 24;
+
+    if (OidIsValid(value_type))
+        return sizeof(int32) + sizeof(Datum);
+
+    return 0;
+}
+
+static int array_agg_state_width_weight(CypherArrayAggPropertyHandoff *handoff)
+{
+    int width;
+
+    if (handoff == NULL || handoff->cached_property_slot_count <= 0)
+        return 0;
+
+    width = handoff->payload_wire_width;
+    width += (handoff->cached_property_slot_count + 7) / 8;
+
+    return Max(1, (width + (int)sizeof(Datum) - 1) / (int)sizeof(Datum));
+}
+
+static int array_agg_index_domain_width_weight(
+    CypherArrayAggPropertyHandoff *handoff)
+{
+    int total_slots;
+    int total_width;
+    int per_slot_width;
+
+    if (handoff == NULL || handoff->index_domain_match_slot_count <= 0)
+        return 0;
+
+    total_slots = list_length(handoff->payload_value_types);
+    if (total_slots <= 0)
+        return handoff->index_domain_match_slot_count * 2;
+
+    total_width = handoff->payload_materialization_weight +
+        handoff->final_materialization_weight + total_slots +
+        array_agg_state_width_weight(handoff);
+    per_slot_width = (total_width + total_slots - 1) / total_slots;
+
+    return per_slot_width * handoff->index_domain_match_slot_count;
+}
+
+static bool array_agg_slot_reuses_prior_key_source(
+    CypherArrayAggPropertyHandoff *handoff,
+    const CypherCachedPropertySlotDescriptor *slot, ListCell *slot_cell)
+{
+    ListCell *lc;
+
+    foreach(lc, handoff->cached_property_slots)
+    {
+        CypherCachedPropertySlotDescriptor *prev_slot = lfirst(lc);
+
+        if (lc == slot_cell)
+            break;
+        if (cached_property_slots_share_key_source(prev_slot, slot))
+            return true;
+    }
+
+    return false;
+}
+
+static int array_agg_heap_lookup_slot_count(
+    CypherArrayAggPropertyHandoff *handoff)
+{
+    int heap_lookup_count = 0;
+    ListCell *lc;
+
+    if (handoff == NULL)
+        return 0;
+
+    foreach(lc, handoff->cached_property_slots)
+    {
+        CypherCachedPropertySlotDescriptor *slot = lfirst(lc);
+
+        if (!array_agg_slot_reuses_prior_key_source(handoff, slot, lc))
+            heap_lookup_count++;
+    }
+
+    return heap_lookup_count;
+}
+
+static int array_agg_reused_slot_count(CypherArrayAggPropertyHandoff *handoff)
+{
+    if (handoff == NULL)
+        return 0;
+
+    return handoff->cached_property_slot_count -
+        array_agg_heap_lookup_slot_count(handoff);
+}
+
+static int array_agg_heap_final_materialization_weight(
+    CypherArrayAggPropertyHandoff *handoff)
+{
+    int heap_final_weight = 0;
+    ListCell *lc;
+
+    if (handoff == NULL)
+        return 0;
+
+    foreach(lc, handoff->cached_property_slots)
+    {
+        CypherCachedPropertySlotDescriptor *slot = lfirst(lc);
+
+        if (!array_agg_slot_reuses_prior_key_source(handoff, slot, lc))
+            heap_final_weight += slot->final_materialization_weight;
+    }
+
+    return heap_final_weight;
+}
+
+static int array_agg_source_reuse_width_weight(
+    CypherArrayAggPropertyHandoff *handoff)
+{
+    int reused_slot_count;
+    int reused_final_weight;
+
+    if (handoff == NULL)
+        return 0;
+
+    reused_slot_count = array_agg_reused_slot_count(handoff);
+    if (reused_slot_count <= 0)
+        return 0;
+
+    reused_final_weight = handoff->final_materialization_weight -
+        array_agg_heap_final_materialization_weight(handoff);
+
+    return reused_slot_count + Max(0, reused_final_weight);
+}
+
+static int array_agg_materialization_cost_weight(
+    CypherArrayAggPropertyHandoff *handoff)
+{
+    if (handoff == NULL)
+        return 0;
+
+    return handoff->final_materialization_weight +
+        handoff->payload_materialization_weight +
+        list_length(handoff->payload_value_types) +
+        array_agg_state_width_weight(handoff) +
+        array_agg_source_reuse_width_weight(handoff);
+}
+
+char *cypher_format_array_agg_property_handoff(
+    CypherArrayAggPropertyHandoff *handoff)
+{
+    StringInfoData buf;
+    ListCell *lc;
+    int index = 0;
+
+    initStringInfo(&buf);
+    if (handoff == NULL)
+    {
+        appendStringInfoString(&buf, "unavailable");
+        return buf.data;
+    }
+
+    appendStringInfo(&buf,
+                     "slots=%d typed=%d agtype=%d "
+                     "index-matched=%d index-width-weight=%d "
+                     "descriptor-slots=%d "
+                     "heap-lookups=%d reused=%d "
+                     "payload-weight=%d final-weight=%d "
+                     "heap-final-weight=%d "
+                     "reuse-weight=%d cost-weight=%d "
+                     "materialization-weight=%d wire-width=%d "
+                     "state-width-weight=%d types=",
+                     handoff->cached_property_slot_count,
+                     handoff->typed_payload_slot_count,
+                     handoff->agtype_payload_slot_count,
+                     handoff->index_domain_match_slot_count,
+                     array_agg_index_domain_width_weight(handoff),
+                     handoff->property_descriptor_slot_count,
+                     array_agg_heap_lookup_slot_count(handoff),
+                     array_agg_reused_slot_count(handoff),
+                     handoff->payload_materialization_weight,
+                     handoff->final_materialization_weight,
+                     array_agg_heap_final_materialization_weight(handoff),
+                     array_agg_source_reuse_width_weight(handoff),
+                     array_agg_materialization_cost_weight(handoff),
+                     handoff->payload_materialization_weight +
+                     handoff->final_materialization_weight,
+                     handoff->payload_wire_width,
+                     array_agg_state_width_weight(handoff));
+
+    foreach(lc, handoff->payload_value_types)
+    {
+        Oid value_type = lfirst_oid(lc);
+
+        if (index > 0)
+            appendStringInfoChar(&buf, ',');
+        appendStringInfoString(&buf, format_type_be(value_type));
+        index++;
+    }
+
+    return buf.data;
 }
 
 static Node *rewrite_array_agg_property_target_mutator(Node *node,
@@ -1612,6 +2093,12 @@ static bool make_array_agg_property_handoff_args(
     if (aggref == NULL || handoff == NULL)
         return false;
 
+    if (is_array_agg_agtype_aggref(aggref) &&
+        make_array_agg_original_property_args(aggref, handoff))
+    {
+        return true;
+    }
+
     if (aggref->aggfnoid == get_cached_age_array_agg_property_agg_oid())
         return make_array_agg_single_property_args(aggref, handoff);
 
@@ -1625,6 +2112,332 @@ static bool make_array_agg_property_handoff_args(
         return make_array_agg_list_property_args(aggref, handoff);
 
     return false;
+}
+
+static void stamp_array_agg_property_slot_agg_oid(
+    CypherArrayAggPropertyHandoff *handoff)
+{
+    ListCell *lc;
+
+    if (handoff == NULL || !OidIsValid(handoff->agg_func_oid))
+        return;
+
+    foreach(lc, handoff->cached_property_slots)
+    {
+        CypherCachedPropertySlotDescriptor *slot = lfirst(lc);
+
+        slot->agg_func_oid = handoff->agg_func_oid;
+        if (slot->has_property_descriptor)
+            slot->property_descriptor.agg_func_oid = handoff->agg_func_oid;
+    }
+}
+
+static bool make_array_agg_original_property_args(
+    Aggref *aggref, CypherArrayAggPropertyHandoff *handoff)
+{
+    TargetEntry *arg_tle;
+
+    if (aggref == NULL || !is_array_agg_agtype_aggref(aggref) ||
+        list_length(aggref->args) != 1)
+    {
+        return false;
+    }
+
+    arg_tle = linitial_node(TargetEntry, aggref->args);
+    if (arg_tle == NULL)
+        return false;
+
+    return make_array_agg_original_map2_property_args(aggref, handoff) ||
+        make_array_agg_original_map_property_args(aggref, handoff) ||
+        make_array_agg_original_list_property_args(aggref, handoff);
+}
+
+static Node *make_array_agg_property_slot_arg(
+    CypherArrayAggPropertyHandoff *handoff, Node *container, Node *path,
+    Oid value_type, Oid field_result_type)
+{
+    CypherCachedPropertySlotDescriptor slot;
+    CypherCachedPropertySlotDescriptor *slot_copy;
+    Node *slot_expr;
+    List *keys = NIL;
+
+    if (handoff == NULL || container == NULL || path == NULL ||
+        !extract_property_path_const_keys(path, &keys))
+    {
+        return NULL;
+    }
+
+    memset(&slot, 0, sizeof(slot));
+    slot.container = container;
+    slot.keys = keys;
+    slot.value_type = value_type;
+    slot.field_result_type = field_result_type;
+    if (cached_property_slot_keys_are_strings(keys))
+    {
+        slot.has_property_descriptor = true;
+        slot.property_descriptor.property_signature.container = container;
+        slot.property_descriptor.property_signature.keys = keys;
+        slot.property_descriptor.property_signature.value_type = value_type;
+        slot.property_descriptor.property_signature.field_result_type =
+            field_result_type;
+    }
+    slot.final_materialization_weight =
+        cached_property_slot_final_materialization_weight(field_result_type);
+
+    slot_expr = cypher_make_cached_property_slot_expr(&slot);
+    if (slot_expr == NULL)
+        return NULL;
+
+    slot_copy = palloc(sizeof(*slot_copy));
+    *slot_copy = slot;
+    handoff->cached_property_slots =
+        lappend(handoff->cached_property_slots, slot_copy);
+    handoff->payload_value_types =
+        lappend_oid(handoff->payload_value_types, slot.value_type);
+    handoff->cached_property_slot_count++;
+    if (slot.has_property_descriptor)
+        handoff->property_descriptor_slot_count++;
+    if (cached_property_slot_uses_typed_physical_result(&slot))
+        handoff->typed_payload_slot_count++;
+    else
+        handoff->agtype_payload_slot_count++;
+    handoff->payload_materialization_weight +=
+        cached_property_slot_final_materialization_weight(slot.value_type);
+    handoff->final_materialization_weight +=
+        slot.final_materialization_weight;
+    handoff->payload_wire_width +=
+        estimated_array_agg_slot_wire_width(slot.value_type);
+
+    return slot_expr;
+}
+
+static Node *make_array_agg_property_signature_slot_arg(
+    CypherArrayAggPropertyHandoff *handoff,
+    CypherPropertyAccessSignature *signature)
+{
+    Const *path;
+
+    if (signature == NULL || signature->container == NULL ||
+        signature->keys == NIL)
+    {
+        return NULL;
+    }
+
+    path = make_property_path_agtype_const(signature->keys);
+    if (path == NULL)
+        return NULL;
+
+    return make_array_agg_property_slot_arg(handoff, signature->container,
+                                            (Node *)path,
+                                            signature->value_type,
+                                            signature->field_result_type);
+}
+
+static bool make_array_agg_original_map2_property_args(
+    Aggref *aggref, CypherArrayAggPropertyHandoff *handoff)
+{
+    TargetEntry *arg_tle;
+    FuncExpr *map_expr;
+    List *map_args;
+    CypherPropertyAccessSignature value1_signature;
+    CypherPropertyAccessSignature value2_signature;
+    Node *value1;
+    Node *value2;
+    Node *out_key1;
+    Node *out_key2;
+
+    arg_tle = linitial_node(TargetEntry, aggref->args);
+    if (arg_tle == NULL || arg_tle->expr == NULL ||
+        !IsA(arg_tle->expr, FuncExpr))
+    {
+        return false;
+    }
+
+    map_expr = castNode(FuncExpr, arg_tle->expr);
+    if (map_expr->funcid != get_cached_agtype_build_map_nonull_oid())
+        return false;
+
+    map_args = extract_map_build_args(map_expr);
+    if (list_length(map_args) != 4)
+        return false;
+
+    out_key1 = linitial(map_args);
+    out_key2 = lthird(map_args);
+    if (!IsA(out_key1, Const) || !IsA(out_key2, Const) ||
+        ((Const *)out_key1)->constisnull ||
+        ((Const *)out_key2)->constisnull ||
+        exprType(out_key1) != TEXTOID ||
+        exprType(out_key2) != TEXTOID)
+    {
+        return false;
+    }
+
+    if (!cypher_extract_property_access_signature(lsecond(map_args),
+                                                  &value1_signature) ||
+        !cypher_extract_property_access_signature(lfourth(map_args),
+                                                  &value2_signature) ||
+        !same_property_source(value1_signature.container,
+                              value2_signature.container))
+    {
+        return false;
+    }
+
+    value1 = make_array_agg_property_signature_slot_arg(handoff,
+                                                        &value1_signature);
+    value2 = make_array_agg_property_signature_slot_arg(handoff,
+                                                        &value2_signature);
+    if (value1 == NULL || value2 == NULL)
+        return false;
+
+    handoff->agg_func_oid = get_cached_age_array_agg_map_slots_agg_oid();
+    handoff->arg_exprs = list_make4(copyObject(out_key1), value1,
+                                    copyObject(out_key2), value2);
+    handoff->arg_types = list_make4_oid(TEXTOID, exprType(value1),
+                                        TEXTOID, exprType(value2));
+
+    return true;
+}
+
+static bool make_array_agg_original_map_property_args(
+    Aggref *aggref, CypherArrayAggPropertyHandoff *handoff)
+{
+    TargetEntry *arg_tle;
+    FuncExpr *map_expr;
+    List *map_args;
+    List *args = NIL;
+    List *arg_types = NIL;
+    Node *first_properties = NULL;
+    int nargs;
+    int i;
+
+    arg_tle = linitial_node(TargetEntry, aggref->args);
+    if (arg_tle == NULL || arg_tle->expr == NULL ||
+        !IsA(arg_tle->expr, FuncExpr))
+    {
+        return false;
+    }
+
+    map_expr = castNode(FuncExpr, arg_tle->expr);
+    if (map_expr->funcid != get_cached_agtype_build_map_nonull_oid())
+        return false;
+
+    map_args = extract_map_build_args(map_expr);
+    nargs = list_length(map_args);
+    if (nargs < 6 || nargs % 2 != 0)
+        return false;
+
+    for (i = 0; i < nargs; i += 2)
+    {
+        Node *out_key = list_nth(map_args, i);
+        Node *value_expr = list_nth(map_args, i + 1);
+        CypherPropertyAccessSignature signature;
+        Node *value;
+
+        if (!IsA(out_key, Const) ||
+            ((Const *)out_key)->constisnull ||
+            exprType(out_key) != TEXTOID ||
+            !cypher_extract_property_access_signature(value_expr,
+                                                      &signature))
+        {
+            return false;
+        }
+
+        if (i == 0)
+        {
+            first_properties = signature.container;
+        }
+        else if (!same_property_source(first_properties, signature.container))
+        {
+            return false;
+        }
+
+        value = make_array_agg_property_signature_slot_arg(handoff,
+                                                           &signature);
+        if (value == NULL)
+            return false;
+
+        args = lappend(args, copyObject(out_key));
+        args = lappend(args, value);
+        arg_types = lappend_oid(lappend_oid(arg_types, TEXTOID),
+                                exprType(value));
+    }
+
+    if (args == NIL)
+        return false;
+
+    handoff->agg_func_oid = get_cached_age_array_agg_map_slots_agg_oid();
+    handoff->arg_exprs = args;
+    handoff->arg_types = arg_types;
+
+    return true;
+}
+
+static bool make_array_agg_original_list_property_args(
+    Aggref *aggref, CypherArrayAggPropertyHandoff *handoff)
+{
+    TargetEntry *arg_tle;
+    FuncExpr *list_expr;
+    List *list_args;
+    List *args = NIL;
+    List *arg_types = NIL;
+    Node *first_properties = NULL;
+    int nargs;
+    int i;
+
+    arg_tle = linitial_node(TargetEntry, aggref->args);
+    if (arg_tle == NULL || arg_tle->expr == NULL ||
+        !IsA(arg_tle->expr, FuncExpr))
+    {
+        return false;
+    }
+
+    list_expr = castNode(FuncExpr, arg_tle->expr);
+    if (list_expr->funcid != get_cached_agtype_build_list_oid())
+        return false;
+
+    list_args = extract_map_build_args(list_expr);
+    nargs = list_length(list_args);
+    if (nargs <= 0)
+        return false;
+
+    for (i = 0; i < nargs; i++)
+    {
+        CypherPropertyAccessSignature signature;
+        Node *value_expr = list_nth(list_args, i);
+        Node *value;
+
+        if (!cypher_extract_property_access_signature(value_expr,
+                                                      &signature))
+        {
+            return false;
+        }
+
+        if (i == 0)
+        {
+            first_properties = signature.container;
+        }
+        else if (!same_property_source(first_properties, signature.container))
+        {
+            return false;
+        }
+
+        value = make_array_agg_property_signature_slot_arg(handoff,
+                                                           &signature);
+        if (value == NULL)
+            return false;
+
+        args = lappend(args, value);
+        arg_types = lappend_oid(arg_types, exprType(value));
+    }
+
+    if (args == NIL)
+        return false;
+
+    handoff->agg_func_oid = get_cached_age_array_agg_list_slots_agg_oid();
+    handoff->arg_exprs = args;
+    handoff->arg_types = arg_types;
+
+    return true;
 }
 
 static bool make_array_agg_single_property_args(
@@ -1642,8 +2455,8 @@ static bool make_array_agg_single_property_args(
     if (properties_tle == NULL || key_tle == NULL)
         return false;
 
-    value = cypher_make_property_path_slot_expr(
-        (Node *)properties_tle->expr, (Node *)key_tle->expr,
+    value = make_array_agg_property_slot_arg(
+        handoff, (Node *)properties_tle->expr, (Node *)key_tle->expr,
         AGTYPEOID, AGTYPEOID);
     if (value == NULL)
         return false;
@@ -1681,11 +2494,11 @@ static bool make_array_agg_map2_property_args(
         return false;
     }
 
-    value1 = cypher_make_property_path_slot_expr(
-        (Node *)properties_tle->expr, (Node *)prop_key1_tle->expr,
+    value1 = make_array_agg_property_slot_arg(
+        handoff, (Node *)properties_tle->expr, (Node *)prop_key1_tle->expr,
         AGTYPEOID, AGTYPEOID);
-    value2 = cypher_make_property_path_slot_expr(
-        (Node *)properties_tle->expr, (Node *)prop_key2_tle->expr,
+    value2 = make_array_agg_property_slot_arg(
+        handoff, (Node *)properties_tle->expr, (Node *)prop_key2_tle->expr,
         AGTYPEOID, AGTYPEOID);
     if (value1 == NULL || value2 == NULL)
         return false;
@@ -1734,8 +2547,8 @@ static bool make_array_agg_map_property_args(
     {
         Node *value;
 
-        value = cypher_make_property_path_slot_expr(
-            (Node *)properties_tle->expr, lfirst(prop_key_lc),
+        value = make_array_agg_property_slot_arg(
+            handoff, (Node *)properties_tle->expr, lfirst(prop_key_lc),
             AGTYPEOID, AGTYPEOID);
         if (value == NULL)
             return false;
@@ -1783,8 +2596,8 @@ static bool make_array_agg_list_property_args(
     {
         Node *value;
 
-        value = cypher_make_property_path_slot_expr(
-            (Node *)properties_tle->expr, lfirst(lc),
+        value = make_array_agg_property_slot_arg(
+            handoff, (Node *)properties_tle->expr, lfirst(lc),
             AGTYPEOID, AGTYPEOID);
         if (value == NULL)
             return false;
@@ -2117,6 +2930,35 @@ static bool extract_map2_property_access_args(Expr *expr, Node **properties,
     return true;
 }
 
+static bool map2_property_access_has_typed_slots(Expr *expr)
+{
+    FuncExpr *map_expr;
+    List *map_args;
+    CypherPropertyAccessSignature signature;
+
+    if (expr == NULL || !IsA(expr, FuncExpr))
+        return false;
+
+    map_expr = castNode(FuncExpr, expr);
+    if (map_expr->funcid != get_cached_agtype_build_map_nonull_oid())
+        return false;
+
+    map_args = extract_map_build_args(map_expr);
+    if (list_length(map_args) != 4)
+        return false;
+
+    if (cypher_extract_property_access_signature(lsecond(map_args),
+                                                 &signature) &&
+        property_signature_uses_typed_physical_result(&signature))
+    {
+        return true;
+    }
+
+    return cypher_extract_property_access_signature(lfourth(map_args),
+                                                   &signature) &&
+        property_signature_uses_typed_physical_result(&signature);
+}
+
 static bool extract_map_property_access_args(Expr *expr, Node **properties,
                                              List **out_keys,
                                              List **prop_keys)
@@ -2192,6 +3034,40 @@ static bool extract_map_property_access_args(Expr *expr, Node **properties,
     return *properties != NULL && list_length(*out_keys) >= 3;
 }
 
+static bool map_property_access_has_typed_slots(Expr *expr)
+{
+    FuncExpr *map_expr;
+    List *map_args;
+    int nargs;
+    int i;
+
+    if (expr == NULL || !IsA(expr, FuncExpr))
+        return false;
+
+    map_expr = castNode(FuncExpr, expr);
+    if (map_expr->funcid != get_cached_agtype_build_map_nonull_oid())
+        return false;
+
+    map_args = extract_map_build_args(map_expr);
+    nargs = list_length(map_args);
+    if (nargs < 6 || nargs % 2 != 0)
+        return false;
+
+    for (i = 1; i < nargs; i += 2)
+    {
+        CypherPropertyAccessSignature signature;
+
+        if (cypher_extract_property_access_signature(list_nth(map_args, i),
+                                                     &signature) &&
+            property_signature_uses_typed_physical_result(&signature))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static bool extract_list_property_access_args(Expr *expr, Node **properties,
                                               List **prop_keys)
 {
@@ -2250,6 +3126,35 @@ static bool extract_list_property_access_args(Expr *expr, Node **properties,
     return *properties != NULL;
 }
 
+static bool list_property_access_has_typed_slots(Expr *expr)
+{
+    FuncExpr *list_expr;
+    List *list_args;
+    int i;
+
+    if (expr == NULL || !IsA(expr, FuncExpr))
+        return false;
+
+    list_expr = castNode(FuncExpr, expr);
+    if (list_expr->funcid != get_cached_agtype_build_list_oid())
+        return false;
+
+    list_args = extract_map_build_args(list_expr);
+    for (i = 0; i < list_length(list_args); i++)
+    {
+        CypherPropertyAccessSignature signature;
+
+        if (cypher_extract_property_access_signature(list_nth(list_args, i),
+                                                     &signature) &&
+            property_signature_uses_typed_physical_result(&signature))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static bool same_property_source(Node *left, Node *right)
 {
     Var *left_var;
@@ -2305,6 +3210,61 @@ static bool cached_property_slot_uses_typed_physical_result(
         slot->field_result_type != AGTYPEOID;
 }
 
+static RelOptInfo *base_rel_for_cached_property_slot(
+    PlannerInfo *root, const CypherCachedPropertySlotDescriptor *slot)
+{
+    Var *container;
+    Index varno;
+
+    if (root == NULL || slot == NULL || slot->container == NULL ||
+        !IsA(slot->container, Var))
+    {
+        return NULL;
+    }
+
+    container = castNode(Var, slot->container);
+    varno = container->varno;
+    if (container->varlevelsup != 0 ||
+        varno <= 0 ||
+        varno >= root->simple_rel_array_size)
+    {
+        return NULL;
+    }
+
+    return root->simple_rel_array[varno];
+}
+
+static bool replace_array_agg_property_arg_expr(
+    CypherArrayAggPropertyHandoff *handoff, Node *old_expr, Node *new_expr)
+{
+    ListCell *lc;
+    bool replaced = false;
+
+    if (handoff == NULL || old_expr == NULL || new_expr == NULL)
+        return false;
+
+    foreach(lc, handoff->arg_exprs)
+    {
+        if (equal(lfirst(lc), old_expr))
+        {
+            lfirst(lc) = copyObject(new_expr);
+            replaced = true;
+        }
+    }
+
+    return replaced;
+}
+
+static bool property_signature_uses_typed_physical_result(
+    const CypherPropertyAccessSignature *signature)
+{
+    if (signature == NULL)
+        return false;
+
+    return signature->value_type != AGTYPEOID ||
+        signature->field_result_type != AGTYPEOID;
+}
+
 static int cached_property_slot_final_materialization_weight(
     Oid field_result_type)
 {
@@ -2315,6 +3275,26 @@ static int cached_property_slot_final_materialization_weight(
         return 1;
 
     return 0;
+}
+
+static bool cached_property_slot_keys_are_strings(List *keys)
+{
+    ListCell *lc;
+
+    if (keys == NIL)
+        return false;
+
+    foreach(lc, keys)
+    {
+        Node *key = lfirst(lc);
+        agtype_value value;
+
+        if (key == NULL || !IsA(key, Const) ||
+            !extract_agtype_const_string((Const *)key, &value))
+            return false;
+    }
+
+    return true;
 }
 
 static List *extract_map_build_args(FuncExpr *map_expr)
@@ -2658,24 +3638,39 @@ static bool property_index_expr_matches(Node *index_expr,
 }
 
 static void set_property_index_handoff_expr(Node *index_expr,
-                                            CypherPropertyIndexHandoff *handoff,
-                                            bool copy_expr)
+                                            Oid index_oid,
+                                            CypherPropertyIndexHandoff *handoff)
 {
-    Node *slot_expr = NULL;
+    CypherPropertyHandoffDescriptor index_descriptor;
+    Node *index_expr_copy;
 
     if (handoff == NULL || index_expr == NULL)
         return;
 
-    if (handoff->has_cached_property_slot)
-        slot_expr = cypher_make_cached_property_slot_expr(
-            &handoff->cached_property_slot);
+    index_expr_copy = copyObject(index_expr);
+    handoff->index_oid = index_oid;
+    handoff->index_expr = index_expr_copy;
 
-    if (slot_expr != NULL && equal(slot_expr, index_expr))
-        handoff->index_expr = slot_expr;
-    else
-        handoff->index_expr = copy_expr ? copyObject(index_expr) : index_expr;
+    memset(&index_descriptor, 0, sizeof(index_descriptor));
+    if (init_property_handoff_descriptor(index_expr_copy, InvalidOid,
+                                         InvalidOid, index_expr_copy,
+                                         &index_descriptor))
+    {
+        handoff->has_index_cached_property_slot =
+            make_cached_property_slot_descriptor(
+                &index_descriptor,
+                &handoff->index_cached_property_slot);
+    }
 
-    if (handoff->has_property_descriptor)
+    handoff->index_domain_matches_cached_slot =
+        handoff->has_cached_property_slot &&
+        handoff->has_index_cached_property_slot &&
+        cached_property_slots_same_physical_signature(
+            &handoff->cached_property_slot,
+            &handoff->index_cached_property_slot);
+
+    if (handoff->has_property_descriptor &&
+        handoff->index_domain_matches_cached_slot)
     {
         handoff->property_descriptor.index_expr = handoff->index_expr;
         refresh_property_index_cached_slot(handoff);

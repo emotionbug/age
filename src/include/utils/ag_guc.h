@@ -31,16 +31,6 @@
  * regular Postgres parameters. See guc.h for more details.
  */
 
-
-
-/*
- * Enables the experimental fixed-length MATCH rewrite that scans
- * age_adjacency candidate providers for guarded one-hop shapes. Keep this
- * opt-in until cost/cardinality policy and regression coverage are settled.
- */
-extern bool age_enable_adjacency_match;
-extern bool age_enable_adjacency_match_custom_path;
-
 void define_config_params(void);
 
 #endif

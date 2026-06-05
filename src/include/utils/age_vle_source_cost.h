@@ -36,6 +36,10 @@ typedef struct VLESourceFanoutEvidence
     double reltuples;
     double start_fanout;
     double end_fanout;
+    const char *start_fanout_source;
+    const char *end_fanout_source;
+    const char *start_value_posting_source;
+    const char *end_value_posting_source;
 } VLESourceFanoutEvidence;
 
 typedef struct VLEStreamSourceCostInput
@@ -57,6 +61,12 @@ typedef struct VLEStreamSourceCostInput
     bool age_adjacency_in;
     bool start_fanout_known;
     bool end_fanout_known;
+    bool composite_prefilter_planned;
+    int32 terminal_label_id;
+    Oid terminal_property_index_oid;
+    uint32 terminal_property_filter_id;
+    int64 composite_candidate_fanout;
+    int64 composite_fanout;
 } VLEStreamSourceCostInput;
 
 typedef struct VLEStreamSourceCostDecision
@@ -82,8 +92,13 @@ typedef struct VLEStreamSourceCostDecision
     int64 threshold_input_observed_count;
     int64 threshold_input_saturated_count;
     int64 threshold_input_relaxed_count;
+    int64 threshold_input_out_observed_count;
+    int64 threshold_input_in_observed_count;
+    int64 threshold_input_out_saturated_count;
+    int64 threshold_input_in_saturated_count;
     const char *threshold_input_source;
     const char *threshold_input_reason;
+    const char *threshold_input_class;
     bool payload_input_known;
     int64 payload_input_headroom_percent;
     int64 payload_input_scan_runs;
@@ -92,7 +107,13 @@ typedef struct VLEStreamSourceCostDecision
     int64 payload_input_replay_percent;
     int64 payload_input_seed_percent;
     int64 payload_input_observed_count;
+    int64 payload_input_value_posting_observed_count;
     const char *payload_input_reason;
+    const char *payload_input_class;
+    const char *payload_input_value_posting_source;
+    bool composite_prefilter_planned;
+    int64 composite_candidate_fanout;
+    int64 composite_fanout;
 } VLEStreamSourceCostDecision;
 
 typedef struct VLESourceRuntimeThresholdFeedback
@@ -102,9 +123,15 @@ typedef struct VLESourceRuntimeThresholdFeedback
     int64 endpoint_headroom_percent;
     int64 empty_lifecycle_batch_size;
     int64 root_empty_completion_count;
+    int64 root_empty_completion_out;
+    int64 root_empty_completion_in;
     int64 observed_count;
     int64 saturated_count;
     int64 relaxed_count;
+    int64 out_observed_count;
+    int64 in_observed_count;
+    int64 out_saturated_count;
+    int64 in_saturated_count;
     int64 scan_runs;
     int64 replay_runs;
     int64 seed_runs;
@@ -112,9 +139,13 @@ typedef struct VLESourceRuntimeThresholdFeedback
     int64 seed_percent;
     int64 payload_observed_count;
     int64 payload_endpoint_headroom_percent;
+    int64 payload_value_posting_observed_count;
     const char *source_direction;
     const char *reason;
+    const char *feedback_class;
     const char *payload_reason;
+    const char *payload_class;
+    const char *payload_value_posting_source;
 } VLESourceRuntimeThresholdFeedback;
 
 extern void estimate_vle_source_fanout_evidence(
@@ -139,7 +170,35 @@ extern double estimate_vle_edge_endpoint_fanout(
 extern double get_vle_relation_estimated_tuples(Oid relation_oid);
 extern char *format_vle_stream_edge_source_evidence(
     AgeVLEStreamEdgeSource *source);
+extern char *format_vle_stream_edge_source_cost(
+    AgeVLEStreamEdgeSource *source);
+extern char *format_vle_stream_edge_terminal_property_source(
+    AgeVLEStreamEdgeSource *source);
+extern char *format_vle_stream_edge_composite_source(
+    AgeVLEStreamEdgeSource *source);
+extern char *format_vle_stream_edge_composite_fanout(
+    AgeVLEStreamEdgeSource *source);
+extern char *format_vle_stream_edge_source_profile(
+    AgeVLEStreamEdgeSource *source);
+extern char *format_vle_stream_edge_source_threshold_input(
+    AgeVLEStreamEdgeSource *source);
+extern char *format_vle_stream_edge_source_payload_input(
+    AgeVLEStreamEdgeSource *source);
+extern char *format_vle_stream_edge_source_policy(
+    AgeVLEStreamEdgeSource *source);
 extern char *format_vle_source_runtime_evidence(
+    const AgeVLESourceStats *stats, const AgeVLEStreamEdgeSource *source);
+extern char *format_vle_source_runtime_plan(
+    const AgeVLESourceStats *stats, const AgeVLEStreamEdgeSource *source);
+extern char *format_vle_source_runtime_counters(
+    const AgeVLESourceStats *stats, const AgeVLEStreamEdgeSource *source);
+extern char *format_vle_source_runtime_payload(
+    const AgeVLESourceStats *stats, const AgeVLEStreamEdgeSource *source);
+extern char *format_vle_source_runtime_empty_evidence(
+    const AgeVLESourceStats *stats, const AgeVLEStreamEdgeSource *source);
+extern char *format_vle_source_runtime_empty_lifecycle(
+    const AgeVLESourceStats *stats, const AgeVLEStreamEdgeSource *source);
+extern char *format_vle_source_runtime_feedback(
     const AgeVLESourceStats *stats, const AgeVLEStreamEdgeSource *source);
 
 #endif

@@ -66,6 +66,8 @@ typedef struct VLETraversalAcceptance
     bool upper_unbounded;
     bool require_terminal;
     graphid terminal_id;
+    bool require_terminal_label;
+    int32 terminal_label_id;
 } VLETraversalAcceptance;
 
 typedef struct VLETraversalCandidate
@@ -93,6 +95,8 @@ extern void age_vle_acceptance_init(VLETraversalAcceptance *acceptance,
                                     bool upper_unbounded);
 extern void age_vle_acceptance_require_terminal(
     VLETraversalAcceptance *acceptance, graphid terminal_id);
+extern void age_vle_acceptance_require_terminal_label(
+    VLETraversalAcceptance *acceptance, int32 terminal_label_id);
 extern bool age_vle_accepts_path(const VLETraversalAcceptance *acceptance,
                                  graphid terminal_id, int64 path_length);
 extern bool age_vle_terminal_over_upper_bound(

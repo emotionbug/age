@@ -63,5 +63,12 @@ Datum create_vlabel(PG_FUNCTION_ARGS);
 Datum create_elabel(PG_FUNCTION_ARGS);
 
 Datum create_property_index(PG_FUNCTION_ARGS);
+Datum create_property_source_index(PG_FUNCTION_ARGS);
+Datum create_property_source_index_named(PG_FUNCTION_ARGS);
+Datum create_adjacency_index(PG_FUNCTION_ARGS);
+Datum create_adjacency_index_named(PG_FUNCTION_ARGS);
+Datum create_adjacency_indexes(PG_FUNCTION_ARGS);
+Datum create_adjacency_indexes_named(PG_FUNCTION_ARGS);
+Datum drop_graph_index(PG_FUNCTION_ARGS);
 
 #endif

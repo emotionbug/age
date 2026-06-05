@@ -19,24 +19,29 @@
 
 #include "postgres.h"
 
+#include "access/age_adjacency.h"
 #include "access/genam.h"
 #include "access/relation.h"
 #include "access/table.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_collation_d.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_statistic.h"
 #include "catalog/pg_type_d.h"
 #include "catalog/ag_namespace.h"
 #include "catalog/ag_label.h"
 #include "catalog/ag_graph.h"
+#include "commands/label_commands.h"
 #include "executor/cypher_adjacency_match.h"
 #include "executor/cypher_property_projection.h"
 #include "executor/cypher_vle_stream.h"
+#include "fmgr.h"
 #include "nodes/makefuncs.h"
 #include "nodes/cypher_nodes.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/primnodes.h"
 #include "optimizer/cost.h"
+#include "optimizer/cypher_graph_join.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
@@ -45,6 +50,7 @@
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_func.h"
+#include "parser/cypher_clause.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/inval.h"
 #include "utils/builtins.h"
@@ -61,7 +67,6 @@
 #include "optimizer/cypher_property_paths.h"
 #include "parser/cypher_property_signature.h"
 #include "utils/ag_func.h"
-#include "utils/ag_guc.h"
 #include "utils/ag_cache.h"
 #include "utils/agtype.h"
 #include "utils/age_vle_root.h"
@@ -86,6 +91,12 @@ typedef struct PropertyIndexSurfaceContext
     Index rti;
     RangeTblEntry *rte;
 } PropertyIndexSurfaceContext;
+
+typedef struct GraphPropertySourceSelectivity
+{
+    double selectivity;
+    char *source;
+} GraphPropertySourceSelectivity;
 
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook;
 static set_join_pathlist_hook_type prev_set_join_pathlist_hook;
@@ -122,18 +133,66 @@ static Const *find_endpoint_graphid_const(PlannerInfo *root,
 static bool adjacency_match_bound_expr_uses_age_id(Node *node);
 static bool adjacency_match_bound_expr_uses_age_id_walker(Node *node,
                                                           void *context);
+typedef struct AdjacencyMatchPayloadRequest
+{
+    Bitmapset *attrs;
+    int attr_mask;
+    bool unsupported;
+    bool fetch_properties;
+} AdjacencyMatchPayloadRequest;
 static void cost_adjacency_match_custom_path(PlannerInfo *root,
                                              RelOptInfo *rel,
                                              CustomPath *cp,
-                                             CypherAdjacencyMatchCandidate *candidate);
+                                             CypherAdjacencyMatchCandidate *candidate,
+                                             const AdjacencyMatchPayloadRequest *payload_request,
+                                             Const *endpoint_const);
+static bool adjacency_match_requires_edge_payload(
+    const CypherAdjacencyMatchCandidate *candidate);
+static bool adjacency_match_has_terminal_property_prefetch(
+    const CypherAdjacencyMatchCandidate *candidate);
+static const char *adjacency_match_terminal_property_value_kind(
+    const CypherAdjacencyMatchCandidate *candidate);
+static const char *adjacency_match_terminal_source_strategy(
+    const CypherAdjacencyMatchCandidate *candidate);
+static int adjacency_match_terminal_prefetch_threshold(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request);
+static bool adjacency_match_plans_terminal_property_prefetch(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request);
+static int adjacency_match_residual_predicate_count(
+    const CypherAdjacencyMatchCandidate *candidate);
+static int adjacency_match_index_solved_predicate_count(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request);
+static const char *adjacency_match_terminal_prefetch_reason(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request);
+static const char *adjacency_match_join_order_connector(
+    const CypherAdjacencyMatchCandidate *candidate);
+static const char *adjacency_match_join_order_bound(
+    const CypherAdjacencyMatchCandidate *candidate);
+static const char *adjacency_match_join_order_property(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request);
+static AdjacencyMatchPayloadRequest build_adjacency_match_payload_request(
+    Index relid, List *target_nodes, List *clauses);
+static List *make_adjacency_match_descriptor(
+    CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request,
+    const AgeGraphJoinCandidate *graph_join_candidate);
+static AgeGraphJoinCandidateTable *make_adjacency_match_graph_join_table(
+    RelOptInfo *rel, CustomPath *cp,
+    CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request);
 static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
                                            RelOptInfo *rel,
                                            CustomPath *best_path,
                                            List *tlist, List *clauses,
                                            List *custom_plans);
-static List *build_adjacency_match_custom_scan_tlist(Index relid,
-                                                     List *tlist,
-                                                     List *clauses);
+static List *build_adjacency_match_custom_scan_tlist(
+    Index relid, const AdjacencyMatchPayloadRequest *payload_request);
+static int adjacency_match_payload_attr_mask(Bitmapset *attrs);
 static void collect_adjacency_match_scan_vars_from_list(List *nodes,
                                                         void *context);
 static bool collect_adjacency_match_scan_vars(Node *node, void *context);
@@ -143,13 +202,31 @@ static CypherAdjacencyMatchCandidate *pop_adjacency_match_candidate(
     PlannerInfo *root, RangeTblEntry *rte);
 static void bind_adjacency_match_candidate_outer_relids(
     PlannerInfo *root, CypherAdjacencyMatchCandidate *candidate);
-static void log_adjacency_match_join_paths(RelOptInfo *joinrel,
+static void restrict_adjacency_match_terminal_property_prefetch(
+    PlannerInfo *root, CypherAdjacencyMatchCandidate *candidate);
+static void log_graph_expansion_join_paths(RelOptInfo *joinrel,
                                            RelOptInfo *outerrel,
                                            RelOptInfo *innerrel,
                                            JoinType jointype);
-static void adjust_adjacency_match_join_rows(RelOptInfo *joinrel,
+static void adjust_graph_expansion_join_rows(RelOptInfo *joinrel,
                                              JoinType jointype);
-static bool path_contains_adjacency_match(Path *path);
+static bool path_contains_graph_expansion(Path *path);
+static bool path_has_bound_graph_expansion(Path *path, Relids outer_relids,
+                                           const char **order_property);
+static const char *custom_path_adjacency_join_order_property(
+    CustomPath *custom_path);
+static const char *custom_path_vle_join_order_property(
+    CustomPath *custom_path);
+static bool custom_path_vle_has_bound_endpoints(CustomPath *custom_path);
+static const char *index_path_join_order_property(Path *path);
+static bool path_is_index_backed(Path *path);
+static const char *adjacency_match_descriptor_text_field(List *descriptor,
+                                                        int index);
+static const char *vle_stream_edge_source_text_field(List *descriptor,
+                                                     int index);
+static int64 vle_stream_descriptor_int8_field(List *descriptor, int index,
+                                              int64 fallback);
+static bool vle_stream_edge_source_bool_field(List *descriptor, int index);
 static bool path_required_outer_is_subset(Path *path, Relids relids);
 static const char *path_param_info_string(Path *path);
 static void add_narrow_typed_collect_paths(PlannerInfo *root,
@@ -165,6 +242,35 @@ static Path *try_narrow_array_agg_property_path(
     CypherArrayAggPropertyHandoff *handoff);
 static bool pathtarget_contains_only_expr(PathTarget *target, Node *expr);
 static Node *rewrite_property_index_surface_mutator(Node *node, void *context);
+typedef struct VLETerminalPropertyQualRewriteContext
+{
+    const char *terminal_key;
+    char *matched_key;
+    Oid agtype_access_operator_oid;
+    Oid age_vle_terminal_vertex_oid;
+} VLETerminalPropertyQualRewriteContext;
+typedef struct VLETerminalPropertyPredicate
+{
+    bool known;
+    bool isnull;
+    char *key;
+    Const *value;
+    Node *value_expr;
+} VLETerminalPropertyPredicate;
+static List *rewrite_vle_terminal_property_quals(List *clauses, List *output);
+static List *remove_vle_terminal_property_predicate_quals(
+    List *clauses, List *edge_source);
+static List *remove_vle_terminal_property_child_plan_quals(
+    List *custom_plans, List *edge_source, List *output);
+static Node *rewrite_vle_terminal_property_qual_mutator(Node *node,
+                                                        void *context);
+static Node *try_rewrite_vle_terminal_property_access(
+    FuncExpr *func, VLETerminalPropertyQualRewriteContext *context);
+static bool extract_vle_terminal_property_predicate(
+    List *restrictinfos, List *output, VLETerminalPropertyPredicate *predicate);
+static bool match_vle_terminal_property_predicate_expr(
+    Node *node, VLETerminalPropertyQualRewriteContext *context,
+    Oid agtype_eq_oid, VLETerminalPropertyPredicate *predicate);
 static void add_property_projection_custom_path(PlannerInfo *root,
                                                 RelOptInfo *input_rel,
                                                 RelOptInfo *output_rel,
@@ -229,6 +335,17 @@ static bool is_age_vle_values_rte(RangeTblEntry *rte, List **func_args);
 static void add_age_vle_stream_custom_path(PlannerInfo *root, RelOptInfo *rel,
                                            RangeTblEntry *rte,
                                            List *func_args);
+static void cost_age_vle_stream_custom_path(CustomPath *cp,
+                                            Path *reference_path,
+                                            List *range_direction,
+                                            List *edge_source);
+static AgeGraphJoinCandidateTable *make_vle_stream_graph_join_table(
+    RelOptInfo *rel, CustomPath *cp, List *func_args, List *edge_source);
+static const char *vle_stream_join_order_connector(List *func_args,
+                                                   List *edge_source);
+static const char *vle_stream_join_order_property(List *func_args,
+                                                  List *edge_source);
+static bool vle_stream_func_args_have_bound_endpoints(List *func_args);
 static List *make_age_vle_stream_const_flags(List *func_args);
 static List *make_age_vle_stream_graph(List *func_args);
 static List *make_age_vle_stream_edge(List *func_args);
@@ -236,12 +353,38 @@ static List *make_age_vle_stream_range_direction(List *func_args);
 static List *make_age_vle_stream_output(List *func_args);
 static List *make_age_vle_stream_edge_source(List *graph, List *edge,
                                              List *range_direction,
-                                             List *output);
+                                             List *output,
+                                             List *func_args,
+                                             List *restrictinfos,
+                                             Node **terminal_property_predicate_expr,
+                                             PlannerInfo *root);
+static int64 choose_vle_stream_terminal_candidate_fanout(
+    const VLESourceFanoutEvidence *source_evidence, cypher_rel_dir direction);
+static int64 clamp_vle_stream_composite_fanout(int64 candidate_fanout,
+                                               double selectivity);
+static GraphPropertySourceSelectivity estimate_graph_property_source_selectivity(
+    Oid property_index_oid, double fallback_selectivity,
+    Const *property_value);
+static bool estimate_graph_property_index_mcv_selectivity(Oid property_index_oid,
+                                                          Const *property_value,
+                                                          double *selectivity);
+static bool estimate_graph_property_index_distinct_values(Oid property_index_oid,
+                                                          double reltuples,
+                                                          double *distinct_values);
+static int64 graph_property_selectivity_ppm(double selectivity);
 static void get_vle_stream_edge_source_indexes(
     const char *graph_name, const char *label_name,
     Oid *edge_label_oid,
+    Oid *age_adjacency_out_index_oid,
+    Oid *age_adjacency_in_index_oid,
     bool *adjacency_out, bool *adjacency_in,
     bool *endpoint_start, bool *endpoint_end);
+static void apply_vle_stream_directory_fanout_evidence(
+    VLESourceFanoutEvidence *source_evidence, List *func_args,
+    Oid age_adjacency_out_index_oid, Oid age_adjacency_in_index_oid,
+    int32 terminal_label_id, PlannerInfo *root);
+static bool find_age_vle_stream_endpoint_graphid_const(
+    PlannerInfo *root, Node *node, graphid *value, bool *isnull);
 static bool vle_stream_age_adjacency_index_matches(Relation index_rel,
                                                    bool outgoing);
 static AgeVLEStreamDirectedSourceKind
@@ -249,6 +392,8 @@ age_vle_stream_directed_source_from_traversal(
     VLETraversalSourceKind source_kind);
 static bool get_age_vle_stream_integer_const(Node *node, int64 *value,
                                              bool *isnull);
+static bool get_age_vle_stream_vertex_id_const(Node *node, graphid *value,
+                                               bool *isnull);
 static bool get_age_vle_stream_string_const(Node *node, char **value,
                                             bool *isnull);
 static Const *make_int8_const(int64 value);
@@ -284,15 +429,31 @@ void cypher_clear_adjacency_match_candidates(void)
 
 void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
                                                Oid index_oid,
+                                               Oid graph_oid,
                                                const char *edge_alias,
                                                const char *bound_endpoint_alias,
                                                Node *bound_endpoint_expr,
                                                const char *candidate_reason,
+                                               const char *index_source,
+                                               const char *index_kind,
+                                               const char *index_provider,
+                                               const char *index_direction,
+                                               int32 index_property_count,
+                                               bool index_metadata_backed,
+                                               const char *right_property_key,
+                                               Oid right_property_index_oid,
+                                               const char *right_property_index_source,
+                                               const char *right_property_index_provider,
+                                               const char *right_property_index_type,
+                                               bool right_property_index_metadata_backed,
+                                               Const *right_property_value,
+                                               Node *right_property_value_expr,
                                                bool outgoing,
                                                bool has_edge_variable_projection,
                                                bool has_edge_property_predicate,
                                                bool has_right_label_constraint,
                                                bool has_right_property_predicate,
+                                               int32 right_label_id,
                                                AttrNumber endpoint_attno)
 {
     MemoryContext oldcontext;
@@ -314,6 +475,7 @@ void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
     oldcontext = MemoryContextSwitchTo(TopTransactionContext);
 
     candidate = palloc0(sizeof(*candidate));
+    candidate->graph_oid = graph_oid;
     candidate->edge_label_oid = edge_label_oid;
     candidate->index_oid = index_oid;
     candidate->edge_alias = pstrdup(edge_alias);
@@ -322,11 +484,43 @@ void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
     candidate->bound_endpoint_expr = copyObject(bound_endpoint_expr);
     candidate->candidate_reason = candidate_reason != NULL ?
         pstrdup(candidate_reason) : NULL;
+    candidate->index_source = index_source != NULL ?
+        pstrdup(index_source) : NULL;
+    candidate->index_kind = index_kind != NULL ? pstrdup(index_kind) : NULL;
+    candidate->index_provider = index_provider != NULL ?
+        pstrdup(index_provider) : NULL;
+    candidate->index_direction = index_direction != NULL ?
+        pstrdup(index_direction) : NULL;
+    candidate->index_property_count = index_property_count;
+    candidate->index_metadata_backed = index_metadata_backed;
+    candidate->right_property_key = right_property_key != NULL ?
+        pstrdup(right_property_key) : NULL;
+    candidate->right_property_index_oid = right_property_index_oid;
+    candidate->right_property_index_source =
+        right_property_index_source != NULL ?
+        pstrdup(right_property_index_source) : NULL;
+    candidate->right_property_index_provider =
+        right_property_index_provider != NULL ?
+        pstrdup(right_property_index_provider) : NULL;
+    candidate->right_property_index_type =
+        right_property_index_type != NULL ?
+        pstrdup(right_property_index_type) : pstrdup("agtype");
+    candidate->right_property_index_metadata_backed =
+        right_property_index_metadata_backed;
+    candidate->right_property_value = right_property_value != NULL ?
+        copyObject(right_property_value) : NULL;
+    candidate->right_property_value_expr = right_property_value_expr != NULL ?
+        copyObject(right_property_value_expr) : NULL;
+    candidate->right_property_value_kind =
+        pstrdup(adjacency_match_terminal_property_value_kind(candidate));
+    candidate->right_property_prefetch_eligible =
+        adjacency_match_has_terminal_property_prefetch(candidate);
     candidate->outgoing = outgoing;
     candidate->has_edge_variable_projection = has_edge_variable_projection;
     candidate->has_edge_property_predicate = has_edge_property_predicate;
     candidate->has_right_label_constraint = has_right_label_constraint;
     candidate->has_right_property_predicate = has_right_property_predicate;
+    candidate->right_label_id = right_label_id;
     candidate->endpoint_attno = endpoint_attno;
 
     adjacency_match_candidates = lappend(adjacency_match_candidates,
@@ -402,7 +596,7 @@ void cypher_rewrite_property_index_surfaces(Query *parse)
 
 static Node *rewrite_property_index_surface_mutator(Node *node, void *context)
 {
-    PropertyIndexSurfaceContext *surface_context = context;
+    PropertyIndexSurfaceContext *surface_context;
     OpExpr *op;
     Node *left;
     Node *right;
@@ -410,6 +604,12 @@ static Node *rewrite_property_index_surface_mutator(Node *node, void *context)
 
     if (node == NULL)
         return NULL;
+    if (context == NULL)
+        return expression_tree_mutator(node,
+                                       rewrite_property_index_surface_mutator,
+                                       context);
+
+    surface_context = context;
 
     if (!IsA(node, OpExpr))
     {
@@ -474,11 +674,14 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
     {
         ereport(DEBUG2,
                 (errmsg_internal("AGE adjacency MATCH candidate visible to planner: "
-                                 "edge_rel=%u index=%u alias=%s direction=%s "
-                                 "endpoint_attno=%d endpoint_alias=%s "
-                                 "endpoint_rti=%u edge_var=%s edge_props=%s "
-                                 "right_label=%s right_props=%s reason=%s "
-                                 "endpoint_expr=%s",
+                             "edge_rel=%u index=%u alias=%s direction=%s "
+                             "endpoint_attno=%d endpoint_alias=%s "
+                             "endpoint_rti=%u edge_var=%s edge_props=%s "
+                             "right_label=%s right_props=%s reason=%s "
+                             "index_source=%s index_kind=%s provider=%s "
+                             "metadata=%s right_property_key=%s "
+                             "right_property_index=%s right_property_value=%s "
+                             "endpoint_expr=%s",
                                  candidate->edge_label_oid,
                                  candidate->index_oid,
                                  candidate->edge_alias,
@@ -497,6 +700,22 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
                                  "true" : "false",
                                  candidate->candidate_reason != NULL ?
                                  candidate->candidate_reason : "unknown",
+                                 candidate->index_source != NULL ?
+                                 candidate->index_source : "unknown",
+                                 candidate->index_kind != NULL ?
+                                 candidate->index_kind : "unknown",
+                                 candidate->index_provider != NULL ?
+                                 candidate->index_provider : "unknown",
+                                 candidate->index_metadata_backed ?
+                                 "true" : "false",
+                                 candidate->right_property_key != NULL ?
+                                 candidate->right_property_key : "<none>",
+                                 candidate->right_property_index_source != NULL ?
+                                 candidate->right_property_index_source :
+                                 "<none>",
+                                 candidate->right_property_value != NULL ?
+                                 nodeToString(candidate->right_property_value) :
+                                 "<none>",
                                  candidate->bound_endpoint_expr != NULL ?
                                  nodeToString(candidate->bound_endpoint_expr) :
                                  "<none>")));
@@ -542,11 +761,8 @@ static void set_join_pathlist(PlannerInfo *root, RelOptInfo *joinrel,
         prev_set_join_pathlist_hook(root, joinrel, outerrel, innerrel,
                                     jointype, extra);
 
-    if (!age_enable_adjacency_match_custom_path)
-        return;
-
-    adjust_adjacency_match_join_rows(joinrel, jointype);
-    log_adjacency_match_join_paths(joinrel, outerrel, innerrel, jointype);
+    adjust_graph_expansion_join_rows(joinrel, jointype);
+    log_graph_expansion_join_paths(joinrel, outerrel, innerrel, jointype);
 }
 
 static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
@@ -599,7 +815,7 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
     }
 }
 
-static void log_adjacency_match_join_paths(RelOptInfo *joinrel,
+static void log_graph_expansion_join_paths(RelOptInfo *joinrel,
                                            RelOptInfo *outerrel,
                                            RelOptInfo *innerrel,
                                            JoinType jointype)
@@ -626,14 +842,14 @@ static void log_adjacency_match_join_paths(RelOptInfo *joinrel,
         outer_path = joinpath->outerjoinpath;
         inner_path = joinpath->innerjoinpath;
 
-        if (!path_contains_adjacency_match(outer_path) &&
-            !path_contains_adjacency_match(inner_path))
+        if (!path_contains_graph_expansion(outer_path) &&
+            !path_contains_graph_expansion(inner_path))
         {
             continue;
         }
 
         ereport(DEBUG2,
-                (errmsg_internal("AGE adjacency MATCH join path visible: "
+                (errmsg_internal("AGE graph expansion join path visible: "
                                  "jointype=%d joinrelids=%s outerrelids=%s "
                                  "innerrelids=%s joinrel_rows=%.0f "
                                  "path_rows=%.0f path_required_outer=%s "
@@ -1354,9 +1570,23 @@ static Path *try_narrow_array_agg_property_path(
     Path *agg_subpath;
     AggPath *new_agg;
     List *arg_plans;
+    double materialization_credit;
+    double type_vector_credit;
+    double index_domain_credit;
+    double input_rows;
 
     if (path == NULL || handoff == NULL || handoff->arg_exprs == NIL ||
         !IsA(path, AggPath))
+    {
+        return NULL;
+    }
+    if (handoff->cached_property_slot_count <= 0 ||
+        list_length(handoff->cached_property_slots) !=
+        handoff->cached_property_slot_count ||
+        list_length(handoff->payload_value_types) !=
+        handoff->cached_property_slot_count ||
+        handoff->property_descriptor_slot_count !=
+        handoff->cached_property_slot_count)
     {
         return NULL;
     }
@@ -1380,6 +1610,8 @@ static Path *try_narrow_array_agg_property_path(
 
     if (agg_path->qual != NIL || agg_path->subpath == NULL)
         return NULL;
+
+    cypher_refresh_array_agg_property_index_domains(root, handoff);
 
     if (list_length(handoff->arg_exprs) == 1 &&
         pathtarget_contains_only_expr(agg_path->subpath->pathtarget,
@@ -1421,8 +1653,28 @@ static Path *try_narrow_array_agg_property_path(
     new_agg->path.pathtarget = agg_target;
     new_agg->subpath = agg_subpath;
     new_agg->path.startup_cost = agg_path->path.startup_cost;
+    input_rows = agg_path->subpath->rows;
+    cypher_array_agg_property_materialization_credits(handoff, input_rows,
+                                                      &type_vector_credit,
+                                                      &index_domain_credit);
+    materialization_credit = type_vector_credit + index_domain_credit;
     new_agg->path.total_cost = Max(agg_path->path.startup_cost,
-                                   agg_path->path.total_cost - 1.0);
+                                   agg_path->path.total_cost -
+                                       materialization_credit);
+
+    {
+        char *descriptor;
+
+        descriptor = cypher_format_array_agg_property_handoff(handoff);
+        ereport(DEBUG2,
+                (errmsg_internal("AGE array_agg property handoff: %s "
+                                 "input_rows=%.0f type-credit=%.2f "
+                                 "index-credit=%.2f credit=%.2f",
+                                 descriptor, input_rows,
+                                 type_vector_credit, index_domain_credit,
+                                 materialization_credit)));
+        pfree(descriptor);
+    }
 
     return (Path *)new_agg;
 }
@@ -1484,6 +1736,8 @@ static Path *try_narrow_typed_collect_path(PlannerInfo *root,
     Path *agg_subpath;
     AggPath *new_agg;
     List *arg_plans;
+    double materialization_credit;
+    double input_rows;
 
     if (path == NULL || handoffs == NIL || !IsA(path, AggPath))
         return NULL;
@@ -1562,8 +1816,12 @@ static Path *try_narrow_typed_collect_path(PlannerInfo *root,
     new_agg->path.pathtarget = agg_target;
     new_agg->subpath = agg_subpath;
     new_agg->path.startup_cost = agg_path->path.startup_cost;
+    input_rows = agg_path->subpath->rows;
+    materialization_credit =
+        cypher_typed_collect_materialization_credit(arg_plans, input_rows);
     new_agg->path.total_cost = Max(agg_path->path.startup_cost,
-                                   agg_path->path.total_cost - 1.0);
+                                   agg_path->path.total_cost -
+                                       materialization_credit);
 
     return (Path *)new_agg;
 }
@@ -1795,7 +2053,8 @@ static bool is_age_vle_values_rte(RangeTblEntry *rte, List **func_args)
 
     row = linitial_node(List, rte->values_lists);
     if (list_length(row) != AGE_VLE_STREAM_ARG_GRAMMAR_NODE + 3 &&
-        list_length(row) != AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 3)
+        list_length(row) != AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 3 &&
+        list_length(row) != AGE_VLE_STREAM_ARG_TERMINAL_LABEL + 3)
     {
         return false;
     }
@@ -1831,6 +2090,10 @@ static void add_age_vle_stream_custom_path(PlannerInfo *root, RelOptInfo *rel,
     CustomPath *cp;
     Path *reference_path;
     List *custom_private = NIL;
+    List *range_direction;
+    List *edge_source;
+    AgeGraphJoinCandidateTable *graph_join_table;
+    Node *terminal_property_predicate_expr = NULL;
 
     if (rel == NULL ||
         rel->reloptkind != RELOPT_BASEREL ||
@@ -1853,11 +2116,8 @@ static void add_age_vle_stream_custom_path(PlannerInfo *root, RelOptInfo *rel,
     cp->path.parallel_safe = false;
     cp->path.parallel_workers = 0;
     cp->path.pathkeys = reference_path->pathkeys;
-    cp->path.rows = reference_path->rows;
-    cp->path.startup_cost = 0;
-    cp->path.total_cost = reference_path->total_cost * 0.80;
     cp->flags = 0;
-    cp->custom_paths = NIL;
+    cp->custom_paths = list_make1(reference_path);
     custom_private = lappend(custom_private, copyObject(func_args));
     custom_private = lappend(custom_private,
                              makeInteger(list_length(func_args)));
@@ -1868,18 +2128,31 @@ static void add_age_vle_stream_custom_path(PlannerInfo *root, RelOptInfo *rel,
                              make_age_vle_stream_graph(func_args));
     custom_private = lappend(custom_private,
                              make_age_vle_stream_edge(func_args));
-    custom_private = lappend(custom_private,
-                             make_age_vle_stream_range_direction(
-                                 func_args));
+    range_direction = make_age_vle_stream_range_direction(func_args);
+    custom_private = lappend(custom_private, range_direction);
     custom_private = lappend(custom_private,
                              make_age_vle_stream_output(func_args));
-    custom_private = lappend(custom_private,
-                             make_age_vle_stream_edge_source(
-                                 list_nth_node(List, custom_private, 3),
-                                 list_nth_node(List, custom_private, 4),
-                                 list_nth_node(List, custom_private, 5),
-                                 list_nth_node(List, custom_private, 6)));
+    edge_source = make_age_vle_stream_edge_source(
+        list_nth_node(List, custom_private, 3),
+        list_nth_node(List, custom_private, 4),
+        range_direction,
+        list_nth_node(List, custom_private, 6),
+        func_args, rel->baserestrictinfo,
+        &terminal_property_predicate_expr, root);
+    custom_private = lappend(custom_private, edge_source);
+    custom_private = lappend(
+        custom_private,
+        terminal_property_predicate_expr != NULL ?
+        terminal_property_predicate_expr :
+        (Node *)makeNullConst(AGTYPEOID, -1, InvalidOid));
     cp->custom_private = custom_private;
+    cost_age_vle_stream_custom_path(cp, reference_path, range_direction,
+                                    edge_source);
+    graph_join_table =
+        make_vle_stream_graph_join_table(rel, cp, func_args, edge_source);
+    cp->custom_private = lappend(cp->custom_private,
+                                 age_graph_join_table_selected_private(
+                                     graph_join_table));
     cp->methods = &age_vle_stream_path_methods;
 
     add_path(rel, (Path *)cp);
@@ -1890,6 +2163,207 @@ static void add_age_vle_stream_custom_path(PlannerInfo *root, RelOptInfo *rel,
                              "rows=%.0f total_cost=%.2f columns=%d",
                              rel->relid, cp->path.rows, cp->path.total_cost,
                              list_length(rte->eref->colnames))));
+}
+
+static void cost_age_vle_stream_custom_path(CustomPath *cp,
+                                            Path *reference_path,
+                                            List *range_direction,
+                                            List *edge_source)
+{
+    int64 upper;
+    int64 direction;
+    int64 start_fanout;
+    int64 end_fanout;
+    int64 composite_fanout;
+    int64 materialization_weight;
+    int64 depth_factor;
+    double fanout;
+    double estimated_rows;
+    double cpu_weight;
+    const char *composite_planned;
+
+    upper = vle_stream_descriptor_int8_field(
+        range_direction, AGE_VLE_STREAM_RANGE_UPPER_VALUE, 1);
+    direction = vle_stream_descriptor_int8_field(
+        range_direction, AGE_VLE_STREAM_DIRECTION_VALUE,
+        CYPHER_REL_DIR_RIGHT);
+    start_fanout = vle_stream_descriptor_int8_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_START_FANOUT, 0);
+    end_fanout = vle_stream_descriptor_int8_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT, 0);
+    composite_fanout = vle_stream_descriptor_int8_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_FANOUT, 0);
+    materialization_weight = vle_stream_descriptor_int8_field(
+        edge_source,
+        AGE_VLE_STREAM_EDGE_SOURCE_POLICY_MATERIALIZATION_WEIGHT, 1);
+    composite_planned = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_PLANNED);
+
+    if (direction == CYPHER_REL_DIR_LEFT)
+        fanout = end_fanout;
+    else if (direction == CYPHER_REL_DIR_NONE)
+        fanout = start_fanout + end_fanout;
+    else
+        fanout = start_fanout;
+
+    if (composite_planned != NULL &&
+        strcmp(composite_planned, "property-prefilter") == 0 &&
+        composite_fanout > 0)
+    {
+        fanout = Min(fanout, (double)composite_fanout);
+    }
+
+    depth_factor = upper > 0 ? Min(upper, 4) : 4;
+    estimated_rows = fanout > 0.0 ?
+        clamp_row_est(fanout * depth_factor) : 1.0;
+    cpu_weight = Max(materialization_weight, 1) * cpu_tuple_cost;
+
+    cp->path.rows = estimated_rows;
+    cp->path.startup_cost = reference_path->startup_cost;
+    cp->path.total_cost = reference_path->startup_cost +
+        Max(reference_path->total_cost - reference_path->startup_cost, 0.0) *
+        0.50 + estimated_rows * cpu_weight;
+}
+
+static AgeGraphJoinCandidateTable *make_vle_stream_graph_join_table(
+    RelOptInfo *rel, CustomPath *cp, List *func_args, List *edge_source)
+{
+    AgeGraphJoinCandidateTable *table;
+    AgeGraphJoinCandidate *fallback_candidate;
+    const char *connector;
+    const char *bound;
+    const char *order_property;
+    const char *source_evidence;
+    bool has_bound_endpoints;
+
+    (void)rel;
+
+    table = age_graph_join_make_candidate_table();
+
+    source_evidence = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_CLASS);
+    if (source_evidence == NULL)
+        source_evidence = vle_stream_edge_source_text_field(
+            edge_source, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_ACTIVE_DIRECTION);
+    connector = vle_stream_join_order_connector(func_args, edge_source);
+    bound = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_ACTIVE_DIRECTION);
+    order_property = vle_stream_join_order_property(func_args, edge_source);
+
+    age_graph_join_table_add_path_candidate(
+        table, &cp->path, "vle", connector, bound, order_property,
+        source_evidence != NULL ? source_evidence : "edge-source",
+        true);
+    has_bound_endpoints = vle_stream_func_args_have_bound_endpoints(
+        func_args);
+    if (has_bound_endpoints)
+    {
+        const char *fallback_connector;
+
+        if (strcmp(connector, "vle-composite-expand-into") == 0)
+            fallback_connector = "vle-composite-expand";
+        else
+            fallback_connector = "vle-expand";
+
+        fallback_candidate = age_graph_join_table_add_path_candidate(
+            table, &cp->path, "vle", fallback_connector, bound,
+            order_property, "edge-source-fallback", true);
+        fallback_candidate->connector.total_cost +=
+            Max(cp->path.rows, 1.0) * cpu_tuple_cost;
+    }
+
+    return table;
+}
+
+static const char *vle_stream_join_order_connector(List *func_args,
+                                                   List *edge_source)
+{
+    const char *composite_planned;
+    const char *active_direction;
+
+    composite_planned = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_PLANNED);
+    if (vle_stream_edge_source_bool_field(
+            edge_source,
+            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_KNOWN) &&
+        composite_planned != NULL &&
+        strcmp(composite_planned, "property-prefilter") == 0)
+    {
+        if (vle_stream_func_args_have_bound_endpoints(func_args))
+            return "vle-composite-expand-into";
+        return "vle-composite-expand";
+    }
+
+    if (vle_stream_func_args_have_bound_endpoints(func_args))
+        return "vle-expand-into";
+
+    active_direction = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_ACTIVE_DIRECTION);
+    if (active_direction != NULL && strcmp(active_direction, "both") == 0)
+        return "vle-bidirectional-expand";
+
+    return "vle-expand";
+}
+
+static const char *vle_stream_join_order_property(List *func_args,
+                                                  List *edge_source)
+{
+    const char *composite_planned;
+    const char *start_fanout_source;
+    const char *end_fanout_source;
+
+    composite_planned = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_PLANNED);
+    if (vle_stream_edge_source_bool_field(
+            edge_source,
+            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_KNOWN) &&
+        composite_planned != NULL &&
+        strcmp(composite_planned, "property-prefilter") == 0)
+        return "index-anchored";
+
+    start_fanout_source = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_START_FANOUT_SOURCE);
+    end_fanout_source = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT_SOURCE);
+    if ((start_fanout_source != NULL &&
+         strcmp(start_fanout_source, "directory-label") == 0) ||
+        (end_fanout_source != NULL &&
+         strcmp(end_fanout_source, "directory-label") == 0))
+        return "vle-frontier-anchored";
+
+    if (vle_stream_edge_source_bool_field(
+            edge_source,
+            AGE_VLE_STREAM_EDGE_SOURCE_CACHE_SEED_ELIGIBLE) ||
+        vle_stream_edge_source_bool_field(
+            edge_source,
+            AGE_VLE_STREAM_EDGE_SOURCE_EMPTY_LIFECYCLE_ELIGIBLE) ||
+        vle_stream_edge_source_bool_field(
+            edge_source,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_KNOWN))
+        return "vle-frontier-anchored";
+
+    if (vle_stream_func_args_have_bound_endpoints(func_args))
+        return "expand-into-verification";
+
+    return "query-order";
+}
+
+static bool vle_stream_func_args_have_bound_endpoints(List *func_args)
+{
+    Node *start_arg;
+    Node *end_arg;
+
+    if (list_length(func_args) <= AGE_VLE_STREAM_ARG_END)
+        return false;
+
+    start_arg = list_nth(func_args, AGE_VLE_STREAM_ARG_START);
+    end_arg = list_nth(func_args, AGE_VLE_STREAM_ARG_END);
+    if (IsA(start_arg, Const) && ((Const *)start_arg)->constisnull)
+        return false;
+    if (IsA(end_arg, Const) && ((Const *)end_arg)->constisnull)
+        return false;
+
+    return true;
 }
 
 static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
@@ -1905,10 +2379,9 @@ static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
     List *range_direction;
     List *output;
     List *edge_source;
-
-    (void) root;
-    (void) clauses;
-    (void) custom_plans;
+    Node *terminal_property_predicate_expr;
+    Node *plan_terminal_property_predicate_expr = NULL;
+    List *scan_quals;
 
     func_args = linitial_node(List, best_path->custom_private);
     nargs_value = lsecond_node(Integer, best_path->custom_private);
@@ -1918,6 +2391,12 @@ static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
     range_direction = list_nth_node(List, best_path->custom_private, 5);
     output = list_nth_node(List, best_path->custom_private, 6);
     edge_source = list_nth_node(List, best_path->custom_private, 7);
+    terminal_property_predicate_expr = list_nth(best_path->custom_private, 8);
+    edge_source = make_age_vle_stream_edge_source(
+        graph, edge, range_direction, output, func_args, clauses,
+        &plan_terminal_property_predicate_expr, root);
+    if (plan_terminal_property_predicate_expr != NULL)
+        terminal_property_predicate_expr = plan_terminal_property_predicate_expr;
 
     cs = makeNode(CustomScan);
     cs->scan.plan.startup_cost = best_path->path.startup_cost;
@@ -1928,14 +2407,25 @@ static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
     cs->scan.plan.parallel_safe = false;
     cs->scan.plan.async_capable = false;
     cs->scan.plan.targetlist = tlist;
-    cs->scan.plan.qual = extract_actual_clauses(clauses, false);
+    scan_quals = extract_actual_clauses(clauses, false);
+    scan_quals = remove_vle_terminal_property_predicate_quals(scan_quals,
+                                                              edge_source);
+    scan_quals = rewrite_vle_terminal_property_quals(scan_quals, output);
+    cs->scan.plan.qual = scan_quals;
     cs->scan.plan.lefttree = NULL;
     cs->scan.plan.righttree = NULL;
     cs->scan.scanrelid = 0;
 
     cs->flags = best_path->flags;
-    cs->custom_plans = NIL;
+    cs->custom_plans = remove_vle_terminal_property_child_plan_quals(
+        custom_plans, edge_source, output);
     cs->custom_exprs = copyObject(func_args);
+    if (terminal_property_predicate_expr != NULL &&
+        !IsA(terminal_property_predicate_expr, Const))
+    {
+        cs->custom_exprs = lappend(cs->custom_exprs,
+                                   copyObject(terminal_property_predicate_expr));
+    }
     cs->custom_private = NIL;
     cs->custom_private = lappend(cs->custom_private, copyObject(nargs_value));
     cs->custom_private = lappend(cs->custom_private, copyObject(const_flags));
@@ -1946,11 +2436,352 @@ static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
     cs->custom_private = lappend(cs->custom_private, copyObject(output));
     cs->custom_private = lappend(cs->custom_private,
                                  copyObject(edge_source));
+    cs->custom_private = lappend(
+        cs->custom_private, copyObject(terminal_property_predicate_expr));
     cs->custom_scan_tlist = copyObject(tlist);
     cs->custom_relids = bms_make_singleton(rel->relid);
     cs->methods = &age_vle_stream_scan_methods;
 
     return (Plan *)cs;
+}
+
+static List *remove_vle_terminal_property_child_plan_quals(
+    List *custom_plans, List *edge_source, List *output)
+{
+    ListCell *lc;
+
+    foreach(lc, custom_plans)
+    {
+        Plan *plan = lfirst(lc);
+
+        if (plan == NULL || plan->qual == NIL)
+            continue;
+
+        plan->qual = remove_vle_terminal_property_predicate_quals(
+            plan->qual, edge_source);
+        plan->qual = rewrite_vle_terminal_property_quals(plan->qual, output);
+    }
+
+    return custom_plans;
+}
+
+static List *remove_vle_terminal_property_predicate_quals(
+    List *clauses, List *edge_source)
+{
+    VLETerminalPropertyQualRewriteContext context;
+    List *filtered = NIL;
+    Oid agtype_eq_oid;
+    char *predicate_key;
+    ListCell *lc;
+
+    if (clauses == NIL || edge_source == NIL ||
+        list_length(edge_source) != AGE_VLE_STREAM_EDGE_SOURCE_COUNT ||
+        intVal(list_nth_node(Integer, edge_source,
+                             AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREDICATE_KNOWN)) == 0)
+    {
+        return clauses;
+    }
+
+    {
+        Const *key_const;
+
+        key_const = list_nth_node(
+            Const, edge_source,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREDICATE_KEY);
+        if (key_const->constisnull)
+            return clauses;
+        predicate_key = TextDatumGetCString(key_const->constvalue);
+    }
+    if (predicate_key == NULL)
+        return clauses;
+
+    context.terminal_key = predicate_key;
+    context.matched_key = NULL;
+    context.agtype_access_operator_oid =
+        get_ag_func_oid("agtype_access_operator", 1, AGTYPEARRAYOID);
+    context.age_vle_terminal_vertex_oid =
+        get_ag_func_oid("age_vle_terminal_vertex", 1, AGTYPEOID);
+    agtype_eq_oid = get_ag_func_oid("agtype_eq", 2, AGTYPEOID, AGTYPEOID);
+
+    foreach(lc, clauses)
+    {
+        Node *clause = lfirst(lc);
+        VLETerminalPropertyPredicate predicate = {0};
+
+        if (match_vle_terminal_property_predicate_expr(
+                clause, &context, agtype_eq_oid, &predicate))
+        {
+            if (predicate.key != NULL)
+                pfree(predicate.key);
+            continue;
+        }
+        filtered = lappend(filtered, clause);
+    }
+
+    pfree(predicate_key);
+    return filtered;
+}
+
+static List *rewrite_vle_terminal_property_quals(List *clauses, List *output)
+{
+    VLETerminalPropertyQualRewriteContext context;
+    char *terminal_key = NULL;
+    bool terminal_key_null = true;
+    bool terminal_property_output;
+
+    if (clauses == NIL || output == NIL ||
+        list_length(output) != AGE_VLE_STREAM_OUTPUT_COUNT)
+    {
+        return clauses;
+    }
+
+    terminal_property_output =
+        DatumGetInt64(list_nth_node(Const, output,
+                                    AGE_VLE_STREAM_OUTPUT_REQUIREMENT)->constvalue) ==
+        AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY;
+    if (!terminal_property_output ||
+        intVal(list_nth_node(Integer, output,
+                             AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_KNOWN)) == 0 ||
+        intVal(list_nth_node(Integer, output,
+                             AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_NULL)) != 0)
+    {
+        return clauses;
+    }
+
+    terminal_key = TextDatumGetCString(
+        list_nth_node(Const, output,
+                      AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_VALUE)->constvalue);
+    terminal_key_null = terminal_key == NULL;
+    if (terminal_key_null)
+        return clauses;
+
+    context.terminal_key = terminal_key;
+    context.matched_key = NULL;
+    context.agtype_access_operator_oid =
+        get_ag_func_oid("agtype_access_operator", 1, AGTYPEARRAYOID);
+    context.age_vle_terminal_vertex_oid =
+        get_ag_func_oid("age_vle_terminal_vertex", 1, AGTYPEOID);
+
+    clauses = (List *)expression_tree_mutator(
+        (Node *)clauses, rewrite_vle_terminal_property_qual_mutator,
+        &context);
+    pfree(terminal_key);
+
+    return clauses;
+}
+
+static Node *rewrite_vle_terminal_property_qual_mutator(Node *node,
+                                                        void *context)
+{
+    Node *rewritten;
+
+    if (node == NULL)
+        return NULL;
+
+    if (IsA(node, FuncExpr))
+    {
+        rewritten = try_rewrite_vle_terminal_property_access(
+            castNode(FuncExpr, node),
+            (VLETerminalPropertyQualRewriteContext *)context);
+        if (rewritten != NULL)
+            return rewritten;
+    }
+
+    return expression_tree_mutator(node,
+                                   rewrite_vle_terminal_property_qual_mutator,
+                                   context);
+}
+
+static Node *try_rewrite_vle_terminal_property_access(
+    FuncExpr *func, VLETerminalPropertyQualRewriteContext *context)
+{
+    ArrayExpr *access_args;
+    FuncExpr *terminal_vertex;
+    Node *terminal_arg;
+    Node *key_arg;
+    char *key = NULL;
+    bool key_null = false;
+
+    Assert(func != NULL);
+    Assert(context != NULL);
+
+    if (func->funcid != context->agtype_access_operator_oid ||
+        list_length(func->args) != 1 ||
+        !IsA(linitial(func->args), ArrayExpr))
+    {
+        return NULL;
+    }
+
+    access_args = linitial_node(ArrayExpr, func->args);
+    if (list_length(access_args->elements) != 2)
+        return NULL;
+
+    terminal_arg = linitial(access_args->elements);
+    key_arg = lsecond(access_args->elements);
+    if (terminal_arg == NULL || !IsA(terminal_arg, FuncExpr))
+        return NULL;
+
+    terminal_vertex = castNode(FuncExpr, terminal_arg);
+    if (terminal_vertex->funcid != context->age_vle_terminal_vertex_oid ||
+        list_length(terminal_vertex->args) != 1)
+    {
+        return NULL;
+    }
+
+    if (!get_age_vle_stream_string_const(key_arg, &key, &key_null) ||
+        key_null || key == NULL)
+    {
+        return NULL;
+    }
+
+    if (context->terminal_key != NULL &&
+        strcmp(key, context->terminal_key) != 0)
+    {
+        pfree(key);
+        return NULL;
+    }
+    if (context->terminal_key == NULL)
+    {
+        if (context->matched_key != NULL)
+            pfree(context->matched_key);
+        context->matched_key = pstrdup(key);
+    }
+    pfree(key);
+
+    return (Node *)copyObject(linitial(terminal_vertex->args));
+}
+
+static bool extract_vle_terminal_property_predicate(
+    List *restrictinfos, List *output, VLETerminalPropertyPredicate *predicate)
+{
+    VLETerminalPropertyQualRewriteContext context;
+    char *terminal_key = NULL;
+    Oid agtype_eq_oid;
+    ListCell *lc;
+
+    Assert(predicate != NULL);
+    memset(predicate, 0, sizeof(*predicate));
+
+    if (restrictinfos == NIL || output == NIL ||
+        list_length(output) != AGE_VLE_STREAM_OUTPUT_COUNT)
+    {
+        return false;
+    }
+
+    if (intVal(list_nth_node(Integer, output,
+                             AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_KNOWN)) != 0 &&
+        intVal(list_nth_node(Integer,
+                             output,
+                             AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_NULL)) == 0)
+    {
+        terminal_key = TextDatumGetCString(
+            list_nth_node(Const, output,
+                          AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_VALUE)->constvalue);
+    }
+
+    context.terminal_key = terminal_key;
+    context.matched_key = NULL;
+    context.agtype_access_operator_oid =
+        get_ag_func_oid("agtype_access_operator", 1, AGTYPEARRAYOID);
+    context.age_vle_terminal_vertex_oid =
+        get_ag_func_oid("age_vle_terminal_vertex", 1, AGTYPEOID);
+    agtype_eq_oid = get_ag_func_oid("agtype_eq", 2, AGTYPEOID, AGTYPEOID);
+
+    foreach(lc, restrictinfos)
+    {
+        RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+        if (match_vle_terminal_property_predicate_expr(
+                (Node *)rinfo->clause, &context, agtype_eq_oid, predicate))
+        {
+            if (predicate->key == NULL && context.matched_key != NULL)
+                predicate->key = pstrdup(context.matched_key);
+            if (context.matched_key != NULL)
+                pfree(context.matched_key);
+            if (terminal_key != NULL)
+                pfree(terminal_key);
+            return true;
+        }
+        if (context.matched_key != NULL)
+        {
+            pfree(context.matched_key);
+            context.matched_key = NULL;
+        }
+    }
+
+    if (terminal_key != NULL)
+        pfree(terminal_key);
+    return false;
+}
+
+static bool match_vle_terminal_property_predicate_expr(
+    Node *node, VLETerminalPropertyQualRewriteContext *context,
+    Oid agtype_eq_oid, VLETerminalPropertyPredicate *predicate)
+{
+    OpExpr *op;
+    Node *left;
+    Node *right;
+    Node *rewritten;
+    Node *value_expr;
+
+    if (node == NULL || !IsA(node, OpExpr))
+        return false;
+
+    op = castNode(OpExpr, node);
+    if (op->opfuncid != agtype_eq_oid || list_length(op->args) != 2)
+        return false;
+
+    left = linitial(op->args);
+    right = lsecond(op->args);
+    if (IsA(left, FuncExpr) && IsA(right, Const))
+    {
+        rewritten = try_rewrite_vle_terminal_property_access(
+            castNode(FuncExpr, left), context);
+        value_expr = right;
+    }
+    else if (IsA(left, Const) && IsA(right, FuncExpr))
+    {
+        rewritten = try_rewrite_vle_terminal_property_access(
+            castNode(FuncExpr, right), context);
+        value_expr = left;
+    }
+    else if (IsA(left, FuncExpr))
+    {
+        rewritten = try_rewrite_vle_terminal_property_access(
+            castNode(FuncExpr, left), context);
+        value_expr = right;
+    }
+    else if (IsA(right, FuncExpr))
+    {
+        rewritten = try_rewrite_vle_terminal_property_access(
+            castNode(FuncExpr, right), context);
+        value_expr = left;
+    }
+    else
+    {
+        return false;
+    }
+
+    if (rewritten == NULL)
+        return false;
+    if (exprType(value_expr) != AGTYPEOID)
+        return false;
+
+    predicate->known = true;
+    if (context->terminal_key != NULL)
+        predicate->key = pstrdup(context->terminal_key);
+    else if (context->matched_key != NULL)
+        predicate->key = pstrdup(context->matched_key);
+    predicate->value_expr = value_expr;
+    if (IsA(value_expr, Const))
+    {
+        Const *value = castNode(Const, value_expr);
+
+        predicate->isnull = value->constisnull;
+        predicate->value = value;
+    }
+
+    return true;
 }
 
 static List *make_age_vle_stream_const_flags(List *func_args)
@@ -2120,6 +2951,11 @@ static List *make_age_vle_stream_output(List *func_args)
     bool terminal_key_null = true;
     bool terminal_key_known = false;
     int terminal_key_len = 0;
+    int64 terminal_label_id = 0;
+    bool terminal_label_null = false;
+    bool terminal_label_known = false;
+    AgeVLETerminalLabelMode terminal_label_mode =
+        AGE_VLE_TERMINAL_LABEL_NONE;
     AgeVLEOutputRequirement output_requirement =
         AGE_VLE_OUTPUT_REQUIREMENT_PATH;
     bool materializer_vertex_prefetch;
@@ -2136,21 +2972,63 @@ static List *make_age_vle_stream_output(List *func_args)
             get_age_vle_stream_string_const(
                 list_nth(func_args, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY),
                 &terminal_key, &terminal_key_null);
-        if (terminal_key_known && terminal_key_null)
+        if (terminal_key_known)
         {
-            output_requirement =
-                AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES;
+            if (terminal_key_null)
+            {
+                output_requirement =
+                    AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES;
+            }
+            else
+            {
+                output_requirement =
+                    AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY;
+            }
+            if (!terminal_key_null && terminal_key != NULL)
+            {
+                terminal_key_len = strlen(terminal_key);
+            }
         }
-        else
+        if (!terminal_key_known)
         {
-            output_requirement = AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY;
-        }
-        if (terminal_key_known && !terminal_key_null && terminal_key != NULL)
-        {
-            terminal_key_len = strlen(terminal_key);
+            terminal_label_known =
+                get_age_vle_stream_integer_const(
+                    list_nth(func_args, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY),
+                    &terminal_label_id, &terminal_label_null);
+            if (terminal_label_null)
+                terminal_label_known = false;
+            else if (terminal_label_known && terminal_label_id < 0)
+            {
+                terminal_label_id = -(terminal_label_id + 1);
+                terminal_label_mode = AGE_VLE_TERMINAL_LABEL_ENDPOINT_ONLY;
+            }
+            else if (terminal_label_known)
+            {
+                terminal_label_mode = AGE_VLE_TERMINAL_LABEL_ALL_DEPTH;
+            }
         }
     }
-    else if (grammar_known && !grammar_null && grammar < 0)
+    if (list_length(func_args) > AGE_VLE_STREAM_ARG_TERMINAL_LABEL)
+    {
+        terminal_label_known =
+            get_age_vle_stream_integer_const(
+                list_nth(func_args, AGE_VLE_STREAM_ARG_TERMINAL_LABEL),
+                &terminal_label_id, &terminal_label_null);
+        if (terminal_label_null)
+            terminal_label_known = false;
+        else if (terminal_label_known && terminal_label_id < 0)
+        {
+            terminal_label_id = -(terminal_label_id + 1);
+            terminal_label_mode = AGE_VLE_TERMINAL_LABEL_ENDPOINT_ONLY;
+        }
+        else if (terminal_label_known &&
+                 terminal_label_mode == AGE_VLE_TERMINAL_LABEL_NONE)
+        {
+            terminal_label_mode = AGE_VLE_TERMINAL_LABEL_ALL_DEPTH;
+        }
+    }
+    if (output_requirement == AGE_VLE_OUTPUT_REQUIREMENT_PATH &&
+        grammar_known && !grammar_null && grammar < 0)
     {
         output_requirement = AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_VERTEX;
     }
@@ -2169,6 +3047,10 @@ static List *make_age_vle_stream_output(List *func_args)
     descriptor = lappend(descriptor,
                          makeInteger(terminal_key_len == 1 ? 1 : 0));
     descriptor = lappend(descriptor,
+                         makeInteger(terminal_label_known ? 1 : 0));
+    descriptor = lappend(descriptor, make_int8_const(terminal_label_id));
+    descriptor = lappend(descriptor, make_int8_const(terminal_label_mode));
+    descriptor = lappend(descriptor,
                          makeInteger(materializer_vertex_prefetch ? 1 : 0));
     descriptor = lappend(
         descriptor,
@@ -2182,7 +3064,11 @@ static List *make_age_vle_stream_output(List *func_args)
 
 static List *make_age_vle_stream_edge_source(List *graph, List *edge,
                                              List *range_direction,
-                                             List *output)
+                                             List *output,
+                                             List *func_args,
+                                             List *restrictinfos,
+                                             Node **terminal_property_predicate_expr,
+                                             PlannerInfo *root)
 {
     AgeVLEStreamEdgeSourceKind source_kind =
         AGE_VLE_STREAM_EDGE_SOURCE_GLOBAL_METADATA;
@@ -2200,6 +3086,8 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
     bool upper_null;
     int64 properties_count;
     int64 output_requirement;
+    int64 terminal_label_id;
+    int64 terminal_label_mode;
     int64 direction_value;
     int64 upper_value;
     bool adjacency_out = false;
@@ -2207,8 +3095,11 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
     bool endpoint_start = false;
     bool endpoint_end = false;
     bool local_edge_state = false;
+    bool anonymous_edge_label = false;
     Oid edge_label_oid = InvalidOid;
-    VLESourceFanoutEvidence source_evidence = {InvalidOid, 0.0, 0.0, 0.0};
+    Oid age_adjacency_out_index_oid = InvalidOid;
+    Oid age_adjacency_in_index_oid = InvalidOid;
+    VLESourceFanoutEvidence source_evidence = {0};
     VLETraversalSourceCandidates source_candidates;
     VLETraversalSourceLayoutInput source_input;
     VLETraversalSourceLayoutDecision source_decision;
@@ -2243,6 +3134,7 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
     int64 threshold_input_relaxed_count = 0;
     const char *threshold_input_source = NULL;
     const char *threshold_input_reason = NULL;
+    const char *threshold_input_class = NULL;
     bool payload_input_known = false;
     int64 payload_input_headroom_percent = 0;
     int64 payload_input_scan_runs = 0;
@@ -2251,15 +3143,44 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
     int64 payload_input_replay_percent = 0;
     int64 payload_input_seed_percent = 0;
     int64 payload_input_observed_count = 0;
+    int64 payload_input_value_posting_observed_count = 0;
     const char *payload_input_reason = NULL;
+    const char *payload_input_class = NULL;
+    const char *payload_input_value_posting_source = NULL;
+    bool terminal_property_source_known = false;
+    Oid terminal_property_index_oid = InvalidOid;
+    uint32 terminal_property_filter_id = 0;
+    char *terminal_property_label = NULL;
+    char *terminal_property_source = NULL;
+    char *terminal_property_provider = NULL;
+    char *terminal_property_type = NULL;
+    int32 terminal_property_match_count = 0;
+    const char *terminal_property_source_key = NULL;
+    bool composite_source_known = false;
+    const char *composite_source_status = NULL;
+    const char *composite_source_reason = NULL;
+    int64 composite_source_property_tuples = 0;
+    int64 composite_source_candidate_fanout = 0;
+    int64 composite_source_fanout = 0;
+    const char *composite_source_planned = NULL;
+    double composite_source_selectivity = 0.0;
+    const char *composite_source_selectivity_source = NULL;
+    VLETerminalPropertyPredicate terminal_property_predicate = {0};
+    const char *terminal_property_value_kind = "none";
+    bool terminal_property_prefilter_eligible = false;
+    int64 terminal_property_prefetch_threshold = 0;
     char *graph_name = NULL;
     char *label_name = NULL;
+    char *terminal_key = NULL;
+    bool terminal_key_null = true;
 
     Assert(list_length(graph) == AGE_VLE_STREAM_GRAPH_COUNT);
     Assert(list_length(edge) == AGE_VLE_STREAM_EDGE_COUNT);
     Assert(list_length(range_direction) ==
            AGE_VLE_STREAM_RANGE_DIRECTION_COUNT);
     Assert(list_length(output) == AGE_VLE_STREAM_OUTPUT_COUNT);
+    if (terminal_property_predicate_expr != NULL)
+        *terminal_property_predicate_expr = NULL;
 
     graph_known = intVal(list_nth_node(Integer, graph,
                                        AGE_VLE_STREAM_GRAPH_KNOWN)) != 0;
@@ -2284,6 +3205,26 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
     output_requirement = DatumGetInt64(
         list_nth_node(Const, output,
                       AGE_VLE_STREAM_OUTPUT_REQUIREMENT)->constvalue);
+    terminal_label_id =
+        intVal(list_nth_node(Integer, output,
+                             AGE_VLE_STREAM_OUTPUT_TERMINAL_LABEL_KNOWN)) != 0 ?
+        DatumGetInt64(
+            list_nth_node(Const, output,
+                          AGE_VLE_STREAM_OUTPUT_TERMINAL_LABEL_ID)->constvalue) :
+        INVALID_LABEL_ID;
+    terminal_label_mode = DatumGetInt64(
+        list_nth_node(Const, output,
+                      AGE_VLE_STREAM_OUTPUT_TERMINAL_LABEL_MODE)->constvalue);
+    if (intVal(list_nth_node(Integer, output,
+                             AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_KNOWN)) != 0 &&
+        intVal(list_nth_node(Integer, output,
+                             AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_NULL)) == 0)
+    {
+        terminal_key = TextDatumGetCString(
+            list_nth_node(Const, output,
+                          AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_VALUE)->constvalue);
+        terminal_key_null = false;
+    }
     direction_known =
         intVal(list_nth_node(Integer, range_direction,
                              AGE_VLE_STREAM_DIRECTION_KNOWN)) != 0;
@@ -2317,16 +3258,155 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
     label_name = TextDatumGetCString(
         list_nth_node(Const, edge,
                       AGE_VLE_STREAM_EDGE_LABEL_VALUE)->constvalue);
+    anonymous_edge_label = label_name[0] == '\0';
 
     get_vle_stream_edge_source_indexes(graph_name, label_name,
                                        &edge_label_oid,
+                                       &age_adjacency_out_index_oid,
+                                       &age_adjacency_in_index_oid,
                                        &adjacency_out, &adjacency_in,
                                        &endpoint_start, &endpoint_end);
+    extract_vle_terminal_property_predicate(
+        restrictinfos, output, &terminal_property_predicate);
+    if (terminal_property_predicate.known)
+    {
+        terminal_property_value_kind =
+            terminal_property_predicate.value != NULL ?
+            (terminal_property_predicate.isnull ? "null" : "const") :
+            "runtime-slot";
+        if (terminal_property_predicate_expr != NULL &&
+            terminal_property_predicate.value == NULL)
+        {
+            *terminal_property_predicate_expr =
+                copyObject(terminal_property_predicate.value_expr);
+        }
+    }
+
+    terminal_property_source_key =
+        terminal_property_predicate.key != NULL ?
+        terminal_property_predicate.key :
+        (!terminal_key_null ? terminal_key : NULL);
+    if (terminal_property_source_key != NULL)
+    {
+        Oid graph_oid = get_graph_oid(graph_name);
+
+        terminal_property_source_known =
+            get_age_graph_property_index_metadata(
+                graph_oid, NULL, terminal_property_source_key,
+                &terminal_property_index_oid,
+                &terminal_property_label, &terminal_property_source,
+                &terminal_property_provider, &terminal_property_type,
+                &terminal_property_match_count);
+        if (!terminal_property_source_known)
+        {
+            composite_source_known = false;
+        }
+        else if (!label_id_is_valid((int32)terminal_label_id))
+        {
+            composite_source_known = true;
+            composite_source_status = "ineligible";
+            composite_source_reason = "missing-terminal-label";
+        }
+        else
+        {
+            int32 property_label_id = terminal_property_label == NULL ?
+                INVALID_LABEL_ID :
+                get_label_id(terminal_property_label, graph_oid);
+
+            composite_source_known = true;
+            composite_source_property_tuples =
+                round_vle_source_cost_evidence(
+                    get_vle_relation_estimated_tuples(
+                        terminal_property_index_oid));
+            if (!label_id_is_valid(property_label_id))
+            {
+                composite_source_status = "ineligible";
+                composite_source_reason = "property-label-unknown";
+            }
+            else if (property_label_id != (int32)terminal_label_id)
+            {
+                composite_source_status = "ineligible";
+                composite_source_reason = "label-mismatch";
+            }
+            else
+            {
+                composite_source_status = "eligible";
+                composite_source_reason =
+                    terminal_label_mode == AGE_VLE_TERMINAL_LABEL_ALL_DEPTH ?
+                    "terminal-label-property" : "endpoint-label-acceptance";
+                terminal_property_prefilter_eligible =
+                    terminal_property_predicate.known &&
+                    !terminal_property_predicate.isnull &&
+                    terminal_label_mode == AGE_VLE_TERMINAL_LABEL_ALL_DEPTH;
+                terminal_property_prefetch_threshold =
+                    terminal_property_prefilter_eligible ? 2 : 0;
+                if (terminal_property_prefilter_eligible &&
+                    terminal_property_predicate.value != NULL)
+                {
+                    terminal_property_filter_id =
+                        age_adjacency_property_filter_id(
+                            terminal_property_index_oid,
+                            terminal_property_predicate.value->constvalue,
+                            terminal_property_predicate.value->constisnull);
+                }
+            }
+        }
+    }
     estimate_vle_source_fanout_evidence(&source_evidence, edge_label_oid);
+    apply_vle_stream_directory_fanout_evidence(
+        &source_evidence, func_args,
+        age_adjacency_out_index_oid, age_adjacency_in_index_oid,
+        (int32)terminal_label_id, root);
+    if (composite_source_known)
+    {
+        composite_source_candidate_fanout =
+            choose_vle_stream_terminal_candidate_fanout(
+                &source_evidence, (cypher_rel_dir)direction_value);
+        composite_source_fanout = composite_source_candidate_fanout;
+        if (composite_source_status != NULL &&
+            strcmp(composite_source_status, "eligible") == 0)
+        {
+            if (terminal_property_prefilter_eligible &&
+                terminal_property_prefetch_threshold > 0 &&
+                composite_source_candidate_fanout >=
+                terminal_property_prefetch_threshold)
+            {
+                GraphPropertySourceSelectivity property_selectivity;
+
+                property_selectivity =
+                    estimate_graph_property_source_selectivity(
+                        terminal_property_index_oid, 0.15,
+                        terminal_property_predicate.value);
+                composite_source_planned = "property-prefilter";
+                composite_source_selectivity = property_selectivity.selectivity;
+                composite_source_selectivity_source =
+                    property_selectivity.source;
+                composite_source_fanout =
+                    clamp_vle_stream_composite_fanout(
+                        composite_source_candidate_fanout,
+                        property_selectivity.selectivity);
+            }
+            else if (terminal_property_prefilter_eligible)
+            {
+                composite_source_planned = "below-threshold";
+            }
+            else
+            {
+                composite_source_planned = "metadata-only";
+            }
+        }
+        else
+        {
+            composite_source_planned = "none";
+            composite_source_fanout = 0;
+        }
+    }
     if (properties_count == 0)
     {
-        bool has_out_source = adjacency_out || endpoint_start;
-        bool has_in_source = adjacency_in || endpoint_end;
+        bool has_out_source = adjacency_out ||
+            (!anonymous_edge_label && endpoint_start);
+        bool has_in_source = adjacency_in ||
+            (!anonymous_edge_label && endpoint_end);
 
         if (((cypher_rel_dir)direction_value == CYPHER_REL_DIR_RIGHT &&
              has_out_source) ||
@@ -2380,6 +3460,16 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
         cost_input.age_adjacency_in = adjacency_in;
         cost_input.start_fanout_known = source_evidence.start_fanout_known;
         cost_input.end_fanout_known = source_evidence.end_fanout_known;
+        cost_input.composite_prefilter_planned =
+            composite_source_planned != NULL &&
+            strcmp(composite_source_planned, "property-prefilter") == 0;
+        cost_input.terminal_label_id = (int32)terminal_label_id;
+        cost_input.terminal_property_index_oid = terminal_property_index_oid;
+        cost_input.terminal_property_filter_id =
+            terminal_property_filter_id;
+        cost_input.composite_candidate_fanout =
+            composite_source_candidate_fanout;
+        cost_input.composite_fanout = composite_source_fanout;
         choose_vle_stream_source_cost_decision(&cost_decision, &cost_input);
         policy_outgoing_kind = cost_decision.outgoing_kind;
         policy_incoming_kind = cost_decision.incoming_kind;
@@ -2410,6 +3500,7 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
             cost_decision.threshold_input_relaxed_count;
         threshold_input_source = cost_decision.threshold_input_source;
         threshold_input_reason = cost_decision.threshold_input_reason;
+        threshold_input_class = cost_decision.threshold_input_class;
         payload_input_known = cost_decision.payload_input_known;
         payload_input_headroom_percent =
             cost_decision.payload_input_headroom_percent;
@@ -2421,7 +3512,12 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
         payload_input_seed_percent = cost_decision.payload_input_seed_percent;
         payload_input_observed_count =
             cost_decision.payload_input_observed_count;
+        payload_input_value_posting_observed_count =
+            cost_decision.payload_input_value_posting_observed_count;
         payload_input_reason = cost_decision.payload_input_reason;
+        payload_input_class = cost_decision.payload_input_class;
+        payload_input_value_posting_source =
+            cost_decision.payload_input_value_posting_source;
         outgoing_kind = cost_decision.outgoing_kind;
         incoming_kind = cost_decision.incoming_kind;
     }
@@ -2456,6 +3552,16 @@ build_descriptor:
     descriptor = lappend(descriptor,
                          makeInteger(source_evidence.end_fanout_known ?
                                      1 : 0));
+    descriptor = lappend(descriptor,
+                         make_text_const(source_evidence.start_fanout_source));
+    descriptor = lappend(descriptor,
+                         make_text_const(source_evidence.end_fanout_source));
+    descriptor = lappend(
+        descriptor,
+        make_text_const(source_evidence.start_value_posting_source));
+    descriptor = lappend(
+        descriptor,
+        make_text_const(source_evidence.end_value_posting_source));
     descriptor = lappend(descriptor, make_text_const(cost_policy));
     descriptor = lappend(descriptor,
                          make_int8_const((int64)policy_outgoing_kind));
@@ -2492,6 +3598,7 @@ build_descriptor:
                          make_int8_const(threshold_input_relaxed_count));
     descriptor = lappend(descriptor, make_text_const(threshold_input_source));
     descriptor = lappend(descriptor, make_text_const(threshold_input_reason));
+    descriptor = lappend(descriptor, make_text_const(threshold_input_class));
     descriptor = lappend(descriptor, makeInteger(payload_input_known ? 1 : 0));
     descriptor = lappend(descriptor,
                          make_int8_const(payload_input_headroom_percent));
@@ -2507,21 +3614,320 @@ build_descriptor:
                          make_int8_const(payload_input_seed_percent));
     descriptor = lappend(descriptor,
                          make_int8_const(payload_input_observed_count));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(payload_input_value_posting_observed_count));
     descriptor = lappend(descriptor, make_text_const(payload_input_reason));
+    descriptor = lappend(descriptor, make_text_const(payload_input_class));
+    descriptor = lappend(descriptor,
+                         make_text_const(payload_input_value_posting_source));
+    descriptor = lappend(descriptor,
+                         makeInteger(terminal_property_source_known ? 1 : 0));
+    descriptor = lappend(descriptor, make_int8_const(terminal_label_id));
+    descriptor = lappend(descriptor,
+                         make_int8_const((int64)terminal_property_index_oid));
+    descriptor = lappend(descriptor,
+                         make_int8_const((int64)terminal_property_filter_id));
+    descriptor = lappend(descriptor, make_text_const(terminal_property_label));
+    descriptor = lappend(descriptor, make_text_const(terminal_property_source));
+    descriptor = lappend(descriptor,
+                         make_text_const(terminal_property_provider));
+    descriptor = lappend(descriptor, make_text_const(terminal_property_type));
+    descriptor = lappend(descriptor,
+                         make_int8_const(terminal_property_match_count));
+    descriptor = lappend(descriptor,
+                         makeInteger(composite_source_known ? 1 : 0));
+    descriptor = lappend(descriptor, make_text_const(composite_source_status));
+    descriptor = lappend(descriptor, make_text_const(composite_source_reason));
+    descriptor = lappend(descriptor,
+                         make_int8_const(composite_source_property_tuples));
+    descriptor = lappend(descriptor,
+                         make_int8_const(composite_source_candidate_fanout));
+    descriptor = lappend(descriptor,
+                         make_int8_const(composite_source_fanout));
+    descriptor = lappend(
+        descriptor, make_int8_const(
+            graph_property_selectivity_ppm(composite_source_selectivity)));
+    descriptor = lappend(
+        descriptor, make_text_const(composite_source_selectivity_source));
+    descriptor = lappend(descriptor, make_text_const(composite_source_planned));
+    descriptor = lappend(
+        descriptor, makeInteger(terminal_property_predicate.known ? 1 : 0));
+    descriptor = lappend(
+        descriptor, make_text_const(terminal_property_predicate.key));
+    descriptor = lappend(
+        descriptor, makeInteger(terminal_property_predicate.isnull ? 1 : 0));
+    descriptor = lappend(
+        descriptor,
+        terminal_property_predicate.value != NULL ?
+        copyObject(terminal_property_predicate.value) :
+        makeNullConst(AGTYPEOID, -1, InvalidOid));
+    descriptor = lappend(descriptor,
+                         make_text_const(terminal_property_value_kind));
+    descriptor = lappend(
+        descriptor, makeInteger(terminal_property_prefilter_eligible ? 1 : 0));
+    descriptor = lappend(
+        descriptor, make_int8_const(terminal_property_prefetch_threshold));
 
     if (graph_name != NULL)
         pfree(graph_name);
     if (label_name != NULL)
         pfree(label_name);
+    if (terminal_key != NULL)
+        pfree(terminal_key);
+    if (terminal_property_predicate.key != NULL)
+        pfree(terminal_property_predicate.key);
+    if (terminal_property_label != NULL)
+        pfree(terminal_property_label);
+    if (terminal_property_source != NULL)
+        pfree(terminal_property_source);
+    if (terminal_property_provider != NULL)
+        pfree(terminal_property_provider);
+    if (terminal_property_type != NULL)
+        pfree(terminal_property_type);
     if (cost_policy != NULL)
         pfree(cost_policy);
 
     return descriptor;
 }
 
+static int64 choose_vle_stream_terminal_candidate_fanout(
+    const VLESourceFanoutEvidence *source_evidence, cypher_rel_dir direction)
+{
+    bool start_known;
+    bool end_known;
+    int64 start_fanout;
+    int64 end_fanout;
+
+    if (source_evidence == NULL)
+        return 0;
+
+    start_known = source_evidence->start_fanout_known;
+    end_known = source_evidence->end_fanout_known;
+    start_fanout =
+        round_vle_source_cost_evidence(source_evidence->start_fanout);
+    end_fanout =
+        round_vle_source_cost_evidence(source_evidence->end_fanout);
+
+    if (direction == CYPHER_REL_DIR_RIGHT)
+        return start_known ? start_fanout : 0;
+    if (direction == CYPHER_REL_DIR_LEFT)
+        return end_known ? end_fanout : 0;
+
+    if (start_known && end_known)
+        return Min(start_fanout, end_fanout);
+    if (start_known)
+        return start_fanout;
+    if (end_known)
+        return end_fanout;
+    return 0;
+}
+
+static int64 clamp_vle_stream_composite_fanout(int64 candidate_fanout,
+                                               double selectivity)
+{
+    int64 composite_fanout;
+
+    if (candidate_fanout <= 0)
+        return 0;
+
+    composite_fanout = round_vle_source_cost_evidence(
+        (double)candidate_fanout * selectivity);
+    if (composite_fanout < 1)
+        composite_fanout = 1;
+    if (composite_fanout > candidate_fanout)
+        composite_fanout = candidate_fanout;
+
+    return composite_fanout;
+}
+
+static GraphPropertySourceSelectivity estimate_graph_property_source_selectivity(
+    Oid property_index_oid, double fallback_selectivity,
+    Const *property_value)
+{
+    GraphPropertySourceSelectivity estimate;
+    double reltuples;
+    double mcv_selectivity;
+    double distinct_values;
+
+    estimate.selectivity = fallback_selectivity;
+    estimate.source = "fallback";
+
+    if (!OidIsValid(property_index_oid) || fallback_selectivity <= 0)
+        return estimate;
+
+    if (estimate_graph_property_index_mcv_selectivity(
+            property_index_oid, property_value, &mcv_selectivity))
+    {
+        if (mcv_selectivity <= fallback_selectivity)
+        {
+            estimate.selectivity = mcv_selectivity;
+            estimate.source = "typed-mcv";
+        }
+        else
+        {
+            estimate.source = "fallback-mcv-ceiling";
+        }
+        return estimate;
+    }
+
+    reltuples = get_vle_relation_estimated_tuples(property_index_oid);
+    if (!estimate_graph_property_index_distinct_values(
+            property_index_oid, reltuples, &distinct_values))
+        return estimate;
+
+    if (distinct_values > 1.0)
+    {
+        double statistics_selectivity = 1.0 / distinct_values;
+
+        if (statistics_selectivity < fallback_selectivity)
+        {
+            estimate.selectivity = statistics_selectivity;
+            estimate.source = "typed-distinct";
+        }
+        else
+        {
+            estimate.source = "fallback-ceiling";
+        }
+    }
+
+    return estimate;
+}
+
+static bool estimate_graph_property_index_mcv_selectivity(Oid property_index_oid,
+                                                          Const *property_value,
+                                                          double *selectivity)
+{
+    HeapTuple stat_tuple;
+    AttStatsSlot sslot;
+    Oid op_oid;
+    Oid op_func_oid;
+    FmgrInfo eqproc;
+    Oid collation;
+    int i;
+
+    Assert(selectivity != NULL);
+    *selectivity = 0.0;
+
+    if (!OidIsValid(property_index_oid) || property_value == NULL ||
+        property_value->constisnull)
+        return false;
+
+    stat_tuple = SearchSysCache3(STATRELATTINH,
+                                 ObjectIdGetDatum(property_index_oid),
+                                 Int16GetDatum(1),
+                                 BoolGetDatum(false));
+    if (!HeapTupleIsValid(stat_tuple))
+        return false;
+
+    if (!get_attstatsslot(&sslot, stat_tuple, STATISTIC_KIND_MCV, InvalidOid,
+                          ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS))
+    {
+        ReleaseSysCache(stat_tuple);
+        return false;
+    }
+
+    if (sslot.valuetype != property_value->consttype ||
+        sslot.nvalues <= 0 || sslot.nnumbers <= 0)
+    {
+        free_attstatsslot(&sslot);
+        ReleaseSysCache(stat_tuple);
+        return false;
+    }
+
+    op_oid = OpernameGetOprid(list_make1(makeString("=")),
+                              property_value->consttype,
+                              property_value->consttype);
+    if (!OidIsValid(op_oid))
+    {
+        free_attstatsslot(&sslot);
+        ReleaseSysCache(stat_tuple);
+        return false;
+    }
+    op_func_oid = get_opcode(op_oid);
+    if (!OidIsValid(op_func_oid))
+    {
+        free_attstatsslot(&sslot);
+        ReleaseSysCache(stat_tuple);
+        return false;
+    }
+
+    fmgr_info(op_func_oid, &eqproc);
+    collation = OidIsValid(sslot.stacoll) ? sslot.stacoll :
+        property_value->constcollid;
+    for (i = 0; i < sslot.nvalues && i < sslot.nnumbers; i++)
+    {
+        if (DatumGetBool(FunctionCall2Coll(&eqproc, collation,
+                                           property_value->constvalue,
+                                           sslot.values[i])))
+        {
+            *selectivity = sslot.numbers[i];
+            free_attstatsslot(&sslot);
+            ReleaseSysCache(stat_tuple);
+            return *selectivity > 0;
+        }
+    }
+
+    free_attstatsslot(&sslot);
+    ReleaseSysCache(stat_tuple);
+    return false;
+}
+
+static bool estimate_graph_property_index_distinct_values(Oid property_index_oid,
+                                                          double reltuples,
+                                                          double *distinct_values)
+{
+    HeapTuple stat_tuple;
+    Form_pg_statistic stats;
+    double distinct;
+
+    Assert(distinct_values != NULL);
+    *distinct_values = 0.0;
+
+    if (!OidIsValid(property_index_oid) || reltuples <= 0)
+        return false;
+
+    stat_tuple = SearchSysCache3(STATRELATTINH,
+                                 ObjectIdGetDatum(property_index_oid),
+                                 Int16GetDatum(1),
+                                 BoolGetDatum(false));
+    if (!HeapTupleIsValid(stat_tuple))
+        return false;
+
+    stats = (Form_pg_statistic) GETSTRUCT(stat_tuple);
+    if (stats->stadistinct > 0)
+        distinct = stats->stadistinct;
+    else if (stats->stadistinct < 0)
+        distinct = -stats->stadistinct * reltuples;
+    else
+        distinct = 0.0;
+
+    ReleaseSysCache(stat_tuple);
+
+    if (distinct <= 0)
+        return false;
+
+    distinct = Max(distinct, 1.0);
+    distinct = Min(distinct, reltuples);
+    *distinct_values = distinct;
+    return true;
+}
+
+static int64 graph_property_selectivity_ppm(double selectivity)
+{
+    if (selectivity <= 0)
+        return 0;
+    if (selectivity >= 1.0)
+        return 1000000;
+
+    return (int64)(selectivity * 1000000.0 + 0.5);
+}
+
 static void get_vle_stream_edge_source_indexes(
     const char *graph_name, const char *label_name,
     Oid *edge_label_oid,
+    Oid *age_adjacency_out_index_oid,
+    Oid *age_adjacency_in_index_oid,
     bool *adjacency_out, bool *adjacency_in,
     bool *endpoint_start, bool *endpoint_end)
 {
@@ -2531,14 +3937,19 @@ static void get_vle_stream_edge_source_indexes(
     Relation edge_rel;
     List *index_list;
     ListCell *lc;
+    bool anonymous_edge_label;
 
     Assert(edge_label_oid != NULL);
+    Assert(age_adjacency_out_index_oid != NULL);
+    Assert(age_adjacency_in_index_oid != NULL);
     Assert(adjacency_out != NULL);
     Assert(adjacency_in != NULL);
     Assert(endpoint_start != NULL);
     Assert(endpoint_end != NULL);
 
     *edge_label_oid = InvalidOid;
+    *age_adjacency_out_index_oid = InvalidOid;
+    *age_adjacency_in_index_oid = InvalidOid;
     *adjacency_out = false;
     *adjacency_in = false;
     *endpoint_start = false;
@@ -2550,6 +3961,10 @@ static void get_vle_stream_edge_source_indexes(
     graph_oid = get_graph_oid(graph_name);
     if (!OidIsValid(graph_oid))
         return;
+
+    anonymous_edge_label = label_name[0] == '\0';
+    if (anonymous_edge_label)
+        label_name = AG_DEFAULT_LABEL_EDGE;
 
     label_cache = search_label_name_graph_cache_cached(label_name, graph_oid);
     if (label_cache == NULL || !OidIsValid(label_cache->relation))
@@ -2582,9 +3997,15 @@ static void get_vle_stream_edge_source_indexes(
                 index_rel->rd_index->indisready)
             {
                 if (vle_stream_age_adjacency_index_matches(index_rel, true))
+                {
+                    *age_adjacency_out_index_oid = index_oid;
                     *adjacency_out = true;
+                }
                 if (vle_stream_age_adjacency_index_matches(index_rel, false))
+                {
+                    *age_adjacency_in_index_oid = index_oid;
                     *adjacency_in = true;
+                }
             }
             index_close(index_rel, AccessShareLock);
             if (*adjacency_out && *adjacency_in)
@@ -2594,6 +4015,189 @@ static void get_vle_stream_edge_source_indexes(
     }
 
     relation_close(edge_rel, AccessShareLock);
+
+    if (anonymous_edge_label && !*adjacency_out && !*adjacency_in)
+    {
+        *endpoint_start = false;
+        *endpoint_end = false;
+    }
+}
+
+static void apply_vle_stream_directory_fanout_evidence(
+    VLESourceFanoutEvidence *source_evidence, List *func_args,
+    Oid age_adjacency_out_index_oid, Oid age_adjacency_in_index_oid,
+    int32 terminal_label_id, PlannerInfo *root)
+{
+    graphid start_id;
+    graphid end_id;
+    bool start_null = false;
+    bool end_null = false;
+
+    Assert(source_evidence != NULL);
+
+    if (func_args == NIL)
+        return;
+
+    if (OidIsValid(age_adjacency_out_index_oid) &&
+        list_length(func_args) > AGE_VLE_STREAM_ARG_START &&
+        find_age_vle_stream_endpoint_graphid_const(
+            root,
+            list_nth(func_args, AGE_VLE_STREAM_ARG_START),
+            &start_id, &start_null) &&
+        !start_null)
+    {
+        int64 run_postings;
+        int64 terminal_postings;
+        const char *value_posting_source;
+
+        if (age_adjacency_estimate_terminal_label_postings(
+                age_adjacency_out_index_oid, start_id, 0,
+                &run_postings, NULL, NULL, NULL))
+        {
+            source_evidence->start_fanout = (double)run_postings;
+            source_evidence->start_fanout_known = true;
+            source_evidence->start_fanout_source = "directory";
+        }
+        if (label_id_is_valid(terminal_label_id) &&
+            age_adjacency_estimate_terminal_label_postings(
+                age_adjacency_out_index_oid, start_id, terminal_label_id,
+                &run_postings, &terminal_postings, NULL,
+                &value_posting_source))
+        {
+            source_evidence->start_fanout = (double)terminal_postings;
+            source_evidence->start_fanout_known = true;
+            source_evidence->start_fanout_source = "directory-label";
+            source_evidence->start_value_posting_source =
+                value_posting_source;
+        }
+    }
+
+    if (OidIsValid(age_adjacency_in_index_oid) &&
+        list_length(func_args) > AGE_VLE_STREAM_ARG_END &&
+        find_age_vle_stream_endpoint_graphid_const(
+            root,
+            list_nth(func_args, AGE_VLE_STREAM_ARG_END),
+            &end_id, &end_null) &&
+        !end_null)
+    {
+        int64 run_postings;
+        int64 terminal_postings;
+        const char *value_posting_source;
+
+        if (age_adjacency_estimate_terminal_label_postings(
+                age_adjacency_in_index_oid, end_id, 0,
+                &run_postings, NULL, NULL, NULL))
+        {
+            source_evidence->end_fanout = (double)run_postings;
+            source_evidence->end_fanout_known = true;
+            source_evidence->end_fanout_source = "directory";
+        }
+        if (label_id_is_valid(terminal_label_id) &&
+            age_adjacency_estimate_terminal_label_postings(
+                age_adjacency_in_index_oid, end_id, terminal_label_id,
+                &run_postings, &terminal_postings, NULL,
+                &value_posting_source))
+        {
+            source_evidence->end_fanout = (double)terminal_postings;
+            source_evidence->end_fanout_known = true;
+            source_evidence->end_fanout_source = "directory-label";
+            source_evidence->end_value_posting_source =
+                value_posting_source;
+        }
+    }
+}
+
+static bool find_age_vle_stream_endpoint_graphid_const(
+    PlannerInfo *root, Node *node, graphid *value, bool *isnull)
+{
+    RelOptInfo *endpoint_rel;
+    Relids relids;
+    int rti;
+    ListCell *lc;
+
+    Assert(value != NULL);
+    Assert(isnull != NULL);
+
+    if (get_age_vle_stream_vertex_id_const(node, value, isnull))
+        return true;
+
+    if (root == NULL || node == NULL)
+        return false;
+
+    relids = pull_varnos(root, node);
+    if (bms_is_empty(relids))
+    {
+        bms_free(relids);
+        return false;
+    }
+    if (bms_membership(relids) != BMS_SINGLETON)
+    {
+        bms_free(relids);
+        return false;
+    }
+
+    rti = bms_singleton_member(relids);
+    bms_free(relids);
+    if (rti <= 0 ||
+        rti >= root->simple_rel_array_size ||
+        root->simple_rel_array[rti] == NULL)
+    {
+        return false;
+    }
+
+    endpoint_rel = root->simple_rel_array[rti];
+    foreach(lc, endpoint_rel->baserestrictinfo)
+    {
+        RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+        OpExpr *op;
+        Node *left;
+        Node *right;
+
+        if (!IsA(rinfo->clause, OpExpr))
+            continue;
+
+        op = castNode(OpExpr, rinfo->clause);
+        if (list_length(op->args) != 2)
+            continue;
+
+        left = linitial(op->args);
+        right = lsecond(op->args);
+
+        if (IsA(left, Var) && IsA(right, Const))
+        {
+            Var *var = castNode(Var, left);
+            Const *con = castNode(Const, right);
+
+            if (var->varno == rti &&
+                var->varattno == Anum_ag_label_vertex_table_id &&
+                var->vartype == GRAPHIDOID &&
+                con->consttype == GRAPHIDOID &&
+                !con->constisnull)
+            {
+                *value = (graphid)DatumGetInt64(con->constvalue);
+                *isnull = false;
+                return true;
+            }
+        }
+        else if (IsA(left, Const) && IsA(right, Var))
+        {
+            Const *con = castNode(Const, left);
+            Var *var = castNode(Var, right);
+
+            if (var->varno == rti &&
+                var->varattno == Anum_ag_label_vertex_table_id &&
+                var->vartype == GRAPHIDOID &&
+                con->consttype == GRAPHIDOID &&
+                !con->constisnull)
+            {
+                *value = (graphid)DatumGetInt64(con->constvalue);
+                *isnull = false;
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 static bool vle_stream_age_adjacency_index_matches(Relation index_rel,
@@ -2691,6 +4295,76 @@ static bool get_age_vle_stream_integer_const(Node *node, int64 *value,
     return true;
 }
 
+static bool get_age_vle_stream_vertex_id_const(Node *node, graphid *value,
+                                               bool *isnull)
+{
+    Const *const_arg;
+    agtype *agt;
+    agtype_value agtv;
+    agtype_value *id_value;
+    bool needs_free = false;
+    bool found;
+
+    Assert(value != NULL);
+    Assert(isnull != NULL);
+
+    *value = 0;
+    *isnull = false;
+
+    if (node == NULL || !IsA(node, Const))
+        return false;
+
+    const_arg = (Const *)node;
+    if (const_arg->constisnull)
+    {
+        *isnull = true;
+        return true;
+    }
+    if (const_arg->consttype != AGTYPEOID)
+        return false;
+
+    agt = DATUM_GET_AGTYPE_P(const_arg->constvalue);
+    if (!AGTYPE_CONTAINER_IS_SCALAR(&agt->root))
+        return false;
+
+    found = get_ith_agtype_value_from_container_no_copy(&agt->root, 0, &agtv,
+                                                        &needs_free);
+    if (!found || agtv.type == AGTV_NULL)
+    {
+        if (needs_free)
+            pfree_agtype_value_content(&agtv);
+        *isnull = true;
+        return true;
+    }
+    if (agtv.type == AGTV_INTEGER)
+    {
+        *value = (graphid)agtv.val.int_value;
+        if (needs_free)
+            pfree_agtype_value_content(&agtv);
+        return true;
+    }
+    if (agtv.type != AGTV_VERTEX)
+    {
+        if (needs_free)
+            pfree_agtype_value_content(&agtv);
+        return false;
+    }
+
+    id_value = AGTYPE_VERTEX_GET_ID(&agtv);
+    if (id_value == NULL || id_value->type != AGTV_INTEGER)
+    {
+        if (needs_free)
+            pfree_agtype_value_content(&agtv);
+        return false;
+    }
+
+    *value = (graphid)id_value->val.int_value;
+    if (needs_free)
+        pfree_agtype_value_content(&agtv);
+
+    return true;
+}
+
 static bool get_age_vle_stream_string_const(Node *node, char **value,
                                             bool *isnull)
 {
@@ -2775,7 +4449,7 @@ static Const *make_agtype_const(agtype *value)
                      false, false);
 }
 
-static void adjust_adjacency_match_join_rows(RelOptInfo *joinrel,
+static void adjust_graph_expansion_join_rows(RelOptInfo *joinrel,
                                              JoinType jointype)
 {
     ListCell *lc;
@@ -2794,8 +4468,16 @@ static void adjust_adjacency_match_join_rows(RelOptInfo *joinrel,
         Path *inner_path;
         double child_rows;
         double adjusted_rows;
-        bool outer_has_adjacency;
-        bool inner_has_adjacency;
+        double row_ratio;
+        Cost old_startup_cost;
+        Cost old_total_cost;
+        Cost adjusted_total_cost;
+        bool outer_has_expansion;
+        bool inner_has_expansion;
+        const char *outer_order_property = NULL;
+        const char *inner_order_property = NULL;
+        bool outer_bound_expansion;
+        bool inner_bound_expansion;
 
         if (!IsA(path, NestPath))
             continue;
@@ -2804,34 +4486,54 @@ static void adjust_adjacency_match_join_rows(RelOptInfo *joinrel,
         outer_path = joinpath->outerjoinpath;
         inner_path = joinpath->innerjoinpath;
 
-        outer_has_adjacency = path_contains_adjacency_match(outer_path);
-        inner_has_adjacency = path_contains_adjacency_match(inner_path);
+        outer_has_expansion = path_contains_graph_expansion(outer_path);
+        inner_has_expansion = path_contains_graph_expansion(inner_path);
+        outer_bound_expansion = inner_path != NULL &&
+            inner_path->parent != NULL &&
+            path_has_bound_graph_expansion(outer_path,
+                                           inner_path->parent->relids,
+                                           &outer_order_property);
+        inner_bound_expansion = outer_path != NULL &&
+            outer_path->parent != NULL &&
+            path_has_bound_graph_expansion(inner_path,
+                                           outer_path->parent->relids,
+                                           &inner_order_property);
 
         if (outer_path == NULL ||
             inner_path == NULL ||
-            (!outer_has_adjacency && !inner_has_adjacency))
+            (!outer_has_expansion && !inner_has_expansion))
         {
             continue;
         }
 
         /*
          * Do not mutate shared joinrel or ParamPathInfo estimates here.  This
-         * only tightens the opt-in NestPath that contains the adjacency
+         * only tightens the opt-in NestPath that contains a graph expansion
          * CustomPath after core join path creation has finished.
          */
         child_rows = outer_path->rows * inner_path->rows;
         adjusted_rows = clamp_row_est(Max(child_rows, 1.0));
 
-        if (outer_has_adjacency &&
-            !inner_has_adjacency &&
+        if (outer_bound_expansion)
+        {
+            adjusted_rows = Min(adjusted_rows,
+                                clamp_row_est(Max(outer_path->rows, 1.0)));
+        }
+        else if (inner_bound_expansion)
+        {
+            adjusted_rows = Min(adjusted_rows,
+                                clamp_row_est(Max(inner_path->rows, 1.0)));
+        }
+        else if (outer_has_expansion &&
+                 !inner_has_expansion &&
             outer_path->parent != NULL &&
             path_required_outer_is_subset(inner_path, outer_path->parent->relids))
         {
             adjusted_rows = Min(adjusted_rows,
                                 clamp_row_est(Max(outer_path->rows, 1.0)));
         }
-        else if (inner_has_adjacency &&
-                 !outer_has_adjacency &&
+        else if (inner_has_expansion &&
+                 !outer_has_expansion &&
                  inner_path->parent != NULL &&
                  path_required_outer_is_subset(outer_path,
                                                inner_path->parent->relids))
@@ -2843,20 +4545,316 @@ static void adjust_adjacency_match_join_rows(RelOptInfo *joinrel,
         if (adjusted_rows >= path->rows)
             continue;
 
+        old_startup_cost = path->startup_cost;
+        old_total_cost = path->total_cost;
+        row_ratio = adjusted_rows / Max(path->rows, 1.0);
+        row_ratio = Max(row_ratio, 0.01);
+        adjusted_total_cost =
+            old_startup_cost + (old_total_cost - old_startup_cost) *
+            row_ratio;
+        if (adjusted_total_cost < old_startup_cost)
+            adjusted_total_cost = old_startup_cost;
+
         ereport(DEBUG2,
-                (errmsg_internal("AGE adjacency MATCH join rows adjusted: "
+                (errmsg_internal("AGE graph expansion join rows adjusted: "
                                  "jointype=%d joinrelids=%s old_rows=%.0f "
                                  "new_rows=%.0f outer_rows=%.0f "
-                                 "inner_rows=%.0f",
+                                 "inner_rows=%.0f old_total=%.2f "
+                                 "new_total=%.2f outer_order=%s "
+                                 "inner_order=%s",
                                  (int)jointype,
                                  bmsToString(joinrel->relids),
                                  path->rows,
                                  adjusted_rows,
                                  outer_path->rows,
-                                 inner_path->rows)));
+                                 inner_path->rows,
+                                 old_total_cost,
+                                 adjusted_total_cost,
+                                 outer_order_property != NULL ?
+                                 outer_order_property : "none",
+                                 inner_order_property != NULL ?
+                                 inner_order_property : "none")));
 
         path->rows = adjusted_rows;
+        path->total_cost = adjusted_total_cost;
     }
+}
+
+static bool path_has_bound_graph_expansion(Path *path, Relids outer_relids,
+                                           const char **order_property)
+{
+    if (path == NULL)
+        return false;
+
+    if (IsA(path, CustomPath))
+    {
+        CustomPath *custom_path = (CustomPath *)path;
+        const char *property;
+
+        if (!path_required_outer_is_subset(path, outer_relids))
+            return false;
+
+        if (custom_path->methods == &age_adjacency_match_path_methods)
+            property = custom_path_adjacency_join_order_property(custom_path);
+        else if (custom_path->methods == &age_vle_stream_path_methods)
+            property = custom_path_vle_join_order_property(custom_path);
+        else
+            return false;
+
+        if (order_property != NULL)
+            *order_property = property;
+
+        return property != NULL &&
+               (strcmp(property, "index-anchored") == 0 ||
+                strcmp(property, "adjacency-directory-anchored") == 0 ||
+                strcmp(property, "adjacency-anchored") == 0 ||
+                strcmp(property, "vle-frontier-anchored") == 0 ||
+                strcmp(property, "expand-into-verification") == 0);
+    }
+
+    if (path_required_outer_is_subset(path, outer_relids))
+    {
+        const char *property;
+
+        property = index_path_join_order_property(path);
+        if (property != NULL)
+        {
+            if (order_property != NULL)
+                *order_property = property;
+            return true;
+        }
+    }
+
+    if (IsA(path, MaterialPath))
+        return path_has_bound_graph_expansion(((MaterialPath *)path)->subpath,
+                                              outer_relids, order_property);
+
+    if (IsA(path, MemoizePath))
+        return path_has_bound_graph_expansion(((MemoizePath *)path)->subpath,
+                                              outer_relids, order_property);
+
+    if (IsA(path, ProjectionPath))
+        return path_has_bound_graph_expansion(((ProjectionPath *)path)->subpath,
+                                              outer_relids, order_property);
+
+    if (IsA(path, SubqueryScanPath))
+        return path_has_bound_graph_expansion(
+            ((SubqueryScanPath *)path)->subpath, outer_relids,
+            order_property);
+
+    return false;
+}
+
+static const char *index_path_join_order_property(Path *path)
+{
+    if (!path_is_index_backed(path))
+        return NULL;
+
+    return "index-anchored";
+}
+
+static bool path_is_index_backed(Path *path)
+{
+    ListCell *lc;
+
+    if (path == NULL)
+        return false;
+
+    if (IsA(path, IndexPath))
+    {
+        IndexPath *index_path = (IndexPath *)path;
+
+        return index_path->indexclauses != NIL;
+    }
+
+    if (IsA(path, BitmapHeapPath))
+        return path_is_index_backed(((BitmapHeapPath *)path)->bitmapqual);
+
+    if (IsA(path, BitmapAndPath))
+    {
+        BitmapAndPath *bitmap_path = (BitmapAndPath *)path;
+
+        foreach(lc, bitmap_path->bitmapquals)
+        {
+            if (path_is_index_backed(lfirst(lc)))
+                return true;
+        }
+    }
+
+    if (IsA(path, BitmapOrPath))
+    {
+        BitmapOrPath *bitmap_path = (BitmapOrPath *)path;
+
+        foreach(lc, bitmap_path->bitmapquals)
+        {
+            if (path_is_index_backed(lfirst(lc)))
+                return true;
+        }
+    }
+
+    return false;
+}
+
+static const char *custom_path_adjacency_join_order_property(
+    CustomPath *custom_path)
+{
+    List *descriptor;
+
+    if (custom_path == NULL ||
+        custom_path->methods != &age_adjacency_match_path_methods ||
+        list_length(custom_path->custom_private) < 5)
+    {
+        return NULL;
+    }
+
+    descriptor = list_nth_node(List, custom_path->custom_private, 4);
+    if (list_length(descriptor) != AGE_ADJACENCY_MATCH_DESC_COUNT)
+        return NULL;
+
+    return adjacency_match_descriptor_text_field(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_PROPERTY);
+}
+
+static const char *custom_path_vle_join_order_property(
+    CustomPath *custom_path)
+{
+    List *edge_source;
+    List *graph_join_descriptor;
+    const char *composite_planned;
+    const char *start_fanout_source;
+    const char *end_fanout_source;
+
+    if (custom_path == NULL ||
+        custom_path->methods != &age_vle_stream_path_methods ||
+        list_length(custom_path->custom_private) < 8)
+    {
+        return NULL;
+    }
+
+    if (list_length(custom_path->custom_private) >
+        AGE_VLE_STREAM_PRIVATE_COUNT + 1)
+    {
+        graph_join_descriptor = list_nth_node(
+            List, custom_path->custom_private,
+            AGE_VLE_STREAM_PRIVATE_COUNT + 1);
+        if (list_length(graph_join_descriptor) ==
+            AGE_GRAPH_JOIN_DESC_COUNT)
+        {
+            return age_graph_join_descriptor_text_field(
+                graph_join_descriptor,
+                AGE_GRAPH_JOIN_DESC_ORDER_PROPERTY);
+        }
+    }
+
+    edge_source = list_nth_node(List, custom_path->custom_private, 7);
+    if (list_length(edge_source) != AGE_VLE_STREAM_EDGE_SOURCE_COUNT)
+        return NULL;
+
+    composite_planned = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_PLANNED);
+    if (vle_stream_edge_source_bool_field(
+            edge_source,
+            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_KNOWN) &&
+        composite_planned != NULL &&
+        strcmp(composite_planned, "property-prefilter") == 0)
+    {
+        return "index-anchored";
+    }
+
+    start_fanout_source = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_START_FANOUT_SOURCE);
+    end_fanout_source = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT_SOURCE);
+    if ((start_fanout_source != NULL &&
+         strcmp(start_fanout_source, "directory-label") == 0) ||
+        (end_fanout_source != NULL &&
+         strcmp(end_fanout_source, "directory-label") == 0))
+    {
+        return "vle-frontier-anchored";
+    }
+
+    if (vle_stream_edge_source_bool_field(
+            edge_source,
+            AGE_VLE_STREAM_EDGE_SOURCE_CACHE_SEED_ELIGIBLE) ||
+        vle_stream_edge_source_bool_field(
+            edge_source,
+            AGE_VLE_STREAM_EDGE_SOURCE_EMPTY_LIFECYCLE_ELIGIBLE) ||
+        vle_stream_edge_source_bool_field(
+            edge_source,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_KNOWN))
+    {
+        return "vle-frontier-anchored";
+    }
+
+    if (custom_path_vle_has_bound_endpoints(custom_path))
+        return "expand-into-verification";
+
+    return "query-order";
+}
+
+static bool custom_path_vle_has_bound_endpoints(CustomPath *custom_path)
+{
+    List *func_args;
+
+    if (custom_path == NULL ||
+        custom_path->methods != &age_vle_stream_path_methods ||
+        custom_path->custom_private == NIL)
+    {
+        return false;
+    }
+
+    func_args = linitial_node(List, custom_path->custom_private);
+    return vle_stream_func_args_have_bound_endpoints(func_args);
+}
+
+static const char *adjacency_match_descriptor_text_field(List *descriptor,
+                                                        int index)
+{
+    Const *value;
+
+    value = list_nth_node(Const, descriptor, index);
+    if (value->constisnull || value->consttype != TEXTOID)
+        return NULL;
+
+    return TextDatumGetCString(value->constvalue);
+}
+
+static const char *vle_stream_edge_source_text_field(List *descriptor,
+                                                     int index)
+{
+    Const *value;
+
+    value = list_nth_node(Const, descriptor, index);
+    if (value->constisnull || value->consttype != TEXTOID)
+        return NULL;
+
+    return TextDatumGetCString(value->constvalue);
+}
+
+static int64 vle_stream_descriptor_int8_field(List *descriptor, int index,
+                                              int64 fallback)
+{
+    Const *value;
+
+    if (descriptor == NIL || list_length(descriptor) <= index)
+        return fallback;
+
+    value = list_nth_node(Const, descriptor, index);
+    if (value->constisnull || value->consttype != INT8OID)
+        return fallback;
+
+    return DatumGetInt64(value->constvalue);
+}
+
+static bool vle_stream_edge_source_bool_field(List *descriptor, int index)
+{
+    Node *value;
+
+    value = list_nth(descriptor, index);
+    if (value == NULL || !IsA(value, Integer))
+        return false;
+
+    return intVal(value) != 0;
 }
 
 static bool path_required_outer_is_subset(Path *path, Relids relids)
@@ -2875,7 +4873,7 @@ static bool path_required_outer_is_subset(Path *path, Relids relids)
            bms_is_subset(required_outer, relids);
 }
 
-static bool path_contains_adjacency_match(Path *path)
+static bool path_contains_graph_expansion(Path *path)
 {
     if (path == NULL)
         return false;
@@ -2884,7 +4882,8 @@ static bool path_contains_adjacency_match(Path *path)
     {
         CustomPath *custom_path = (CustomPath *)path;
 
-        return custom_path->methods == &age_adjacency_match_path_methods;
+        return custom_path->methods == &age_adjacency_match_path_methods ||
+               custom_path->methods == &age_vle_stream_path_methods;
     }
 
     if (IsA(path, NestPath) ||
@@ -2893,21 +4892,21 @@ static bool path_contains_adjacency_match(Path *path)
     {
         JoinPath *join_path = (JoinPath *)path;
 
-        return path_contains_adjacency_match(join_path->outerjoinpath) ||
-               path_contains_adjacency_match(join_path->innerjoinpath);
+        return path_contains_graph_expansion(join_path->outerjoinpath) ||
+               path_contains_graph_expansion(join_path->innerjoinpath);
     }
 
     if (IsA(path, MaterialPath))
-        return path_contains_adjacency_match(((MaterialPath *)path)->subpath);
+        return path_contains_graph_expansion(((MaterialPath *)path)->subpath);
 
     if (IsA(path, MemoizePath))
-        return path_contains_adjacency_match(((MemoizePath *)path)->subpath);
+        return path_contains_graph_expansion(((MemoizePath *)path)->subpath);
 
     if (IsA(path, ProjectionPath))
-        return path_contains_adjacency_match(((ProjectionPath *)path)->subpath);
+        return path_contains_graph_expansion(((ProjectionPath *)path)->subpath);
 
     if (IsA(path, SubqueryScanPath))
-        return path_contains_adjacency_match(((SubqueryScanPath *)path)->subpath);
+        return path_contains_graph_expansion(((SubqueryScanPath *)path)->subpath);
 
     return false;
 }
@@ -3012,6 +5011,8 @@ static void bind_adjacency_match_candidate_outer_relids(
             {
                 candidate->required_outer = expr_relids;
                 candidate->bound_endpoint_rti = expr_rti;
+                restrict_adjacency_match_terminal_property_prefetch(root,
+                                                                    candidate);
                 return;
             }
         }
@@ -3030,6 +5031,40 @@ static void bind_adjacency_match_candidate_outer_relids(
 
     candidate->bound_endpoint_rti = alias_rti;
     candidate->required_outer = bms_make_singleton(alias_rti);
+    restrict_adjacency_match_terminal_property_prefetch(root, candidate);
+}
+
+static void restrict_adjacency_match_terminal_property_prefetch(
+    PlannerInfo *root, CypherAdjacencyMatchCandidate *candidate)
+{
+    Relids value_relids;
+
+    if (root == NULL ||
+        candidate == NULL ||
+        candidate->right_property_value_expr == NULL)
+    {
+        return;
+    }
+
+    value_relids = pull_varnos(root, candidate->right_property_value_expr);
+    if (!bms_is_empty(value_relids) &&
+        !bms_is_subset(value_relids, candidate->required_outer))
+    {
+        candidate->right_property_value_expr = NULL;
+        candidate->right_property_value = NULL;
+        candidate->right_property_index_metadata_backed = false;
+        candidate->right_property_index_oid = InvalidOid;
+        candidate->right_property_prefetch_eligible = false;
+        candidate->right_property_value_kind = pstrdup("none");
+    }
+    else
+    {
+        candidate->right_property_value_kind =
+            pstrdup(adjacency_match_terminal_property_value_kind(candidate));
+        candidate->right_property_prefetch_eligible =
+            adjacency_match_has_terminal_property_prefetch(candidate);
+    }
+    bms_free(value_relids);
 }
 
 static void add_adjacency_match_custom_path(
@@ -3039,14 +5074,14 @@ static void add_adjacency_match_custom_path(
     CustomPath *cp;
     Expr *key_expr;
     Const *endpoint_const;
+    Relids path_required_outer;
+    AdjacencyMatchPayloadRequest payload_request;
+    AgeGraphJoinCandidateTable *graph_join_table;
+    AgeGraphJoinCandidate *graph_join_candidate;
 
-    if (!age_enable_adjacency_match_custom_path ||
-        candidate == NULL ||
+    if (candidate == NULL ||
         candidate->bound_endpoint_expr == NULL ||
         candidate->required_outer == NULL ||
-        candidate->has_edge_variable_projection ||
-        candidate->has_edge_property_predicate ||
-        candidate->has_right_property_predicate ||
         adjacency_match_bound_expr_uses_age_id(candidate->bound_endpoint_expr))
     {
         return;
@@ -3056,27 +5091,43 @@ static void add_adjacency_match_custom_path(
     endpoint_const = find_endpoint_graphid_const(root, candidate);
     if (endpoint_const != NULL)
         key_expr = (Expr *)endpoint_const;
+    path_required_outer = endpoint_const != NULL ? NULL :
+        candidate->required_outer;
+    payload_request = build_adjacency_match_payload_request(
+        rel->relid, rel->reltarget->exprs, rel->baserestrictinfo);
 
     cp = makeNode(CustomPath);
     cp->path.pathtype = T_CustomScan;
     cp->path.parent = rel;
     cp->path.pathtarget = rel->reltarget;
     cp->path.param_info =
-        get_baserel_parampathinfo(root, rel, candidate->required_outer);
+        get_baserel_parampathinfo(root, rel, path_required_outer);
     cp->path.parallel_aware = false;
-    cp->path.parallel_safe = false;
+    cp->path.parallel_safe = path_required_outer == NULL &&
+        rel->consider_parallel;
     cp->path.parallel_workers = 0;
     cp->path.pathkeys = NIL;
 
-    cost_adjacency_match_custom_path(root, rel, cp, candidate);
+    cost_adjacency_match_custom_path(root, rel, cp, candidate,
+                                     &payload_request, endpoint_const);
+    graph_join_table = make_adjacency_match_graph_join_table(
+        rel, cp, candidate, &payload_request);
+    graph_join_candidate = age_graph_join_table_select_cheapest(
+        graph_join_table);
+    Assert(graph_join_candidate != NULL);
     cp->flags = CUSTOMPATH_SUPPORT_PROJECTION;
     cp->custom_paths = NIL;
-    cp->custom_private = list_make3(
+    cp->custom_private = list_make5(
         key_expr,
+        candidate->right_property_value_expr != NULL ?
+        copyObject(candidate->right_property_value_expr) :
+        (Node *)makeNullConst(AGTYPEOID, -1, InvalidOid),
         makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
                   ObjectIdGetDatum(candidate->index_oid), false, true),
         makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
-                  BoolGetDatum(candidate->outgoing), false, true));
+                  BoolGetDatum(candidate->outgoing), false, true),
+        make_adjacency_match_descriptor(candidate, &payload_request,
+                                        graph_join_candidate));
     cp->methods = &age_adjacency_match_path_methods;
 
     add_path(rel, (Path *)cp);
@@ -3084,10 +5135,20 @@ static void add_adjacency_match_custom_path(
     ereport(DEBUG2,
             (errmsg_internal("AGE adjacency MATCH CustomPath added: "
                              "edge_rel=%u index=%u required_outer=%s "
+                             "path_required_outer=%s endpoint_const=%s "
+                             "edge_variable=%s edge_props=%s right_props=%s "
                              "rows=%.0f total_cost=%.2f",
                              candidate->edge_label_oid,
                              candidate->index_oid,
                              bmsToString(candidate->required_outer),
+                             path_param_info_string(&cp->path),
+                             endpoint_const != NULL ? "true" : "false",
+                             candidate->has_edge_variable_projection ?
+                             "true" : "false",
+                             candidate->has_edge_property_predicate ?
+                             "true" : "false",
+                             candidate->has_right_property_predicate ?
+                             "true" : "false",
                              cp->path.rows,
                              cp->path.total_cost)));
 }
@@ -3195,16 +5256,26 @@ static bool adjacency_match_bound_expr_uses_age_id_walker(Node *node,
 static void cost_adjacency_match_custom_path(PlannerInfo *root,
                                              RelOptInfo *rel,
                                              CustomPath *cp,
-                                             CypherAdjacencyMatchCandidate *candidate)
+                                             CypherAdjacencyMatchCandidate *candidate,
+                                             const AdjacencyMatchPayloadRequest *payload_request,
+                                             Const *endpoint_const)
 {
     double rows;
     VLESourceFanoutEvidence source_evidence;
     double endpoint_fanout;
+    double terminal_fanout;
+    double composite_fanout;
     double pages;
     double estimated_payload_rows;
     double page_probe_cost;
     double heap_recheck_cost;
+    double right_property_recheck_cost;
     double cpu_cost;
+    double residual_weight;
+    double index_solved_credit;
+    int residual_count;
+    int index_solved_count;
+    bool edge_payload_required;
     Cost random_page_cost;
     Cost local_seq_page_cost;
 
@@ -3224,10 +5295,86 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
     if (endpoint_fanout <= 0)
         endpoint_fanout = Min(rows, 8.0);
 
-    rows = clamp_row_est(Min(rows, endpoint_fanout));
+    terminal_fanout = endpoint_fanout;
+    candidate->estimated_terminal_label_groups = 0;
+    candidate->estimated_value_posting_source = "none";
+    candidate->estimated_fanout_from_directory = false;
+    if (endpoint_const != NULL &&
+        endpoint_const->consttype == GRAPHIDOID &&
+        !endpoint_const->constisnull)
+    {
+        int64 run_postings;
+        int64 terminal_postings;
+        int64 label_groups;
+        const char *value_posting_source;
+
+        if (age_adjacency_estimate_terminal_label_postings(
+                candidate->index_oid,
+                (graphid)DatumGetInt64(endpoint_const->constvalue),
+                candidate->right_label_id,
+                &run_postings, &terminal_postings, &label_groups,
+                &value_posting_source))
+        {
+            endpoint_fanout = (double)run_postings;
+            if (candidate->has_right_label_constraint &&
+                label_id_is_valid(candidate->right_label_id))
+            {
+                terminal_fanout = (double)terminal_postings;
+            }
+            else
+            {
+                terminal_fanout = endpoint_fanout;
+            }
+            candidate->estimated_terminal_label_groups =
+                (double)label_groups;
+            candidate->estimated_value_posting_source =
+                (char *)value_posting_source;
+            candidate->estimated_fanout_from_directory = true;
+        }
+    }
+    else if (candidate->has_right_label_constraint &&
+             label_id_is_valid(candidate->right_label_id))
+    {
+        terminal_fanout = Max(1.0, terminal_fanout * 0.50);
+    }
+    candidate->estimated_endpoint_fanout = endpoint_fanout;
+    candidate->estimated_terminal_fanout = terminal_fanout;
+    candidate->estimated_composite_selectivity = 0.0;
+    candidate->estimated_composite_selectivity_source = "none";
+
+    rows = clamp_row_est(Min(rows, terminal_fanout));
     if (rows < 1)
         rows = 1;
+    composite_fanout = rows;
+    if (adjacency_match_plans_terminal_property_prefetch(candidate,
+                                                        payload_request))
+    {
+        GraphPropertySourceSelectivity property_selectivity;
+        double fallback_selectivity;
+
+        fallback_selectivity =
+            candidate->has_right_label_constraint ? 0.15 : 0.25;
+        property_selectivity = estimate_graph_property_source_selectivity(
+            candidate->right_property_index_oid, fallback_selectivity,
+            candidate->right_property_value);
+        candidate->estimated_composite_selectivity =
+            property_selectivity.selectivity;
+        candidate->estimated_composite_selectivity_source =
+            property_selectivity.source;
+        rows = clamp_row_est(Max(1.0, rows * property_selectivity.selectivity));
+        composite_fanout = rows;
+    }
+    candidate->estimated_composite_fanout = composite_fanout;
     estimated_payload_rows = rows;
+    if (payload_request != NULL)
+        edge_payload_required = payload_request->fetch_properties;
+    else
+        edge_payload_required = adjacency_match_requires_edge_payload(
+            candidate);
+    residual_count = adjacency_match_residual_predicate_count(candidate);
+    index_solved_count =
+        adjacency_match_index_solved_predicate_count(candidate,
+                                                     payload_request);
 
     get_tablespace_page_costs(rel->reltablespace, &random_page_cost,
                               &local_seq_page_cost);
@@ -3238,15 +5385,498 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
      * visibility rechecks for the estimated payload rows.
      */
     page_probe_cost = Min(pages, 4.0) * random_page_cost * 0.03;
-    heap_recheck_cost = estimated_payload_rows * random_page_cost * 0.02;
-    cpu_cost = estimated_payload_rows * cpu_tuple_cost * 2.0;
+    heap_recheck_cost = estimated_payload_rows * random_page_cost *
+        (edge_payload_required ? 0.035 : 0.012);
+    right_property_recheck_cost = 0;
+    if (candidate->has_right_property_predicate)
+    {
+        right_property_recheck_cost = estimated_payload_rows * cpu_tuple_cost *
+            (adjacency_match_plans_terminal_property_prefetch(
+                candidate, payload_request) ?
+             0.05 : 1.25);
+    }
+    residual_weight = 1.0 + (0.35 * residual_count);
+    index_solved_credit = Max(0.70, 1.0 - (0.10 * index_solved_count));
+    cpu_cost = estimated_payload_rows * cpu_tuple_cost *
+        (edge_payload_required ? 3.0 : 1.4) * residual_weight *
+        index_solved_credit;
 
     cp->path.rows = rows;
     cp->path.startup_cost = page_probe_cost;
-    cp->path.total_cost = cp->path.startup_cost + heap_recheck_cost + cpu_cost;
+    cp->path.total_cost = cp->path.startup_cost + heap_recheck_cost +
+        right_property_recheck_cost + cpu_cost;
 
     (void) root;
     (void) local_seq_page_cost;
+}
+
+static bool adjacency_match_requires_edge_payload(
+    const CypherAdjacencyMatchCandidate *candidate)
+{
+    return candidate != NULL &&
+        (candidate->has_edge_variable_projection ||
+         candidate->has_edge_property_predicate);
+}
+
+static bool adjacency_match_has_terminal_property_prefetch(
+    const CypherAdjacencyMatchCandidate *candidate)
+{
+    return candidate != NULL &&
+        candidate->has_right_property_predicate &&
+        candidate->right_property_index_metadata_backed &&
+        OidIsValid(candidate->right_property_index_oid) &&
+        candidate->right_property_value_expr != NULL &&
+        (candidate->right_property_value == NULL ||
+         !candidate->right_property_value->constisnull);
+}
+
+static const char *
+adjacency_match_terminal_property_value_kind(
+    const CypherAdjacencyMatchCandidate *candidate)
+{
+    if (candidate == NULL || candidate->right_property_value_expr == NULL)
+        return "none";
+    if (candidate->right_property_value != NULL)
+        return "const";
+    return "runtime-slot";
+}
+
+static const char *
+adjacency_match_terminal_source_strategy(
+    const CypherAdjacencyMatchCandidate *candidate)
+{
+    bool label_prune;
+    bool property_prefetch;
+
+    if (candidate == NULL)
+        return "none";
+
+    label_prune = candidate->has_right_label_constraint &&
+        label_id_is_valid(candidate->right_label_id);
+    property_prefetch = adjacency_match_has_terminal_property_prefetch(
+        candidate);
+
+    if (label_prune && property_prefetch)
+        return "label-block+property-source";
+    if (label_prune)
+        return "label-block";
+    if (property_prefetch)
+        return "property-source";
+    if (candidate->has_right_property_predicate)
+        return "property-recheck";
+
+    return "none";
+}
+
+static int
+adjacency_match_terminal_prefetch_threshold(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request)
+{
+    bool fetch_properties;
+
+    if (!adjacency_match_has_terminal_property_prefetch(candidate))
+        return 0;
+
+    fetch_properties = payload_request != NULL ?
+        payload_request->fetch_properties :
+        adjacency_match_requires_edge_payload(candidate);
+
+    if (fetch_properties)
+        return 2;
+    if (candidate->estimated_terminal_fanout >= 16.0)
+        return 2;
+
+    return 3;
+}
+
+static const char *
+adjacency_match_terminal_prefetch_reason(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request)
+{
+    bool fetch_properties;
+
+    if (!adjacency_match_has_terminal_property_prefetch(candidate))
+        return "not-indexable";
+
+    fetch_properties = payload_request != NULL ?
+        payload_request->fetch_properties :
+        adjacency_match_requires_edge_payload(candidate);
+
+    if (fetch_properties)
+        return "edge-payload-required";
+    if (candidate->estimated_terminal_fanout >= 16.0)
+        return "large-terminal-fanout";
+
+    return "small-terminal-fanout";
+}
+
+static const char *
+adjacency_match_join_order_connector(
+    const CypherAdjacencyMatchCandidate *candidate)
+{
+    if (candidate == NULL)
+        return "unknown";
+
+    if (candidate->has_right_property_predicate ||
+        candidate->has_right_label_constraint)
+        return "adjacency-composite-expand";
+
+    return "adjacency-expand";
+}
+
+static const char *
+adjacency_match_join_order_bound(
+    const CypherAdjacencyMatchCandidate *candidate)
+{
+    if (candidate == NULL)
+        return "unknown";
+
+    return candidate->outgoing ? "start-bound" : "end-bound";
+}
+
+static const char *
+adjacency_match_join_order_property(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request)
+{
+    if (candidate == NULL)
+        return "unknown";
+
+    if (adjacency_match_has_terminal_property_prefetch(candidate))
+        return "index-anchored";
+
+    if (candidate->estimated_fanout_from_directory)
+        return "adjacency-directory-anchored";
+
+    if (candidate->index_metadata_backed)
+        return "adjacency-anchored";
+
+    return "query-order";
+}
+
+static bool
+adjacency_match_plans_terminal_property_prefetch(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request)
+{
+    int threshold;
+
+    if (!adjacency_match_has_terminal_property_prefetch(candidate))
+        return false;
+
+    threshold = adjacency_match_terminal_prefetch_threshold(candidate,
+                                                           payload_request);
+    if (threshold <= 0)
+        return false;
+
+    return candidate->estimated_terminal_fanout >= threshold;
+}
+
+static int
+adjacency_match_residual_predicate_count(
+    const CypherAdjacencyMatchCandidate *candidate)
+{
+    int count = 0;
+
+    if (candidate->has_edge_property_predicate)
+        count++;
+    if (candidate->has_right_label_constraint)
+        count++;
+    if (candidate->has_right_property_predicate)
+        count++;
+
+    return count;
+}
+
+static int
+adjacency_match_index_solved_predicate_count(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request)
+{
+    int count = 0;
+
+    if (label_id_is_valid(candidate->right_label_id))
+        count++;
+    if (adjacency_match_plans_terminal_property_prefetch(candidate,
+                                                        payload_request))
+    {
+        count++;
+    }
+
+    return count;
+}
+
+static AgeGraphJoinCandidateTable *make_adjacency_match_graph_join_table(
+    RelOptInfo *rel, CustomPath *cp,
+    CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request)
+{
+    AgeGraphJoinCandidateTable *table;
+
+    (void)rel;
+
+    table = age_graph_join_make_candidate_table();
+    if (adjacency_match_has_terminal_property_prefetch(candidate))
+    {
+        age_graph_join_table_add_path_candidate(
+            table, &cp->path,
+            candidate->edge_alias != NULL ? candidate->edge_alias : "edge",
+            "adjacency-value-join",
+            adjacency_match_join_order_bound(candidate),
+            "index-anchored",
+            candidate->right_property_index_source != NULL ?
+            candidate->right_property_index_source : "property-source",
+            false);
+    }
+    age_graph_join_table_add_path_candidate(
+        table, &cp->path,
+        candidate->edge_alias != NULL ? candidate->edge_alias : "edge",
+        adjacency_match_join_order_connector(candidate),
+        adjacency_match_join_order_bound(candidate),
+        adjacency_match_join_order_property(candidate, payload_request),
+        candidate->estimated_fanout_from_directory ?
+        "directory" : "statistics",
+        false);
+
+    return table;
+}
+
+static List *make_adjacency_match_descriptor(
+    CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request,
+    const AgeGraphJoinCandidate *graph_join_candidate)
+{
+    List *descriptor;
+    bool edge_payload_required;
+    int attr_mask = 0;
+
+    Assert(candidate != NULL);
+    Assert(graph_join_candidate != NULL);
+    if (payload_request != NULL)
+    {
+        edge_payload_required = payload_request->fetch_properties;
+        attr_mask = payload_request->attr_mask;
+    }
+    else
+        edge_payload_required = adjacency_match_requires_edge_payload(
+            candidate);
+
+    descriptor = list_make5(
+        makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
+                  ObjectIdGetDatum(candidate->graph_oid), false, true),
+        makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                  BoolGetDatum(candidate->has_edge_variable_projection),
+                  false, true),
+        makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                  BoolGetDatum(candidate->has_edge_property_predicate),
+                  false, true),
+        makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                  BoolGetDatum(candidate->has_right_label_constraint),
+                  false, true),
+        makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                  BoolGetDatum(candidate->has_right_property_predicate),
+                  false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                                   BoolGetDatum(edge_payload_required),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum((int32)attr_mask),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(candidate->right_label_id),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum((int32)
+                                                 candidate->endpoint_attno),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
+                                   Int64GetDatum((int64)(
+                                       candidate->estimated_endpoint_fanout +
+                                       0.5)),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
+                                   Int64GetDatum((int64)(
+                                       candidate->estimated_terminal_fanout +
+                                       0.5)),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
+                                   Int64GetDatum((int64)(
+                                       candidate->estimated_composite_fanout +
+                                       0.5)),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
+                                   Int64GetDatum(
+                                       graph_property_selectivity_ppm(
+                                           candidate->estimated_composite_selectivity)),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       candidate->estimated_composite_selectivity_source != NULL ?
+                                       candidate->estimated_composite_selectivity_source :
+                                       "none"),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       candidate->estimated_value_posting_source != NULL ?
+                                       candidate->estimated_value_posting_source :
+                                       "none"),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
+                                   Int64GetDatum((int64)(
+                                       candidate->estimated_terminal_label_groups +
+                                       0.5)),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       candidate->estimated_fanout_from_directory ?
+                                       "directory" : "statistics"),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       candidate->index_source != NULL ?
+                                       candidate->index_source :
+                                       "unknown"),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       candidate->index_kind != NULL ?
+                                       candidate->index_kind : "unknown"),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       candidate->index_provider != NULL ?
+                                       candidate->index_provider :
+                                       "unknown"),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       candidate->index_direction != NULL ?
+                                       candidate->index_direction :
+                                       (candidate->outgoing ? "out" : "in")),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(
+                                       candidate->index_property_count),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                                   BoolGetDatum(
+                                       candidate->index_metadata_backed),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       candidate->right_property_key != NULL ?
+                                       candidate->right_property_key :
+                                       "none"),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
+                                   ObjectIdGetDatum(
+                                       candidate->right_property_index_oid),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       candidate->right_property_index_source != NULL ?
+                                       candidate->right_property_index_source :
+                                       "none"),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       candidate->right_property_index_provider != NULL ?
+                                       candidate->right_property_index_provider :
+                                       "none"),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       candidate->right_property_index_type != NULL ?
+                                       candidate->right_property_index_type :
+                                       "agtype"),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                                   BoolGetDatum(
+                                       candidate->right_property_index_metadata_backed),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                                   BoolGetDatum(
+                                       candidate->right_property_prefetch_eligible),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       candidate->right_property_value_kind != NULL ?
+                                       candidate->right_property_value_kind :
+                                       "none"),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       adjacency_match_terminal_source_strategy(
+                                           candidate)),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(
+                                       adjacency_match_terminal_prefetch_threshold(
+                                           candidate, payload_request)),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       adjacency_match_terminal_prefetch_reason(
+                                           candidate, payload_request)),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       graph_join_candidate->component.name),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       graph_join_candidate->connector.kind),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       graph_join_candidate->connector.bound),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       graph_join_candidate->connector.order_property),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         candidate->right_property_value != NULL ?
+                         copyObject(candidate->right_property_value) :
+                         makeConst(AGTYPEOID, -1, InvalidOid, -1,
+                                   (Datum)0, true, false));
+
+    return descriptor;
 }
 
 static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
@@ -3257,12 +5887,15 @@ static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
 {
     CustomScan *cs;
     List *custom_scan_tlist;
+    AdjacencyMatchPayloadRequest payload_request;
 
     (void) root;
     (void) custom_plans;
 
+    payload_request = build_adjacency_match_payload_request(rel->relid, tlist,
+                                                            clauses);
     custom_scan_tlist = build_adjacency_match_custom_scan_tlist(
-        rel->relid, tlist, clauses);
+        rel->relid, &payload_request);
 
     cs = makeNode(CustomScan);
 
@@ -3270,8 +5903,8 @@ static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
     cs->scan.plan.total_cost = best_path->path.total_cost;
     cs->scan.plan.plan_rows = best_path->path.rows;
     cs->scan.plan.plan_width = rel->reltarget->width;
-    cs->scan.plan.parallel_aware = false;
-    cs->scan.plan.parallel_safe = false;
+    cs->scan.plan.parallel_aware = best_path->path.parallel_aware;
+    cs->scan.plan.parallel_safe = best_path->path.parallel_safe;
     cs->scan.plan.async_capable = false;
     cs->scan.plan.targetlist = tlist;
     cs->scan.plan.qual = extract_actual_clauses(clauses, false);
@@ -3281,8 +5914,9 @@ static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
 
     cs->flags = best_path->flags;
     cs->custom_plans = NIL;
-    cs->custom_exprs = list_make1(linitial(best_path->custom_private));
-    cs->custom_private = list_copy_tail(best_path->custom_private, 1);
+    cs->custom_exprs = list_make2(linitial(best_path->custom_private),
+                                  lsecond(best_path->custom_private));
+    cs->custom_private = list_copy_tail(best_path->custom_private, 2);
     cs->custom_scan_tlist = custom_scan_tlist;
     cs->custom_relids = bms_make_singleton(rel->relid);
     cs->methods = &age_adjacency_match_scan_methods;
@@ -3297,27 +5931,42 @@ typedef struct AdjacencyMatchScanVarContext
     bool unsupported;
 } AdjacencyMatchScanVarContext;
 
-static List *build_adjacency_match_custom_scan_tlist(Index relid,
-                                                     List *tlist,
-                                                     List *clauses)
+static AdjacencyMatchPayloadRequest build_adjacency_match_payload_request(
+    Index relid, List *target_nodes, List *clauses)
 {
     AdjacencyMatchScanVarContext context;
-    List *custom_tlist = NIL;
-    int attno;
-    int resno = 1;
+    AdjacencyMatchPayloadRequest request;
 
     context.relid = relid;
     context.attrs = NULL;
     context.unsupported = false;
 
-    collect_adjacency_match_scan_vars_from_list(tlist, &context);
+    collect_adjacency_match_scan_vars_from_list(target_nodes, &context);
     collect_adjacency_match_scan_vars_from_list(clauses, &context);
 
-    if (context.unsupported || context.attrs == NULL)
+    request.attrs = context.attrs;
+    request.attr_mask = adjacency_match_payload_attr_mask(context.attrs);
+    request.unsupported = context.unsupported;
+    request.fetch_properties = context.unsupported || context.attrs == NULL ||
+        bms_is_member(Anum_ag_label_edge_table_properties, context.attrs);
+
+    return request;
+}
+
+static List *build_adjacency_match_custom_scan_tlist(
+    Index relid, const AdjacencyMatchPayloadRequest *payload_request)
+{
+    List *custom_tlist = NIL;
+    int attno;
+    int resno = 1;
+
+    if (payload_request == NULL ||
+        payload_request->unsupported ||
+        payload_request->attrs == NULL)
         return NIL;
 
     attno = -1;
-    while ((attno = bms_next_member(context.attrs, attno)) >= 0)
+    while ((attno = bms_next_member(payload_request->attrs, attno)) >= 0)
     {
         Var *var;
         TargetEntry *tle;
@@ -3336,6 +5985,20 @@ static List *build_adjacency_match_custom_scan_tlist(Index relid,
     }
 
     return custom_tlist;
+}
+
+static int adjacency_match_payload_attr_mask(Bitmapset *attrs)
+{
+    int mask = 0;
+    int attno = -1;
+
+    if (attrs == NULL)
+        return 0;
+
+    while ((attno = bms_next_member(attrs, attno)) >= 0)
+        mask |= (1 << (attno - 1));
+
+    return mask;
 }
 
 static void collect_adjacency_match_scan_vars_from_list(List *nodes,

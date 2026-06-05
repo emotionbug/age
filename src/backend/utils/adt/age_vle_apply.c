@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 
+#include "executor/cypher_vle_stream.h"
 #include "utils/age_global_graph.h"
 #include "utils/age_vle_apply.h"
 #include "utils/age_vle_iterator_materialization.h"
@@ -166,7 +167,8 @@ static AgeVLEOutputRequirement resolve_vle_output_requirement(
 
     if (input->output_requirement != AGE_VLE_OUTPUT_REQUIREMENT_UNKNOWN)
         return input->output_requirement;
-    if (input->nargs == AGE_VLE_MAX_ARGS)
+    if (input->nargs == AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 1 ||
+        input->nargs == AGE_VLE_STREAM_ARG_TERMINAL_LABEL + 1)
         return AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY;
     if (vle_grammar_node_id < 0)
         return AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_VERTEX;
@@ -212,6 +214,15 @@ static void init_vle_traversal_context_apply(
     context_apply->edge_label_oid =
         OidIsValid(setup->graph_load.edge_label_oid) ?
         setup->graph_load.edge_label_oid : InvalidOid;
+    context_apply->terminal_label_id =
+        apply->input->terminal_label_known &&
+        apply->input->terminal_label_mode == AGE_VLE_TERMINAL_LABEL_ALL_DEPTH ?
+        apply->input->terminal_label_id : INVALID_LABEL_ID;
+    context_apply->terminal_endpoint_label_id =
+        apply->input->terminal_label_known &&
+        apply->input->terminal_label_mode ==
+        AGE_VLE_TERMINAL_LABEL_ENDPOINT_ONLY ?
+        apply->input->terminal_label_id : INVALID_LABEL_ID;
     context_apply->source_indexes =
         setup->graph_load.source_policy.indexes;
     context_apply->source_policy_known = apply->input->source_policy_known;
@@ -232,6 +243,31 @@ static void init_vle_traversal_context_apply(
     context_apply->upper_infinite = shape->upper_infinite;
     context_apply->terminal_property_prefetch_budget =
         shape->upper_infinite ? -1 : shape->upper + 1;
+    context_apply->terminal_property_prefilter_eligible =
+        apply->input->terminal_property_prefilter_eligible &&
+        apply->input->terminal_property_predicate_known &&
+        apply->input->terminal_label_known &&
+        apply->input->terminal_label_mode == AGE_VLE_TERMINAL_LABEL_ALL_DEPTH;
+    context_apply->terminal_property_index_oid =
+        apply->input->terminal_property_index_oid;
+    context_apply->terminal_property_predicate_known =
+        apply->input->terminal_property_predicate_known;
+    context_apply->terminal_property_predicate_key_known =
+        apply->input->terminal_property_predicate_key_known;
+    context_apply->terminal_property_predicate_key_value =
+        apply->input->terminal_property_predicate_key_value;
+    context_apply->terminal_property_predicate_key_len =
+        apply->input->terminal_property_predicate_key_len;
+    context_apply->terminal_property_predicate_key_is_char =
+        apply->input->terminal_property_predicate_key_is_char;
+    context_apply->terminal_property_predicate_key_char =
+        apply->input->terminal_property_predicate_key_char;
+    context_apply->terminal_property_predicate_value =
+        apply->input->terminal_property_predicate_value;
+    context_apply->terminal_property_predicate_null =
+        apply->input->terminal_property_predicate_null;
+    context_apply->terminal_property_source_prefetch_threshold =
+        apply->input->terminal_property_prefetch_threshold;
 }
 
 static void init_vle_traversal_output_apply(
@@ -261,6 +297,10 @@ static void init_vle_traversal_output_apply(
     output_apply->has_terminal_property_key = false;
     output_apply->terminal_property_key_is_char = false;
     output_apply->terminal_property_key_char = '\0';
+    output_apply->terminal_label_known = input->terminal_label_known;
+    output_apply->terminal_label_id = input->terminal_label_known ?
+        input->terminal_label_id : INVALID_LABEL_ID;
+    output_apply->terminal_label_mode = input->terminal_label_mode;
 
     if (output_requirement == AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY)
     {
@@ -595,6 +635,15 @@ void init_vle_context_refresh_input(AgeVLEInput *input,
     refresh->end_valid = age_vle_input_get_vertex_or_id(
         input, 2, "end vertex argument must be a vertex or the integer id",
         &refresh->end_vertex_id);
+    refresh->terminal_label_id =
+        input->terminal_label_known &&
+        input->terminal_label_mode == AGE_VLE_TERMINAL_LABEL_ALL_DEPTH ?
+        input->terminal_label_id : INVALID_LABEL_ID;
+    refresh->terminal_endpoint_label_id =
+        input->terminal_label_known &&
+        input->terminal_label_mode ==
+        AGE_VLE_TERMINAL_LABEL_ENDPOINT_ONLY ?
+        input->terminal_label_id : INVALID_LABEL_ID;
     refresh->source_policy_known = input->source_policy_known;
     refresh->source_policy_outgoing_kind =
         (VLETraversalSourceKind)input->source_policy_outgoing_kind;
@@ -619,6 +668,9 @@ bool apply_cached_vle_context_refresh(
     Assert(funcctx != NULL);
 
     vlelctx->source_policy_known = refresh->source_policy_known;
+    vlelctx->terminal_label_id = refresh->terminal_label_id;
+    vlelctx->terminal_endpoint_label_id =
+        refresh->terminal_endpoint_label_id;
     vlelctx->source_policy_outgoing_kind =
         refresh->source_policy_outgoing_kind;
     vlelctx->source_policy_incoming_kind =

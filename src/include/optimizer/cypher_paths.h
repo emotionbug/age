@@ -28,12 +28,29 @@
 
 typedef struct CypherAdjacencyMatchCandidate
 {
+    Oid graph_oid;
     Oid edge_label_oid;
     Oid index_oid;
     char *edge_alias;
     char *bound_endpoint_alias;
     Node *bound_endpoint_expr;
     char *candidate_reason;
+    char *index_source;
+    char *index_kind;
+    char *index_provider;
+    char *index_direction;
+    int32 index_property_count;
+    bool index_metadata_backed;
+    char *right_property_key;
+    Oid right_property_index_oid;
+    char *right_property_index_source;
+    char *right_property_index_provider;
+    char *right_property_index_type;
+    bool right_property_index_metadata_backed;
+    bool right_property_prefetch_eligible;
+    char *right_property_value_kind;
+    Const *right_property_value;
+    Node *right_property_value_expr;
     Index bound_endpoint_rti;
     Relids required_outer;
     bool outgoing;
@@ -41,7 +58,16 @@ typedef struct CypherAdjacencyMatchCandidate
     bool has_edge_property_predicate;
     bool has_right_label_constraint;
     bool has_right_property_predicate;
+    int32 right_label_id;
     AttrNumber endpoint_attno;
+    double estimated_endpoint_fanout;
+    double estimated_terminal_fanout;
+    double estimated_composite_fanout;
+    double estimated_composite_selectivity;
+    char *estimated_composite_selectivity_source;
+    char *estimated_value_posting_source;
+    double estimated_terminal_label_groups;
+    bool estimated_fanout_from_directory;
 } CypherAdjacencyMatchCandidate;
 
 void set_rel_pathlist_init(void);
@@ -50,15 +76,31 @@ void cypher_rewrite_property_index_surfaces(Query *parse);
 void cypher_clear_adjacency_match_candidates(void);
 void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
                                                Oid index_oid,
+                                               Oid graph_oid,
                                                const char *edge_alias,
                                                const char *bound_endpoint_alias,
                                                Node *bound_endpoint_expr,
                                                const char *candidate_reason,
+                                               const char *index_source,
+                                               const char *index_kind,
+                                               const char *index_provider,
+                                               const char *index_direction,
+                                               int32 index_property_count,
+                                               bool index_metadata_backed,
+                                               const char *right_property_key,
+                                               Oid right_property_index_oid,
+                                               const char *right_property_index_source,
+                                               const char *right_property_index_provider,
+                                               const char *right_property_index_type,
+                                               bool right_property_index_metadata_backed,
+                                               Const *right_property_value,
+                                               Node *right_property_value_expr,
                                                bool outgoing,
                                                bool has_edge_variable_projection,
                                                bool has_edge_property_predicate,
                                                bool has_right_label_constraint,
                                                bool has_right_property_predicate,
+                                               int32 right_label_id,
                                                AttrNumber endpoint_attno);
 
 #endif

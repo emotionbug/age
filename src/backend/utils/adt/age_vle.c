@@ -1043,7 +1043,8 @@ static bool dfs_find_a_path_between(VLE_local_context *vlelctx)
 
         extend_dfs_from_vertex_if_needed(vlelctx, &step);
 
-        if (found)
+        if (found &&
+            age_vle_terminal_output_path_matches_predicate(vlelctx, &step))
         {
             age_vle_terminal_output_cache_result(vlelctx, &output_policy,
                                                  &step);
@@ -1095,7 +1096,8 @@ static bool dfs_find_a_path_from(VLE_local_context *vlelctx)
 
         extend_dfs_from_vertex_if_needed(vlelctx, &step);
 
-        if (found)
+        if (found &&
+            age_vle_terminal_output_path_matches_predicate(vlelctx, &step))
         {
             age_vle_terminal_output_cache_result(vlelctx, &output_policy,
                                                  &step);
@@ -1133,7 +1135,8 @@ static inline bool dfs_find_terminal_property_path_from(
 
         extend_dfs_from_vertex_if_needed(vlelctx, &step);
 
-        if (age_vle_accepts_step(&acceptance, &step))
+        if (age_vle_accepts_step(&acceptance, &step) &&
+            age_vle_terminal_output_path_matches_predicate(vlelctx, &step))
         {
             age_vle_terminal_output_cache_result(vlelctx, &output_policy,
                                                  &step);
@@ -1237,7 +1240,7 @@ static bool get_vle_indexed_property_from_lookup(
     {
         vertex_entry *ve;
 
-        ve = get_vertex_entry(lookup->ggctx, lookup->entity_id);
+        ve = ensure_vertex_entry_skeleton(lookup->ggctx, lookup->entity_id);
         Assert(ve != NULL);
 
         if (lookup->candidate_vertex_matches &&
@@ -2409,8 +2412,9 @@ static void advance_vle_iterator_start(AgeVLEIterator *iterator,
     }
     else if (age_vle_context_has_zero_bound_start(vlelctx))
     {
-        search->is_zero_bound = true;
-        *done = true;
+        search->is_zero_bound =
+            age_vle_terminal_output_path_matches_predicate(vlelctx, NULL);
+        *done = search->is_zero_bound;
         iterator->zero_bound_pending = false;
     }
     else
@@ -2440,8 +2444,9 @@ static bool search_vle_iterator_path(AgeVLEIterator *iterator,
     }
     else if (iterator->zero_bound_pending)
     {
-        search->is_zero_bound = true;
-        done = true;
+        search->is_zero_bound =
+            age_vle_terminal_output_path_matches_predicate(vlelctx, NULL);
+        done = search->is_zero_bound;
         iterator->zero_bound_pending = false;
     }
 

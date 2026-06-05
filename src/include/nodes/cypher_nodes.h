@@ -89,6 +89,31 @@ typedef struct cypher_create
     List *pattern; /* a list of cypher_paths */
 } cypher_create;
 
+typedef struct cypher_create_index
+{
+    ExtensibleNode extensible;
+    char *index_name;
+    char *label_name;
+    char *property_name;
+    bool for_relationship;
+    bool adjacency;
+    bool outgoing;
+    int location;
+} cypher_create_index;
+
+typedef struct cypher_drop_index
+{
+    ExtensibleNode extensible;
+    char *index_name;
+    int location;
+} cypher_drop_index;
+
+typedef struct cypher_show_indexes
+{
+    ExtensibleNode extensible;
+    int location;
+} cypher_show_indexes;
+
 typedef struct cypher_set
 {
     ExtensibleNode extensible;

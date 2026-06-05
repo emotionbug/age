@@ -142,6 +142,34 @@ void out_cypher_create(StringInfo str, const ExtensibleNode *node)
     WRITE_NODE_FIELD(pattern);
 }
 
+void out_cypher_create_index(StringInfo str, const ExtensibleNode *node)
+{
+    DEFINE_AG_NODE(cypher_create_index);
+
+    WRITE_STRING_FIELD(index_name);
+    WRITE_STRING_FIELD(label_name);
+    WRITE_STRING_FIELD(property_name);
+    WRITE_BOOL_FIELD(for_relationship);
+    WRITE_BOOL_FIELD(adjacency);
+    WRITE_BOOL_FIELD(outgoing);
+    WRITE_LOCATION_FIELD(location);
+}
+
+void out_cypher_drop_index(StringInfo str, const ExtensibleNode *node)
+{
+    DEFINE_AG_NODE(cypher_drop_index);
+
+    WRITE_STRING_FIELD(index_name);
+    WRITE_LOCATION_FIELD(location);
+}
+
+void out_cypher_show_indexes(StringInfo str, const ExtensibleNode *node)
+{
+    DEFINE_AG_NODE(cypher_show_indexes);
+
+    WRITE_LOCATION_FIELD(location);
+}
+
 /* serialization function for the cypher_set ExtensibleNode. */
 void out_cypher_set(StringInfo str, const ExtensibleNode *node)
 {

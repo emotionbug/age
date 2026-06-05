@@ -26,6 +26,7 @@
 
 #include "access/relation.h"
 #include "catalog/index.h"
+#include "catalog/namespace.h"
 #include "access/heapam.h"
 #include "access/tableam.h"
 #include "catalog/pg_collation_d.h"
@@ -45,7 +46,9 @@
 #include "parser/parse_relation.h"
 #include "rewrite/rewriteHandler.h"
 #include "utils/inval.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -64,7 +67,7 @@
 #include "parser/cypher_property_signature.h"
 #include "utils/ag_cache.h"
 #include "utils/ag_func.h"
-#include "utils/ag_guc.h"
+#include "utils/graphid.h"
 
 /*
  * Variable string names for makeTargetEntry. As they are going to be variable
@@ -185,7 +188,36 @@ static Expr *transform_cypher_node(cypher_parsestate *cpstate,
                                    bool output_node, bool valid_label);
 static bool match_check_valid_label(cypher_match *match,
                                     cypher_parsestate *cpstate);
-static Oid get_age_adjacency_match_index(Oid edge_label_oid, bool outgoing);
+static Oid get_age_adjacency_match_index(Oid graph_oid, Oid edge_label_oid,
+                                         const char *label_name,
+                                         bool outgoing,
+                                         char **index_source,
+                                         char **index_kind,
+                                         char **index_provider,
+                                         char **index_direction,
+                                         int32 *index_property_count,
+                                         bool *index_metadata_backed);
+static Oid get_age_adjacency_match_metadata_index(Oid graph_oid,
+                                                  const char *label_name,
+                                                  Oid age_adjacency_am_oid,
+                                                  bool outgoing,
+                                                  char **index_source,
+                                                  char **index_kind,
+                                                  char **index_provider,
+                                                  char **index_direction,
+                                                  int32 *index_property_count);
+static bool get_age_adjacency_match_property_index(Oid graph_oid,
+                                                   const char *label_name,
+                                                   const char *property_name,
+                                                   Oid *result_index_oid,
+                                                   char **index_source,
+                                                   char **index_provider,
+                                                   char **property_type);
+static char *graph_index_options_property_type(Datum options);
+static bool graph_index_property_names_contains(ArrayType *property_names,
+                                                const char *property_name);
+static char *get_cypher_map_first_property_key(Node *props,
+                                               Node **property_value);
 static bool age_adjacency_match_index_matches(Relation index_rel,
                                               bool outgoing);
 static Node *make_vertex_expr(cypher_parsestate *cpstate,
@@ -242,6 +274,17 @@ static transform_entity *transform_VLE_edge_entity(cypher_parsestate *cpstate,
 /* create clause */
 static Query *transform_cypher_create(cypher_parsestate *cpstate,
                                       cypher_clause *clause);
+static Query *transform_cypher_create_index(cypher_parsestate *cpstate,
+                                            cypher_clause *clause);
+static Query *transform_cypher_drop_index(cypher_parsestate *cpstate,
+                                          cypher_clause *clause);
+static Query *transform_cypher_show_indexes(cypher_parsestate *cpstate,
+                                            cypher_clause *clause);
+static Query *transform_cypher_graph_index_function(
+    cypher_parsestate *cpstate, char *function_name, List *args,
+    char *target_name);
+static Node *make_cstring_arg(char *value);
+static Node *make_name_arg(char *value);
 static List *transform_cypher_create_pattern(cypher_parsestate *cpstate,
                                              Query *query, List *pattern);
 static cypher_create_path *
@@ -406,7 +449,30 @@ static bool is_single_func_name(FuncCall *fn);
 static char *make_raw_attr_name(const char *var_name, const char *attr_name);
 static char *make_raw_edges_name(const char *var_name);
 static char *make_raw_path_count_anchor_name(const char *var_name);
+static void try_rewrite_fixed_label_chain_to_vle(
+    cypher_parsestate *cpstate, cypher_path *path);
+static bool fixed_label_chain_candidate(cypher_parsestate *cpstate,
+                                        cypher_path *path,
+                                        int *edge_count,
+                                        int32 *terminal_label_id);
+static bool same_label_name(const char *left, const char *right);
+static cypher_relationship *make_fixed_label_chain_vle_rel(
+    cypher_parsestate *cpstate, cypher_path *path, int edge_count,
+    int32 terminal_label_id);
+static Node *make_cypher_string_const(char *value, int location);
+static Node *make_cypher_null_const(int location);
+static Node *make_cypher_func_expr(List *func_name, List *args,
+                                   int location);
+static uint64 next_clause_vle_grammar_node_id(void);
 static void mark_vle_terminal_only_result(cypher_relationship *rel);
+static bool mark_vle_terminal_label_result(cypher_parsestate *cpstate,
+                                           cypher_relationship *rel,
+                                           cypher_node *next_node);
+static bool vle_func_has_terminal_label(FuncCall *func);
+static bool vle_func_has_finite_upper(FuncCall *func);
+static bool vle_func_is_fixed_one_hop(FuncCall *func);
+static bool node_is_cypher_integer_const(Node *node, int *value);
+static Node *make_cypher_integer_const(int64 value, int location);
 static Oid get_create_clause_func_oid(void);
 static Oid get_set_clause_func_oid(void);
 static Oid get_delete_clause_func_oid(void);
@@ -444,8 +510,6 @@ static ParseNamespaceItem *transform_RangeFunction(cypher_parsestate *cpstate,
 static Node *transform_from_clause_item(cypher_parsestate *cpstate, Node *n,
                                         RangeTblEntry **top_rte, int *top_rti,
                                         List **namespace);
-static ParseNamespaceItem *append_VLE_Func_to_FromClause(cypher_parsestate *cpstate,
-                                                         Node *n);
 static ParseNamespaceItem *append_VLE_Values_to_FromClause(
     cypher_parsestate *cpstate, FuncCall *func, Alias *alias);
 static void setNamespaceLateralState(List *namespace, bool lateral_only,
@@ -631,6 +695,18 @@ Query *transform_cypher_clause(cypher_parsestate *cpstate,
     else if (is_ag_node(self, cypher_create))
     {
         result = transform_cypher_create(cpstate, clause);
+    }
+    else if (is_ag_node(self, cypher_create_index))
+    {
+        result = transform_cypher_create_index(cpstate, clause);
+    }
+    else if (is_ag_node(self, cypher_drop_index))
+    {
+        result = transform_cypher_drop_index(cpstate, clause);
+    }
+    else if (is_ag_node(self, cypher_show_indexes))
+    {
+        result = transform_cypher_show_indexes(cpstate, clause);
     }
     else if (is_ag_node(self, cypher_set))
     {
@@ -3828,42 +3904,6 @@ static void setNamespaceLateralState(List *namespace, bool lateral_only,
     }
 }
 
-/*
- * Code borrowed and inspired by PG's transformFromClauseItem. Static function
- * to add in the VLE function as a FROM clause entry.
- */
-static ParseNamespaceItem *append_VLE_Func_to_FromClause(cypher_parsestate *cpstate,
-                                                         Node *n)
-{
-    ParseState *pstate = &cpstate->pstate;
-    RangeTblEntry *rte = NULL;
-    List *namespace = NULL;
-    int rtindex;
-
-    /*
-     * Following PG's FROM clause logic, just in case we need to expand it in
-     * the future, we process the items in another function.
-     */
-    n = transform_from_clause_item(cpstate, n, &rte, &rtindex, &namespace);
-
-    /* this should not happen */
-    Assert(n != NULL);
-
-    /* verify there aren't any conflicts */
-    checkNameSpaceConflicts(pstate, pstate->p_namespace, namespace);
-
-    /* mark the new namespace items as visible only to LATERAL */
-    setNamespaceLateralState(namespace, true, true);
-
-    /* add the entry to the joinlist and namespace */
-    pstate->p_joinlist = lappend(pstate->p_joinlist, n);
-    pstate->p_namespace = list_concat(pstate->p_namespace, namespace);
-
-    /* make all namespace items unconditionally visible */
-    setNamespaceLateralState(pstate->p_namespace, false, true);
-
-    return lfirst(list_head(namespace));
-}
 
 static ParseNamespaceItem *append_VLE_Values_to_FromClause(
     cypher_parsestate *cpstate, FuncCall *func, Alias *alias)
@@ -5396,6 +5436,7 @@ static List *transform_match_path(cypher_parsestate *cpstate, Query *query,
 
     compact_vle_path_only =
         path_has_compact_vle_only_consumers(path, clause, where);
+    try_rewrite_fixed_label_chain_to_vle(cpstate, path);
 
     /* transform the entities in the path */
     entities = transform_match_entities(cpstate, query, path, valid_label,
@@ -5503,6 +5544,8 @@ static transform_entity *transform_VLE_edge_entity(cypher_parsestate *cpstate,
         alias->colnames = lappend(alias->colnames, makeString("__age_vle_grammar_node"));
     if (vle_nargs > AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY)
         alias->colnames = lappend(alias->colnames, makeString("__age_vle_terminal_property"));
+    if (vle_nargs > AGE_VLE_STREAM_ARG_TERMINAL_LABEL)
+        alias->colnames = lappend(alias->colnames, makeString("__age_vle_terminal_label"));
 
     /*
      * Add the VLE descriptor row to the FROM clause. The planner replaces this
@@ -5618,8 +5661,9 @@ static transform_entity *try_transform_vle_terminal_node(
 
     if (next_node == NULL ||
         next_node->name == NULL ||
-        next_node->label != NULL ||
         next_node->props != NULL ||
+        (next_node->label != NULL &&
+         !vle_func_has_terminal_label((FuncCall *)rel->varlen)) ||
         vle_entity == NULL ||
         vle_entity->expr == NULL ||
         exprType((Node *)vle_entity->expr) != AGTYPEOID)
@@ -6184,11 +6228,17 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                     Node *start_arg = linitial(func->args);
                     Node *end_arg = lfirst(end_arg_cell);
                     bool needs_pretransform = false;
+                    bool can_use_vle_terminal_label =
+                        next_node->label != NULL &&
+                        next_node->props == NULL &&
+                        (vle_func_is_fixed_one_hop(func) ||
+                         vle_func_has_terminal_label(func));
 
                     if (next_node->name != NULL &&
                         next_node->parsed_name == NULL &&
                         IsA(end_arg, A_Const) &&
-                        !IsA(start_arg, A_Const))
+                        !IsA(start_arg, A_Const) &&
+                        !can_use_vle_terminal_label)
                     {
                         ColumnRef *end_ref = makeNode(ColumnRef);
 
@@ -6201,7 +6251,8 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                     else if (next_node->name != NULL &&
                              next_node->parsed_name == NULL &&
                              !prev_entity->in_join_tree &&
-                             !IsA(end_arg, A_Const))
+                             !IsA(end_arg, A_Const) &&
+                             !can_use_vle_terminal_label)
                     {
                         needs_pretransform = true;
                     }
@@ -6230,6 +6281,20 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                          rel->dir == CYPHER_REL_DIR_LEFT))
                     {
                         mark_vle_terminal_only_result(rel);
+                    }
+                }
+                if (list_length(path->path) == 3 && next_lc != NULL)
+                {
+                    cypher_node *next_node = lfirst(next_lc);
+
+                    (void)mark_vle_terminal_label_result(cpstate, rel,
+                                                         next_node);
+                    if (next_node->name == NULL &&
+                        next_node->label != NULL &&
+                        next_node->props == NULL &&
+                        vle_func_has_terminal_label((FuncCall *)rel->varlen))
+                    {
+                        skip_pretransformed_node = true;
                     }
                 }
 
@@ -6342,13 +6407,34 @@ static List *make_path_join_quals(cypher_parsestate *cpstate, List *entities)
     }
 }
 
-static Oid get_age_adjacency_match_index(Oid edge_label_oid, bool outgoing)
+static Oid get_age_adjacency_match_index(Oid graph_oid, Oid edge_label_oid,
+                                         const char *label_name,
+                                         bool outgoing,
+                                         char **index_source,
+                                         char **index_kind,
+                                         char **index_provider,
+                                         char **index_direction,
+                                         int32 *index_property_count,
+                                         bool *index_metadata_backed)
 {
     static Oid age_adjacency_am_oid = InvalidOid;
     Relation edge_rel;
     List *index_list;
     ListCell *lc;
     Oid result = InvalidOid;
+
+    if (index_source != NULL)
+        *index_source = NULL;
+    if (index_kind != NULL)
+        *index_kind = NULL;
+    if (index_provider != NULL)
+        *index_provider = NULL;
+    if (index_direction != NULL)
+        *index_direction = NULL;
+    if (index_property_count != NULL)
+        *index_property_count = 0;
+    if (index_metadata_backed != NULL)
+        *index_metadata_backed = false;
 
     if (!OidIsValid(edge_label_oid))
     {
@@ -6362,6 +6448,20 @@ static Oid get_age_adjacency_match_index(Oid edge_label_oid, bool outgoing)
         {
             return InvalidOid;
         }
+    }
+
+    result = get_age_adjacency_match_metadata_index(graph_oid, label_name,
+                                                    age_adjacency_am_oid,
+                                                    outgoing, index_source,
+                                                    index_kind,
+                                                    index_provider,
+                                                    index_direction,
+                                                    index_property_count);
+    if (OidIsValid(result))
+    {
+        if (index_metadata_backed != NULL)
+            *index_metadata_backed = true;
+        return result;
     }
 
     edge_rel = relation_open(edge_label_oid, AccessShareLock);
@@ -6380,6 +6480,14 @@ static Oid get_age_adjacency_match_index(Oid edge_label_oid, bool outgoing)
             age_adjacency_match_index_matches(index_rel, outgoing))
         {
             result = index_oid;
+            if (index_source != NULL)
+                *index_source = pstrdup("relcache-scan");
+            if (index_kind != NULL)
+                *index_kind = pstrdup("ADJACENCY");
+            if (index_provider != NULL)
+                *index_provider = pstrdup("relcache");
+            if (index_direction != NULL)
+                *index_direction = pstrdup(outgoing ? "out" : "in");
             index_close(index_rel, AccessShareLock);
             break;
         }
@@ -6390,6 +6498,374 @@ static Oid get_age_adjacency_match_index(Oid edge_label_oid, bool outgoing)
     relation_close(edge_rel, AccessShareLock);
 
     return result;
+}
+
+static Oid get_age_adjacency_match_metadata_index(Oid graph_oid,
+                                                  const char *label_name,
+                                                  Oid age_adjacency_am_oid,
+                                                  bool outgoing,
+                                                  char **index_source,
+                                                  char **index_kind,
+                                                  char **index_provider,
+                                                  char **index_direction,
+                                                  int32 *index_property_count)
+{
+    Oid ag_catalog_oid;
+    Oid metadata_relid;
+    Relation metadata_rel;
+    TableScanDesc scan;
+    HeapTuple tuple;
+    TupleDesc tupdesc;
+    Oid result = InvalidOid;
+    char *result_source = NULL;
+    char *result_kind = NULL;
+    char *result_provider = NULL;
+    char *result_direction = NULL;
+    int32 result_property_count = 0;
+    const char *direction = outgoing ? "out" : "in";
+
+    if (!OidIsValid(graph_oid) || label_name == NULL)
+        return InvalidOid;
+
+    ag_catalog_oid = get_namespace_oid("ag_catalog", true);
+    if (!OidIsValid(ag_catalog_oid))
+        return InvalidOid;
+
+    metadata_relid = get_relname_relid("ag_graph_index", ag_catalog_oid);
+    if (!OidIsValid(metadata_relid))
+        return InvalidOid;
+
+    metadata_rel = table_open(metadata_relid, AccessShareLock);
+    tupdesc = RelationGetDescr(metadata_rel);
+    scan = table_beginscan_catalog(metadata_rel, 0, NULL);
+
+    while (HeapTupleIsValid(tuple = heap_getnext(scan, ForwardScanDirection)))
+    {
+        Datum value;
+        bool isnull;
+        Oid index_oid;
+        char label_kind;
+        char *tuple_label_name;
+        char *index_kind;
+        char *tuple_direction;
+        char *index_name;
+        char *provider;
+        ArrayType *property_names;
+        Relation index_rel;
+
+        value = heap_getattr(tuple, 1, tupdesc, &isnull);
+        if (isnull || DatumGetObjectId(value) != graph_oid)
+            continue;
+
+        value = heap_getattr(tuple, 3, tupdesc, &isnull);
+        if (isnull)
+            continue;
+        tuple_label_name = NameStr(*DatumGetName(value));
+        if (strcmp(tuple_label_name, label_name) != 0)
+            continue;
+
+        value = heap_getattr(tuple, 4, tupdesc, &isnull);
+        if (isnull)
+            continue;
+        label_kind = DatumGetChar(value);
+        if (label_kind != LABEL_TYPE_EDGE)
+            continue;
+
+        value = heap_getattr(tuple, 7, tupdesc, &isnull);
+        if (isnull)
+            continue;
+        index_kind = TextDatumGetCString(value);
+        if (pg_strcasecmp(index_kind, "ADJACENCY") != 0)
+            continue;
+
+        value = heap_getattr(tuple, 8, tupdesc, &isnull);
+        if (isnull)
+            continue;
+        tuple_direction = TextDatumGetCString(value);
+        if (pg_strcasecmp(tuple_direction, direction) != 0)
+            continue;
+
+        value = heap_getattr(tuple, 6, tupdesc, &isnull);
+        if (isnull)
+            continue;
+        index_oid = DatumGetObjectId(value);
+        if (!OidIsValid(index_oid))
+            continue;
+        if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(index_oid)))
+            continue;
+
+        index_rel = index_open(index_oid, AccessShareLock);
+        if (index_rel->rd_rel->relam == age_adjacency_am_oid &&
+            index_rel->rd_index != NULL &&
+            index_rel->rd_index->indisvalid &&
+            index_rel->rd_index->indisready &&
+            age_adjacency_match_index_matches(index_rel, outgoing))
+        {
+            value = heap_getattr(tuple, 5, tupdesc, &isnull);
+            index_name = isnull ? get_rel_name(index_oid) :
+                NameStr(*DatumGetName(value));
+            value = heap_getattr(tuple, 10, tupdesc, &isnull);
+            provider = isnull ? "unknown" : TextDatumGetCString(value);
+            value = heap_getattr(tuple, 9, tupdesc, &isnull);
+            if (!isnull)
+            {
+                property_names = DatumGetArrayTypeP(value);
+                result_property_count =
+                    ARR_NDIM(property_names) == 0 ? 0 :
+                    (int32)ArrayGetNItems(ARR_NDIM(property_names),
+                                          ARR_DIMS(property_names));
+            }
+            result = index_oid;
+            result_source = psprintf("graph-metadata:%s", index_name);
+            result_kind = pstrdup(index_kind);
+            result_provider = pstrdup(provider);
+            result_direction = pstrdup(tuple_direction);
+            index_close(index_rel, AccessShareLock);
+            break;
+        }
+        index_close(index_rel, AccessShareLock);
+    }
+
+    table_endscan(scan);
+    table_close(metadata_rel, AccessShareLock);
+
+    if (OidIsValid(result) && index_source != NULL)
+        *index_source = result_source;
+    if (OidIsValid(result) && index_kind != NULL)
+        *index_kind = result_kind;
+    if (OidIsValid(result) && index_provider != NULL)
+        *index_provider = result_provider;
+    if (OidIsValid(result) && index_direction != NULL)
+        *index_direction = result_direction;
+    if (OidIsValid(result) && index_property_count != NULL)
+        *index_property_count = result_property_count;
+
+    return result;
+}
+
+static bool get_age_adjacency_match_property_index(Oid graph_oid,
+                                                   const char *label_name,
+                                                   const char *property_name,
+                                                   Oid *result_index_oid,
+                                                   char **index_source,
+                                                   char **index_provider,
+                                                   char **property_type)
+{
+    return get_age_graph_property_index_metadata(
+        graph_oid, label_name, property_name, result_index_oid, NULL,
+        index_source, index_provider, property_type, NULL);
+}
+
+bool get_age_graph_property_index_metadata(Oid graph_oid,
+                                           const char *label_name,
+                                           const char *property_name,
+                                           Oid *result_index_oid,
+                                           char **matched_label_name,
+                                           char **index_source,
+                                           char **index_provider,
+                                           char **property_type,
+                                           int32 *match_count)
+{
+    Oid ag_catalog_oid;
+    Oid metadata_relid;
+    Relation metadata_rel;
+    TableScanDesc scan;
+    HeapTuple tuple;
+    TupleDesc tupdesc;
+    bool found = false;
+
+    if (result_index_oid != NULL)
+        *result_index_oid = InvalidOid;
+    if (index_source != NULL)
+        *index_source = NULL;
+    if (index_provider != NULL)
+        *index_provider = NULL;
+    if (property_type != NULL)
+        *property_type = NULL;
+    if (matched_label_name != NULL)
+        *matched_label_name = NULL;
+    if (match_count != NULL)
+        *match_count = 0;
+
+    if (!OidIsValid(graph_oid) || property_name == NULL)
+        return false;
+
+    ag_catalog_oid = get_namespace_oid("ag_catalog", true);
+    if (!OidIsValid(ag_catalog_oid))
+        return false;
+
+    metadata_relid = get_relname_relid("ag_graph_index", ag_catalog_oid);
+    if (!OidIsValid(metadata_relid))
+        return false;
+
+    metadata_rel = table_open(metadata_relid, AccessShareLock);
+    tupdesc = RelationGetDescr(metadata_rel);
+    scan = table_beginscan_catalog(metadata_rel, 0, NULL);
+
+    while (HeapTupleIsValid(tuple = heap_getnext(scan, ForwardScanDirection)))
+    {
+        Datum value;
+        bool isnull;
+        char label_kind;
+        char *tuple_label_name;
+        char *index_kind;
+        char *index_name;
+        char *provider;
+        Oid index_oid;
+        ArrayType *property_names;
+
+        value = heap_getattr(tuple, 1, tupdesc, &isnull);
+        if (isnull || DatumGetObjectId(value) != graph_oid)
+            continue;
+
+        value = heap_getattr(tuple, 3, tupdesc, &isnull);
+        if (isnull)
+            continue;
+        tuple_label_name = NameStr(*DatumGetName(value));
+        if (label_name != NULL && strcmp(tuple_label_name, label_name) != 0)
+            continue;
+
+        value = heap_getattr(tuple, 4, tupdesc, &isnull);
+        if (isnull)
+            continue;
+        label_kind = DatumGetChar(value);
+        if (label_kind != LABEL_TYPE_VERTEX)
+            continue;
+
+        value = heap_getattr(tuple, 7, tupdesc, &isnull);
+        if (isnull)
+            continue;
+        index_kind = TextDatumGetCString(value);
+        if (pg_strcasecmp(index_kind, "PROPERTY") != 0)
+            continue;
+
+        value = heap_getattr(tuple, 9, tupdesc, &isnull);
+        if (isnull)
+            continue;
+        property_names = DatumGetArrayTypeP(value);
+        if (!graph_index_property_names_contains(property_names,
+                                                 property_name))
+            continue;
+
+        value = heap_getattr(tuple, 6, tupdesc, &isnull);
+        if (isnull)
+            continue;
+        index_oid = DatumGetObjectId(value);
+        if (!OidIsValid(index_oid) ||
+            !SearchSysCacheExists1(RELOID, ObjectIdGetDatum(index_oid)))
+            continue;
+
+        if (match_count != NULL)
+            (*match_count)++;
+        if (found)
+            continue;
+
+        value = heap_getattr(tuple, 5, tupdesc, &isnull);
+        index_name = isnull ? get_rel_name(index_oid) :
+            NameStr(*DatumGetName(value));
+        value = heap_getattr(tuple, 10, tupdesc, &isnull);
+        provider = isnull ? "unknown" : TextDatumGetCString(value);
+
+        if (index_source != NULL)
+            *index_source = psprintf("graph-metadata:%s", index_name);
+        if (index_provider != NULL)
+            *index_provider = pstrdup(provider);
+        if (matched_label_name != NULL)
+            *matched_label_name = pstrdup(tuple_label_name);
+        if (property_type != NULL)
+        {
+            value = heap_getattr(tuple, 11, tupdesc, &isnull);
+            if (!isnull)
+                *property_type = graph_index_options_property_type(value);
+            if (*property_type == NULL)
+                *property_type = pstrdup("agtype");
+        }
+        if (result_index_oid != NULL)
+            *result_index_oid = index_oid;
+        found = true;
+    }
+
+    table_endscan(scan);
+    table_close(metadata_rel, AccessShareLock);
+
+    return found;
+}
+
+static char *graph_index_options_property_type(Datum options)
+{
+    Jsonb *jsonb;
+    JsonbValue key;
+    JsonbValue *value;
+
+    jsonb = DatumGetJsonbP(options);
+    if (JB_ROOT_IS_SCALAR(jsonb))
+        return NULL;
+
+    key.type = jbvString;
+    key.val.string.val = "property_type";
+    key.val.string.len = strlen("property_type");
+    value = findJsonbValueFromContainer(&jsonb->root,
+                                        JB_FOBJECT, &key);
+    if (value == NULL || value->type != jbvString)
+        return NULL;
+
+    return pnstrdup(value->val.string.val, value->val.string.len);
+}
+
+static bool graph_index_property_names_contains(ArrayType *property_names,
+                                                const char *property_name)
+{
+    Datum *values;
+    bool *nulls;
+    int nelems;
+    int i;
+    bool found = false;
+
+    if (property_names == NULL || property_name == NULL ||
+        ARR_NDIM(property_names) == 0)
+        return false;
+
+    deconstruct_array(property_names, NAMEOID, NAMEDATALEN, false,
+                      TYPALIGN_CHAR, &values, &nulls, &nelems);
+    for (i = 0; i < nelems; i++)
+    {
+        if (nulls[i])
+            continue;
+
+        if (strcmp(NameStr(*DatumGetName(values[i])), property_name) == 0)
+        {
+            found = true;
+            break;
+        }
+    }
+
+    return found;
+}
+
+static char *get_cypher_map_first_property_key(Node *props,
+                                               Node **property_value)
+{
+    cypher_map *map;
+    Node *key;
+
+    if (property_value != NULL)
+        *property_value = NULL;
+
+    if (props == NULL || !is_ag_node(props, cypher_map))
+        return NULL;
+
+    map = (cypher_map *)props;
+    if (map->keyvals == NIL || list_length(map->keyvals) < 2)
+        return NULL;
+
+    key = (Node *)linitial(map->keyvals);
+    if (!IsA(key, String))
+        return NULL;
+
+    if (property_value != NULL)
+        *property_value = (Node *)lsecond(map->keyvals);
+
+    return ((String *)key)->sval;
 }
 
 static bool age_adjacency_match_index_matches(Relation index_rel,
@@ -7167,17 +7643,25 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     Relation label_relation;
     Oid edge_label_oid;
     Oid index_oid;
-    RangeFunction *rf;
-    FuncCall *func;
-    Alias *alias;
-    Node *index_arg;
+    char *index_source = NULL;
+    char *index_kind = NULL;
+    char *index_provider = NULL;
+    char *index_direction = NULL;
+    int32 index_property_count = 0;
+    bool index_metadata_backed = false;
+    char *right_property_key = NULL;
+    char *right_property_index_source = NULL;
+    char *right_property_index_provider = NULL;
+    char *right_property_index_type = NULL;
+    bool right_property_index_metadata_backed = false;
+    Oid right_property_index_oid = InvalidOid;
+    Node *right_property_value_node = NULL;
+    Node *right_property_value_expr = NULL;
+    Const *right_property_value = NULL;
     Node *key_arg;
     Expr *key_expr;
-    Const *outgoing_arg;
-    ParseNamespaceItem *pnsi;
-    TargetEntry *te;
-    Node *expr;
     bool has_edge_variable_projection;
+    int32 right_label_id = INVALID_LABEL_ID;
 
     if (!valid_label ||
         rel->label == NULL ||
@@ -7199,7 +7683,13 @@ static Expr *transform_cypher_adjacency_candidate_edge(
                                                    rel->location,
                                                    AccessShareLock);
     edge_label_oid = RelationGetRelid(label_relation);
-    index_oid = get_age_adjacency_match_index(edge_label_oid, outgoing);
+    index_oid = get_age_adjacency_match_index(cpstate->graph_oid,
+                                              edge_label_oid, rel->label,
+                                              outgoing, &index_source,
+                                              &index_kind, &index_provider,
+                                              &index_direction,
+                                              &index_property_count,
+                                              &index_metadata_backed);
     table_close(label_relation, AccessShareLock);
     if (!OidIsValid(index_oid))
     {
@@ -7207,6 +7697,32 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     }
 
     has_edge_variable_projection = rel->name != NULL;
+    if (next_node != NULL && next_node->label != NULL)
+    {
+        right_label_id = get_label_id(next_node->label, cpstate->graph_oid);
+        right_property_key = get_cypher_map_first_property_key(
+            next_node->props, &right_property_value_node);
+        if (right_property_value_node != NULL)
+        {
+            right_property_value_expr = transform_cypher_expr(
+                cpstate, copyObject(right_property_value_node),
+                EXPR_KIND_WHERE);
+            if (right_property_value_expr != NULL &&
+                IsA(right_property_value_expr, Const) &&
+                castNode(Const, right_property_value_expr)->consttype ==
+                AGTYPEOID &&
+                !castNode(Const, right_property_value_expr)->constisnull)
+                right_property_value = castNode(Const,
+                                                right_property_value_expr);
+        }
+        right_property_index_metadata_backed =
+            get_age_adjacency_match_property_index(
+                cpstate->graph_oid, next_node->label, right_property_key,
+                &right_property_index_oid,
+                &right_property_index_source,
+                &right_property_index_provider,
+                &right_property_index_type);
+    }
 
     if (rel->name == NULL)
     {
@@ -7217,51 +7733,33 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     key_expr = (Expr *)transformExpr(pstate, copyObject(key_arg),
                                      EXPR_KIND_WHERE);
 
-    if (!age_enable_adjacency_match ||
-        age_enable_adjacency_match_custom_path)
-    {
-        cypher_register_adjacency_match_candidate(
-            edge_label_oid, index_oid, rel->name, get_entity_name(prev_entity),
-            (Node *)key_expr,
-            age_enable_adjacency_match_custom_path ?
-            "custom_path_opt_in" : "normal_edge_rte_preserved", outgoing,
-            has_edge_variable_projection,
-            rel->props != NULL,
-            next_node != NULL && next_node->label != NULL,
-            next_node != NULL && next_node->props != NULL,
-            outgoing ? Anum_ag_label_edge_table_start_id :
-                       Anum_ag_label_edge_table_end_id);
-        return NULL;
-    }
-
-    index_arg = (Node *)makeConst(REGCLASSOID, -1, InvalidOid, sizeof(Oid),
-                                  ObjectIdGetDatum(index_oid), false, true);
-    outgoing_arg = makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
-                             BoolGetDatum(outgoing), false, true);
-
-    func = makeFuncCall(list_make2(makeString("ag_catalog"),
-                                   makeString("age_adjacency_candidate_edge_rows")),
-                        list_make3(index_arg, key_arg, outgoing_arg),
-                        COERCE_EXPLICIT_CALL, rel->location);
-
-    rf = makeNode(RangeFunction);
-    rf->lateral = true;
-    rf->ordinality = false;
-    rf->is_rowsfrom = false;
-    rf->functions = list_make1(list_make2(func, NIL));
-
-    alias = makeAlias(rel->name, NIL);
-    rf->alias = alias;
-
-    pnsi = append_VLE_Func_to_FromClause(cpstate, (Node *)rf);
-    Assert(pnsi != NULL);
-
-    expr = make_edge_expr(cpstate, pnsi);
-    te = makeTargetEntry((Expr *)expr, pstate->p_next_resno++, rel->name,
-                         false);
-    *target_list = lappend(*target_list, te);
-
-    return (Expr *)expr;
+    cypher_register_adjacency_match_candidate(
+        edge_label_oid, index_oid, cpstate->graph_oid, rel->name,
+        get_entity_name(prev_entity),
+        (Node *)key_expr, "default_custom_path",
+        index_source != NULL ? index_source : "unknown",
+        index_kind != NULL ? index_kind : "ADJACENCY",
+        index_provider != NULL ? index_provider : "unknown",
+        index_direction != NULL ? index_direction : (outgoing ? "out" : "in"),
+        index_property_count,
+        index_metadata_backed,
+        right_property_key,
+        right_property_index_oid,
+        right_property_index_source,
+        right_property_index_provider,
+        right_property_index_type,
+        right_property_index_metadata_backed,
+        right_property_value,
+        right_property_value_expr,
+        outgoing,
+        has_edge_variable_projection,
+        rel->props != NULL,
+        next_node != NULL && next_node->label != NULL,
+        next_node != NULL && next_node->props != NULL,
+        right_label_id,
+        outgoing ? Anum_ag_label_edge_table_start_id :
+                   Anum_ag_label_edge_table_end_id);
+    return NULL;
 }
 
 static Expr *transform_cypher_node(cypher_parsestate *cpstate,
@@ -7723,6 +8221,140 @@ static Query *transform_cypher_create(cypher_parsestate *cpstate,
     cpstate->skip_raw_targets = old_skip;
 
     return query;
+}
+
+static Query *transform_cypher_create_index(cypher_parsestate *cpstate,
+                                            cypher_clause *clause)
+{
+    cypher_create_index *self = (cypher_create_index *)clause->self;
+    List *args;
+
+    if (self->for_relationship && self->adjacency)
+    {
+        args = list_make4(make_cstring_arg(cpstate->graph_name),
+                          make_cstring_arg(self->label_name),
+                          make_cstring_arg(self->outgoing ? "out" : "in"),
+                          make_cstring_arg(self->index_name));
+        return transform_cypher_graph_index_function(
+            cpstate, "create_adjacency_index_named", args, "create_index");
+    }
+    if (self->adjacency)
+        ereport(ERROR,
+                (errcode(ERRCODE_SYNTAX_ERROR),
+                 errmsg("ADJACENCY index requires a relationship pattern")));
+
+    args = list_make4(make_cstring_arg(cpstate->graph_name),
+                      make_cstring_arg(self->label_name),
+                      make_cstring_arg(self->property_name),
+                      make_cstring_arg(self->index_name));
+
+    return transform_cypher_graph_index_function(
+        cpstate, "create_property_source_index_named", args, "create_index");
+}
+
+static Query *transform_cypher_drop_index(cypher_parsestate *cpstate,
+                                          cypher_clause *clause)
+{
+    cypher_drop_index *self = (cypher_drop_index *)clause->self;
+    List *args;
+
+    args = list_make2(make_cstring_arg(cpstate->graph_name),
+                      make_cstring_arg(self->index_name));
+
+    return transform_cypher_graph_index_function(
+        cpstate, "drop_graph_index", args, "drop_index");
+}
+
+static Query *transform_cypher_show_indexes(cypher_parsestate *cpstate,
+                                            cypher_clause *clause)
+{
+    ParseState *pstate = (ParseState *)cpstate;
+    Query *query;
+    FuncCall *func_call;
+    Node *func_expr;
+    RangeFunction *range_function;
+    ParseNamespaceItem *nsitem;
+
+    (void)clause;
+
+    query = makeNode(Query);
+    query->commandType = CMD_SELECT;
+
+    func_call = makeFuncCall(list_make2(makeString("ag_catalog"),
+                                        makeString("show_indexes")),
+                             list_make1(make_name_arg(cpstate->graph_name)),
+                             COERCE_EXPLICIT_CALL, -1);
+    func_expr = transformExpr(pstate, (Node *)func_call,
+                              EXPR_KIND_FROM_FUNCTION);
+    range_function = makeNode(RangeFunction);
+    range_function->lateral = false;
+    range_function->ordinality = false;
+    range_function->is_rowsfrom = false;
+    range_function->functions = list_make1(list_make2(func_call, NIL));
+    range_function->alias = makeAlias("indexes", NIL);
+    range_function->coldeflist = NIL;
+
+    nsitem = addRangeTableEntryForFunction(
+        pstate, list_make1(func_call->funcname), list_make1(func_expr),
+        list_make1(NIL), range_function, false, true);
+    addNSItemToQuery(pstate, nsitem, true, true, true);
+
+    query->targetList = expandNSItemAttrs(pstate, nsitem, 0, true, -1);
+    query->rtable = pstate->p_rtable;
+    query->jointree = makeFromExpr(pstate->p_joinlist, NULL);
+
+    return query;
+}
+
+static Query *transform_cypher_graph_index_function(
+    cypher_parsestate *cpstate, char *function_name, List *args,
+    char *target_name)
+{
+    ParseState *pstate = (ParseState *)cpstate;
+    Query *query;
+    FuncCall *func_call;
+    FuncExpr *func_expr;
+    TargetEntry *tle;
+
+    query = makeNode(Query);
+    query->commandType = CMD_SELECT;
+
+    func_call = makeFuncCall(list_make2(makeString("ag_catalog"),
+                                        makeString(function_name)),
+                             args, COERCE_EXPLICIT_CALL, -1);
+    func_expr = castNode(FuncExpr,
+                         transformExpr(pstate, (Node *)func_call,
+                                       EXPR_KIND_SELECT_TARGET));
+    tle = makeTargetEntry((Expr *)func_expr,
+                          (AttrNumber)pstate->p_next_resno++,
+                          target_name, false);
+    query->targetList = list_make1(tle);
+    query->rtable = pstate->p_rtable;
+    query->jointree = makeFromExpr(pstate->p_joinlist, NULL);
+
+    return query;
+}
+
+static Node *make_cstring_arg(char *value)
+{
+    TypeCast *cast = makeNode(TypeCast);
+
+    cast->arg = makeStringConst(value, -1);
+    cast->typeName = makeTypeName("cstring");
+    cast->location = -1;
+
+    return (Node *)cast;
+}
+
+static Node *make_name_arg(char *value)
+{
+    TypeCast *cast = makeNode(TypeCast);
+
+    cast->arg = makeStringConst(value, -1);
+    cast->typeName = makeTypeName("name");
+    cast->location = -1;
+
+    return (Node *)cast;
 }
 
 static List *transform_cypher_create_pattern(cypher_parsestate *cpstate,
@@ -10260,6 +10892,231 @@ static char *make_raw_path_count_anchor_name(const char *var_name)
                     var_name);
 }
 
+static void try_rewrite_fixed_label_chain_to_vle(
+    cypher_parsestate *cpstate, cypher_path *path)
+{
+    cypher_node *start_node;
+    cypher_node *end_node;
+    cypher_node *terminal_node;
+    cypher_relationship *vle_rel;
+    int edge_count = 0;
+    int32 terminal_label_id = INVALID_LABEL_ID;
+
+    Assert(cpstate != NULL);
+    Assert(path != NULL);
+
+    if (!fixed_label_chain_candidate(cpstate, path, &edge_count,
+                                     &terminal_label_id))
+        return;
+
+    start_node = (cypher_node *)linitial(path->path);
+    end_node = (cypher_node *)llast(path->path);
+    vle_rel = make_fixed_label_chain_vle_rel(cpstate, path, edge_count,
+                                             terminal_label_id);
+    if (vle_rel == NULL)
+        return;
+
+    terminal_node = make_ag_node(cypher_node);
+    terminal_node->name = end_node->name;
+    terminal_node->parsed_name = NULL;
+    terminal_node->label = end_node->name != NULL ? end_node->label : NULL;
+    terminal_node->parsed_label =
+        end_node->name != NULL ? end_node->parsed_label : NULL;
+    terminal_node->use_equals = end_node->use_equals;
+    terminal_node->props = NULL;
+    terminal_node->location = end_node->location;
+
+    path->path = list_make3(start_node, vle_rel, terminal_node);
+}
+
+static bool fixed_label_chain_candidate(cypher_parsestate *cpstate,
+                                        cypher_path *path,
+                                        int *edge_count,
+                                        int32 *terminal_label_id)
+{
+    cypher_relationship *first_rel;
+    cypher_node *first_target;
+    const char *edge_label;
+    const char *terminal_label;
+    cypher_rel_dir direction;
+    int path_len;
+    int i;
+
+    Assert(cpstate != NULL);
+    Assert(path != NULL);
+    Assert(edge_count != NULL);
+    Assert(terminal_label_id != NULL);
+
+    *edge_count = 0;
+    *terminal_label_id = INVALID_LABEL_ID;
+    path_len = list_length(path->path);
+    if (path_len < 5 || path_len % 2 == 0)
+        return false;
+
+    first_rel = (cypher_relationship *)list_nth(path->path, 1);
+    first_target = (cypher_node *)list_nth(path->path, 2);
+    if (first_rel->name != NULL ||
+        first_rel->label == NULL ||
+        first_rel->props != NULL ||
+        first_rel->varlen != NULL ||
+        first_rel->dir == CYPHER_REL_DIR_NONE ||
+        first_target->label == NULL ||
+        first_target->props != NULL)
+    {
+        return false;
+    }
+
+    edge_label = first_rel->label;
+    terminal_label = first_target->label;
+    direction = first_rel->dir;
+
+    for (i = 1; i < path_len; i += 2)
+    {
+        cypher_relationship *rel =
+            (cypher_relationship *)list_nth(path->path, i);
+        cypher_node *target = (cypher_node *)list_nth(path->path, i + 1);
+
+        if (rel->name != NULL ||
+            rel->props != NULL ||
+            rel->varlen != NULL ||
+            rel->dir != direction ||
+            !same_label_name(rel->label, edge_label) ||
+            target->props != NULL ||
+            !same_label_name(target->label, terminal_label))
+        {
+            return false;
+        }
+        if (target->name != NULL && i + 1 != path_len - 1)
+            return false;
+    }
+
+    *edge_count = (path_len - 1) / 2;
+    *terminal_label_id = get_label_id(terminal_label, cpstate->graph_oid);
+
+    return label_id_is_valid(*terminal_label_id);
+}
+
+static bool same_label_name(const char *left, const char *right)
+{
+    if (left == NULL || right == NULL)
+        return left == right;
+
+    return strcmp(left, right) == 0;
+}
+
+static cypher_relationship *make_fixed_label_chain_vle_rel(
+    cypher_parsestate *cpstate, cypher_path *path, int edge_count,
+    int32 terminal_label_id)
+{
+    cypher_node *start_node;
+    cypher_node *end_node;
+    cypher_relationship *rel;
+    cypher_relationship *vle_rel;
+    ColumnRef *start_ref;
+    Node *edge_expr;
+    List *edge_args = NIL;
+    List *args = NIL;
+
+    Assert(cpstate != NULL);
+    Assert(path != NULL);
+    Assert(edge_count > 1);
+
+    start_node = (cypher_node *)linitial(path->path);
+    end_node = (cypher_node *)llast(path->path);
+    rel = (cypher_relationship *)list_nth(path->path, 1);
+    vle_rel = make_ag_node(cypher_relationship);
+    vle_rel->name = NULL;
+    vle_rel->parsed_name = NULL;
+    vle_rel->label = rel->label;
+    vle_rel->parsed_label = rel->parsed_label;
+    vle_rel->use_equals = rel->use_equals;
+    vle_rel->props = NULL;
+    vle_rel->dir = rel->dir;
+    vle_rel->location = rel->location;
+
+    if (start_node->name == NULL &&
+        (start_node->label != NULL ||
+         start_node->props != NULL ||
+         end_node->name != NULL ||
+         end_node->label != NULL ||
+         end_node->props != NULL))
+    {
+        start_node->name = get_next_default_alias(cpstate);
+    }
+
+    if (start_node->name != NULL)
+    {
+        start_ref = makeNode(ColumnRef);
+        start_ref->fields = list_make2(makeString(start_node->name),
+                                       makeString("id"));
+        start_ref->location = start_node->location;
+        args = lappend(args, start_ref);
+    }
+    else
+    {
+        args = lappend(args, make_cypher_null_const(start_node->location));
+    }
+    args = lappend(args, make_cypher_null_const(end_node->location));
+
+    edge_args = lappend(edge_args,
+                        make_cypher_string_const(rel->label, rel->location));
+    edge_args = lappend(edge_args, make_cypher_null_const(rel->location));
+    edge_expr = make_cypher_func_expr(
+        list_make2(makeString("ag_catalog"),
+                   makeString("age_build_vle_match_edge")),
+        edge_args, rel->location);
+    args = lappend(args, edge_expr);
+    args = lappend(args, make_cypher_integer_const(edge_count, rel->location));
+    args = lappend(args, make_cypher_integer_const(edge_count, rel->location));
+    args = lappend(args, make_cypher_integer_const(rel->dir, rel->location));
+    args = lappend(args,
+                   make_cypher_integer_const(
+                       (int64)next_clause_vle_grammar_node_id(), -1));
+    args = lappend(args,
+                   make_cypher_integer_const(terminal_label_id,
+                                             end_node->location));
+
+    vle_rel->varlen = make_cypher_func_expr(
+        list_make1(makeString("vle_internal")), args, rel->location);
+
+    return vle_rel;
+}
+
+static Node *make_cypher_string_const(char *value, int location)
+{
+    A_Const *n = makeNode(A_Const);
+
+    n->val.sval.type = T_String;
+    n->val.sval.sval = value;
+    n->location = location;
+
+    return (Node *)n;
+}
+
+static Node *make_cypher_null_const(int location)
+{
+    A_Const *n = makeNode(A_Const);
+
+    n->isnull = true;
+    n->location = location;
+
+    return (Node *)n;
+}
+
+static Node *make_cypher_func_expr(List *func_name, List *args,
+                                   int location)
+{
+    return (Node *)makeFuncCall(func_name, args, COERCE_SQL_SYNTAX,
+                                location);
+}
+
+static uint64 next_clause_vle_grammar_node_id(void)
+{
+    static uint64 next_id = 1;
+
+    return next_id++;
+}
+
 static void mark_vle_terminal_only_result(cypher_relationship *rel)
 {
     FuncCall *func;
@@ -10290,6 +11147,133 @@ static void mark_vle_terminal_only_result(cypher_relationship *rel)
     {
         cache_key->val.ival.ival = -(key + 1);
     }
+}
+
+static bool mark_vle_terminal_label_result(cypher_parsestate *cpstate,
+                                           cypher_relationship *rel,
+                                           cypher_node *next_node)
+{
+    FuncCall *func;
+    int32 label_id;
+    int32 marker_label_id;
+
+    if (cpstate == NULL ||
+        rel == NULL ||
+        next_node == NULL ||
+        next_node->label == NULL ||
+        next_node->props != NULL ||
+        rel->varlen == NULL ||
+        !IsA(rel->varlen, FuncCall) ||
+        (rel->dir != CYPHER_REL_DIR_RIGHT &&
+         rel->dir != CYPHER_REL_DIR_LEFT))
+    {
+        return false;
+    }
+
+    func = (FuncCall *)rel->varlen;
+    if (list_length(func->args) != AGE_VLE_STREAM_ARG_GRAMMAR_NODE &&
+        list_length(func->args) != AGE_VLE_STREAM_ARG_GRAMMAR_NODE + 1)
+        return false;
+    if (!vle_func_is_fixed_one_hop(func) && vle_func_has_terminal_label(func))
+        return true;
+    if (!vle_func_is_fixed_one_hop(func) &&
+        !vle_func_has_finite_upper(func))
+        return false;
+
+    label_id = get_label_id(next_node->label, cpstate->graph_oid);
+    if (label_id == INVALID_LABEL_ID)
+        return false;
+
+    marker_label_id = vle_func_is_fixed_one_hop(func) ?
+        label_id : -(label_id + 1);
+    func->args = lappend(func->args,
+                         make_cypher_integer_const(marker_label_id,
+                                                   next_node->location));
+
+    return true;
+}
+
+static bool vle_func_has_terminal_label(FuncCall *func)
+{
+    Node *arg;
+    int label_id;
+
+    if (func == NULL)
+        return false;
+
+    if (list_length(func->args) > AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY)
+        return true;
+    if (list_length(func->args) <= AGE_VLE_STREAM_ARG_GRAMMAR_NODE)
+        return false;
+
+    arg = list_nth(func->args, AGE_VLE_STREAM_ARG_GRAMMAR_NODE);
+    return node_is_cypher_integer_const(arg, &label_id) &&
+        (label_id_is_valid(label_id) || label_id < 0);
+}
+
+static bool vle_func_has_finite_upper(FuncCall *func)
+{
+    int upper;
+
+    if (func == NULL ||
+        list_length(func->args) <= AGE_VLE_STREAM_ARG_UPPER)
+    {
+        return false;
+    }
+
+    return node_is_cypher_integer_const(
+        list_nth(func->args, AGE_VLE_STREAM_ARG_UPPER), &upper) &&
+        upper >= 0;
+}
+
+static bool vle_func_is_fixed_one_hop(FuncCall *func)
+{
+    int lower;
+    int upper;
+
+    if (func == NULL ||
+        list_length(func->args) != AGE_VLE_STREAM_ARG_GRAMMAR_NODE)
+    {
+        return false;
+    }
+
+    if (!node_is_cypher_integer_const(
+            list_nth(func->args, AGE_VLE_STREAM_ARG_LOWER), &lower) ||
+        !node_is_cypher_integer_const(
+            list_nth(func->args, AGE_VLE_STREAM_ARG_UPPER), &upper))
+    {
+        return false;
+    }
+
+    return lower == 1 && upper == 1;
+}
+
+static bool node_is_cypher_integer_const(Node *node, int *value)
+{
+    A_Const *aconst;
+
+    Assert(value != NULL);
+
+    if (node == NULL || !IsA(node, A_Const))
+        return false;
+
+    aconst = (A_Const *)node;
+    if (aconst->isnull || nodeTag(&aconst->val) != T_Integer)
+        return false;
+
+    *value = aconst->val.ival.ival;
+    return true;
+}
+
+static Node *make_cypher_integer_const(int64 value, int location)
+{
+    A_Const *n = makeNode(A_Const);
+
+    n->val.ival.type = T_Integer;
+    n->val.ival.ival = (int)value;
+    n->location = location;
+
+    return (Node *)n;
 }
 
 /*

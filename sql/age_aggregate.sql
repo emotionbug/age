@@ -352,6 +352,22 @@ CREATE FUNCTION ag_catalog.age_array_agg_slots_finalfn(internal)
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
 
+-- array_agg summary final function for slot-vector map/list state
+CREATE FUNCTION ag_catalog.age_array_agg_slots_summary_finalfn(internal)
+    RETURNS text
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- resolved argument descriptor for slot-vector map/list aggregate state
+CREATE FUNCTION ag_catalog.age_array_agg_slots_descriptor(variadic "any")
+    RETURNS text
+    LANGUAGE c
+    STABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
 -- array_agg combine function for slot-vector map/list state
 CREATE FUNCTION ag_catalog.age_array_agg_slots_combine(internal, internal)
     RETURNS internal
@@ -513,5 +529,29 @@ CREATE AGGREGATE ag_catalog.age_array_agg_list_slots(variadic "any")
     serialfunc = ag_catalog.age_array_agg_slots_serialize,
     deserialfunc = ag_catalog.age_array_agg_slots_deserialize,
     finalfunc = ag_catalog.age_array_agg_slots_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_array_agg_map_slots_summary(variadic "any")
+CREATE AGGREGATE ag_catalog.age_array_agg_map_slots_summary(variadic "any")
+(
+    stype = internal,
+    sfunc = ag_catalog.age_array_agg_map_slots_transfn,
+    combinefunc = ag_catalog.age_array_agg_slots_combine,
+    serialfunc = ag_catalog.age_array_agg_slots_serialize,
+    deserialfunc = ag_catalog.age_array_agg_slots_deserialize,
+    finalfunc = ag_catalog.age_array_agg_slots_summary_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_array_agg_list_slots_summary(variadic "any")
+CREATE AGGREGATE ag_catalog.age_array_agg_list_slots_summary(variadic "any")
+(
+    stype = internal,
+    sfunc = ag_catalog.age_array_agg_list_slots_transfn,
+    combinefunc = ag_catalog.age_array_agg_slots_combine,
+    serialfunc = ag_catalog.age_array_agg_slots_serialize,
+    deserialfunc = ag_catalog.age_array_agg_slots_deserialize,
+    finalfunc = ag_catalog.age_array_agg_slots_summary_finalfn,
     parallel = safe
 );
