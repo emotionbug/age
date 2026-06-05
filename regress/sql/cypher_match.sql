@@ -29,10 +29,200 @@ SELECT * FROM cypher('cypher_match', $$CREATE (:v {i: 1})$$) AS (a agtype);
 SELECT * FROM cypher('cypher_match', $$MATCH (n:v) RETURN n$$) AS (n agtype);
 SELECT * FROM cypher('cypher_match', $$MATCH (n:v) RETURN n.i$$) AS (i agtype);
 
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) RETURN n.i::pg_bigint$$) AS (i bigint);
+
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) RETURN n.i::pg_bigint$$) AS (i bigint)
+ORDER BY i NULLS FIRST;
+
 SELECT * FROM cypher('cypher_match', $$
 MATCH (n:v) WHERE n.i > 0
 RETURN n.i
 $$) AS (i agtype);
+
+SELECT create_graph('cypher_match_plan');
+
+SELECT * FROM cypher('cypher_match_plan', $$
+CREATE (:join_v {i: 3})-[:order_e {i: 2}]->(:join_v),
+       (:join_v {i: 1})-[:order_e {i: 1}]->(:join_v)
+$$) AS (a agtype);
+
+SELECT create_graph('cypher_match_numeric_path');
+
+SELECT * FROM cypher('cypher_match_numeric_path', $$
+CREATE (:NumericPath {payload: {a: 1, b: 11, c: 101}}),
+       (:NumericPath {payload: {a: 2, b: 12, c: 102}})
+$$) AS (a agtype);
+
+CREATE FUNCTION cypher_match_normalized_explain(graph_name text,
+                                                cypher_query text)
+RETURNS SETOF text
+LANGUAGE plpgsql
+AS $normalized_explain$
+DECLARE
+    plan_line text;
+BEGIN
+    FOR plan_line IN EXECUTE
+        format('EXPLAIN (VERBOSE, COSTS OFF)
+                SELECT *
+                FROM cypher(%L, %L) AS (value agtype)',
+               graph_name, cypher_query)
+    LOOP
+        plan_line := regexp_replace(
+            plan_line,
+            'agtype_ctid_property_field_agtype\(''[0-9]+''::oid',
+            'agtype_ctid_property_field_agtype(''<relid>''::oid',
+            'g');
+        RETURN NEXT regexp_replace(
+            plan_line,
+            'agtype_id_property_field_agtype\(''[0-9]+''::oid',
+            'agtype_id_property_field_agtype(''<relid>''::oid',
+            'g');
+    END LOOP;
+END
+$normalized_explain$;
+
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match',
+    'MATCH (n:v)
+     RETURN n.payload.a
+     ORDER BY n.payload.a::pg_bigint
+     LIMIT 1');
+
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match',
+    'MATCH (n:v)
+     RETURN n.payload.a::pg_bigint
+     ORDER BY n.payload.a::pg_bigint
+     LIMIT 1');
+
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match_plan',
+    'MATCH (:join_v)-[r:order_e]->(:join_v)
+     RETURN r.i ORDER BY r.i::pg_bigint LIMIT 1');
+
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match_numeric_path',
+    'MATCH (n:NumericPath)
+     RETURN collect(DISTINCT n.payload.a::pg_bigint)');
+
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match_numeric_path',
+    'MATCH (n:NumericPath)
+     RETURN n.payload.a
+     ORDER BY n.payload.a::pg_numeric
+     LIMIT 1');
+
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match_numeric_path',
+    'MATCH (n:NumericPath)
+     RETURN collect(DISTINCT n.payload.a::pg_numeric)');
+
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match_numeric_path',
+    'MATCH (n:NumericPath)
+     RETURN collect(n.payload.a::numeric)');
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.a::pg_numeric, count(*)
+              ORDER BY n.payload.a::pg_numeric$$)
+     AS (i numeric, c agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              WHERE n.payload.a::pg_numeric >= 1::pg_numeric
+              RETURN n.payload.a::pg_numeric$$)
+     AS (i numeric);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(v), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath) RETURN n.payload.a$$) AS (v agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(m), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath) RETURN {a: n.payload.a, b: n.payload.b}$$)
+     AS (m agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(m), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN {a: n.payload.a, b: n.payload.b, c: n.payload.c}$$)
+     AS (m agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(l), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath) RETURN [n.payload.a, n.payload.b]$$)
+     AS (l agtype);
+
+DROP FUNCTION cypher_match_normalized_explain(text, text);
+
+SELECT * FROM cypher('cypher_match_numeric_path', $$
+    MATCH (n:NumericPath)
+    RETURN collect(n.payload.a::numeric)
+$$) AS (vals agtype);
+
+SELECT * FROM cypher('cypher_match_numeric_path', $$
+    MATCH (n:NumericPath)
+    RETURN collect(DISTINCT n.payload.a::pg_numeric)
+$$) AS (vals agtype);
+
+SELECT array_agg(v)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath) RETURN n.payload.a$$) AS (v agtype);
+
+SELECT array_agg(m)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath) RETURN {a: n.payload.a, b: n.payload.b}$$)
+     AS (m agtype);
+
+SELECT array_agg(l)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath) RETURN [n.payload.a, n.payload.b]$$)
+     AS (l agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) RETURN count(n.i), count(n.i)$$)
+     AS (a agtype, b agtype);
+
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) RETURN count(n.i), count(n.i)$$)
+     AS (a agtype, b agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v)
+              RETURN n.i::pg_bigint, count(*), count(*)
+              ORDER BY n.i::pg_bigint$$)
+     AS (i agtype, a agtype, b agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT int8_to_agtype(
+           agtype_object_field_int8(
+               agtype_object_field_agtype(n.properties, '"payload"'::agtype),
+               '"a"'::agtype)),
+       int8_to_agtype(
+           agtype_object_field_int8(
+               agtype_access_operator(VARIADIC ARRAY[n.properties,
+                                                     '"payload"'::agtype]),
+               '"a"'::agtype))
+FROM cypher_match_numeric_path."NumericPath" n;
 
 DO $property_projection_plan$
 DECLARE
@@ -46,6 +236,10 @@ DECLARE
     has_limit_node boolean := false;
     has_order_by_direct_access boolean := false;
     has_order_by_materialized_access boolean := false;
+    has_nested_count_arg_nonnull_probe boolean := false;
+    has_nested_count_arg_materialized_access boolean := false;
+    has_nested_count_cypher_nonnull_probe boolean := false;
+    has_nested_count_cypher_materialized_access boolean := false;
     has_pg_bigint_property_helper boolean := false;
     has_pg_bigint_materialized_cast boolean := false;
     has_pg_float8_property_helper boolean := false;
@@ -54,10 +248,40 @@ DECLARE
     has_numeric_materialized_cast boolean := false;
     has_deferred_order_output boolean := false;
     has_deferred_order_limit_input boolean := false;
+    has_deferred_float_order_output boolean := false;
+    has_deferred_float_order_limit_input boolean := false;
+    has_deferred_text_order_output boolean := false;
+    has_deferred_text_order_limit_input boolean := false;
+    has_deferred_numeric_order_output boolean := false;
+    has_deferred_numeric_order_limit_input boolean := false;
+    has_deferred_edge_order_output boolean := false;
+    has_deferred_edge_order_limit_input boolean := false;
+    has_deferred_join_order_output boolean := false;
+    has_deferred_join_order_limit_input boolean := false;
     has_group_direct_access boolean := false;
     has_group_variadic_access boolean := false;
+    has_nested_group_direct_access boolean := false;
+    has_nested_group_variadic_access boolean := false;
     has_group_count_final_output boolean := false;
     has_group_count_limit_input boolean := false;
+    has_group_count_plain_final_output boolean := false;
+    has_group_count_plain_sort_input boolean := false;
+    has_float_group_count_final_output boolean := false;
+    has_float_group_count_limit_input boolean := false;
+    has_float_group_count_plain_final_output boolean := false;
+    has_float_group_count_plain_sort_input boolean := false;
+    has_text_group_count_final_output boolean := false;
+    has_text_group_count_limit_input boolean := false;
+    has_text_group_count_plain_final_output boolean := false;
+    has_text_group_count_plain_sort_input boolean := false;
+    has_numeric_group_count_final_output boolean := false;
+    has_numeric_group_count_limit_input boolean := false;
+    has_numeric_group_count_plain_final_output boolean := false;
+    has_numeric_group_count_plain_sort_input boolean := false;
+    has_distinct_order_access boolean := false;
+    has_distinct_deferred_order_output boolean := false;
+    has_nested_distinct_order_access boolean := false;
+    has_nested_distinct_variadic_access boolean := false;
 BEGIN
     PERFORM set_config('enable_seqscan', 'on', false);
     PERFORM set_config('enable_indexscan', 'on', false);
@@ -123,6 +347,52 @@ BEGIN
 
     FOR plan_text IN EXECUTE
         'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT count(i)
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN n.payload.a$$) AS (i agtype)'
+    LOOP
+        IF plan_text LIKE '%agtype_object_field_exists_nonnull(agtype_object_field_agtype(n.properties, ''"payload"''::agtype), ''"a"''::agtype)%' THEN
+            has_nested_count_arg_nonnull_probe := true;
+        END IF;
+        IF plan_text LIKE '%count(agtype_object_field_agtype(agtype_object_field_agtype%' OR
+           plan_text LIKE '%count(agtype_access_operator%' THEN
+            has_nested_count_arg_materialized_access := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_nested_count_arg_nonnull_probe THEN
+        RAISE EXCEPTION 'expected nested count(i) wrapper to use terminal non-null property probe';
+    END IF;
+    IF has_nested_count_arg_materialized_access THEN
+        RAISE EXCEPTION 'unexpected materialized nested property access in count(i) wrapper';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN count(n.payload.a)$$) AS (c agtype)'
+    LOOP
+        IF plan_text LIKE '%agtype_object_field_exists_nonnull(%agtype_access_operator(ARRAY[n.properties, ''"payload"''::agtype]), ''"a"''::agtype)%' OR
+           plan_text LIKE '%agtype_object_field_exists_nonnull(%agtype_access_operator(VARIADIC ARRAY[n.properties, ''"payload"''::agtype]), ''"a"''::agtype)%' OR
+           plan_text LIKE '%agtype_object_field_exists_nonnull(agtype_object_field_agtype(n.properties, ''"payload"''::agtype), ''"a"''::agtype)%' THEN
+            has_nested_count_cypher_nonnull_probe := true;
+        END IF;
+        IF plan_text LIKE '%count(agtype_access_operator(VARIADIC ARRAY[n.properties, ''"payload"''::agtype, ''"a"''::agtype])%' OR
+           plan_text LIKE '%count(agtype_object_field_agtype(agtype_object_field_agtype%' THEN
+            has_nested_count_cypher_materialized_access := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_nested_count_cypher_nonnull_probe THEN
+        RAISE EXCEPTION 'expected nested Cypher count to use terminal non-null property probe';
+    END IF;
+    IF has_nested_count_cypher_materialized_access THEN
+        RAISE EXCEPTION 'unexpected materialized nested property access in Cypher count';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
          SELECT *
          FROM cypher(''cypher_match'',
                      $$MATCH (n:v) RETURN n.i LIMIT 1$$) AS (i agtype)'
@@ -148,7 +418,7 @@ BEGIN
          FROM cypher(''cypher_match'',
                      $$MATCH (n:v) RETURN n.i ORDER BY n.i LIMIT 1$$) AS (i agtype)'
     LOOP
-        IF plan_text LIKE '%Sort Key:%agtype_access_operator(n.properties, ''"i"''::agtype)%' THEN
+        IF plan_text LIKE '%Sort Key:%agtype_object_field_agtype(n.properties, ''"i"''::agtype)%' THEN
             has_order_by_direct_access := true;
         END IF;
         IF plan_text LIKE '%agtype_access_operator(VARIADIC ARRAY[n.properties, ''"i"''::agtype])%' THEN
@@ -157,7 +427,7 @@ BEGIN
     END LOOP;
 
     IF NOT has_order_by_direct_access THEN
-        RAISE EXCEPTION 'expected ORDER BY property projection to reuse direct access target';
+        RAISE EXCEPTION 'expected ORDER BY property projection to use direct object field target';
     END IF;
     IF has_order_by_materialized_access THEN
         RAISE EXCEPTION 'unexpected duplicate variadic property access in ORDER BY projection';
@@ -235,7 +505,7 @@ BEGIN
          FROM cypher(''cypher_match'',
                      $$MATCH (n:v) RETURN n.i ORDER BY n.i::pg_bigint LIMIT 1$$) AS (i agtype)'
     LOOP
-        IF plan_text LIKE '%Output: agtype_ctid_field_agtype(%n.ctid, ''"i"''::agtype), (agtype_object_field_int8(n.properties, ''"i"''::agtype))%' THEN
+        IF plan_text LIKE '%Output: agtype_ctid_property_field_agtype(%n.ctid, 2, ''"i"''::agtype), (agtype_object_field_int8(n.properties, ''"i"''::agtype))%' THEN
             has_deferred_order_output := true;
         END IF;
         IF plan_text LIKE '%Output: n.ctid, (agtype_object_field_int8(n.properties, ''"i"''::agtype))%' THEN
@@ -254,10 +524,157 @@ BEGIN
         'EXPLAIN (VERBOSE, COSTS OFF)
          SELECT *
          FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN n.i ORDER BY n.i::pg_float8 LIMIT 1$$) AS (i agtype)'
+    LOOP
+        IF plan_text LIKE '%Output: agtype_ctid_property_field_agtype(%n.ctid, 2, ''"i"''::agtype), (agtype_object_field_float8(n.properties, ''"i"''::agtype))%' THEN
+            has_deferred_float_order_output := true;
+        END IF;
+        IF plan_text LIKE '%Output: n.ctid, (agtype_object_field_float8(n.properties, ''"i"''::agtype))%' THEN
+            has_deferred_float_order_limit_input := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_deferred_float_order_output THEN
+        RAISE EXCEPTION 'expected float ordered property projection to materialize output above LIMIT';
+    END IF;
+    IF NOT has_deferred_float_order_limit_input THEN
+        RAISE EXCEPTION 'expected float ordered property projection lower path to carry ctid and typed sort key';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN n.i ORDER BY n.i::pg_text LIMIT 1$$) AS (i agtype)'
+    LOOP
+        IF plan_text LIKE '%Output: agtype_ctid_property_field_agtype(%n.ctid, 2, ''"i"''::agtype), (agtype_object_field_text_agtype(n.properties, ''"i"''::agtype))%' THEN
+            has_deferred_text_order_output := true;
+        END IF;
+        IF plan_text LIKE '%Output: n.ctid, (agtype_object_field_text_agtype(n.properties, ''"i"''::agtype))%' THEN
+            has_deferred_text_order_limit_input := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_deferred_text_order_output THEN
+        RAISE EXCEPTION 'expected text ordered property projection to materialize output above LIMIT';
+    END IF;
+    IF NOT has_deferred_text_order_limit_input THEN
+        RAISE EXCEPTION 'expected text ordered property projection lower path to carry ctid and typed sort key';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN n.i ORDER BY n.i::numeric LIMIT 1$$) AS (i agtype)'
+    LOOP
+        IF plan_text LIKE '%Output: agtype_ctid_property_field_agtype(%n.ctid, 2, ''"i"''::agtype), (agtype_object_field_numeric_agtype(n.properties, ''"i"''::agtype))%' THEN
+            has_deferred_numeric_order_output := true;
+        END IF;
+        IF plan_text LIKE '%Output: n.ctid, (agtype_object_field_numeric_agtype(n.properties, ''"i"''::agtype))%' THEN
+            has_deferred_numeric_order_limit_input := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_deferred_numeric_order_output THEN
+        RAISE EXCEPTION 'expected numeric ordered property projection to materialize output above LIMIT';
+    END IF;
+    IF NOT has_deferred_numeric_order_limit_input THEN
+        RAISE EXCEPTION 'expected numeric ordered property projection lower path to carry ctid and typed sort key';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match_plan'',
+                     $$MATCH ()-[r:order_e]->() RETURN r.i ORDER BY r.i::pg_bigint LIMIT 1$$) AS (i agtype)'
+    LOOP
+        IF plan_text LIKE '%Output: agtype_id_property_field_agtype(%r.id, 4, ''"i"''::agtype), (agtype_object_field_int8(r.properties, ''"i"''::agtype))%' THEN
+            has_deferred_edge_order_output := true;
+        END IF;
+        IF plan_text LIKE '%Output: r.id, (agtype_object_field_int8(r.properties, ''"i"''::agtype))%' THEN
+            has_deferred_edge_order_limit_input := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_deferred_edge_order_output THEN
+        RAISE EXCEPTION 'expected edge ordered property projection to refetch output by graphid above LIMIT';
+    END IF;
+    IF NOT has_deferred_edge_order_limit_input THEN
+        RAISE EXCEPTION 'expected edge ordered property projection lower path to carry id and typed sort key';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match_plan'',
+                     $$MATCH (a:join_v)-[:order_e]->(:join_v) RETURN a.i ORDER BY a.i::pg_bigint LIMIT 1$$) AS (i agtype)'
+    LOOP
+        IF plan_text LIKE '%Output: agtype_ctid_property_field_agtype(%a.ctid, 2, ''"i"''::agtype), (agtype_object_field_int8(a.properties, ''"i"''::agtype))%' THEN
+            has_deferred_join_order_output := true;
+        END IF;
+        IF plan_text LIKE '%Output: a.ctid, (agtype_object_field_int8(a.properties, ''"i"''::agtype))%' THEN
+            has_deferred_join_order_limit_input := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_deferred_join_order_output THEN
+        RAISE EXCEPTION 'expected join ordered property projection to refetch output above LIMIT';
+    END IF;
+    IF NOT has_deferred_join_order_limit_input THEN
+        RAISE EXCEPTION 'expected join ordered property projection lower path to carry lookup key and typed sort key';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN DISTINCT n.i ORDER BY n.i LIMIT 1$$) AS (i agtype)'
+    LOOP
+        IF plan_text LIKE '%agtype_object_field_agtype(n.properties, ''"i"''::agtype)%' THEN
+            has_distinct_order_access := true;
+        END IF;
+        IF plan_text LIKE '%agtype_ctid_property_field_agtype%' THEN
+            has_distinct_deferred_order_output := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_distinct_order_access THEN
+        RAISE EXCEPTION 'expected DISTINCT ordered property target to use direct object field access';
+    END IF;
+    IF has_distinct_deferred_order_output THEN
+        RAISE EXCEPTION 'unexpected deferred ctid refetch across DISTINCT property target';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN DISTINCT n.payload.a ORDER BY n.payload.a LIMIT 1$$) AS (i agtype)'
+    LOOP
+        IF plan_text LIKE '%agtype_object_field_agtype(agtype_object_field_agtype(n.properties, ''"payload"''::agtype), ''"a"''::agtype)%' THEN
+            has_nested_distinct_order_access := true;
+        END IF;
+        IF plan_text LIKE '%agtype_access_operator(VARIADIC ARRAY[n.properties, ''"payload"''::agtype, ''"a"''::agtype])%' THEN
+            has_nested_distinct_variadic_access := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_nested_distinct_order_access THEN
+        RAISE EXCEPTION 'expected nested DISTINCT property target to use chained object field access';
+    END IF;
+    IF has_nested_distinct_variadic_access THEN
+        RAISE EXCEPTION 'unexpected variadic access in nested DISTINCT property target';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
                      $$MATCH (n:v) RETURN n.i, count(*) ORDER BY n.i LIMIT 1$$)
               AS (i agtype, c agtype)'
     LOOP
-        IF plan_text LIKE '%Group Key: agtype_access_operator(n.properties, ''"i"''::agtype)%' THEN
+        IF plan_text LIKE '%Group Key: agtype_object_field_agtype(n.properties, ''"i"''::agtype)%' THEN
             has_group_direct_access := true;
         END IF;
         IF plan_text LIKE '%agtype_access_operator(VARIADIC ARRAY[n.properties, ''"i"''::agtype])%' THEN
@@ -266,10 +683,32 @@ BEGIN
     END LOOP;
 
     IF NOT has_group_direct_access THEN
-        RAISE EXCEPTION 'expected grouped property target to use direct access';
+        RAISE EXCEPTION 'expected grouped property target to use direct object field access';
     END IF;
     IF has_group_variadic_access THEN
         RAISE EXCEPTION 'unexpected variadic property access in grouped property target';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN n.payload.a, count(*) ORDER BY n.payload.a LIMIT 1$$)
+              AS (i agtype, c agtype)'
+    LOOP
+        IF plan_text LIKE '%Group Key: agtype_object_field_agtype(agtype_object_field_agtype(n.properties, ''"payload"''::agtype), ''"a"''::agtype)%' THEN
+            has_nested_group_direct_access := true;
+        END IF;
+        IF plan_text LIKE '%agtype_access_operator(VARIADIC ARRAY[n.properties, ''"payload"''::agtype, ''"a"''::agtype])%' THEN
+            has_nested_group_variadic_access := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_nested_group_direct_access THEN
+        RAISE EXCEPTION 'expected nested grouped property target to use chained object field access';
+    END IF;
+    IF has_nested_group_variadic_access THEN
+        RAISE EXCEPTION 'unexpected variadic access in nested grouped property target';
     END IF;
 
     FOR plan_text IN EXECUTE
@@ -292,6 +731,160 @@ BEGIN
     END IF;
     IF NOT has_group_count_limit_input THEN
         RAISE EXCEPTION 'expected grouped count lower path to carry raw count';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN n.i::pg_bigint, count(*) ORDER BY n.i::pg_bigint$$)
+              AS (i bigint, c agtype)'
+    LOOP
+        IF plan_text LIKE '%Output: (agtype_object_field_int8(n.properties, ''"i"''::agtype)), ((count(*)))::agtype%' THEN
+            has_group_count_plain_final_output := true;
+        END IF;
+        IF plan_text LIKE '%Output: (agtype_object_field_int8(n.properties, ''"i"''::agtype)), (count(*))%' THEN
+            has_group_count_plain_sort_input := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_group_count_plain_final_output THEN
+        RAISE EXCEPTION 'expected non-limit grouped count final projection above aggregate';
+    END IF;
+    IF NOT has_group_count_plain_sort_input THEN
+        RAISE EXCEPTION 'expected non-limit grouped count lower path to carry raw count';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN n.i::pg_float8, count(*) ORDER BY n.i::pg_float8 LIMIT 1$$)
+              AS (i float8, c agtype)'
+    LOOP
+        IF plan_text LIKE '%Output: (agtype_object_field_float8(n.properties, ''"i"''::agtype)), ((count(*)))::agtype%' THEN
+            has_float_group_count_final_output := true;
+        END IF;
+        IF plan_text LIKE '%Output: (agtype_object_field_float8(n.properties, ''"i"''::agtype)), (count(*))%' THEN
+            has_float_group_count_limit_input := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_float_group_count_final_output THEN
+        RAISE EXCEPTION 'expected float grouped count agtype projection above LIMIT';
+    END IF;
+    IF NOT has_float_group_count_limit_input THEN
+        RAISE EXCEPTION 'expected float grouped count lower path to carry raw count';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN n.i::pg_float8, count(*) ORDER BY n.i::pg_float8$$)
+              AS (i float8, c agtype)'
+    LOOP
+        IF plan_text LIKE '%Output: (agtype_object_field_float8(n.properties, ''"i"''::agtype)), ((count(*)))::agtype%' THEN
+            has_float_group_count_plain_final_output := true;
+        END IF;
+        IF plan_text LIKE '%Output: (agtype_object_field_float8(n.properties, ''"i"''::agtype)), (count(*))%' THEN
+            has_float_group_count_plain_sort_input := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_float_group_count_plain_final_output THEN
+        RAISE EXCEPTION 'expected non-limit float grouped count final projection above aggregate';
+    END IF;
+    IF NOT has_float_group_count_plain_sort_input THEN
+        RAISE EXCEPTION 'expected non-limit float grouped count lower path to carry raw count';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN n.i::pg_text, count(*) ORDER BY n.i::pg_text LIMIT 1$$)
+              AS (i text, c agtype)'
+    LOOP
+        IF plan_text LIKE '%Output: (agtype_object_field_text_agtype(n.properties, ''"i"''::agtype)), ((count(*)))::agtype%' THEN
+            has_text_group_count_final_output := true;
+        END IF;
+        IF plan_text LIKE '%Output: (agtype_object_field_text_agtype(n.properties, ''"i"''::agtype)), (count(*))%' THEN
+            has_text_group_count_limit_input := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_text_group_count_final_output THEN
+        RAISE EXCEPTION 'expected text grouped count agtype projection above LIMIT';
+    END IF;
+    IF NOT has_text_group_count_limit_input THEN
+        RAISE EXCEPTION 'expected text grouped count lower path to carry raw count';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN n.i::pg_text, count(*) ORDER BY n.i::pg_text$$)
+              AS (i text, c agtype)'
+    LOOP
+        IF plan_text LIKE '%Output: (agtype_object_field_text_agtype(n.properties, ''"i"''::agtype)), ((count(*)))::agtype%' THEN
+            has_text_group_count_plain_final_output := true;
+        END IF;
+        IF plan_text LIKE '%Output: (agtype_object_field_text_agtype(n.properties, ''"i"''::agtype)), (count(*))%' THEN
+            has_text_group_count_plain_sort_input := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_text_group_count_plain_final_output THEN
+        RAISE EXCEPTION 'expected non-limit text grouped count final projection above aggregate';
+    END IF;
+    IF NOT has_text_group_count_plain_sort_input THEN
+        RAISE EXCEPTION 'expected non-limit text grouped count lower path to carry raw count';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN n.i::numeric, count(*) ORDER BY n.i::numeric LIMIT 1$$)
+              AS (i agtype, c agtype)'
+    LOOP
+        IF plan_text LIKE '%Output: (agtype_object_field_numeric_agtype(n.properties, ''"i"''::agtype)), ((count(*)))::agtype%' THEN
+            has_numeric_group_count_final_output := true;
+        END IF;
+        IF plan_text LIKE '%Output: (agtype_object_field_numeric_agtype(n.properties, ''"i"''::agtype)), (count(*))%' THEN
+            has_numeric_group_count_limit_input := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_numeric_group_count_final_output THEN
+        RAISE EXCEPTION 'expected numeric grouped count agtype projection above LIMIT';
+    END IF;
+    IF NOT has_numeric_group_count_limit_input THEN
+        RAISE EXCEPTION 'expected numeric grouped count lower path to carry raw count';
+    END IF;
+
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN n.i::numeric, count(*) ORDER BY n.i::numeric$$)
+              AS (i agtype, c agtype)'
+    LOOP
+        IF plan_text LIKE '%Output: (agtype_object_field_numeric_agtype(n.properties, ''"i"''::agtype)), ((count(*)))::agtype%' THEN
+            has_numeric_group_count_plain_final_output := true;
+        END IF;
+        IF plan_text LIKE '%Output: (agtype_object_field_numeric_agtype(n.properties, ''"i"''::agtype)), (count(*))%' THEN
+            has_numeric_group_count_plain_sort_input := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_numeric_group_count_plain_final_output THEN
+        RAISE EXCEPTION 'expected non-limit numeric grouped count final projection above aggregate';
+    END IF;
+    IF NOT has_numeric_group_count_plain_sort_input THEN
+        RAISE EXCEPTION 'expected non-limit numeric grouped count lower path to carry raw count';
     END IF;
 END
 $property_projection_plan$;
@@ -324,6 +917,136 @@ BEGIN
     END IF;
 END
 $property_count_plan$;
+
+DO $typed_distinct_collect_plan$
+DECLARE
+    plan_text text;
+    has_collect_distinct_float8 boolean := false;
+    has_collect_distinct_int8 boolean := false;
+    has_collect_distinct_text boolean := false;
+    has_distinct_properties_carry boolean := false;
+    has_materialized_access boolean := false;
+BEGIN
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN collect(DISTINCT n.i::pg_float8)$$) AS (xs agtype)'
+    LOOP
+        IF plan_text LIKE '%age_collect_float8(DISTINCT%' THEN
+            has_collect_distinct_float8 := true;
+        END IF;
+        IF plan_text LIKE '%age_collect(DISTINCT%' OR
+           plan_text LIKE '%agtype_access_operator%' THEN
+            has_materialized_access := true;
+        END IF;
+        IF plan_text LIKE '%Output: n.properties,%' THEN
+            has_distinct_properties_carry := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_collect_distinct_float8 THEN
+        RAISE EXCEPTION 'expected typed distinct float8 collect to use typed transition aggregate';
+    END IF;
+    IF has_materialized_access THEN
+        RAISE EXCEPTION 'unexpected materialized property access in typed distinct float8 collect';
+    END IF;
+    IF has_distinct_properties_carry THEN
+        RAISE EXCEPTION 'unexpected properties carry in typed distinct float8 collect';
+    END IF;
+
+    has_materialized_access := false;
+    has_distinct_properties_carry := false;
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN collect(DISTINCT n.i::pg_bigint)$$) AS (xs agtype)'
+    LOOP
+        IF plan_text LIKE '%age_collect_int8(DISTINCT%' THEN
+            has_collect_distinct_int8 := true;
+        END IF;
+        IF plan_text LIKE '%age_collect(DISTINCT%' OR
+           plan_text LIKE '%agtype_access_operator%' THEN
+            has_materialized_access := true;
+        END IF;
+        IF plan_text LIKE '%Output: n.properties,%' THEN
+            has_distinct_properties_carry := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_collect_distinct_int8 THEN
+        RAISE EXCEPTION 'expected typed distinct int8 collect to use typed transition aggregate';
+    END IF;
+    IF has_materialized_access THEN
+        RAISE EXCEPTION 'unexpected materialized property access in typed distinct int8 collect';
+    END IF;
+    IF has_distinct_properties_carry THEN
+        RAISE EXCEPTION 'unexpected properties carry in typed distinct int8 collect';
+    END IF;
+
+    has_materialized_access := false;
+    has_distinct_properties_carry := false;
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN collect(DISTINCT n.i::pg_text)$$) AS (xs agtype)'
+    LOOP
+        IF plan_text LIKE '%age_collect_text(DISTINCT%' THEN
+            has_collect_distinct_text := true;
+        END IF;
+        IF plan_text LIKE '%age_collect(DISTINCT%' OR
+           plan_text LIKE '%agtype_access_operator%' THEN
+            has_materialized_access := true;
+        END IF;
+        IF plan_text LIKE '%Output: n.properties,%' THEN
+            has_distinct_properties_carry := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_collect_distinct_text THEN
+        RAISE EXCEPTION 'expected typed distinct text collect to use typed transition aggregate';
+    END IF;
+    IF has_materialized_access THEN
+        RAISE EXCEPTION 'unexpected materialized property access in typed distinct text collect';
+    END IF;
+    IF has_distinct_properties_carry THEN
+        RAISE EXCEPTION 'unexpected properties carry in typed distinct text collect';
+    END IF;
+END
+$typed_distinct_collect_plan$;
+
+DO $numeric_property_collect_plan$
+DECLARE
+    plan_text text;
+    has_collect_numeric_property boolean := false;
+    has_materialized_access boolean := false;
+BEGIN
+    FOR plan_text IN EXECUTE
+        'EXPLAIN (VERBOSE, COSTS OFF)
+         SELECT *
+         FROM cypher(''cypher_match'',
+                     $$MATCH (n:v) RETURN collect(n.i::numeric)$$) AS (xs agtype)'
+    LOOP
+        IF plan_text LIKE '%age_collect_numeric_property%' THEN
+            has_collect_numeric_property := true;
+        END IF;
+        IF plan_text LIKE '%age_collect(%' OR
+           plan_text LIKE '%agtype_object_field_numeric_agtype%' OR
+           plan_text LIKE '%agtype_access_operator%' THEN
+            has_materialized_access := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_collect_numeric_property THEN
+        RAISE EXCEPTION 'expected numeric property collect to use descriptor aggregate';
+    END IF;
+    IF has_materialized_access THEN
+        RAISE EXCEPTION 'unexpected materialized property access in numeric property collect';
+    END IF;
+END
+$numeric_property_collect_plan$;
 
 DO $property_collect_plan$
 DECLARE
@@ -612,376 +1335,235 @@ BEGIN
 END
 $property_collect_plan$;
 
-DO $property_equals_plan$
-DECLARE
-    plan_text text;
-    has_field_equals boolean := false;
-    has_field_cmp boolean := false;
-    has_commuted_field_cmp boolean := false;
-    has_materialized_access boolean := false;
-    has_index_scan boolean := false;
-    has_index_access_cond boolean := false;
-    has_range_index_access_cond boolean := false;
-BEGIN
-    PERFORM set_config('enable_seqscan', 'on', false);
-    PERFORM set_config('enable_indexscan', 'on', false);
-    PERFORM set_config('enable_bitmapscan', 'on', false);
+SET enable_seqscan = on;
+SET enable_indexscan = on;
+SET enable_bitmapscan = on;
 
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) WHERE n.i = 1 RETURN n.i$$) AS (i agtype)'
-    LOOP
-        IF plan_text LIKE '%agtype_object_field_equals%' THEN
-            has_field_equals := true;
-        END IF;
-        IF plan_text LIKE '%Filter:%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE n.i = 1 RETURN n.i$$) AS (i agtype);
 
-    IF NOT has_field_equals THEN
-        RAISE EXCEPTION 'expected no-index property equality to use direct field equality helper';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized accessor in no-index property equality';
-    END IF;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE n.i > 0 RETURN n.i$$) AS (i agtype);
 
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) WHERE n.i > 0 RETURN n.i$$) AS (i agtype)'
-    LOOP
-        IF plan_text LIKE '%agtype_object_field_cmp%' THEN
-            has_field_cmp := true;
-        END IF;
-        IF plan_text LIKE '%Filter:%agtype_access_operator%' THEN
-            RAISE EXCEPTION 'unexpected materialized accessor in no-index property range';
-        END IF;
-    END LOOP;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE n.payload.a = 1 RETURN n.payload.a$$) AS (i agtype);
 
-    IF NOT has_field_cmp THEN
-        RAISE EXCEPTION 'expected no-index property range to use direct field compare helper';
-    END IF;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE n.payload.a > 0 RETURN n.payload.a$$) AS (i agtype);
 
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) WHERE 0 < n.i RETURN n.i$$) AS (i agtype)'
-    LOOP
-        IF plan_text LIKE '%agtype_object_field_cmp%' AND
-           plan_text LIKE '%> 0%' THEN
-            has_commuted_field_cmp := true;
-        END IF;
-    END LOOP;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE 0 < n.i RETURN n.i$$) AS (i agtype);
 
-    IF NOT has_commuted_field_cmp THEN
-        RAISE EXCEPTION 'expected commuted property range to normalize to field compare helper';
-    END IF;
+CREATE INDEX cypher_match_v_i_access_idx ON cypher_match.v
+((ag_catalog.agtype_access_operator(VARIADIC
+    ARRAY[properties, '"i"'::ag_catalog.agtype])));
 
-    EXECUTE
-        'CREATE INDEX cypher_match_v_i_access_idx ON cypher_match.v
-         ((ag_catalog.agtype_access_operator(VARIADIC
-             ARRAY[properties, ''"i"''::ag_catalog.agtype])))';
+SET enable_seqscan = off;
 
-    PERFORM set_config('enable_seqscan', 'off', false);
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE n.i = 1 RETURN n.i$$) AS (i agtype);
 
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) WHERE n.i = 1 RETURN n.i$$) AS (i agtype)'
-    LOOP
-        IF plan_text LIKE '%Index Scan%' OR
-           plan_text LIKE '%Bitmap Index Scan%' THEN
-            has_index_scan := true;
-        END IF;
-        IF plan_text LIKE '%agtype_access_operator%' THEN
-            has_index_access_cond := true;
-        END IF;
-        IF plan_text LIKE '%agtype_object_field_equals%' THEN
-            RAISE EXCEPTION 'expression-index property equality should keep accessor surface: %',
-                            plan_text;
-        END IF;
-    END LOOP;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE n.i > 0 RETURN n.i$$) AS (i agtype);
 
-    IF NOT has_index_scan THEN
-        RAISE EXCEPTION 'expected property equality expression index scan';
-    END IF;
-    IF NOT has_index_access_cond THEN
-        RAISE EXCEPTION 'expected expression index plan to retain agtype_access_operator';
-    END IF;
+SET enable_seqscan = on;
 
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) WHERE n.i > 0 RETURN n.i$$) AS (i agtype)'
-    LOOP
-        IF plan_text LIKE '%agtype_access_operator%' THEN
-            has_range_index_access_cond := true;
-        END IF;
-        IF plan_text LIKE '%agtype_object_field_cmp%' THEN
-            RAISE EXCEPTION 'expression-index property range should keep accessor surface: %',
-                            plan_text;
-        END IF;
-    END LOOP;
+DROP INDEX cypher_match.cypher_match_v_i_access_idx;
 
-    IF NOT has_range_index_access_cond THEN
-        RAISE EXCEPTION 'expected range expression index plan to retain agtype_access_operator';
-    END IF;
+CREATE INDEX cypher_match_v_i_direct_idx ON cypher_match.v
+((ag_catalog.agtype_object_field_agtype(
+    properties, '"i"'::ag_catalog.agtype)));
 
-    PERFORM set_config('enable_seqscan', 'on', false);
+SET enable_seqscan = off;
 
-    EXECUTE 'DROP INDEX cypher_match.cypher_match_v_i_access_idx';
-END
-$property_equals_plan$;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE n.i = 1 RETURN n.i$$) AS (i agtype);
+
+SET enable_seqscan = on;
+
+DROP INDEX cypher_match.cypher_match_v_i_direct_idx;
+
+CREATE INDEX cypher_match_v_i_partial_direct_idx ON cypher_match.v
+((ag_catalog.agtype_object_field_agtype(
+    properties, '"i"'::ag_catalog.agtype)))
+WHERE ag_catalog.agtype_object_field_agtype(
+          properties, '"i"'::ag_catalog.agtype) IS NOT NULL;
+
+SET enable_seqscan = off;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE n.i = 1 RETURN n.i$$) AS (i agtype);
+
+SET enable_seqscan = on;
+
+DROP INDEX cypher_match.cypher_match_v_i_partial_direct_idx;
+
+CREATE INDEX cypher_match_v_payload_a_direct_idx ON cypher_match.v
+((ag_catalog.agtype_object_field_agtype(
+    ag_catalog.agtype_object_field_agtype(
+        properties, '"payload"'::ag_catalog.agtype),
+    '"a"'::ag_catalog.agtype)));
+
+SET enable_seqscan = off;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE n.payload.a = 1 RETURN n.payload.a$$) AS (i agtype);
+
+SET enable_seqscan = on;
+
+DROP INDEX cypher_match.cypher_match_v_payload_a_direct_idx;
+
+CREATE INDEX cypher_match_v_payload_a_access_idx ON cypher_match.v
+((ag_catalog.agtype_access_operator(VARIADIC
+    ARRAY[properties,
+          '"payload"'::ag_catalog.agtype,
+          '"a"'::ag_catalog.agtype])));
+
+SET enable_seqscan = off;
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE n.payload.a = 1 RETURN n.payload.a$$) AS (i agtype);
+
+SET enable_seqscan = on;
+
+DROP INDEX cypher_match.cypher_match_v_payload_a_access_idx;
 
 --Directed Paths
 SELECT * FROM cypher('cypher_match', $$
 	CREATE (:v1 {id:'initial'})-[:e1]->(:v1 {id:'middle'})-[:e1]->(:v1 {id:'end'})
 $$) AS (a agtype);
 
-DO $fixed_path_count_plan$
+CREATE FUNCTION pg_temp.normalized_verbose_explain(query text)
+RETURNS TABLE(plan text)
+LANGUAGE plpgsql
+AS $$
 DECLARE
     plan_text text;
-    has_id_count boolean := false;
 BEGIN
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
-                       RETURN count(p)$$) AS (c agtype)'
+    FOR plan_text IN EXECUTE 'EXPLAIN (VERBOSE, COSTS OFF) ' || query
     LOOP
-        IF plan_text LIKE '%_agtype_build_path%' THEN
-            RAISE EXCEPTION 'fixed path count should not materialize path: %',
-                            plan_text;
-        END IF;
-
-        IF plan_text LIKE '%count(%id)%' THEN
-            has_id_count := true;
-        END IF;
+        plan := regexp_replace(plan_text, '''[0-9]+''::oid',
+                               '''<graph_oid>''::oid', 'g');
+        RETURN NEXT;
     END LOOP;
+END;
+$$;
 
-    IF NOT has_id_count THEN
-        RAISE EXCEPTION 'expected fixed path count to count a raw id anchor';
-    END IF;
-END
-$fixed_path_count_plan$;
+SELECT * FROM pg_temp.normalized_verbose_explain($plan$
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
+              RETURN count(p)$$) AS (c agtype)
+$plan$);
 
-DO $fixed_path_3hop_raw_plan$
-DECLARE
-    plan_text text;
-    has_raw_path boolean := false;
-BEGIN
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
-                       RETURN p$$) AS (p agtype)'
-    LOOP
-        IF plan_text LIKE '%_agtype_build_path(%' THEN
-            RAISE EXCEPTION 'fixed 3-hop path should not use variadic path builder: %',
-                            plan_text;
-        END IF;
+SELECT * FROM pg_temp.normalized_verbose_explain($plan$
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH p=(a:v1)-[r:e1]->(b:v1)
+              RETURN relationships(p)[0].payload.a, count(*)
+              ORDER BY relationships(p)[0].payload.a$$)
+     AS (payload agtype, count agtype)
+$plan$);
 
-        IF plan_text LIKE '%_agtype_build_path_raw%' THEN
-            has_raw_path := true;
-        END IF;
-    END LOOP;
+SELECT * FROM pg_temp.normalized_verbose_explain($plan$
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH p=(a:v1)-[r:e1]->(b:v1)
+              RETURN startNode(relationships(p)[0]).payload.a, count(*)
+              ORDER BY startNode(relationships(p)[0]).payload.a$$)
+     AS (payload agtype, count agtype)
+$plan$);
 
-    IF NOT has_raw_path THEN
-        RAISE EXCEPTION 'expected fixed 3-hop path to use raw path builder';
-    END IF;
-END
-$fixed_path_3hop_raw_plan$;
+SELECT * FROM pg_temp.normalized_verbose_explain($plan$
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
+              RETURN p$$) AS (p agtype)
+$plan$);
 
-DO $fixed_path_4hop_raw_plan$
-DECLARE
-    plan_text text;
-    has_raw_path boolean := false;
-BEGIN
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
-                       RETURN p$$) AS (p agtype)'
-    LOOP
-        IF plan_text LIKE '%_agtype_build_path(%' THEN
-            RAISE EXCEPTION 'fixed 4-hop path should not use variadic path builder: %',
-                            plan_text;
-        END IF;
+SELECT * FROM pg_temp.normalized_verbose_explain($plan$
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
+              RETURN p$$) AS (p agtype)
+$plan$);
 
-        IF plan_text LIKE '%_agtype_build_path_raw%' THEN
-            has_raw_path := true;
-        END IF;
-    END LOOP;
+SELECT * FROM pg_temp.normalized_verbose_explain($plan$
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
+              RETURN size(nodes(p)), size(relationships(p))$$)
+     AS (nodes agtype, rels agtype)
+$plan$);
 
-    IF NOT has_raw_path THEN
-        RAISE EXCEPTION 'expected fixed 4-hop path to use raw path builder';
-    END IF;
-END
-$fixed_path_4hop_raw_plan$;
+SELECT * FROM pg_temp.normalized_verbose_explain($plan$
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
+              RETURN nodes(p), relationships(p)$$)
+     AS (nodes agtype, rels agtype)
+$plan$);
 
-DO $fixed_path_cardinality_plan$
-DECLARE
-    plan_text text;
-    has_node_cardinality boolean := false;
-    has_rel_cardinality boolean := false;
-BEGIN
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
-                       RETURN size(nodes(p)), size(relationships(p))$$)
-              AS (nodes agtype, rels agtype)'
-    LOOP
-        IF plan_text LIKE '%_agtype_build_path%' OR
-           plan_text LIKE '%age_nodes%' OR
-           plan_text LIKE '%age_relationships%' THEN
-            RAISE EXCEPTION 'fixed path cardinality should not materialize path/list: %',
-                            plan_text;
-        END IF;
+SELECT * FROM pg_temp.normalized_verbose_explain($plan$
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
+              RETURN p$$) AS (p agtype)
+$plan$);
 
-        IF plan_text LIKE '%''6''::agtype%' THEN
-            has_node_cardinality := true;
-        END IF;
-        IF plan_text LIKE '%''5''::agtype%' THEN
-            has_rel_cardinality := true;
-        END IF;
-    END LOOP;
+SELECT * FROM pg_temp.normalized_verbose_explain($plan$
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
+              RETURN relationships(p)$$) AS (r agtype)
+$plan$);
 
-    IF NOT has_node_cardinality OR NOT has_rel_cardinality THEN
-        RAISE EXCEPTION 'expected fixed 5-hop path cardinalities in plan';
-    END IF;
-END
-$fixed_path_cardinality_plan$;
+SELECT * FROM pg_temp.normalized_verbose_explain($plan$
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH p=(a:v1)-[r:e1*1..2]->(b:v1)
+              RETURN last(relationships(p)).payload.a, count(*)
+              ORDER BY last(relationships(p)).payload.a$$)
+     AS (payload agtype, count agtype)
+$plan$);
 
-DO $fixed_path_entity_list_plan$
-DECLARE
-    plan_text text;
-    has_direct_list boolean := false;
-BEGIN
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
-                       RETURN nodes(p), relationships(p)$$)
-              AS (nodes agtype, rels agtype)'
-    LOOP
-        IF plan_text LIKE '%_agtype_build_path%' OR
-           plan_text LIKE '%age_nodes%' OR
-           plan_text LIKE '%age_relationships%' THEN
-            RAISE EXCEPTION 'fixed path entity lists should not materialize path/list extractor: %',
-                            plan_text;
-        END IF;
+SELECT * FROM pg_temp.normalized_verbose_explain($plan$
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH p=(a:v1)-[r:e1*1..2]->(b:v1)
+              RETURN last(nodes(p)).payload.a, count(*)
+              ORDER BY last(nodes(p)).payload.a$$)
+     AS (payload agtype, count agtype)
+$plan$);
 
-        IF plan_text LIKE '%agtype_build_list%' THEN
-            has_direct_list := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_direct_list THEN
-        RAISE EXCEPTION 'expected fixed path entity lists to use direct agtype_build_list';
-    END IF;
-END
-$fixed_path_entity_list_plan$;
-
-DO $fixed_path_raw_plan$
-DECLARE
-    plan_text text;
-    has_raw_path boolean := false;
-BEGIN
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
-                       RETURN p$$) AS (p agtype)'
-    LOOP
-        IF plan_text LIKE '%_agtype_build_path(%' OR
-           plan_text LIKE '%_agtype_build_vertex_label%' OR
-           plan_text LIKE '%_agtype_build_edge_label%' THEN
-            RAISE EXCEPTION 'fixed 5-hop path should use raw path builder: %',
-                            plan_text;
-        END IF;
-
-        IF plan_text LIKE '%_agtype_build_path_raw%' THEN
-            has_raw_path := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_raw_path THEN
-        RAISE EXCEPTION 'expected fixed 5-hop path to use raw path builder';
-    END IF;
-END
-$fixed_path_raw_plan$;
-
-DO $vle_relationships_materialize_plan$
-DECLARE
-    plan_text text;
-    has_vle_edges_materializer boolean := false;
-BEGIN
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
-                       RETURN relationships(p)$$) AS (r agtype)'
-    LOOP
-        IF plan_text LIKE '%_agtype_build_path%' OR
-           plan_text LIKE '%age_relationships%' THEN
-            RAISE EXCEPTION 'VLE relationships(p) should use raw edge materializer: %',
-                            plan_text;
-        END IF;
-
-        IF plan_text LIKE '%age_materialize_vle_edges%' THEN
-            has_vle_edges_materializer := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_vle_edges_materializer THEN
-        RAISE EXCEPTION 'expected VLE relationships(p) to use age_materialize_vle_edges';
-    END IF;
-END
-$vle_relationships_materialize_plan$;
-
-DO $vle_path_materialize_plan$
-DECLARE
-    plan_text text;
-    has_vle_path_materializer boolean := false;
-BEGIN
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
-                       RETURN p$$) AS (p agtype)'
-    LOOP
-        IF plan_text LIKE '%_agtype_build_path%' OR
-           plan_text LIKE '%_agtype_build_vertex_label%' THEN
-            RAISE EXCEPTION 'VLE path should use direct path materializer: %',
-                            plan_text;
-        END IF;
-
-        IF plan_text LIKE '%age_materialize_vle_path%' THEN
-            has_vle_path_materializer := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_vle_path_materializer THEN
-        RAISE EXCEPTION 'expected VLE path to use age_materialize_vle_path';
-    END IF;
-END
-$vle_path_materialize_plan$;
+SELECT * FROM pg_temp.normalized_verbose_explain($plan$
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
+              RETURN p$$) AS (p agtype)
+$plan$);
 
 --Undirected Path Tests
 SELECT * FROM cypher('cypher_match', $$
@@ -2620,6 +3202,7 @@ $fixed_path_variadic_payload_smoke$;
 -- Clean up
 --
 SELECT drop_graph('cypher_match', true);
+SELECT drop_graph('cypher_match_numeric_path', true);
 SELECT drop_graph('test_retrieve_var', true);
 SELECT drop_graph('test_enable_containment', true);
 SELECT drop_graph('issue_945', true);

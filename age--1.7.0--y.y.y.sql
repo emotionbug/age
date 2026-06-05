@@ -486,6 +486,14 @@ RETURNS NULL ON NULL INPUT
 PARALLEL RESTRICTED
 AS 'MODULE_PATHNAME';
 
+CREATE FUNCTION ag_catalog.agtype_ctid_property_field_agtype(oid, tid, int4, agtype)
+    RETURNS agtype
+    LANGUAGE c
+    STABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL RESTRICTED
+AS 'MODULE_PATHNAME';
+
 CREATE FUNCTION ag_catalog.agtype_object_field_exists_nonnull(agtype, agtype)
     RETURNS bool
     LANGUAGE c

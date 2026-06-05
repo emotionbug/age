@@ -434,7 +434,201 @@ DROP INDEX cypher_index.city_west_coast_idx;
 DROP INDEX cypher_index.country_life_exp_idx;
 
 --
--- Section 5: Agtype path-hash GIN opclass
+-- Section 5: Nested property path expression index
+--
+SELECT create_vlabel('cypher_index', 'NestedIndex');
+
+SELECT * FROM cypher('cypher_index', $$
+    CREATE (:NestedIndex {payload: {a: 1}, name: 'hit'}),
+           (:NestedIndex {payload: {a: 2}, name: 'miss'})
+$$) as (a agtype);
+
+SELECT create_property_index('cypher_index', 'NestedIndex', 'payload.a');
+
+SELECT * FROM cypher('cypher_index', $$
+    EXPLAIN (costs off) MATCH (n:NestedIndex)
+    WHERE n.payload.a = 1
+    RETURN n.name
+$$) as (plan agtype);
+
+SELECT * FROM cypher('cypher_index', $$
+    MATCH (n:NestedIndex)
+    WHERE n.payload.a = 1
+    RETURN n.name
+$$) as (name agtype);
+
+--
+-- Section 6: Typed scalar property expression index
+--
+SELECT create_vlabel('cypher_index', 'TypedIndex');
+
+SELECT * FROM cypher('cypher_index', $$
+    CREATE (:TypedIndex {score: 7, name: 'low'}),
+           (:TypedIndex {score: 12, name: 'high'})
+$$) as (a agtype);
+
+SELECT create_property_index('cypher_index', 'TypedIndex', 'score', 'pg_bigint');
+
+SELECT * FROM cypher('cypher_index', $$
+    EXPLAIN (costs off) MATCH (n:TypedIndex)
+    WHERE n.score::pg_bigint >= 10
+    RETURN n.name
+$$) as (plan agtype);
+
+SELECT * FROM cypher('cypher_index', $$
+    MATCH (n:TypedIndex)
+    WHERE n.score::pg_bigint >= 10
+    RETURN n.name
+$$) as (name agtype);
+
+--
+-- Section 7: Nested typed scalar property expression index
+--
+SELECT create_vlabel('cypher_index', 'NestedTypedIndex');
+
+SELECT * FROM cypher('cypher_index', $$
+    CREATE (:NestedTypedIndex {payload: {score: 7}, name: 'low'}),
+           (:NestedTypedIndex {payload: {score: 12}, name: 'high'})
+$$) as (a agtype);
+
+SELECT create_property_index('cypher_index', 'NestedTypedIndex',
+                             'payload.score', 'pg_bigint');
+
+SELECT * FROM cypher('cypher_index', $$
+    EXPLAIN (costs off) MATCH (n:NestedTypedIndex)
+    WHERE n.payload.score::pg_bigint >= 10
+    RETURN n.name
+$$) as (plan agtype);
+
+SELECT * FROM cypher('cypher_index', $$
+    MATCH (n:NestedTypedIndex)
+    WHERE n.payload.score::pg_bigint >= 10
+    RETURN n.name
+$$) as (name agtype);
+
+--
+-- Section 7a: Nested numeric property expression index
+--
+SELECT create_vlabel('cypher_index', 'NestedNumericIndex');
+
+SELECT * FROM cypher('cypher_index', $$
+    CREATE (:NestedNumericIndex {payload: {gpa: 3.7::numeric}, name: 'low'}),
+           (:NestedNumericIndex {payload: {gpa: 3.9::numeric}, name: 'high'})
+$$) as (a agtype);
+
+SELECT create_property_index('cypher_index', 'NestedNumericIndex',
+                             'payload.gpa', 'numeric');
+
+SELECT * FROM cypher('cypher_index', $$
+    EXPLAIN (costs off) MATCH (n:NestedNumericIndex)
+    WHERE n.payload.gpa::numeric >= 3.8::numeric
+    RETURN n.name
+$$) as (plan agtype);
+
+SELECT * FROM cypher('cypher_index', $$
+    MATCH (n:NestedNumericIndex)
+    WHERE n.payload.gpa::numeric >= 3.8::numeric
+    RETURN n.name
+$$) as (name agtype);
+
+--
+-- Section 7b: Nested pg_numeric property expression index
+--
+SELECT create_vlabel('cypher_index', 'NestedPgNumericIndex');
+
+SELECT * FROM cypher('cypher_index', $$
+    CREATE (:NestedPgNumericIndex {payload: {gpa: 3.7::numeric}, name: 'low'}),
+           (:NestedPgNumericIndex {payload: {gpa: 3.9::numeric}, name: 'high'})
+$$) as (a agtype);
+
+SELECT create_property_index('cypher_index', 'NestedPgNumericIndex',
+                             'payload.gpa', 'pg_numeric');
+
+SELECT * FROM cypher('cypher_index', $$
+    EXPLAIN (costs off) MATCH (n:NestedPgNumericIndex)
+    WHERE n.payload.gpa::pg_numeric >= 3.8::pg_numeric
+    RETURN n.name
+$$) as (plan agtype);
+
+SELECT * FROM cypher('cypher_index', $$
+    MATCH (n:NestedPgNumericIndex)
+    WHERE n.payload.gpa::pg_numeric >= 3.8::pg_numeric
+    RETURN n.name
+$$) as (name agtype);
+
+SELECT * FROM cypher('cypher_index', $$
+    EXPLAIN (costs off) MATCH (n:NestedPgNumericIndex)
+    WHERE n.payload.gpa::numeric >= 3.8::numeric
+    RETURN n.name
+$$) as (plan agtype);
+
+SELECT * FROM cypher('cypher_index', $$
+    MATCH (n:NestedPgNumericIndex)
+    WHERE n.payload.gpa::numeric >= 3.8::numeric
+    RETURN n.name
+$$) as (name agtype);
+
+--
+-- Section 7c: Typed property expression index descriptor matching
+--
+SELECT create_vlabel('cypher_index', 'TypedDescriptorIndex');
+
+SELECT * FROM cypher('cypher_index', $$
+    CREATE (:TypedDescriptorIndex {payload: {score: 7}, name: 'low'}),
+           (:TypedDescriptorIndex {payload: {score: 12}, name: 'high'})
+$$) as (a agtype);
+
+CREATE INDEX typed_descriptor_chained_idx
+ON cypher_index."TypedDescriptorIndex"
+(ag_catalog.agtype_object_field_int8(
+     ag_catalog.agtype_object_field_agtype(properties, '"payload"'::agtype),
+     '"score"'::agtype));
+
+SELECT * FROM cypher('cypher_index', $$
+    EXPLAIN (costs off) MATCH (n:TypedDescriptorIndex)
+    WHERE n.payload.score::pg_bigint >= 10
+    RETURN n.name
+$$) as (plan agtype);
+
+SELECT * FROM cypher('cypher_index', $$
+    MATCH (n:TypedDescriptorIndex)
+    WHERE n.payload.score::pg_bigint >= 10
+    RETURN n.name
+$$) as (name agtype);
+
+--
+-- Section 7c: Typed property partial index descriptor matching
+--
+SELECT create_vlabel('cypher_index', 'TypedDescriptorPartialIndex');
+
+SELECT * FROM cypher('cypher_index', $$
+    CREATE (:TypedDescriptorPartialIndex {payload: {score: 7}, name: 'low'}),
+           (:TypedDescriptorPartialIndex {payload: {score: 12}, name: 'high'})
+$$) as (a agtype);
+
+CREATE INDEX typed_descriptor_partial_idx
+ON cypher_index."TypedDescriptorPartialIndex"
+(ag_catalog.agtype_object_field_int8(
+     ag_catalog.agtype_object_field_agtype(properties, '"payload"'::agtype),
+     '"score"'::agtype))
+WHERE ag_catalog.agtype_object_field_int8(
+          ag_catalog.agtype_object_field_agtype(properties, '"payload"'::agtype),
+          '"score"'::agtype) >= 10;
+
+SELECT * FROM cypher('cypher_index', $$
+    EXPLAIN (costs off) MATCH (n:TypedDescriptorPartialIndex)
+    WHERE n.payload.score::pg_bigint >= 10
+    RETURN n.name
+$$) as (plan agtype);
+
+SELECT * FROM cypher('cypher_index', $$
+    MATCH (n:TypedDescriptorPartialIndex)
+    WHERE n.payload.score::pg_bigint >= 10
+    RETURN n.name
+$$) as (name agtype);
+
+--
+-- Section 8: Agtype path-hash GIN opclass
 --
 CREATE TEMP TABLE agtype_path_idx_probe (id int, doc agtype);
 

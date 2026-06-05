@@ -19,6 +19,8 @@
 
 #include "postgres.h"
 
+#include "access/genam.h"
+#include "access/table.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type_d.h"
@@ -44,11 +46,15 @@
 #include "utils/array.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
+#include "utils/relcache.h"
 #include "utils/spccache.h"
 #include "utils/syscache.h"
 
 #include "optimizer/cypher_pathnode.h"
 #include "optimizer/cypher_paths.h"
+#include "optimizer/cypher_property_paths.h"
+#include "parser/cypher_property_signature.h"
 #include "utils/ag_func.h"
 #include "utils/ag_guc.h"
 #include "utils/agtype.h"
@@ -66,6 +72,13 @@ typedef enum cypher_clause_kind
 typedef CustomPath *(*cypher_path_factory)(PlannerInfo *root, RelOptInfo *rel,
                                            List *custom_private);
 
+typedef struct PropertyIndexSurfaceContext
+{
+    Query *parse;
+    Index rti;
+    RangeTblEntry *rte;
+} PropertyIndexSurfaceContext;
+
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook;
 static set_join_pathlist_hook_type prev_set_join_pathlist_hook;
 static create_upper_paths_hook_type prev_create_upper_paths_hook;
@@ -75,26 +88,12 @@ static Oid cypher_create_clause_func_oid = InvalidOid;
 static Oid cypher_set_clause_func_oid = InvalidOid;
 static Oid cypher_delete_clause_func_oid = InvalidOid;
 static Oid cypher_merge_clause_func_oid = InvalidOid;
-static Oid agtype_access_operator_func_oid = InvalidOid;
 static Oid agtype_eq_func_oid = InvalidOid;
 static Oid agtype_lt_func_oid = InvalidOid;
 static Oid agtype_le_func_oid = InvalidOid;
 static Oid agtype_gt_func_oid = InvalidOid;
 static Oid agtype_ge_func_oid = InvalidOid;
 static Oid count_any_agg_func_oid = InvalidOid;
-static Oid age_collect_float8_agg_func_oid = InvalidOid;
-static Oid age_collect_int8_agg_func_oid = InvalidOid;
-static Oid age_collect_text_agg_func_oid = InvalidOid;
-static Oid array_agg_anynonarray_agg_func_oid = InvalidOid;
-static Oid age_array_agg_property_agg_func_oid = InvalidOid;
-static Oid age_array_agg_map2_property_agg_func_oid = InvalidOid;
-static Oid age_array_agg_map_property_agg_func_oid = InvalidOid;
-static Oid agtype_build_map_nonull_func_oid = InvalidOid;
-static Oid age_array_agg_list_property_agg_func_oid = InvalidOid;
-static Oid agtype_build_list_func_oid = InvalidOid;
-static Oid agtype_object_field_int8_func_oid = InvalidOid;
-static Oid agtype_ctid_field_agtype_func_oid = InvalidOid;
-static Oid int8_to_agtype_func_oid = InvalidOid;
 static bool cypher_clause_func_callback_registered = false;
 
 static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -156,71 +155,51 @@ static const char *path_param_info_string(Path *path);
 static bool detect_simple_property_projection(PlannerInfo *root,
                                               RelOptInfo *input_rel,
                                               RelOptInfo *output_rel,
-                                              FuncExpr **access_expr,
+                                              CypherCachedPropertySlotDescriptor *slot,
                                               const char **target_source);
-static bool is_simple_property_access_target(Node *node);
+static bool is_simple_property_access_target(
+    Node *node, CypherCachedPropertySlotDescriptor *slot);
 static bool rewrite_count_property_access_pathtarget(PathTarget *target);
 static bool rewrite_property_access_aggregate_expr(Node *node);
 static bool rewrite_property_access_aggregate_walker(Node *node,
                                                      void *context);
-static bool rewrite_collect_typed_scalar_expr(Node *node);
 static void add_narrow_distinct_collect_paths(PlannerInfo *root,
                                              RelOptInfo *output_rel);
-static Node *find_typed_distinct_collect_arg(PathTarget *target);
 static Path *try_narrow_distinct_collect_path(PlannerInfo *root,
                                              RelOptInfo *output_rel,
-                                             Path *path, Node *arg);
+                                             Path *path,
+                                             CypherTypedCollectHandoff *handoff,
+                                             CypherCachedPropertySlotDescriptor *slot);
 static bool pathtarget_contains_only_expr(PathTarget *target, Node *expr);
-static bool rewrite_collect_numeric_property_expr(Node *node);
 static bool rewrite_count_property_access_expr(Node *node);
-static bool rewrite_array_agg_property_access_expr(Node *node);
-static bool rewrite_array_agg_map2_property_access_expr(Node *node);
-static bool rewrite_array_agg_map_property_access_expr(Node *node);
-static bool rewrite_array_agg_list_property_access_expr(Node *node);
 static bool is_count_any_aggref(Aggref *aggref);
-static bool is_ag_catalog_aggref(Aggref *aggref);
-static bool is_array_agg_agtype_aggref(Aggref *aggref);
-static FuncExpr *extract_count_property_access_arg(Aggref *aggref);
-static FuncExpr *extract_simple_property_access_arg(Aggref *aggref);
-static bool extract_property_access_args(Node *node, Node **properties,
-                                         Node **key);
-static bool extract_map2_property_access_args(Expr *expr, Node **properties,
-                                              Node **out_key1,
-                                              Node **prop_key1,
-                                              Node **out_key2,
-                                              Node **prop_key2);
-static bool extract_map_property_access_args(Expr *expr, Node **properties,
-                                             List **out_keys,
-                                             List **prop_keys);
-static bool extract_list_property_access_args(Expr *expr, Node **properties,
-                                              List **prop_keys);
+static bool extract_count_property_access_args(Aggref *aggref, Node **object,
+                                               Node **key);
 static bool same_property_source(Node *left, Node *right);
-static List *extract_map_build_args(FuncExpr *map_expr);
-static Const *make_const_array_const(List *elements, Oid array_type,
-                                     Oid element_type);
 static Oid get_cached_count_any_agg_oid(void);
-static Oid get_cached_age_collect_float8_agg_oid(void);
-static Oid get_cached_age_collect_int8_agg_oid(void);
-static Oid get_cached_age_collect_text_agg_oid(void);
-static Oid get_cached_array_agg_anynonarray_agg_oid(void);
-static Oid get_cached_age_array_agg_property_agg_oid(void);
-static Oid get_cached_age_array_agg_map2_property_agg_oid(void);
-static Oid get_cached_age_array_agg_map_property_agg_oid(void);
-static Oid get_cached_agtype_build_map_nonull_oid(void);
-static Oid get_cached_age_array_agg_list_property_agg_oid(void);
-static Oid get_cached_agtype_build_list_oid(void);
 static Oid get_cached_agtype_field_exists_nonnull_oid(void);
 static Oid get_cached_agtype_field_equals_oid(void);
 static Oid get_cached_agtype_field_cmp_oid(void);
 static Oid get_cached_agtype_eq_oid(void);
 static Oid get_cached_agtype_cmp_func_oid(const char *name, Oid *cache);
-static void rewrite_property_equals_restrictions(PlannerInfo *root,
+static bool rewrite_property_equals_restrictions(PlannerInfo *root,
                                                  RelOptInfo *rel, Index rti);
-static bool rel_has_matching_expression_index(RelOptInfo *rel, Node *expr);
+static Node *replace_property_index_side(OpExpr *op, bool replace_left,
+                                         Node *index_expr);
+static Node *rewrite_property_index_surface_mutator(Node *node, void *context);
+static void canonicalize_property_index_predicates(RelOptInfo *rel);
+static void canonicalize_property_index_restrictions(RelOptInfo *rel);
+static bool collect_canonical_property_index_exprs_walker(Node *node,
+                                                          void *context);
+static Node *canonicalize_property_index_exprs_mutator(Node *node,
+                                                       void *context);
+static List *collect_canonical_property_index_exprs(RelOptInfo *rel);
+static bool property_expr_list_contains(List *exprs, Node *expr);
 static Node *try_rewrite_property_equals_clause(Node *clause, Index rti,
                                                 RelOptInfo *rel);
 static bool match_property_access_expr(Node *node, Index rti,
                                        Node **properties, Node **key);
+static bool property_object_belongs_to_rti(Node *node, Index rti);
 static Expr *make_int4_zero_compare_expr(FuncExpr *cmp_expr,
                                          const char *operator_name);
 static const char *property_compare_operator_name(Oid opfuncid,
@@ -228,29 +207,70 @@ static const char *property_compare_operator_name(Oid opfuncid,
 static void add_property_projection_custom_path(PlannerInfo *root,
                                                 RelOptInfo *input_rel,
                                                 RelOptInfo *output_rel,
-                                                FuncExpr *access_expr,
+                                                CypherCachedPropertySlotDescriptor *slot,
                                                 FinalPathExtraData *extra);
+static Const *make_oid_const(Oid value);
 static bool detect_ordered_property_projection_delay(PlannerInfo *root,
                                                      Node **properties,
-                                                     Node **key,
+                                                     List **keys,
+                                                     bool *reuse_sort_output,
                                                      TargetEntry **sort_tle);
 static void add_deferred_ordered_property_projection_path(
     PlannerInfo *root, RelOptInfo *input_rel, RelOptInfo *output_rel,
     FinalPathExtraData *extra);
+static void add_deferred_projection_paths(PlannerInfo *root,
+                                          RelOptInfo *output_rel,
+                                          PathTarget *lower_target,
+                                          PathTarget *final_target,
+                                          FinalPathExtraData *extra,
+                                          Cost cost_discount,
+                                          const char *debug_label,
+                                          bool prune_join_child_targets);
 static Path *copy_path_with_deferred_projection_target(PlannerInfo *root,
                                                        Path *path,
-                                                       PathTarget *target);
-static bool extract_int8_property_sort_args(Node *node, Node **properties,
-                                            Node **key);
-static Oid get_cached_agtype_object_field_int8_oid(void);
-static Oid get_cached_agtype_ctid_field_agtype_oid(void);
-static Oid get_cached_int8_to_agtype_oid(void);
+                                                       PathTarget *target,
+                                                       bool prune_join_child_targets);
+static Path *copy_join_path_with_deferred_projection_target(PlannerInfo *root,
+                                                            Path *path,
+                                                            PathTarget *target,
+                                                            bool prune_join_child_targets);
+static PathTarget *build_child_deferred_projection_target(PlannerInfo *root,
+                                                          Path *child_path,
+                                                          PathTarget *target,
+                                                          List *joinrestrictinfo,
+                                                          bool preserve_label_core,
+                                                          bool prune_child_target);
+static void add_child_rel_vars_to_pathtarget(PathTarget *child_target,
+                                             Path *child_path,
+                                             Node *node);
+static void add_child_join_clause_vars_to_pathtarget(PathTarget *child_target,
+                                                     Path *child_path,
+                                                     List *joinrestrictinfo);
+static void add_child_label_core_vars_to_pathtarget(PlannerInfo *root,
+                                                    PathTarget *child_target,
+                                                    Path *child_path);
+static void add_child_label_var_to_pathtarget(PlannerInfo *root,
+                                              PathTarget *child_target,
+                                              Index varno,
+                                              AttrNumber attno,
+                                              Oid vartype);
+static bool target_contains_edge_ctid(PlannerInfo *root, PathTarget *target);
+static List *join_path_clause_sources(Path *path);
+static bool expression_belongs_to_child_relids(Node *expr, Relids relids);
+static bool pathtarget_contains_expr(PathTarget *target, Node *expr);
+static Path *copy_projection_capable_path_with_target(PlannerInfo *root,
+                                                      Path *path,
+                                                      PathTarget *target);
+static Path *copy_path_node_shallow(Path *path);
 static void add_deferred_count_agtype_projection_path(
     PlannerInfo *root, RelOptInfo *output_rel, FinalPathExtraData *extra);
+static void add_deferred_count_agtype_plain_paths(PlannerInfo *root,
+                                                  RelOptInfo *output_rel,
+                                                  PathTarget *lower_target,
+                                                  PathTarget *final_target);
 static bool build_count_agtype_deferred_targets(PlannerInfo *root,
                                                 PathTarget **lower_target,
                                                 PathTarget **final_target);
-static bool extract_int8_to_agtype_arg(Node *node, Node **arg);
 static bool is_age_vle_function_rte(RangeTblEntry *rte, FuncExpr **func_expr);
 static void add_age_vle_stream_custom_path(PlannerInfo *root, RelOptInfo *rel,
                                            RangeTblEntry *rte,
@@ -263,7 +283,6 @@ static Plan *plan_age_property_projection_path(PlannerInfo *root,
                                                CustomPath *best_path,
                                                List *tlist, List *clauses,
                                                List *custom_plans);
-static Oid get_cached_agtype_access_operator_oid(void);
 static Oid agtype_field_exists_nonnull_func_oid = InvalidOid;
 static Oid agtype_field_equals_func_oid = InvalidOid;
 static Oid agtype_field_cmp_func_oid = InvalidOid;
@@ -361,6 +380,100 @@ void set_rel_pathlist_fini(void)
     set_rel_pathlist_hook = prev_set_rel_pathlist_hook;
 }
 
+void cypher_rewrite_property_index_surfaces(Query *parse)
+{
+    ListCell *lc;
+    Index rti = 1;
+
+    if (parse == NULL)
+    {
+        return;
+    }
+
+    foreach(lc, parse->rtable)
+    {
+        RangeTblEntry *rte = lfirst_node(RangeTblEntry, lc);
+        PropertyIndexSurfaceContext context;
+
+        if (rte->rtekind == RTE_SUBQUERY && rte->subquery != NULL)
+        {
+            cypher_rewrite_property_index_surfaces(rte->subquery);
+            rti++;
+            continue;
+        }
+
+        if (parse->jointree == NULL || parse->jointree->quals == NULL)
+        {
+            rti++;
+            continue;
+        }
+
+        if (rte->rtekind != RTE_RELATION || !OidIsValid(rte->relid))
+        {
+            rti++;
+            continue;
+        }
+
+        context.parse = parse;
+        context.rti = rti;
+        context.rte = rte;
+        parse->jointree->quals = (Node *)expression_tree_mutator(
+            parse->jointree->quals, rewrite_property_index_surface_mutator,
+            &context);
+
+        rti++;
+    }
+}
+
+static Node *rewrite_property_index_surface_mutator(Node *node, void *context)
+{
+    PropertyIndexSurfaceContext *surface_context = context;
+    OpExpr *op;
+    Node *left;
+    Node *right;
+    CypherPropertyIndexHandoff index_handoff;
+
+    if (node == NULL)
+        return NULL;
+
+    if (!IsA(node, OpExpr))
+    {
+        return expression_tree_mutator(node,
+                                       rewrite_property_index_surface_mutator,
+                                       context);
+    }
+
+    op = castNode(OpExpr, node);
+    if (list_length(op->args) != 2)
+        return expression_tree_mutator(node,
+                                       rewrite_property_index_surface_mutator,
+                                       context);
+
+    left = linitial(op->args);
+    right = lsecond(op->args);
+
+    if (cypher_find_matching_property_index_handoff_for_rte(
+            surface_context->rte, surface_context->rti, left,
+            &index_handoff) &&
+        !equal(index_handoff.index_expr, left))
+    {
+        return replace_property_index_side(op, true,
+                                           index_handoff.index_expr);
+    }
+
+    if (cypher_find_matching_property_index_handoff_for_rte(
+            surface_context->rte, surface_context->rti, right,
+            &index_handoff) &&
+        !equal(index_handoff.index_expr, right))
+    {
+        return replace_property_index_side(op, false,
+                                           index_handoff.index_expr);
+    }
+
+    return expression_tree_mutator(node, rewrite_property_index_surface_mutator,
+                                   context);
+}
+
 static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
                              RangeTblEntry *rte)
 {
@@ -370,7 +483,13 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
     if (prev_set_rel_pathlist_hook)
         prev_set_rel_pathlist_hook(root, rel, rti, rte);
 
-    rewrite_property_equals_restrictions(root, rel, rti);
+    if (rewrite_property_equals_restrictions(root, rel, rti))
+    {
+        canonicalize_property_index_predicates(rel);
+        check_index_predicates(root, rel);
+        canonicalize_property_index_restrictions(rel);
+        create_index_paths(root, rel);
+    }
 
     candidate = pop_adjacency_match_candidate(root, rte);
     if (candidate != NULL)
@@ -451,7 +570,7 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
                                RelOptInfo *input_rel,
                                RelOptInfo *output_rel, void *extra)
 {
-    FuncExpr *access_expr = NULL;
+    CypherCachedPropertySlotDescriptor property_slot;
     const char *target_source = NULL;
 
     if (prev_create_upper_paths_hook != NULL)
@@ -477,18 +596,20 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
                                                  (FinalPathExtraData *)extra);
 
     if (detect_simple_property_projection(root, input_rel, output_rel,
-                                          &access_expr, &target_source))
+                                          &property_slot, &target_source))
     {
         ereport(DEBUG2,
                 (errmsg_internal("AGE simple property projection visible after "
                                  "scan/join target: input_paths=%d "
-                                 "output_paths=%d target_source=%s funcid=%u",
+                                 "output_paths=%d target_source=%s "
+                                 "value_type=%u field_result_type=%u",
                                  list_length(input_rel->pathlist),
                                  list_length(output_rel->pathlist),
                                  target_source,
-                                 access_expr->funcid)));
+                                 property_slot.value_type,
+                                 property_slot.field_result_type)));
         add_property_projection_custom_path(root, input_rel, output_rel,
-                                            access_expr,
+                                            &property_slot,
                                             (FinalPathExtraData *)extra);
     }
 }
@@ -552,7 +673,7 @@ static void log_adjacency_match_join_paths(RelOptInfo *joinrel,
 static bool detect_simple_property_projection(PlannerInfo *root,
                                               RelOptInfo *input_rel,
                                               RelOptInfo *output_rel,
-                                              FuncExpr **access_expr,
+                                              CypherCachedPropertySlotDescriptor *slot,
                                               const char **target_source)
 {
     Node *expr;
@@ -564,9 +685,8 @@ static bool detect_simple_property_projection(PlannerInfo *root,
         list_length(input_rel->reltarget->exprs) == 1)
     {
         expr = linitial(input_rel->reltarget->exprs);
-        if (is_simple_property_access_target(expr))
+        if (is_simple_property_access_target(expr, slot))
         {
-            *access_expr = castNode(FuncExpr, expr);
             *target_source = "input_rel";
             return true;
         }
@@ -577,9 +697,8 @@ static bool detect_simple_property_projection(PlannerInfo *root,
         list_length(output_rel->reltarget->exprs) == 1)
     {
         expr = linitial(output_rel->reltarget->exprs);
-        if (is_simple_property_access_target(expr))
+        if (is_simple_property_access_target(expr, slot))
         {
-            *access_expr = castNode(FuncExpr, expr);
             *target_source = "output_rel";
             return true;
         }
@@ -588,32 +707,39 @@ static bool detect_simple_property_projection(PlannerInfo *root,
     return false;
 }
 
-static bool is_simple_property_access_target(Node *node)
+static bool is_simple_property_access_target(
+    Node *node, CypherCachedPropertySlotDescriptor *slot)
 {
-    FuncExpr *func;
+    CypherPropertyHandoffDescriptor handoff;
+    CypherCachedPropertySlotDescriptor candidate;
     Var *properties_var;
     Const *key_const;
 
-    if (node == NULL || !IsA(node, FuncExpr))
+    if (node == NULL || slot == NULL)
         return false;
 
-    func = castNode(FuncExpr, node);
-    if (list_length(func->args) != 2)
+    memset(&handoff, 0, sizeof(handoff));
+    if (!cypher_extract_property_access_signature(
+            node, &handoff.property_signature) ||
+        !cypher_make_cached_property_slot_descriptor(&handoff, &candidate))
+        return false;
+
+    if (list_length(candidate.keys) != 1 ||
+        !IsA(candidate.container, Var) ||
+        !IsA(linitial(candidate.keys), Const))
+        return false;
+
+    if (candidate.field_result_type != AGTYPEOID &&
+        candidate.field_result_type != INT8OID &&
+        candidate.field_result_type != FLOAT8OID &&
+        candidate.field_result_type != NUMERICOID &&
+        candidate.field_result_type != TEXTOID)
     {
         return false;
     }
 
-    if (!IsA(linitial(func->args), Var) ||
-        !IsA(lsecond(func->args), Const))
-    {
-        return false;
-    }
-
-    if (func->funcid != get_cached_agtype_access_operator_oid())
-        return false;
-
-    properties_var = linitial_node(Var, func->args);
-    key_const = lsecond_node(Const, func->args);
+    properties_var = castNode(Var, candidate.container);
+    key_const = linitial_node(Const, candidate.keys);
 
     if (properties_var->varattno != Anum_ag_label_vertex_table_properties ||
         key_const->constisnull ||
@@ -622,24 +748,25 @@ static bool is_simple_property_access_target(Node *node)
         return false;
     }
 
+    *slot = candidate;
     return true;
 }
 
 static bool detect_ordered_property_projection_delay(PlannerInfo *root,
                                                      Node **properties,
-                                                     Node **key,
+                                                     List **keys,
+                                                     bool *reuse_sort_output,
                                                      TargetEntry **sort_tle)
 {
     TargetEntry *output_tle = NULL;
     SortGroupClause *sort_clause;
-    Node *output_properties;
-    Node *output_key;
-    Node *sort_properties;
-    Node *sort_key;
+    CypherPropertyAccessSignature output_signature;
+    CypherPropertyAccessSignature sort_signature;
     ListCell *lc;
 
     if (root == NULL || root->parse == NULL ||
         root->parse->sortClause == NIL ||
+        root->parse->distinctClause != NIL ||
         list_length(root->parse->sortClause) != 1 ||
         root->parse->limitCount == NULL)
     {
@@ -660,8 +787,8 @@ static bool detect_ordered_property_projection_delay(PlannerInfo *root,
     }
 
     if (output_tle == NULL ||
-        !extract_property_access_args((Node *)output_tle->expr,
-                                      &output_properties, &output_key))
+        !cypher_extract_property_access_signature((Node *)output_tle->expr,
+                                                  &output_signature))
     {
         return false;
     }
@@ -671,21 +798,29 @@ static bool detect_ordered_property_projection_delay(PlannerInfo *root,
                                      root->parse->targetList);
 
     if (*sort_tle == NULL ||
-        !(*sort_tle)->resjunk ||
-        !extract_int8_property_sort_args((Node *)(*sort_tle)->expr,
-                                         &sort_properties, &sort_key))
+        (!(*sort_tle)->resjunk && *sort_tle != output_tle) ||
+        !cypher_extract_property_access_signature((Node *)(*sort_tle)->expr,
+                                                  &sort_signature) ||
+        sort_signature.value_type == AGTYPEOID)
     {
         return false;
     }
 
-    if (!same_property_source(output_properties, sort_properties) ||
-        !equal(output_key, sort_key))
+    if (!same_property_source(output_signature.container,
+                              sort_signature.container) ||
+        !equal(output_signature.keys, sort_signature.keys))
     {
         return false;
     }
 
-    *properties = output_properties;
-    *key = output_key;
+    *reuse_sort_output =
+        output_signature.value_type == sort_signature.value_type &&
+        output_signature.field_result_type == sort_signature.field_result_type;
+    if (output_signature.value_type != AGTYPEOID && !*reuse_sort_output)
+        return false;
+
+    *properties = output_signature.container;
+    *keys = output_signature.keys;
     return true;
 }
 
@@ -694,60 +829,118 @@ static void add_deferred_ordered_property_projection_path(
     FinalPathExtraData *extra)
 {
     Node *properties = NULL;
-    Node *key = NULL;
+    List *keys = NIL;
     TargetEntry *sort_tle = NULL;
     PathTarget *lower_target;
     PathTarget *final_target;
     Var *properties_var;
-    Var *ctid_var;
-    FuncExpr *final_output_expr;
-    Const *relid_const;
+    Var *lookup_var;
+    Node *final_output_expr;
     Oid relid;
-    ListCell *lc;
+    AttrNumber properties_attno;
+    bool reuse_sort_output = false;
 
     if (input_rel == NULL || output_rel == NULL || extra == NULL ||
         !extra->limit_needed ||
         !detect_ordered_property_projection_delay(root, &properties,
-                                                  &key, &sort_tle) ||
+                                                  &keys,
+                                                  &reuse_sort_output,
+                                                  &sort_tle) ||
         !IsA(properties, Var))
     {
         return;
     }
 
     properties_var = castNode(Var, properties);
-    if (properties_var->varno <= 0 ||
-        properties_var->varno >= root->simple_rel_array_size ||
-        properties_var->varattno != Anum_ag_label_vertex_table_properties ||
-        root->simple_rte_array[properties_var->varno] == NULL ||
-        root->simple_rte_array[properties_var->varno]->rtekind != RTE_RELATION)
+    if (!reuse_sort_output &&
+        (properties_var->varno <= 0 ||
+         properties_var->varno >= root->simple_rel_array_size ||
+         root->simple_rte_array[properties_var->varno] == NULL ||
+         root->simple_rte_array[properties_var->varno]->rtekind != RTE_RELATION))
     {
         return;
     }
 
-    relid = root->simple_rte_array[properties_var->varno]->relid;
-    ctid_var = makeVar(properties_var->varno, SelfItemPointerAttributeNumber,
-                       TIDOID, -1, InvalidOid, properties_var->varlevelsup);
-    relid_const = makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
-                            ObjectIdGetDatum(relid), false, true);
-    final_output_expr = makeFuncExpr(get_cached_agtype_ctid_field_agtype_oid(),
-                                     AGTYPEOID,
-                                     list_make3(relid_const,
-                                                copyObject(ctid_var),
-                                                copyObject(key)),
-                                     InvalidOid, InvalidOid,
-                                     COERCE_EXPLICIT_CALL);
+    if (!reuse_sort_output &&
+        properties_var->varattno != Anum_ag_label_vertex_table_properties)
+    {
+        if (properties_var->varattno != Anum_ag_label_edge_table_properties)
+            return;
+    }
+
+    properties_attno = properties_var->varattno;
+
+    if (reuse_sort_output)
+    {
+        lookup_var = NULL;
+        final_output_expr = (Node *)copyObject(sort_tle->expr);
+    }
+    else
+    {
+        relid = root->simple_rte_array[properties_var->varno]->relid;
+        if (properties_attno == Anum_ag_label_edge_table_properties)
+        {
+            lookup_var = makeVar(properties_var->varno,
+                                 Anum_ag_label_edge_table_id,
+                                 GRAPHIDOID, -1, InvalidOid,
+                                 properties_var->varlevelsup);
+            final_output_expr = cypher_make_id_property_path_field_agtype_expr(
+                relid, (Node *)lookup_var, properties_attno, keys);
+        }
+        else
+        {
+            lookup_var = makeVar(properties_var->varno,
+                                 SelfItemPointerAttributeNumber,
+                                 TIDOID, -1, InvalidOid,
+                                 properties_var->varlevelsup);
+            final_output_expr = cypher_make_ctid_property_path_field_agtype_expr(
+                relid, (Node *)lookup_var, properties_attno, keys);
+        }
+    }
+
+    if (final_output_expr == NULL)
+        return;
 
     lower_target = create_empty_pathtarget();
-    add_column_to_pathtarget(lower_target, (Expr *)copyObject(ctid_var), 0);
+    if (lookup_var != NULL)
+        add_column_to_pathtarget(lower_target, (Expr *)copyObject(lookup_var),
+                                 0);
     add_column_to_pathtarget(lower_target, (Expr *)copyObject(sort_tle->expr),
                              sort_tle->ressortgroupref);
     lower_target = set_pathtarget_cost_width(root, lower_target);
 
     final_target = create_empty_pathtarget();
-    add_column_to_pathtarget(final_target, (Expr *)final_output_expr, 0);
-    add_column_to_pathtarget(final_target, (Expr *)copyObject(sort_tle->expr),
-                             sort_tle->ressortgroupref);
+    if (reuse_sort_output)
+    {
+        add_column_to_pathtarget(final_target, (Expr *)final_output_expr,
+                                 sort_tle->ressortgroupref);
+    }
+    else
+    {
+        add_column_to_pathtarget(final_target, (Expr *)final_output_expr, 0);
+        add_column_to_pathtarget(final_target,
+                                 (Expr *)copyObject(sort_tle->expr),
+                                 sort_tle->ressortgroupref);
+    }
     final_target = set_pathtarget_cost_width(root, final_target);
+
+    add_deferred_projection_paths(root, output_rel, lower_target, final_target,
+                                  extra, 1.0,
+                                  "ordered property projection",
+                                  true);
+}
+
+static void add_deferred_projection_paths(PlannerInfo *root,
+                                          RelOptInfo *output_rel,
+                                          PathTarget *lower_target,
+                                          PathTarget *final_target,
+                                          FinalPathExtraData *extra,
+                                          Cost cost_discount,
+                                          const char *debug_label,
+                                          bool prune_join_child_targets)
+{
+    List *new_paths = NIL;
+    ListCell *lc;
 
     foreach(lc, output_rel->pathlist)
     {
@@ -770,7 +963,8 @@ static void add_deferred_ordered_property_projection_path(
         memcpy(limit_path, path, sizeof(*limit_path));
         limit_path->path.pathtype = T_Limit;
         limit_path->subpath = copy_path_with_deferred_projection_target(
-            root, limit_path->subpath, lower_target);
+            root, limit_path->subpath, lower_target,
+            prune_join_child_targets);
         if (limit_path->subpath == NULL)
             continue;
 
@@ -786,26 +980,38 @@ static void add_deferred_ordered_property_projection_path(
         deferred_path->disabled_nodes = disabled_nodes;
         deferred_path->startup_cost = original_startup_cost;
         deferred_path->total_cost = Max(original_startup_cost,
-                                        original_total_cost - 1.0);
+                                        original_total_cost - cost_discount);
 
         ereport(DEBUG2,
-                (errmsg_internal("AGE deferred ordered property projection "
-                                 "path added: original_cost=%.2f "
-                                 "new_cost=%.2f rows=%.0f",
+                (errmsg_internal("AGE deferred %s path added: "
+                                 "original_cost=%.2f new_cost=%.2f "
+                                 "rows=%.0f",
+                                 debug_label,
                                  original_total_cost,
                                  deferred_path->total_cost,
                                  deferred_path->rows)));
 
-        add_path(output_rel, deferred_path);
+        new_paths = lappend(new_paths, deferred_path);
     }
+
+    foreach(lc, new_paths)
+        add_path(output_rel, lfirst(lc));
 }
 
 static Path *copy_path_with_deferred_projection_target(PlannerInfo *root,
                                                        Path *path,
-                                                       PathTarget *target)
+                                                       PathTarget *target,
+                                                       bool prune_join_child_targets)
 {
     if (path == NULL)
         return NULL;
+
+    if (path->pathtarget != NULL &&
+        target != NULL &&
+        equal(path->pathtarget->exprs, target->exprs))
+    {
+        return path;
+    }
 
     if (IsA(path, LimitPath))
     {
@@ -815,7 +1021,7 @@ static Path *copy_path_with_deferred_projection_target(PlannerInfo *root,
         memcpy(limit_path, path, sizeof(*limit_path));
 
         limit_path->subpath = copy_path_with_deferred_projection_target(
-            root, limit_path->subpath, target);
+            root, limit_path->subpath, target, prune_join_child_targets);
         if (limit_path->subpath == NULL)
             return NULL;
         limit_path->path.pathtype = T_Limit;
@@ -831,13 +1037,29 @@ static Path *copy_path_with_deferred_projection_target(PlannerInfo *root,
         memcpy(gm_path, path, sizeof(*gm_path));
 
         gm_path->subpath = copy_path_with_deferred_projection_target(
-            root, gm_path->subpath, target);
+            root, gm_path->subpath, target, prune_join_child_targets);
         if (gm_path->subpath == NULL)
             return NULL;
         gm_path->path.pathtype = T_GatherMerge;
         gm_path->path.pathtarget = gm_path->subpath->pathtarget;
         gm_path->path.pathkeys = path->pathkeys;
         return (Path *)gm_path;
+    }
+    if (IsA(path, UpperUniquePath))
+    {
+        UpperUniquePath *unique_path;
+
+        unique_path = palloc(sizeof(*unique_path));
+        memcpy(unique_path, path, sizeof(*unique_path));
+
+        unique_path->subpath = copy_path_with_deferred_projection_target(
+            root, unique_path->subpath, target, prune_join_child_targets);
+        if (unique_path->subpath == NULL)
+            return NULL;
+        unique_path->path.pathtype = T_Unique;
+        unique_path->path.pathtarget = unique_path->subpath->pathtarget;
+        unique_path->path.pathkeys = unique_path->subpath->pathkeys;
+        return (Path *)unique_path;
     }
     if (IsA(path, SortPath))
     {
@@ -847,7 +1069,7 @@ static Path *copy_path_with_deferred_projection_target(PlannerInfo *root,
         memcpy(sort_path, path, sizeof(*sort_path));
 
         sort_path->subpath = copy_path_with_deferred_projection_target(
-            root, sort_path->subpath, target);
+            root, sort_path->subpath, target, prune_join_child_targets);
         if (sort_path->subpath == NULL)
             return NULL;
         sort_path->path.pathtype = T_Sort;
@@ -855,35 +1077,420 @@ static Path *copy_path_with_deferred_projection_target(PlannerInfo *root,
         sort_path->path.pathkeys = path->pathkeys;
         return (Path *)sort_path;
     }
+    if (IsA(path, MaterialPath))
+    {
+        MaterialPath *material_path;
+
+        material_path = palloc(sizeof(*material_path));
+        memcpy(material_path, path, sizeof(*material_path));
+
+        material_path->subpath = copy_path_with_deferred_projection_target(
+            root, material_path->subpath, target, prune_join_child_targets);
+        if (material_path->subpath == NULL)
+            return NULL;
+        material_path->path.pathtype = T_Material;
+        material_path->path.pathtarget = material_path->subpath->pathtarget;
+        material_path->path.pathkeys = material_path->subpath->pathkeys;
+        return (Path *)material_path;
+    }
+    if (IsA(path, ProjectionPath))
+    {
+        ProjectionPath *projection_path = castNode(ProjectionPath, path);
+
+        return copy_path_with_deferred_projection_target(
+            root, projection_path->subpath, target, prune_join_child_targets);
+    }
+    if (IsA(path, NestPath) || IsA(path, MergePath) || IsA(path, HashPath))
+        return copy_join_path_with_deferred_projection_target(root, path,
+                                                              target,
+                                                              prune_join_child_targets);
 
     if (!is_projection_capable_path(path))
         return NULL;
 
-    return (Path *)create_projection_path(root, path->parent, path, target);
+    return copy_projection_capable_path_with_target(root, path, target);
 }
 
-static bool extract_int8_property_sort_args(Node *node, Node **properties,
-                                            Node **key)
+static Path *copy_join_path_with_deferred_projection_target(PlannerInfo *root,
+                                                            Path *path,
+                                                            PathTarget *target,
+                                                            bool prune_join_child_targets)
 {
-    FuncExpr *func;
+    JoinPath *join_path;
+    Path *outer_path;
+    Path *inner_path;
+    PathTarget *outer_target;
+    PathTarget *inner_target;
 
-    if (node == NULL || !IsA(node, FuncExpr))
-        return false;
+    join_path = (JoinPath *)copy_path_node_shallow(path);
+    if (join_path == NULL)
+        return NULL;
 
-    func = castNode(FuncExpr, node);
-    if (func->funcid != get_cached_agtype_object_field_int8_oid() ||
-        list_length(func->args) != 2)
+    outer_path = join_path->outerjoinpath;
+    inner_path = join_path->innerjoinpath;
+    outer_target = build_child_deferred_projection_target(
+        root, outer_path, target, join_path_clause_sources(path),
+        target_contains_edge_ctid(root, target),
+        prune_join_child_targets);
+    inner_target = build_child_deferred_projection_target(
+        root, inner_path, target, join_path_clause_sources(path),
+        target_contains_edge_ctid(root, target),
+        prune_join_child_targets);
+
+    join_path->outerjoinpath = copy_path_with_deferred_projection_target(
+        root, outer_path, outer_target, prune_join_child_targets);
+    join_path->innerjoinpath = copy_path_with_deferred_projection_target(
+        root, inner_path, inner_target, prune_join_child_targets);
+
+    if (join_path->outerjoinpath == NULL || join_path->innerjoinpath == NULL)
+        return NULL;
+
+    join_path->path.pathtarget = target;
+    return (Path *)join_path;
+}
+
+static PathTarget *build_child_deferred_projection_target(PlannerInfo *root,
+                                                          Path *child_path,
+                                                          PathTarget *target,
+                                                          List *joinrestrictinfo,
+                                                          bool preserve_label_core,
+                                                          bool prune_child_target)
+{
+    PathTarget *child_target;
+    ListCell *lc;
+
+    child_target = prune_child_target ? create_empty_pathtarget() :
+        copy_pathtarget(child_path->pathtarget);
+    foreach(lc, target->exprs)
     {
-        return false;
+        Node *expr = lfirst(lc);
+        bool child_owned;
+
+        child_owned = expression_belongs_to_child_relids(
+            expr, child_path->parent->relids);
+        if (child_owned &&
+            !pathtarget_contains_expr(child_target, expr))
+        {
+            add_column_to_pathtarget(child_target, (Expr *)copyObject(expr),
+                                     0);
+        }
+        else if (!child_owned)
+        {
+            add_child_rel_vars_to_pathtarget(child_target, child_path, expr);
+        }
     }
 
-    *properties = linitial(func->args);
-    *key = lsecond(func->args);
+    if (!prune_child_target)
+    {
+        add_child_rel_vars_to_pathtarget(child_target, child_path,
+                                         (Node *)target->exprs);
+    }
+    add_child_join_clause_vars_to_pathtarget(child_target, child_path,
+                                             joinrestrictinfo);
+    if (child_path->param_info != NULL)
+    {
+        add_child_join_clause_vars_to_pathtarget(
+            child_target, child_path, child_path->param_info->ppi_clauses);
+    }
+    if (preserve_label_core)
+        add_child_label_core_vars_to_pathtarget(root, child_target, child_path);
 
-    return *properties != NULL &&
-        *key != NULL &&
-        exprType(*properties) == AGTYPEOID &&
-        exprType(*key) == AGTYPEOID;
+    child_target = set_pathtarget_cost_width(root, child_target);
+
+    return child_target;
+}
+
+static void add_child_rel_vars_to_pathtarget(PathTarget *child_target,
+                                             Path *child_path,
+                                             Node *node)
+{
+    List *vars;
+    ListCell *lc;
+
+    vars = pull_var_clause(node,
+                           PVC_RECURSE_AGGREGATES |
+                           PVC_RECURSE_WINDOWFUNCS |
+                           PVC_RECURSE_PLACEHOLDERS);
+
+    foreach(lc, vars)
+    {
+        Var *var = lfirst_node(Var, lc);
+
+        if (var->varno <= 0 ||
+            !bms_is_member(var->varno, child_path->parent->relids) ||
+            pathtarget_contains_expr(child_target, (Node *)var))
+        {
+            continue;
+        }
+
+        add_column_to_pathtarget(child_target, (Expr *)copyObject(var), 0);
+    }
+
+    list_free(vars);
+}
+
+static void add_child_join_clause_vars_to_pathtarget(PathTarget *child_target,
+                                                     Path *child_path,
+                                                     List *joinrestrictinfo)
+{
+    ListCell *lc;
+
+    foreach(lc, joinrestrictinfo)
+    {
+        RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+        add_child_rel_vars_to_pathtarget(child_target, child_path,
+                                         (Node *)rinfo->clause);
+    }
+}
+
+static void add_child_label_core_vars_to_pathtarget(PlannerInfo *root,
+                                                    PathTarget *child_target,
+                                                    Path *child_path)
+{
+    int varno;
+
+    for (varno = 1; varno < root->simple_rel_array_size; varno++)
+    {
+        RelOptInfo *rel = root->simple_rel_array[varno];
+
+        if (rel == NULL ||
+            !bms_is_member(varno, child_path->parent->relids))
+        {
+            continue;
+        }
+
+        if (rel->max_attr < Anum_ag_label_edge_table_properties)
+            continue;
+
+        add_child_label_var_to_pathtarget(root, child_target, varno,
+                                          SelfItemPointerAttributeNumber,
+                                          TIDOID);
+        add_child_label_var_to_pathtarget(root, child_target, varno,
+                                          Anum_ag_label_edge_table_id,
+                                          GRAPHIDOID);
+        add_child_label_var_to_pathtarget(root, child_target, varno,
+                                          Anum_ag_label_edge_table_start_id,
+                                          GRAPHIDOID);
+        add_child_label_var_to_pathtarget(root, child_target, varno,
+                                          Anum_ag_label_edge_table_end_id,
+                                          GRAPHIDOID);
+        add_child_label_var_to_pathtarget(root, child_target, varno,
+                                          Anum_ag_label_edge_table_properties,
+                                          AGTYPEOID);
+    }
+}
+
+static void add_child_label_var_to_pathtarget(PlannerInfo *root,
+                                              PathTarget *child_target,
+                                              Index varno,
+                                              AttrNumber attno,
+                                              Oid vartype)
+{
+    RelOptInfo *rel;
+    Var *var;
+
+    rel = root->simple_rel_array[varno];
+    if (rel == NULL)
+        return;
+
+    if (attno > 0 && attno > rel->max_attr)
+        return;
+
+    var = makeVar(varno, attno, vartype, -1, InvalidOid, 0);
+    if (pathtarget_contains_expr(child_target, (Node *)var))
+        return;
+
+    add_column_to_pathtarget(child_target, (Expr *)var, 0);
+}
+
+static bool target_contains_edge_ctid(PlannerInfo *root, PathTarget *target)
+{
+    List *vars;
+    ListCell *lc;
+    bool result = false;
+
+    vars = pull_var_clause((Node *)target->exprs,
+                           PVC_RECURSE_AGGREGATES |
+                           PVC_RECURSE_WINDOWFUNCS |
+                           PVC_RECURSE_PLACEHOLDERS);
+
+    foreach(lc, vars)
+    {
+        Var *var = lfirst_node(Var, lc);
+
+        if (var->varattno == SelfItemPointerAttributeNumber &&
+            var->varno > 0 &&
+            var->varno < root->simple_rel_array_size &&
+            root->simple_rel_array[var->varno] != NULL &&
+            root->simple_rel_array[var->varno]->max_attr >=
+            Anum_ag_label_edge_table_properties)
+        {
+            result = true;
+            break;
+        }
+    }
+
+    list_free(vars);
+
+    return result;
+}
+
+static List *join_path_clause_sources(Path *path)
+{
+    JoinPath *join_path = (JoinPath *)path;
+    List *clauses;
+
+    clauses = list_copy(join_path->joinrestrictinfo);
+    if (IsA(path, MergePath))
+    {
+        MergePath *merge_path = (MergePath *)path;
+
+        clauses = list_concat(clauses, list_copy(merge_path->path_mergeclauses));
+    }
+    else if (IsA(path, HashPath))
+    {
+        HashPath *hash_path = (HashPath *)path;
+
+        clauses = list_concat(clauses, list_copy(hash_path->path_hashclauses));
+    }
+
+    return clauses;
+}
+
+static bool expression_belongs_to_child_relids(Node *expr, Relids relids)
+{
+    List *vars;
+    ListCell *lc;
+    bool result = true;
+
+    if (expr == NULL)
+        return false;
+
+    vars = pull_var_clause(expr,
+                           PVC_RECURSE_AGGREGATES |
+                           PVC_RECURSE_WINDOWFUNCS |
+                           PVC_RECURSE_PLACEHOLDERS);
+    if (vars == NIL)
+        return false;
+
+    foreach(lc, vars)
+    {
+        Var *var = lfirst_node(Var, lc);
+
+        if (var->varno <= 0 || !bms_is_member(var->varno, relids))
+        {
+            result = false;
+            break;
+        }
+    }
+
+    list_free(vars);
+
+    return result;
+}
+
+static bool pathtarget_contains_expr(PathTarget *target, Node *expr)
+{
+    ListCell *lc;
+
+    if (target == NULL || expr == NULL)
+        return false;
+
+    foreach(lc, target->exprs)
+    {
+        if (equal(lfirst(lc), expr))
+            return true;
+    }
+
+    return false;
+}
+
+static Path *copy_projection_capable_path_with_target(PlannerInfo *root,
+                                                      Path *path,
+                                                      PathTarget *target)
+{
+    Path *copy;
+    QualCost oldcost;
+
+    Assert(is_projection_capable_path(path));
+
+    copy = copy_path_node_shallow(path);
+    if (copy == NULL)
+        return NULL;
+
+    oldcost = copy->pathtarget->cost;
+    copy->pathtarget = target;
+    copy->startup_cost += target->cost.startup - oldcost.startup;
+    copy->total_cost += target->cost.startup - oldcost.startup +
+        (target->cost.per_tuple - oldcost.per_tuple) * copy->rows;
+
+    return copy;
+}
+
+static Path *copy_path_node_shallow(Path *path)
+{
+    Path *copy;
+    Size size;
+
+    if (path == NULL)
+        return NULL;
+
+    switch (nodeTag(path))
+    {
+        case T_Path:
+            size = sizeof(Path);
+            break;
+        case T_IndexPath:
+            size = sizeof(IndexPath);
+            break;
+        case T_BitmapHeapPath:
+            size = sizeof(BitmapHeapPath);
+            break;
+        case T_TidPath:
+            size = sizeof(TidPath);
+            break;
+        case T_TidRangePath:
+            size = sizeof(TidRangePath);
+            break;
+        case T_SubqueryScanPath:
+            size = sizeof(SubqueryScanPath);
+            break;
+        case T_ForeignPath:
+            size = sizeof(ForeignPath);
+            break;
+        case T_CustomPath:
+            size = sizeof(CustomPath);
+            break;
+        case T_GatherPath:
+            size = sizeof(GatherPath);
+            break;
+        case T_NestPath:
+            size = sizeof(NestPath);
+            break;
+        case T_MergePath:
+            size = sizeof(MergePath);
+            break;
+        case T_HashPath:
+            size = sizeof(HashPath);
+            break;
+        case T_GroupPath:
+            size = sizeof(GroupPath);
+            break;
+        case T_AggPath:
+            size = sizeof(AggPath);
+            break;
+        case T_WindowAggPath:
+            size = sizeof(WindowAggPath);
+            break;
+        default:
+            return NULL;
+    }
+
+    copy = palloc(size);
+    memcpy(copy, path, size);
+
+    return copy;
 }
 
 static void add_deferred_count_agtype_projection_path(
@@ -891,57 +1498,64 @@ static void add_deferred_count_agtype_projection_path(
 {
     PathTarget *lower_target;
     PathTarget *final_target;
-    ListCell *lc;
 
-    if (root == NULL || output_rel == NULL || extra == NULL ||
-        !extra->limit_needed ||
+    if (root == NULL || output_rel == NULL ||
         !build_count_agtype_deferred_targets(root, &lower_target,
                                              &final_target))
     {
         return;
     }
 
+    if (extra != NULL && extra->limit_needed)
+    {
+        add_deferred_projection_paths(root, output_rel, lower_target,
+                                      final_target, extra, 0.5,
+                                      "count agtype projection",
+                                      false);
+    }
+
+    add_deferred_count_agtype_plain_paths(root, output_rel, lower_target,
+                                          final_target);
+}
+
+static void add_deferred_count_agtype_plain_paths(PlannerInfo *root,
+                                                  RelOptInfo *output_rel,
+                                                  PathTarget *lower_target,
+                                                  PathTarget *final_target)
+{
+    List *new_paths = NIL;
+    ListCell *lc;
+
     foreach(lc, output_rel->pathlist)
     {
         Path *path = lfirst(lc);
-        LimitPath *limit_path;
+        Path *lower_path;
         ProjectionPath *project_path;
         Path *deferred_path;
-        Cost original_startup_cost;
-        Cost original_total_cost;
-        int disabled_nodes;
 
-        if (!IsA(path, LimitPath))
+        if (IsA(path, LimitPath))
             continue;
 
-        original_startup_cost = path->startup_cost;
-        original_total_cost = path->total_cost;
-        disabled_nodes = path->disabled_nodes;
-
-        limit_path = palloc(sizeof(*limit_path));
-        memcpy(limit_path, path, sizeof(*limit_path));
-        limit_path->path.pathtype = T_Limit;
-        limit_path->subpath = copy_path_with_deferred_projection_target(
-            root, limit_path->subpath, lower_target);
-        if (limit_path->subpath == NULL)
+        lower_path = copy_path_with_deferred_projection_target(root, path,
+                                                               lower_target,
+                                                               false);
+        if (lower_path == NULL || lower_path == path)
             continue;
 
-        limit_path->path.pathtarget = limit_path->subpath->pathtarget;
-        limit_path->path.pathkeys = limit_path->subpath->pathkeys;
-
-        project_path = create_projection_path(root, output_rel,
-                                              (Path *)limit_path,
+        project_path = create_projection_path(root, output_rel, lower_path,
                                               final_target);
         deferred_path = (Path *)project_path;
-        deferred_path->rows = extra->count_est > 0 ? extra->count_est :
-            path->rows;
-        deferred_path->disabled_nodes = disabled_nodes;
-        deferred_path->startup_cost = original_startup_cost;
-        deferred_path->total_cost = Max(original_startup_cost,
-                                        original_total_cost - 0.5);
+        deferred_path->rows = path->rows;
+        deferred_path->disabled_nodes = path->disabled_nodes;
+        deferred_path->startup_cost = path->startup_cost;
+        deferred_path->total_cost = Max(path->startup_cost,
+                                        path->total_cost - 0.25);
 
-        add_path(output_rel, deferred_path);
+        new_paths = lappend(new_paths, deferred_path);
     }
+
+    foreach(lc, new_paths)
+        add_path(output_rel, lfirst(lc));
 }
 
 static bool build_count_agtype_deferred_targets(PlannerInfo *root,
@@ -960,21 +1574,41 @@ static bool build_count_agtype_deferred_targets(PlannerInfo *root,
     foreach(lc, root->processed_tlist)
     {
         TargetEntry *tle = lfirst_node(TargetEntry, lc);
-        Node *count_arg = NULL;
-
-        add_column_to_pathtarget(*final_target, (Expr *)copyObject(tle->expr),
-                                 tle->ressortgroupref);
+        CypherScalarFinalHandoff handoff;
 
         if (!tle->resjunk &&
-            extract_int8_to_agtype_arg((Node *)tle->expr, &count_arg))
+            cypher_extract_scalar_final_handoff((Node *)tle->expr, &handoff))
         {
-            add_column_to_pathtarget(*lower_target,
-                                     (Expr *)copyObject(count_arg),
+            CypherCachedPropertySlotDescriptor slot;
+            FuncExpr *final_expr;
+            Expr *canonical_arg;
+            Node *slot_expr = NULL;
+
+            if (handoff.has_property_descriptor &&
+                cypher_make_cached_property_slot_descriptor(
+                    &handoff.property_descriptor, &slot))
+            {
+                slot_expr = cypher_make_cached_property_slot_expr(&slot);
+            }
+
+            handoff.scalar_expr = slot_expr != NULL ?
+                slot_expr : copyObject(handoff.scalar_expr);
+            canonical_arg = cypher_add_or_get_lower_scalar_handoff(
+                *lower_target, &handoff, tle->ressortgroupref);
+            if (canonical_arg == NULL)
+                return false;
+
+            final_expr = castNode(FuncExpr, copyObject(tle->expr));
+            final_expr->args = list_make1(copyObject(canonical_arg));
+            add_column_to_pathtarget(*final_target, (Expr *)final_expr,
                                      tle->ressortgroupref);
             found = true;
         }
         else
         {
+            add_column_to_pathtarget(*final_target,
+                                     (Expr *)copyObject(tle->expr),
+                                     tle->ressortgroupref);
             add_column_to_pathtarget(*lower_target,
                                      (Expr *)copyObject(tle->expr),
                                      tle->ressortgroupref);
@@ -988,24 +1622,6 @@ static bool build_count_agtype_deferred_targets(PlannerInfo *root,
     *final_target = set_pathtarget_cost_width(root, *final_target);
 
     return true;
-}
-
-static bool extract_int8_to_agtype_arg(Node *node, Node **arg)
-{
-    FuncExpr *func;
-
-    if (node == NULL || !IsA(node, FuncExpr))
-        return false;
-
-    func = castNode(FuncExpr, node);
-    if (func->funcid != get_cached_int8_to_agtype_oid() ||
-        list_length(func->args) != 1)
-    {
-        return false;
-    }
-
-    *arg = linitial(func->args);
-    return *arg != NULL && exprType(*arg) == INT8OID;
 }
 
 static bool rewrite_count_property_access_pathtarget(PathTarget *target)
@@ -1044,13 +1660,10 @@ static bool rewrite_property_access_aggregate_walker(Node *node,
     if (node == NULL)
         return false;
 
-    if (rewrite_collect_typed_scalar_expr(node) ||
-        rewrite_collect_numeric_property_expr(node) ||
-        rewrite_count_property_access_expr(node) ||
-        rewrite_array_agg_property_access_expr(node) ||
-        rewrite_array_agg_map2_property_access_expr(node) ||
-        rewrite_array_agg_map_property_access_expr(node) ||
-        rewrite_array_agg_list_property_access_expr(node))
+    if (cypher_rewrite_collect_typed_scalar_expr(node) ||
+        cypher_rewrite_collect_numeric_property_expr(node) ||
+        cypher_rewrite_array_agg_property_expr(node) ||
+        rewrite_count_property_access_expr(node))
     {
         *rewritten = true;
         return false;
@@ -1061,24 +1674,28 @@ static bool rewrite_property_access_aggregate_walker(Node *node,
                                   context);
 }
 
-static bool rewrite_collect_typed_scalar_expr(Node *node)
-{
-    return false;
-}
-
 static void add_narrow_distinct_collect_paths(PlannerInfo *root,
                                               RelOptInfo *output_rel)
 {
-    Node *arg;
+    CypherTypedCollectHandoff handoff;
+    CypherCachedPropertySlotDescriptor property_slot;
+    CypherCachedPropertySlotDescriptor *slot = NULL;
     List *new_paths = NIL;
     ListCell *lc;
 
     if (root == NULL || output_rel == NULL || output_rel->pathlist == NIL)
         return;
 
-    arg = find_typed_distinct_collect_arg(output_rel->reltarget);
-    if (arg == NULL)
+    if (!cypher_find_typed_distinct_collect_handoff(output_rel->reltarget,
+                                                   &handoff))
         return;
+
+    if (handoff.has_property_descriptor &&
+        cypher_make_cached_property_slot_descriptor(
+            &handoff.property_descriptor, &property_slot))
+    {
+        slot = &property_slot;
+    }
 
     foreach(lc, output_rel->pathlist)
     {
@@ -1086,7 +1703,7 @@ static void add_narrow_distinct_collect_paths(PlannerInfo *root,
         Path *new_path;
 
         new_path = try_narrow_distinct_collect_path(root, output_rel, path,
-                                                    arg);
+                                                    &handoff, slot);
         if (new_path != NULL)
             new_paths = lappend(new_paths, new_path);
     }
@@ -1095,92 +1712,38 @@ static void add_narrow_distinct_collect_paths(PlannerInfo *root,
         add_path(output_rel, lfirst(lc));
 }
 
-static Node *find_typed_distinct_collect_arg(PathTarget *target)
-{
-    Aggref *found = NULL;
-    TargetEntry *arg_tle;
-    ListCell *lc;
-
-    if (target == NULL)
-        return NULL;
-
-    foreach(lc, target->exprs)
-    {
-        Node *expr = lfirst(lc);
-        Aggref *aggref;
-        Oid argtype;
-
-        if (expr == NULL || !IsA(expr, Aggref))
-            continue;
-
-        aggref = castNode(Aggref, expr);
-        if (!is_ag_catalog_aggref(aggref))
-            continue;
-
-        if (aggref->aggfnoid != get_cached_age_collect_float8_agg_oid() &&
-            aggref->aggfnoid != get_cached_age_collect_int8_agg_oid() &&
-            aggref->aggfnoid != get_cached_age_collect_text_agg_oid())
-        {
-            continue;
-        }
-
-        if (aggref->aggstar ||
-            aggref->aggdirectargs != NIL ||
-            aggref->aggdistinct == NIL ||
-            aggref->aggfilter != NULL ||
-            list_length(aggref->aggargtypes) != 1 ||
-            list_length(aggref->args) != 1)
-        {
-            return NULL;
-        }
-
-        argtype = linitial_oid(aggref->aggargtypes);
-        if (argtype != FLOAT8OID && argtype != INT8OID && argtype != TEXTOID)
-            return NULL;
-
-        if (found != NULL)
-            return NULL;
-
-        found = aggref;
-    }
-
-    if (found == NULL)
-        return NULL;
-
-    arg_tle = linitial_node(TargetEntry, found->args);
-    if (arg_tle == NULL || arg_tle->expr == NULL)
-        return NULL;
-
-    return (Node *)arg_tle->expr;
-}
-
 static Path *try_narrow_distinct_collect_path(PlannerInfo *root,
                                               RelOptInfo *output_rel,
-                                              Path *path, Node *arg)
+                                              Path *path,
+                                              CypherTypedCollectHandoff *handoff,
+                                              CypherCachedPropertySlotDescriptor *slot)
 {
     AggPath *agg_path;
-    SortPath *sort_path;
     PathTarget *narrow_target;
-    Path *projected_subpath;
-    SortPath *new_sort;
+    Path *narrow_subpath;
     AggPath *new_agg;
+    Node *arg;
+    Node *slot_expr = NULL;
 
-    if (path == NULL || arg == NULL || !IsA(path, AggPath))
+    if (path == NULL || handoff == NULL || handoff->arg_expr == NULL ||
+        !IsA(path, AggPath))
         return NULL;
+
+    if (slot != NULL)
+        slot_expr = cypher_make_cached_property_slot_expr(slot);
+
+    arg = slot_expr != NULL ? slot_expr : handoff->arg_expr;
 
     agg_path = (AggPath *)path;
     if (agg_path->aggstrategy != AGG_PLAIN ||
         agg_path->groupClause != NIL ||
         agg_path->qual != NIL ||
-        agg_path->subpath == NULL ||
-        !IsA(agg_path->subpath, SortPath))
+        agg_path->subpath == NULL)
     {
         return NULL;
     }
 
-    sort_path = (SortPath *)agg_path->subpath;
-    if (sort_path->subpath == NULL ||
-        pathtarget_contains_only_expr(sort_path->path.pathtarget, arg))
+    if (pathtarget_contains_only_expr(agg_path->subpath->pathtarget, arg))
     {
         return NULL;
     }
@@ -1189,24 +1752,15 @@ static Path *try_narrow_distinct_collect_path(PlannerInfo *root,
     add_column_to_pathtarget(narrow_target, (Expr *)copyObject(arg), 0);
     narrow_target = set_pathtarget_cost_width(root, narrow_target);
 
-    projected_subpath = (Path *)create_projection_path(
-        root, sort_path->subpath->parent, sort_path->subpath, narrow_target);
-
-    new_sort = palloc(sizeof(*new_sort));
-    memcpy(new_sort, sort_path, sizeof(*new_sort));
-    new_sort->path.pathtype = T_Sort;
-    new_sort->path.pathtarget = narrow_target;
-    new_sort->path.rows = sort_path->path.rows;
-    new_sort->path.disabled_nodes = sort_path->path.disabled_nodes;
-    new_sort->path.startup_cost = sort_path->path.startup_cost;
-    new_sort->path.total_cost = Max(sort_path->path.startup_cost,
-                                    sort_path->path.total_cost - 1.0);
-    new_sort->subpath = projected_subpath;
+    narrow_subpath = copy_path_with_deferred_projection_target(
+        root, agg_path->subpath, narrow_target, false);
+    if (narrow_subpath == NULL)
+        return NULL;
 
     new_agg = palloc(sizeof(*new_agg));
     memcpy(new_agg, agg_path, sizeof(*new_agg));
     new_agg->path.pathtype = T_Agg;
-    new_agg->subpath = (Path *)new_sort;
+    new_agg->subpath = narrow_subpath;
     new_agg->path.startup_cost = agg_path->path.startup_cost;
     new_agg->path.total_cost = Max(agg_path->path.startup_cost,
                                    agg_path->path.total_cost - 1.0);
@@ -1222,17 +1776,13 @@ static bool pathtarget_contains_only_expr(PathTarget *target, Node *expr)
     return equal(linitial(target->exprs), expr);
 }
 
-static bool rewrite_collect_numeric_property_expr(Node *node)
-{
-    return false;
-}
-
 static bool rewrite_count_property_access_expr(Node *node)
 {
     Aggref *aggref;
-    FuncExpr *access_expr;
     FuncExpr *exists_expr;
     TargetEntry *arg_tle;
+    Node *object = NULL;
+    Node *key = NULL;
 
     if (node == NULL || !IsA(node, Aggref))
         return false;
@@ -1241,186 +1791,19 @@ static bool rewrite_count_property_access_expr(Node *node)
     if (!is_count_any_aggref(aggref))
         return false;
 
-    access_expr = extract_count_property_access_arg(aggref);
-    if (access_expr == NULL)
+    if (!extract_count_property_access_args(aggref, &object, &key))
         return false;
 
     exists_expr = makeFuncExpr(
         get_cached_agtype_field_exists_nonnull_oid(),
         BOOLOID,
-        list_make2(copyObject(linitial(access_expr->args)),
-                   copyObject(lsecond(access_expr->args))),
+        list_make2(copyObject(object), copyObject(key)),
         InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
-    exists_expr->location = access_expr->location;
+    exists_expr->location = exprLocation(object);
 
     arg_tle = linitial_node(TargetEntry, aggref->args);
     arg_tle->expr = (Expr *)exists_expr;
     aggref->aggargtypes = list_make1_oid(BOOLOID);
-
-    return true;
-}
-
-static bool rewrite_array_agg_property_access_expr(Node *node)
-{
-    Aggref *aggref;
-    FuncExpr *access_expr;
-    TargetEntry *properties_tle;
-    TargetEntry *key_tle;
-
-    if (node == NULL || !IsA(node, Aggref))
-        return false;
-
-    aggref = castNode(Aggref, node);
-    if (!is_array_agg_agtype_aggref(aggref))
-        return false;
-
-    access_expr = extract_simple_property_access_arg(aggref);
-    if (access_expr == NULL)
-        return false;
-
-    properties_tle = makeTargetEntry(
-        (Expr *)copyObject(linitial(access_expr->args)), 1, NULL, false);
-    key_tle = makeTargetEntry(
-        (Expr *)copyObject(lsecond(access_expr->args)), 2, NULL, false);
-
-    aggref->aggfnoid = get_cached_age_array_agg_property_agg_oid();
-    aggref->aggargtypes = list_make2_oid(AGTYPEOID, AGTYPEOID);
-    aggref->args = list_make2(properties_tle, key_tle);
-    aggref->aggvariadic = false;
-
-    return true;
-}
-
-static bool rewrite_array_agg_map2_property_access_expr(Node *node)
-{
-    Aggref *aggref;
-    TargetEntry *arg_tle;
-    TargetEntry *properties_tle;
-    TargetEntry *out_key1_tle;
-    TargetEntry *prop_key1_tle;
-    TargetEntry *out_key2_tle;
-    TargetEntry *prop_key2_tle;
-    Node *properties;
-    Node *out_key1;
-    Node *prop_key1;
-    Node *out_key2;
-    Node *prop_key2;
-
-    if (node == NULL || !IsA(node, Aggref))
-        return false;
-
-    aggref = castNode(Aggref, node);
-    if (!is_array_agg_agtype_aggref(aggref))
-        return false;
-
-    arg_tle = linitial_node(TargetEntry, aggref->args);
-    if (arg_tle == NULL ||
-        !extract_map2_property_access_args(arg_tle->expr, &properties,
-                                           &out_key1, &prop_key1,
-                                           &out_key2, &prop_key2))
-    {
-        return false;
-    }
-
-    properties_tle = makeTargetEntry((Expr *)copyObject(properties), 1,
-                                     NULL, false);
-    out_key1_tle = makeTargetEntry((Expr *)copyObject(out_key1), 2,
-                                   NULL, false);
-    prop_key1_tle = makeTargetEntry((Expr *)copyObject(prop_key1), 3,
-                                    NULL, false);
-    out_key2_tle = makeTargetEntry((Expr *)copyObject(out_key2), 4,
-                                   NULL, false);
-    prop_key2_tle = makeTargetEntry((Expr *)copyObject(prop_key2), 5,
-                                    NULL, false);
-
-    aggref->aggfnoid = get_cached_age_array_agg_map2_property_agg_oid();
-    aggref->aggargtypes = list_make5_oid(AGTYPEOID, TEXTOID, AGTYPEOID,
-                                         TEXTOID, AGTYPEOID);
-    aggref->args = list_make5(properties_tle, out_key1_tle, prop_key1_tle,
-                              out_key2_tle, prop_key2_tle);
-    aggref->aggvariadic = false;
-
-    return true;
-}
-
-static bool rewrite_array_agg_map_property_access_expr(Node *node)
-{
-    Aggref *aggref;
-    TargetEntry *arg_tle;
-    TargetEntry *properties_tle;
-    TargetEntry *out_keys_tle;
-    TargetEntry *prop_keys_tle;
-    Node *properties;
-    List *out_keys;
-    List *prop_keys;
-
-    if (node == NULL || !IsA(node, Aggref))
-        return false;
-
-    aggref = castNode(Aggref, node);
-    if (!is_array_agg_agtype_aggref(aggref))
-        return false;
-
-    arg_tle = linitial_node(TargetEntry, aggref->args);
-    if (arg_tle == NULL ||
-        !extract_map_property_access_args(arg_tle->expr, &properties,
-                                          &out_keys, &prop_keys))
-    {
-        return false;
-    }
-
-    properties_tle = makeTargetEntry((Expr *)copyObject(properties), 1,
-                                     NULL, false);
-    out_keys_tle = makeTargetEntry(
-        (Expr *)make_const_array_const(out_keys, TEXTARRAYOID, TEXTOID),
-        2, NULL, false);
-    prop_keys_tle = makeTargetEntry(
-        (Expr *)make_const_array_const(prop_keys, AGTYPEARRAYOID, AGTYPEOID),
-        3, NULL, false);
-
-    aggref->aggfnoid = get_cached_age_array_agg_map_property_agg_oid();
-    aggref->aggargtypes = list_make3_oid(AGTYPEOID, TEXTARRAYOID,
-                                         AGTYPEARRAYOID);
-    aggref->args = list_make3(properties_tle, out_keys_tle, prop_keys_tle);
-    aggref->aggvariadic = false;
-
-    return true;
-}
-
-static bool rewrite_array_agg_list_property_access_expr(Node *node)
-{
-    Aggref *aggref;
-    TargetEntry *arg_tle;
-    TargetEntry *properties_tle;
-    TargetEntry *prop_keys_tle;
-    Node *properties;
-    List *prop_keys;
-
-    if (node == NULL || !IsA(node, Aggref))
-        return false;
-
-    aggref = castNode(Aggref, node);
-    if (!is_array_agg_agtype_aggref(aggref))
-        return false;
-
-    arg_tle = linitial_node(TargetEntry, aggref->args);
-    if (arg_tle == NULL ||
-        !extract_list_property_access_args(arg_tle->expr, &properties,
-                                           &prop_keys))
-    {
-        return false;
-    }
-
-    properties_tle = makeTargetEntry((Expr *)copyObject(properties), 1,
-                                     NULL, false);
-    prop_keys_tle = makeTargetEntry(
-        (Expr *)make_const_array_const(prop_keys, AGTYPEARRAYOID, AGTYPEOID),
-        2, NULL, false);
-
-    aggref->aggfnoid = get_cached_age_array_agg_list_property_agg_oid();
-    aggref->aggargtypes = list_make2_oid(AGTYPEOID, AGTYPEARRAYOID);
-    aggref->args = list_make2(properties_tle, prop_keys_tle);
-    aggref->aggvariadic = false;
 
     return true;
 }
@@ -1437,273 +1820,17 @@ static bool is_count_any_aggref(Aggref *aggref)
         list_length(aggref->args) == 1;
 }
 
-static bool is_ag_catalog_aggref(Aggref *aggref)
-{
-    return aggref != NULL &&
-        OidIsValid(aggref->aggfnoid) &&
-        get_func_namespace(aggref->aggfnoid) == ag_catalog_namespace_id();
-}
-
-static bool is_array_agg_agtype_aggref(Aggref *aggref)
-{
-    return aggref != NULL &&
-        aggref->aggfnoid == get_cached_array_agg_anynonarray_agg_oid() &&
-        aggref->aggtype == AGTYPEARRAYOID &&
-        !aggref->aggstar &&
-        aggref->aggdirectargs == NIL &&
-        aggref->aggorder == NIL &&
-        aggref->aggdistinct == NIL &&
-        aggref->aggfilter == NULL &&
-        list_length(aggref->aggargtypes) == 1 &&
-        linitial_oid(aggref->aggargtypes) == AGTYPEOID &&
-        list_length(aggref->args) == 1;
-}
-
-static FuncExpr *extract_count_property_access_arg(Aggref *aggref)
-{
-    return extract_simple_property_access_arg(aggref);
-}
-
-static FuncExpr *extract_simple_property_access_arg(Aggref *aggref)
+static bool extract_count_property_access_args(Aggref *aggref, Node **object,
+                                               Node **key)
 {
     TargetEntry *arg_tle;
 
     arg_tle = linitial_node(TargetEntry, aggref->args);
-    if (arg_tle == NULL || arg_tle->expr == NULL ||
-        !is_simple_property_access_target((Node *)arg_tle->expr))
-    {
-        return NULL;
-    }
-
-    return castNode(FuncExpr, arg_tle->expr);
-}
-
-static bool extract_property_access_args(Node *node, Node **properties,
-                                         Node **key)
-{
-    FuncExpr *func;
-    ArrayExpr *array;
-
-    if (node == NULL || !IsA(node, FuncExpr))
+    if (arg_tle == NULL || arg_tle->expr == NULL)
         return false;
 
-    func = castNode(FuncExpr, node);
-    if (func->funcid != get_cached_agtype_access_operator_oid())
-        return false;
-
-    if (list_length(func->args) == 2)
-    {
-        *properties = linitial(func->args);
-        *key = lsecond(func->args);
-    }
-    else if (list_length(func->args) == 1 && IsA(linitial(func->args), ArrayExpr))
-    {
-        array = linitial_node(ArrayExpr, func->args);
-        if (list_length(array->elements) != 2)
-            return false;
-
-        *properties = linitial(array->elements);
-        *key = lsecond(array->elements);
-    }
-    else
-    {
-        return false;
-    }
-
-    return *properties != NULL &&
-        *key != NULL &&
-        exprType(*properties) == AGTYPEOID &&
-        exprType(*key) == AGTYPEOID;
-}
-
-static bool extract_map2_property_access_args(Expr *expr, Node **properties,
-                                              Node **out_key1,
-                                              Node **prop_key1,
-                                              Node **out_key2,
-                                              Node **prop_key2)
-{
-    FuncExpr *map_expr;
-    List *map_args;
-    Node *value1_properties;
-    Node *value2_properties;
-
-    if (expr == NULL || !IsA(expr, FuncExpr))
-        return false;
-
-    map_expr = castNode(FuncExpr, expr);
-    if (map_expr->funcid != get_cached_agtype_build_map_nonull_oid())
-        return false;
-
-    map_args = extract_map_build_args(map_expr);
-    if (list_length(map_args) != 4)
-    {
-        return false;
-    }
-
-    *out_key1 = linitial(map_args);
-    *out_key2 = lthird(map_args);
-    if (!IsA(*out_key1, Const) ||
-        !IsA(*out_key2, Const) ||
-        ((Const *)*out_key1)->constisnull ||
-        ((Const *)*out_key2)->constisnull ||
-        exprType(*out_key1) != TEXTOID ||
-        exprType(*out_key2) != TEXTOID)
-        return false;
-
-    if (!extract_property_access_args(lsecond(map_args),
-                                      &value1_properties, prop_key1) ||
-        !extract_property_access_args(lfourth(map_args),
-                                      &value2_properties, prop_key2))
-    {
-        return false;
-    }
-
-    if (!same_property_source(value1_properties, value2_properties))
-        return false;
-
-    if (!IsA(*prop_key1, Const) ||
-        !IsA(*prop_key2, Const) ||
-        ((Const *)*prop_key1)->constisnull ||
-        ((Const *)*prop_key2)->constisnull)
-    {
-        return false;
-    }
-
-    *properties = value1_properties;
-    return true;
-}
-
-static bool extract_map_property_access_args(Expr *expr, Node **properties,
-                                             List **out_keys,
-                                             List **prop_keys)
-{
-    FuncExpr *map_expr;
-    List *map_args;
-    Node *first_properties = NULL;
-    int i;
-    int nargs;
-
-    if (expr == NULL || !IsA(expr, FuncExpr))
-        return false;
-
-    map_expr = castNode(FuncExpr, expr);
-    if (map_expr->funcid != get_cached_agtype_build_map_nonull_oid())
-        return false;
-
-    map_args = extract_map_build_args(map_expr);
-    if (list_length(map_args) < 6 ||
-        list_length(map_args) % 2 != 0)
-    {
-        return false;
-    }
-
-    *out_keys = NIL;
-    *prop_keys = NIL;
-
-    nargs = list_length(map_args);
-    for (i = 0; i < nargs; i += 2)
-    {
-        Node *out_key;
-        Node *value_expr;
-        Node *value_properties;
-        Node *prop_key;
-
-        out_key = list_nth(map_args, i);
-        value_expr = list_nth(map_args, i + 1);
-
-        if (!IsA(out_key, Const) ||
-            ((Const *)out_key)->constisnull ||
-            exprType(out_key) != TEXTOID)
-        {
-            return false;
-        }
-
-        if (!extract_property_access_args(value_expr, &value_properties,
-                                          &prop_key))
-        {
-            return false;
-        }
-
-        if (!IsA(prop_key, Const) ||
-            ((Const *)prop_key)->constisnull ||
-            exprType(prop_key) != AGTYPEOID)
-        {
-            return false;
-        }
-
-        if (i == 0)
-        {
-            first_properties = value_properties;
-        }
-        else if (!same_property_source(first_properties, value_properties))
-        {
-            return false;
-        }
-
-        *out_keys = lappend(*out_keys, out_key);
-        *prop_keys = lappend(*prop_keys, prop_key);
-    }
-
-    *properties = first_properties;
-    return *properties != NULL && list_length(*out_keys) >= 3;
-}
-
-static bool extract_list_property_access_args(Expr *expr, Node **properties,
-                                              List **prop_keys)
-{
-    FuncExpr *list_expr;
-    List *list_args;
-    Node *first_properties = NULL;
-    int i;
-    int nargs;
-
-    if (expr == NULL || !IsA(expr, FuncExpr))
-        return false;
-
-    list_expr = castNode(FuncExpr, expr);
-    if (list_expr->funcid != get_cached_agtype_build_list_oid())
-        return false;
-
-    list_args = extract_map_build_args(list_expr);
-    nargs = list_length(list_args);
-    if (nargs <= 0)
-        return false;
-
-    *prop_keys = NIL;
-    for (i = 0; i < nargs; i++)
-    {
-        Node *value_expr;
-        Node *value_properties;
-        Node *prop_key;
-
-        value_expr = list_nth(list_args, i);
-        if (!extract_property_access_args(value_expr, &value_properties,
-                                          &prop_key))
-        {
-            return false;
-        }
-
-        if (!IsA(prop_key, Const) ||
-            ((Const *)prop_key)->constisnull ||
-            exprType(prop_key) != AGTYPEOID)
-        {
-            return false;
-        }
-
-        if (i == 0)
-        {
-            first_properties = value_properties;
-        }
-        else if (!same_property_source(first_properties, value_properties))
-        {
-            return false;
-        }
-
-        *prop_keys = lappend(*prop_keys, prop_key);
-    }
-
-    *properties = first_properties;
-    return *properties != NULL;
+    return cypher_extract_property_access_terminal_args((Node *)arg_tle->expr,
+                                                        object, key);
 }
 
 static bool same_property_source(Node *left, Node *right)
@@ -1729,54 +1856,6 @@ static bool same_property_source(Node *left, Node *right)
         left_var->vartype == right_var->vartype;
 }
 
-static List *extract_map_build_args(FuncExpr *map_expr)
-{
-    ArrayExpr *array;
-
-    if (map_expr == NULL)
-        return NIL;
-
-    if (list_length(map_expr->args) == 1 &&
-        IsA(linitial(map_expr->args), ArrayExpr))
-    {
-        array = linitial_node(ArrayExpr, map_expr->args);
-        return array->elements;
-    }
-
-    return map_expr->args;
-}
-
-static Const *make_const_array_const(List *elements, Oid array_type,
-                                     Oid element_type)
-{
-    ListCell *lc;
-    Datum *values;
-    ArrayType *array;
-    int nelems;
-    int i = 0;
-    int16 typlen;
-    bool typbyval;
-    char typalign;
-
-    nelems = list_length(elements);
-    values = palloc(sizeof(Datum) * nelems);
-
-    foreach(lc, elements)
-    {
-        Const *element = castNode(Const, lfirst(lc));
-
-        Assert(!element->constisnull);
-        values[i++] = element->constvalue;
-    }
-
-    get_typlenbyvalalign(element_type, &typlen, &typbyval, &typalign);
-    array = construct_array(values, nelems, element_type, typlen, typbyval,
-                            typalign);
-
-    return makeConst(array_type, -1, InvalidOid, -1, PointerGetDatum(array),
-                     false, false);
-}
-
 static Oid get_cached_count_any_agg_oid(void)
 {
     if (!OidIsValid(count_any_agg_func_oid))
@@ -1792,128 +1871,10 @@ static Oid get_cached_count_any_agg_oid(void)
     return count_any_agg_func_oid;
 }
 
-static Oid get_cached_age_collect_float8_agg_oid(void)
-{
-    if (!OidIsValid(age_collect_float8_agg_func_oid))
-    {
-        age_collect_float8_agg_func_oid =
-            get_ag_func_oid("age_collect_float8", 1, FLOAT8OID);
-    }
-
-    return age_collect_float8_agg_func_oid;
-}
-
-static Oid get_cached_age_collect_int8_agg_oid(void)
-{
-    if (!OidIsValid(age_collect_int8_agg_func_oid))
-    {
-        age_collect_int8_agg_func_oid =
-            get_ag_func_oid("age_collect_int8", 1, INT8OID);
-    }
-
-    return age_collect_int8_agg_func_oid;
-}
-
-static Oid get_cached_age_collect_text_agg_oid(void)
-{
-    if (!OidIsValid(age_collect_text_agg_func_oid))
-    {
-        age_collect_text_agg_func_oid =
-            get_ag_func_oid("age_collect_text", 1, TEXTOID);
-    }
-
-    return age_collect_text_agg_func_oid;
-}
-
-static Oid get_cached_array_agg_anynonarray_agg_oid(void)
-{
-    if (!OidIsValid(array_agg_anynonarray_agg_func_oid))
-    {
-        Oid argtype = ANYNONARRAYOID;
-
-        array_agg_anynonarray_agg_func_oid =
-            LookupFuncName(list_make2(makeString("pg_catalog"),
-                                      makeString("array_agg")),
-                           1, &argtype, false);
-    }
-
-    return array_agg_anynonarray_agg_func_oid;
-}
-
-static Oid get_cached_age_array_agg_property_agg_oid(void)
-{
-    if (!OidIsValid(age_array_agg_property_agg_func_oid))
-    {
-        age_array_agg_property_agg_func_oid =
-            get_ag_func_oid("age_array_agg_property", 2, AGTYPEOID,
-                            AGTYPEOID);
-    }
-
-    return age_array_agg_property_agg_func_oid;
-}
-
-static Oid get_cached_age_array_agg_map2_property_agg_oid(void)
-{
-    if (!OidIsValid(age_array_agg_map2_property_agg_func_oid))
-    {
-        age_array_agg_map2_property_agg_func_oid =
-            get_ag_func_oid("age_array_agg_map2_property", 5, AGTYPEOID,
-                            TEXTOID, AGTYPEOID, TEXTOID, AGTYPEOID);
-    }
-
-    return age_array_agg_map2_property_agg_func_oid;
-}
-
-static Oid get_cached_age_array_agg_map_property_agg_oid(void)
-{
-    if (!OidIsValid(age_array_agg_map_property_agg_func_oid))
-    {
-        age_array_agg_map_property_agg_func_oid =
-            get_ag_func_oid("age_array_agg_map_property", 3, AGTYPEOID,
-                            TEXTARRAYOID, AGTYPEARRAYOID);
-    }
-
-    return age_array_agg_map_property_agg_func_oid;
-}
-
-static Oid get_cached_age_array_agg_list_property_agg_oid(void)
-{
-    if (!OidIsValid(age_array_agg_list_property_agg_func_oid))
-    {
-        age_array_agg_list_property_agg_func_oid =
-            get_ag_func_oid("age_array_agg_list_property", 2, AGTYPEOID,
-                            AGTYPEARRAYOID);
-    }
-
-    return age_array_agg_list_property_agg_func_oid;
-}
-
-static Oid get_cached_agtype_build_map_nonull_oid(void)
-{
-    if (!OidIsValid(agtype_build_map_nonull_func_oid))
-    {
-        agtype_build_map_nonull_func_oid =
-            get_ag_func_oid("agtype_build_map_nonull", 1, ANYOID);
-    }
-
-    return agtype_build_map_nonull_func_oid;
-}
-
-static Oid get_cached_agtype_build_list_oid(void)
-{
-    if (!OidIsValid(agtype_build_list_func_oid))
-    {
-        agtype_build_list_func_oid =
-            get_ag_func_oid("agtype_build_list", 1, ANYOID);
-    }
-
-    return agtype_build_list_func_oid;
-}
-
 static void add_property_projection_custom_path(PlannerInfo *root,
                                                 RelOptInfo *input_rel,
                                                 RelOptInfo *output_rel,
-                                                FuncExpr *access_expr,
+                                                CypherCachedPropertySlotDescriptor *slot,
                                                 FinalPathExtraData *extra)
 {
     CustomPath *cp;
@@ -1930,7 +1891,7 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     Cost random_page_cost;
     Cost seq_page_cost;
 
-    if (input_rel == NULL || output_rel == NULL || access_expr == NULL ||
+    if (input_rel == NULL || output_rel == NULL || slot == NULL ||
         root->parse == NULL ||
         input_rel->pathlist == NIL ||
         !bms_get_singleton_member(input_rel->relids, &scanrelid_int))
@@ -1939,8 +1900,17 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     }
     scanrelid = (Index)scanrelid_int;
 
-    properties_var = linitial_node(Var, access_expr->args);
-    key_const = lsecond_node(Const, access_expr->args);
+    if (slot->container == NULL ||
+        slot->keys == NIL ||
+        list_length(slot->keys) != 1 ||
+        !IsA(slot->container, Var) ||
+        !IsA(linitial(slot->keys), Const))
+    {
+        return;
+    }
+
+    properties_var = castNode(Var, slot->container);
+    key_const = linitial_node(Const, slot->keys);
     if (properties_var->varno != scanrelid ||
         scanrelid <= 0 ||
         scanrelid >= root->simple_rel_array_size)
@@ -1982,8 +1952,10 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     cp->path.total_cost = seq_page_cost * pages + cpu_tuple_cost * rows;
     cp->flags = CUSTOMPATH_SUPPORT_PROJECTION;
     cp->custom_paths = NIL;
-    cp->custom_private = list_make2(copyObject(key_const),
-                                    makeInteger(scanrelid));
+    cp->custom_private = list_make4(copyObject(key_const),
+                                    makeInteger(scanrelid),
+                                    make_oid_const(slot->value_type),
+                                    make_oid_const(slot->field_result_type));
     cp->methods = &age_property_projection_path_methods;
 
     path = (Path *)cp;
@@ -2018,6 +1990,8 @@ static Plan *plan_age_property_projection_path(PlannerInfo *root,
     CustomScan *cs;
     Const *key_const;
     Integer *scanrelid_value;
+    Const *value_type_const;
+    Const *field_result_type_const;
     Index scanrelid;
 
     (void) root;
@@ -2027,6 +2001,9 @@ static Plan *plan_age_property_projection_path(PlannerInfo *root,
 
     key_const = linitial_node(Const, best_path->custom_private);
     scanrelid_value = lsecond_node(Integer, best_path->custom_private);
+    value_type_const = list_nth_node(Const, best_path->custom_private, 2);
+    field_result_type_const = list_nth_node(Const, best_path->custom_private,
+                                            3);
     scanrelid = intVal(scanrelid_value);
 
     cs = makeNode(CustomScan);
@@ -2046,12 +2023,20 @@ static Plan *plan_age_property_projection_path(PlannerInfo *root,
     cs->flags = best_path->flags;
     cs->custom_plans = NIL;
     cs->custom_exprs = NIL;
-    cs->custom_private = list_make1(copyObject(key_const));
+    cs->custom_private = list_make3(copyObject(key_const),
+                                    copyObject(value_type_const),
+                                    copyObject(field_result_type_const));
     cs->custom_scan_tlist = copyObject(tlist);
     cs->custom_relids = bms_make_singleton(scanrelid);
     cs->methods = &age_property_projection_scan_methods;
 
     return (Plan *)cs;
+}
+
+static Const *make_oid_const(Oid value)
+{
+    return makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
+                     ObjectIdGetDatum(value), false, true);
 }
 
 static bool is_age_vle_function_rte(RangeTblEntry *rte, FuncExpr **func_expr)
@@ -2179,17 +2164,6 @@ static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
     return (Plan *)cs;
 }
 
-static Oid get_cached_agtype_access_operator_oid(void)
-{
-    if (!OidIsValid(agtype_access_operator_func_oid))
-    {
-        agtype_access_operator_func_oid =
-            get_ag_func_oid("agtype_access_operator", 1, AGTYPEARRAYOID);
-    }
-
-    return agtype_access_operator_func_oid;
-}
-
 static Oid get_cached_agtype_eq_oid(void)
 {
     if (!OidIsValid(agtype_eq_func_oid))
@@ -2247,46 +2221,12 @@ static Oid get_cached_agtype_field_cmp_oid(void)
     return agtype_field_cmp_func_oid;
 }
 
-static Oid get_cached_agtype_object_field_int8_oid(void)
-{
-    if (!OidIsValid(agtype_object_field_int8_func_oid))
-    {
-        agtype_object_field_int8_func_oid =
-            get_ag_func_oid("agtype_object_field_int8", 2,
-                            AGTYPEOID, AGTYPEOID);
-    }
-
-    return agtype_object_field_int8_func_oid;
-}
-
-static Oid get_cached_agtype_ctid_field_agtype_oid(void)
-{
-    if (!OidIsValid(agtype_ctid_field_agtype_func_oid))
-    {
-        agtype_ctid_field_agtype_func_oid =
-            get_ag_func_oid("agtype_ctid_field_agtype", 3,
-                            OIDOID, TIDOID, AGTYPEOID);
-    }
-
-    return agtype_ctid_field_agtype_func_oid;
-}
-
-static Oid get_cached_int8_to_agtype_oid(void)
-{
-    if (!OidIsValid(int8_to_agtype_func_oid))
-    {
-        int8_to_agtype_func_oid =
-            get_ag_func_oid("int8_to_agtype", 1, INT8OID);
-    }
-
-    return int8_to_agtype_func_oid;
-}
-
-static void rewrite_property_equals_restrictions(PlannerInfo *root,
+static bool rewrite_property_equals_restrictions(PlannerInfo *root,
                                                  RelOptInfo *rel, Index rti)
 {
     RangeTblEntry *rte;
     ListCell *lc;
+    bool rewritten_any = false;
 
     if (root == NULL ||
         rti <= 0 ||
@@ -2294,13 +2234,13 @@ static void rewrite_property_equals_restrictions(PlannerInfo *root,
         rel == NULL ||
         rel->baserestrictinfo == NIL)
     {
-        return;
+        return false;
     }
 
     rte = root->simple_rte_array[rti];
     if (rte == NULL || rte->rtekind != RTE_RELATION)
     {
-        return;
+        return false;
     }
 
     foreach(lc, rel->baserestrictinfo)
@@ -2316,24 +2256,179 @@ static void rewrite_property_equals_restrictions(PlannerInfo *root,
         if (rewritten != NULL)
         {
             rinfo->clause = (Expr *)rewritten;
+            rewritten_any = true;
         }
+    }
+
+    return rewritten_any;
+}
+
+static Node *replace_property_index_side(OpExpr *op, bool replace_left,
+                                         Node *index_expr)
+{
+    OpExpr *copy;
+    Node *left;
+    Node *right;
+
+    if (op == NULL || index_expr == NULL)
+        return NULL;
+
+    copy = copyObject(op);
+    left = linitial(copy->args);
+    right = lsecond(copy->args);
+    copy->args = replace_left ?
+        list_make2(copyObject(index_expr), right) :
+        list_make2(left, copyObject(index_expr));
+
+    return (Node *)copy;
+}
+
+static void canonicalize_property_index_predicates(RelOptInfo *rel)
+{
+    ListCell *lc;
+    List *canonical_exprs;
+
+    if (rel == NULL)
+        return;
+
+    canonical_exprs = collect_canonical_property_index_exprs(rel);
+    if (canonical_exprs == NIL)
+        return;
+
+    foreach(lc, rel->indexlist)
+    {
+        IndexOptInfo *index = lfirst_node(IndexOptInfo, lc);
+
+        if (index->indpred == NIL)
+            continue;
+
+        index->indpred = (List *)
+            expression_tree_mutator((Node *)index->indpred,
+                                    canonicalize_property_index_exprs_mutator,
+                                    canonical_exprs);
     }
 }
 
-static bool rel_has_matching_expression_index(RelOptInfo *rel, Node *expr)
+static void canonicalize_property_index_restrictions(RelOptInfo *rel)
 {
     ListCell *index_lc;
+    List *canonical_exprs;
+
+    if (rel == NULL)
+        return;
+
+    canonical_exprs = collect_canonical_property_index_exprs(rel);
+    if (canonical_exprs == NIL)
+        return;
 
     foreach(index_lc, rel->indexlist)
     {
         IndexOptInfo *index = lfirst_node(IndexOptInfo, index_lc);
-        ListCell *expr_lc;
+        ListCell *rinfo_lc;
 
-        foreach(expr_lc, index->indexprs)
+        foreach(rinfo_lc, index->indrestrictinfo)
         {
-            if (equal(expr, lfirst(expr_lc)))
-                return true;
+            RestrictInfo *rinfo = lfirst_node(RestrictInfo, rinfo_lc);
+
+            rinfo->clause = (Expr *)
+                expression_tree_mutator(
+                    (Node *)rinfo->clause,
+                    canonicalize_property_index_exprs_mutator,
+                    canonical_exprs);
         }
+    }
+}
+
+static List *collect_canonical_property_index_exprs(RelOptInfo *rel)
+{
+    List *exprs = NIL;
+    ListCell *lc;
+
+    if (rel == NULL)
+        return NIL;
+
+    foreach(lc, rel->indexlist)
+    {
+        IndexOptInfo *index = lfirst_node(IndexOptInfo, lc);
+
+        expression_tree_walker((Node *)index->indexprs,
+                               collect_canonical_property_index_exprs_walker,
+                               &exprs);
+        expression_tree_walker((Node *)index->indpred,
+                               collect_canonical_property_index_exprs_walker,
+                               &exprs);
+    }
+
+    return exprs;
+}
+
+static bool collect_canonical_property_index_exprs_walker(Node *node,
+                                                          void *context)
+{
+    List **exprs = (List **)context;
+    CypherPropertyHandoffDescriptor handoff;
+    CypherCachedPropertySlotDescriptor slot;
+    Node *slot_expr;
+
+    if (node == NULL)
+        return false;
+
+    memset(&handoff, 0, sizeof(handoff));
+    if (cypher_extract_property_access_signature(
+            node, &handoff.property_signature) &&
+        cypher_make_cached_property_slot_descriptor(&handoff, &slot) &&
+        (slot.value_type != AGTYPEOID ||
+         slot.field_result_type != AGTYPEOID))
+    {
+        slot_expr = cypher_make_cached_property_slot_expr(&slot);
+        if (slot_expr != NULL && equal(slot_expr, node) &&
+            !property_expr_list_contains(*exprs, slot_expr))
+        {
+            *exprs = lappend(*exprs, slot_expr);
+        }
+
+        return false;
+    }
+
+    return expression_tree_walker(
+        node, collect_canonical_property_index_exprs_walker, context);
+}
+
+static Node *canonicalize_property_index_exprs_mutator(Node *node,
+                                                       void *context)
+{
+    List *exprs = (List *)context;
+    CypherPropertyHandoffDescriptor handoff;
+    CypherCachedPropertySlotDescriptor slot;
+    Node *slot_expr;
+
+    if (node == NULL)
+        return NULL;
+
+    memset(&handoff, 0, sizeof(handoff));
+    if (cypher_extract_property_access_signature(
+            node, &handoff.property_signature) &&
+        cypher_make_cached_property_slot_descriptor(&handoff, &slot) &&
+        (slot.value_type != AGTYPEOID ||
+         slot.field_result_type != AGTYPEOID))
+    {
+        slot_expr = cypher_make_cached_property_slot_expr(&slot);
+        if (slot_expr != NULL && property_expr_list_contains(exprs, slot_expr))
+            return slot_expr;
+    }
+
+    return expression_tree_mutator(
+        node, canonicalize_property_index_exprs_mutator, context);
+}
+
+static bool property_expr_list_contains(List *exprs, Node *expr)
+{
+    ListCell *lc;
+
+    foreach(lc, exprs)
+    {
+        if (equal(lfirst(lc), expr))
+            return true;
     }
 
     return false;
@@ -2358,12 +2453,27 @@ static Node *try_rewrite_property_equals_clause(Node *clause, Index rti,
     left = linitial(op->args);
     right = lsecond(op->args);
 
+    {
+        CypherPropertyIndexHandoff index_handoff;
+
+        if (cypher_find_matching_property_index_handoff(rel, left,
+                                                        &index_handoff))
+        {
+            return replace_property_index_side(op, true,
+                                               index_handoff.index_expr);
+        }
+
+        if (cypher_find_matching_property_index_handoff(rel, right,
+                                                        &index_handoff))
+        {
+            return replace_property_index_side(op, false,
+                                               index_handoff.index_expr);
+        }
+    }
+
     if (match_property_access_expr(left, rti, &properties, &key))
     {
         const char *operator_name;
-
-        if (rel_has_matching_expression_index(rel, left))
-            return NULL;
 
         if (op->opfuncid == get_cached_agtype_eq_oid())
         {
@@ -2396,9 +2506,6 @@ static Node *try_rewrite_property_equals_clause(Node *clause, Index rti,
     if (match_property_access_expr(right, rti, &properties, &key))
     {
         const char *operator_name;
-
-        if (rel_has_matching_expression_index(rel, right))
-            return NULL;
 
         if (op->opfuncid == get_cached_agtype_eq_oid())
         {
@@ -2434,42 +2541,56 @@ static Node *try_rewrite_property_equals_clause(Node *clause, Index rti,
 static bool match_property_access_expr(Node *node, Index rti,
                                        Node **properties, Node **key)
 {
-    FuncExpr *func;
-    ArrayExpr *array;
     Node *properties_arg;
     Node *key_arg;
-    Var *properties_var;
 
-    if (node == NULL || !IsA(node, FuncExpr))
+    if (!cypher_extract_property_access_terminal_args(node, &properties_arg,
+                                                     &key_arg))
         return false;
 
-    func = (FuncExpr *)node;
-    if (func->funcid != get_cached_agtype_access_operator_oid() ||
-        list_length(func->args) != 1)
+    if (!IsA(key_arg, Const) ||
+        !property_object_belongs_to_rti(properties_arg, rti))
         return false;
 
-    if (!IsA(linitial(func->args), ArrayExpr))
-        return false;
-
-    array = (ArrayExpr *)linitial(func->args);
-    if (list_length(array->elements) != 2)
-        return false;
-
-    properties_arg = linitial(array->elements);
-    key_arg = lsecond(array->elements);
-    if (!IsA(properties_arg, Var) || !IsA(key_arg, Const))
-        return false;
-
-    properties_var = (Var *)properties_arg;
-    if (properties_var->varno != rti ||
-        properties_var->vartype != AGTYPEOID ||
-        ((Const *)key_arg)->consttype != AGTYPEOID ||
+    if (((Const *)key_arg)->consttype != AGTYPEOID ||
         ((Const *)key_arg)->constisnull)
+    {
         return false;
+    }
 
     *properties = properties_arg;
     *key = key_arg;
     return true;
+}
+
+static bool property_object_belongs_to_rti(Node *node, Index rti)
+{
+    List *vars;
+    ListCell *lc;
+    bool found = false;
+
+    if (node == NULL || exprType(node) != AGTYPEOID)
+        return false;
+
+    vars = pull_var_clause(node,
+                           PVC_RECURSE_AGGREGATES |
+                           PVC_RECURSE_WINDOWFUNCS |
+                           PVC_RECURSE_PLACEHOLDERS);
+
+    foreach(lc, vars)
+    {
+        Var *var = lfirst_node(Var, lc);
+
+        if (var->varno != rti || var->vartype != AGTYPEOID)
+        {
+            list_free(vars);
+            return false;
+        }
+        found = true;
+    }
+
+    list_free(vars);
+    return found;
 }
 
 static Expr *make_int4_zero_compare_expr(FuncExpr *cmp_expr,
@@ -3287,16 +3408,8 @@ static void invalidate_cypher_clause_function_oids(Datum arg, int cache_id,
     cypher_delete_clause_func_oid = InvalidOid;
     cypher_merge_clause_func_oid = InvalidOid;
     count_any_agg_func_oid = InvalidOid;
-    age_collect_float8_agg_func_oid = InvalidOid;
-    age_collect_int8_agg_func_oid = InvalidOid;
-    age_collect_text_agg_func_oid = InvalidOid;
-    array_agg_anynonarray_agg_func_oid = InvalidOid;
-    age_array_agg_property_agg_func_oid = InvalidOid;
-    age_array_agg_map2_property_agg_func_oid = InvalidOid;
-    age_array_agg_map_property_agg_func_oid = InvalidOid;
-    agtype_build_map_nonull_func_oid = InvalidOid;
-    age_array_agg_list_property_agg_func_oid = InvalidOid;
-    agtype_build_list_func_oid = InvalidOid;
+    cypher_property_path_invalidate_oids();
+    cypher_property_signature_invalidate_oids();
 }
 
 static void replace_with_cypher_dml_path(PlannerInfo *root, RelOptInfo *rel,

@@ -21,6 +21,7 @@
 #define AG_CYPHER_PATHS_H
 
 #include "nodes/nodes.h"
+#include "nodes/parsenodes.h"
 #include "nodes/pathnodes.h"
 #include "nodes/pg_list.h"
 #include "utils/relcache.h"
@@ -45,6 +46,7 @@ typedef struct CypherAdjacencyMatchCandidate
 
 void set_rel_pathlist_init(void);
 void set_rel_pathlist_fini(void);
+void cypher_rewrite_property_index_surfaces(Query *parse);
 void cypher_clear_adjacency_match_candidates(void);
 void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
                                                Oid index_oid,

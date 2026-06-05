@@ -72,6 +72,7 @@ OBJS = src/backend/age.o \
        src/backend/nodes/cypher_readfuncs.o \
        src/backend/optimizer/cypher_createplan.o \
        src/backend/optimizer/cypher_pathnode.o \
+       src/backend/optimizer/cypher_property_paths.o \
        src/backend/optimizer/cypher_paths.o \
        src/backend/parser/ag_scanner.o \
        src/backend/parser/cypher_analyze.o \
@@ -84,7 +85,9 @@ OBJS = src/backend/age.o \
        src/backend/parser/cypher_parse_agg.o \
        src/backend/parser/cypher_parse_node.o \
        src/backend/parser/cypher_parser.o \
+       src/backend/parser/cypher_property_signature.o \
        src/backend/parser/cypher_transform_entity.o \
+       src/backend/parser/cypher_vle_agg.o \
        src/backend/utils/adt/age_graphid_ds.o \
        src/backend/utils/adt/agtype.o \
        src/backend/utils/adt/agtype_ext.o \

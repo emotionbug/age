@@ -30,6 +30,7 @@
 #include "optimizer/optimizer.h"
 #include "parser/cypher_parse_agg.h"
 #include "parser/cypher_parse_node.h"
+#include "parser/cypher_property_signature.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/agtype.h"
@@ -382,7 +383,9 @@ static bool check_ungrouped_columns_walker(Node *node, check_ungrouped_columns_c
         {
             TargetEntry *tle = lfirst(gl);
 
-            if (equal(node, tle->expr))
+            if (equal(node, tle->expr) ||
+                cypher_equal_property_access_signature(node,
+                                                       (Node *)tle->expr))
                 return false; /* acceptable, do not descend more */
         }
     }
@@ -693,7 +696,9 @@ static bool finalize_grouping_exprs_walker(Node *node,
                     {
                         TargetEntry *tle = lfirst(gl);
 
-                        if (equal(expr, tle->expr))
+                        if (equal(expr, tle->expr) ||
+                            cypher_equal_property_access_signature(
+                                expr, (Node *)tle->expr))
                         {
                            ref = tle->ressortgroupref;
                            break;

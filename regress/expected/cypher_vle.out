@@ -2114,8 +2114,15 @@ DECLARE
     plan_text text;
     length_plan text := '';
     rel_count_plan text := '';
+    rel_tail_count_plan text := '';
+    rel_tail_empty_plan text := '';
+    rel_slice_count_plan text := '';
+    rel_slice_empty_plan text := '';
+    rel_tail_slice_count_plan text := '';
     node_count_plan text := '';
     aggregate_count_plan text := '';
+    tail_last_count_plan text := '';
+    slice_boundary_count_plan text := '';
     path_plan text := '';
     constrained_path_plan text := '';
     rel_index_plan text := '';
@@ -2168,6 +2175,106 @@ BEGIN
     FOR plan_text IN
         SELECT plan::text
         FROM cypher('cypher_vle',
+                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(tail(relationships(p)))$cypher$)
+        AS (plan agtype)
+    LOOP
+        rel_tail_count_plan := rel_tail_count_plan || plan_text || E'\n';
+    END LOOP;
+
+    IF rel_tail_count_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
+       rel_tail_count_plan NOT LIKE '%age_vle_edge_tail_count%' THEN
+        RAISE EXCEPTION 'expected compact VLE relationship tail count plan to stream age_vle directly: %',
+                        rel_tail_count_plan;
+    END IF;
+
+    IF rel_tail_count_plan LIKE '%age_match_vle_terminal_edge%' THEN
+        RAISE EXCEPTION 'compact VLE relationship tail count plan should not expose endpoint joins: %',
+                        rel_tail_count_plan;
+    END IF;
+
+    FOR plan_text IN
+        SELECT plan::text
+        FROM cypher('cypher_vle',
+                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN isEmpty(tail(relationships(p)))$cypher$)
+        AS (plan agtype)
+    LOOP
+        rel_tail_empty_plan := rel_tail_empty_plan || plan_text || E'\n';
+    END LOOP;
+
+    IF rel_tail_empty_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
+       rel_tail_empty_plan NOT LIKE '%age_vle_list_is_empty%' THEN
+        RAISE EXCEPTION 'expected compact VLE relationship tail empty plan to stream age_vle directly: %',
+                        rel_tail_empty_plan;
+    END IF;
+
+    IF rel_tail_empty_plan LIKE '%age_match_vle_terminal_edge%' THEN
+        RAISE EXCEPTION 'compact VLE relationship tail empty plan should not expose endpoint joins: %',
+                        rel_tail_empty_plan;
+    END IF;
+
+    FOR plan_text IN
+        SELECT plan::text
+        FROM cypher('cypher_vle',
+                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(relationships(p)[1..])$cypher$)
+        AS (plan agtype)
+    LOOP
+        rel_slice_count_plan := rel_slice_count_plan || plan_text || E'\n';
+    END LOOP;
+
+    IF rel_slice_count_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
+       rel_slice_count_plan NOT LIKE '%age_vle_list_slice_count%' THEN
+        RAISE EXCEPTION 'expected compact VLE relationship slice count plan to stream age_vle directly: %',
+                        rel_slice_count_plan;
+    END IF;
+
+    IF rel_slice_count_plan LIKE '%age_match_vle_terminal_edge%' THEN
+        RAISE EXCEPTION 'compact VLE relationship slice count plan should not expose endpoint joins: %',
+                        rel_slice_count_plan;
+    END IF;
+
+    FOR plan_text IN
+        SELECT plan::text
+        FROM cypher('cypher_vle',
+                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN isEmpty(relationships(p)[1..])$cypher$)
+        AS (plan agtype)
+    LOOP
+        rel_slice_empty_plan := rel_slice_empty_plan || plan_text || E'\n';
+    END LOOP;
+
+    IF rel_slice_empty_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
+       rel_slice_empty_plan NOT LIKE '%age_vle_list_slice_is_empty%' THEN
+        RAISE EXCEPTION 'expected compact VLE relationship slice empty plan to stream age_vle directly: %',
+                        rel_slice_empty_plan;
+    END IF;
+
+    IF rel_slice_empty_plan LIKE '%age_match_vle_terminal_edge%' THEN
+        RAISE EXCEPTION 'compact VLE relationship slice empty plan should not expose endpoint joins: %',
+                        rel_slice_empty_plan;
+    END IF;
+
+    FOR plan_text IN
+        SELECT plan::text
+        FROM cypher('cypher_vle',
+                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(tail(relationships(p))[0..1])$cypher$)
+        AS (plan agtype)
+    LOOP
+        rel_tail_slice_count_plan := rel_tail_slice_count_plan || plan_text || E'\n';
+    END LOOP;
+
+    IF rel_tail_slice_count_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
+       rel_tail_slice_count_plan NOT LIKE '%age_vle_list_slice_count%' THEN
+        RAISE EXCEPTION 'expected compact VLE relationship tail slice count plan to stream age_vle directly: %',
+                        rel_tail_slice_count_plan;
+    END IF;
+
+    IF rel_tail_slice_count_plan LIKE '%age_match_vle_terminal_edge%' THEN
+        RAISE EXCEPTION 'compact VLE relationship tail slice count plan should not expose endpoint joins: %',
+                        rel_tail_slice_count_plan;
+    END IF;
+
+    FOR plan_text IN
+        SELECT plan::text
+        FROM cypher('cypher_vle',
                     $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(nodes(p))$cypher$)
         AS (plan agtype)
     LOOP
@@ -2204,6 +2311,53 @@ BEGIN
        aggregate_count_plan LIKE '%_agtype_build_path%' THEN
         RAISE EXCEPTION 'compact VLE aggregate count plan should not expose endpoint joins or path build: %',
                         aggregate_count_plan;
+    END IF;
+
+    FOR plan_text IN
+        SELECT plan::text
+        FROM cypher('cypher_vle',
+                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN count(last(tail(nodes(p)))) + count(last(tail(relationships(p)))) + count(startNode(last(tail(relationships(p))))) + count(endNode(last(tail(relationships(p))))) + count(label(last(tail(nodes(p))))) + count(properties(last(tail(nodes(p))))) + count(type(last(tail(relationships(p))))) + count(labels(endNode(last(tail(relationships(p)))))) + count(properties(startNode(last(tail(relationships(p))))))$cypher$)
+        AS (plan agtype)
+    LOOP
+        tail_last_count_plan := tail_last_count_plan || plan_text || E'\n';
+    END LOOP;
+
+    IF tail_last_count_plan NOT LIKE '%age_vle_node_tail_last_id%' OR
+       tail_last_count_plan NOT LIKE '%age_vle_edge_tail_last_id%' OR
+       tail_last_count_plan NOT LIKE '%age_vle_tail_last_edge_endpoint%' THEN
+        RAISE EXCEPTION 'expected VLE tail-last count plan to use direct id/endpoint helpers: %',
+                        tail_last_count_plan;
+    END IF;
+
+    IF tail_last_count_plan LIKE '%age_materialize_vle_node_tail_last%' OR
+       tail_last_count_plan LIKE '%age_materialize_vle_edge_tail_last%' OR
+       tail_last_count_plan LIKE '%age_vle_tail_last_field%' OR
+       tail_last_count_plan LIKE '%age_vle_tail_last_endpoint_field%' THEN
+        RAISE EXCEPTION 'VLE tail-last count plan should not materialize tail-last entities: %',
+                        tail_last_count_plan;
+    END IF;
+
+    FOR plan_text IN
+        SELECT plan::text
+        FROM cypher('cypher_vle',
+                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH ()-[e*2..3]->() RETURN count(last(tail(reverse(e)))) + count(head(reverse(tail(e)))) + count(last(tail(tail(e)))) + count(type(last(tail(reverse(e))))) + count(properties(head(reverse(tail(e)))))$cypher$)
+        AS (plan agtype)
+    LOOP
+        slice_boundary_count_plan := slice_boundary_count_plan || plan_text || E'\n';
+    END LOOP;
+
+    IF slice_boundary_count_plan NOT LIKE '%''253''::agtype%' OR
+       slice_boundary_count_plan NOT LIKE '%''132''::agtype%' OR
+       slice_boundary_count_plan NOT LIKE '%''373''::agtype%' THEN
+        RAISE EXCEPTION 'expected nested VLE slice-boundary count plan to use id modes: %',
+                        slice_boundary_count_plan;
+    END IF;
+
+    IF slice_boundary_count_plan LIKE '%''245''::agtype%' OR
+       slice_boundary_count_plan LIKE '%''124''::agtype%' OR
+       slice_boundary_count_plan LIKE '%''365''::agtype%' THEN
+        RAISE EXCEPTION 'nested VLE slice-boundary count plan should not use entity/field modes: %',
+                        slice_boundary_count_plan;
     END IF;
 
     FOR plan_text IN

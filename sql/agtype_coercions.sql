@@ -78,6 +78,30 @@ AS 'MODULE_PATHNAME';
 CREATE CAST (float8 AS agtype)
     WITH FUNCTION ag_catalog.float8_to_agtype(float8);
 
+-- numeric -> agtype (explicit)
+CREATE FUNCTION ag_catalog.numeric_to_agtype(numeric)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE CAST (numeric AS agtype)
+    WITH FUNCTION ag_catalog.numeric_to_agtype(numeric);
+
+-- agtype -> numeric (explicit)
+CREATE FUNCTION ag_catalog.agtype_to_numeric(agtype)
+    RETURNS numeric
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE CAST (agtype AS numeric)
+    WITH FUNCTION ag_catalog.agtype_to_numeric(agtype);
+
 -- agtype -> float8 (explicit)
 CREATE FUNCTION ag_catalog.agtype_to_float8(agtype)
     RETURNS float8
