@@ -92,6 +92,12 @@ typedef struct EntryPropertyRelationCacheEntry
     Relation rel;
 } EntryPropertyRelationCacheEntry;
 
+typedef struct VertexPropertyPrefetchEntry
+{
+    graphid vertex_id;
+    vertex_entry *ve;
+} VertexPropertyPrefetchEntry;
+
 /*
  * Version mode detection — determined once per backend on first use.
  * DSM:      PG 17+ GetNamedDSMSegment (no shared_preload_libraries needed)
@@ -137,6 +143,11 @@ typedef struct edge_entry
     int edge_property_count;        /* top-level property pair count */
     int edge_property_size;         /* varlena size for exact-object checks */
     uint32 edge_property_hash;      /* datum image hash for exact-object checks */
+    char *cached_property_key;      /* graph-context copy of one property key */
+    int cached_property_key_len;
+    char cached_property_key_char;  /* inline key for one-byte property keys */
+    Datum cached_property_value;    /* graph-context agtype result for key */
+    bool cached_property_value_valid;
 } edge_entry;
 
 typedef struct graph_label_entry
@@ -282,6 +293,8 @@ static bool load_vertex_tuple(GRAPH_global_context *ggctx, TupleDesc tupdesc,
                               bool use_vertex_range,
                               graphid min_vertex_id,
                               graphid max_vertex_id);
+static void load_endpoint_vertex_skeletons(GRAPH_global_context *ggctx,
+                                           HTAB *edge_endpoint_ids);
 static void free_ag_label_names(graph_label_list *labels);
 static HTAB *create_graphid_hash(const char *name);
 static void add_graphid_hash(HTAB *hash, graphid id);
@@ -336,6 +349,12 @@ static bool get_vertex_entry_property_with_relation_uncached(vertex_entry *ve,
                                                              Relation rel,
                                                              agtype_value *key,
                                                              Datum *result);
+static bool get_edge_entry_property_with_relation_uncached(edge_entry *ee,
+                                                           Relation rel,
+                                                           agtype_value *key,
+                                                           Datum *result);
+static Datum fetch_vertex_entry_properties_by_id(vertex_entry *ve,
+                                                 HTAB *relation_cache);
 static bool get_vertex_entry_scalar_property_with_relation(vertex_entry *ve,
                                                            Relation rel,
                                                            agtype_value *key,
@@ -343,6 +362,9 @@ static bool get_vertex_entry_scalar_property_with_relation(vertex_entry *ve,
 static void cache_vertex_entry_scalar_property(vertex_entry *ve,
                                                agtype_value *key,
                                                agtype_value *property_value);
+static void cache_edge_entry_scalar_property(edge_entry *ee,
+                                             agtype_value *key,
+                                             agtype_value *property_value);
 static int64 prefetch_vertex_block_scalar_property_cache(
     GRAPH_global_context *ggctx, Relation rel, BlockNumber blockno,
     graphid target_vertex_id, agtype_value *key, int64 max_cached,
@@ -1306,6 +1328,34 @@ static bool load_vertex_tuple(GRAPH_global_context *ggctx, TupleDesc tupdesc,
     return true;
 }
 
+static void load_endpoint_vertex_skeletons(GRAPH_global_context *ggctx,
+                                           HTAB *edge_endpoint_ids)
+{
+    HASH_SEQ_STATUS status;
+    GraphIdHashEntry *entry;
+    ItemPointerData invalid_tid;
+
+    ItemPointerSetInvalid(&invalid_tid);
+    hash_seq_init(&status, edge_endpoint_ids);
+    while ((entry = hash_seq_search(&status)) != NULL)
+    {
+        label_cache_data *label_cache;
+        Oid vertex_label_table_oid = InvalidOid;
+        const char *vertex_label_name = NULL;
+
+        label_cache = search_label_graph_oid_cache_cached(
+            ggctx->graph_oid, get_graphid_label_id(entry->id));
+        if (label_cache != NULL)
+        {
+            vertex_label_table_oid = label_cache->relation;
+            vertex_label_name = NameStr(label_cache->name);
+        }
+
+        (void) insert_vertex_entry(ggctx, entry->id, vertex_label_table_oid,
+                                   vertex_label_name, invalid_tid);
+    }
+}
+
 /*
  * Helper function to load all of the GRAPH global hashtables (vertex & edge)
  * for the current global context.
@@ -1361,20 +1411,14 @@ static void load_GRAPH_global_hashtables(GRAPH_global_context *ggctx,
                                   get_graphid_label_id(entry->id));
             }
         }
-        if (!load_vertex_metadata)
-        {
-            if (targeted_edge_label)
-            {
-                graph_label_list edge_labels = {0};
-
-                get_ag_labels_names(snapshot, ggctx->graph_oid,
-                                    &ggctx->vertex_labels,
-                                    &edge_labels);
-                free_ag_label_names(&edge_labels);
-            }
-        }
-        else if (edge_endpoint_ids == NULL ||
-                 hash_get_num_entries(edge_endpoint_ids) == 0)
+        /*
+         * Adjacency-index VLE loads do not materialize vertex metadata. Keep
+         * the label surface equally narrow: vertex labels are only needed
+         * when load_vertex_hashtable() will scan vertex relations below.
+         */
+        if (load_vertex_metadata &&
+            (edge_endpoint_ids == NULL ||
+             hash_get_num_entries(edge_endpoint_ids) == 0))
         {
             if (targeted_edge_label)
             {
@@ -1388,7 +1432,7 @@ static void load_GRAPH_global_hashtables(GRAPH_global_context *ggctx,
             load_vertex_hashtable(ggctx, snapshot, &ggctx->vertex_labels,
                                   NULL, NULL);
         }
-        else
+        else if (load_vertex_metadata)
         {
             if (targeted_edge_label)
             {
@@ -1397,6 +1441,12 @@ static void load_GRAPH_global_hashtables(GRAPH_global_context *ggctx,
             }
             load_vertex_hashtable(ggctx, snapshot, &ggctx->vertex_labels,
                                   edge_endpoint_ids, edge_endpoint_label_ids);
+        }
+        else if (load_edge_metadata &&
+                 edge_endpoint_ids != NULL &&
+                 hash_get_num_entries(edge_endpoint_ids) > 0)
+        {
+            load_endpoint_vertex_skeletons(ggctx, edge_endpoint_ids);
         }
         ggctx->adjacency_index_candidate_source =
             targeted_edge_label &&
@@ -1442,6 +1492,10 @@ static void load_GRAPH_global_hashtables(GRAPH_global_context *ggctx,
 static bool edge_label_has_age_adjacency_indexes(Oid edge_label_oid)
 {
     static Oid age_adjacency_am_oid = InvalidOid;
+    static Oid cached_edge_label_oid = InvalidOid;
+    static uint64 cached_label_generation = 0;
+    static bool cached_has_indexes = false;
+    uint64 current_label_generation;
     Relation edge_rel;
     List *index_list;
     ListCell *lc;
@@ -1453,11 +1507,21 @@ static bool edge_label_has_age_adjacency_indexes(Oid edge_label_oid)
         return false;
     }
 
+    current_label_generation = get_label_cache_generation();
+    if (cached_edge_label_oid == edge_label_oid &&
+        cached_label_generation == current_label_generation)
+    {
+        return cached_has_indexes;
+    }
+
     if (!OidIsValid(age_adjacency_am_oid))
     {
         age_adjacency_am_oid = get_index_am_oid("age_adjacency", true);
         if (!OidIsValid(age_adjacency_am_oid))
         {
+            cached_edge_label_oid = edge_label_oid;
+            cached_label_generation = current_label_generation;
+            cached_has_indexes = false;
             return false;
         }
     }
@@ -1495,7 +1559,11 @@ static bool edge_label_has_age_adjacency_indexes(Oid edge_label_oid)
     list_free(index_list);
     relation_close(edge_rel, AccessShareLock);
 
-    return has_outgoing && has_incoming;
+    cached_edge_label_oid = edge_label_oid;
+    cached_label_generation = current_label_generation;
+    cached_has_indexes = has_outgoing && has_incoming;
+
+    return cached_has_indexes;
 }
 
 static bool age_adjacency_index_matches(Relation index_rel, bool outgoing)
@@ -1759,8 +1827,10 @@ static void freeze_GRAPH_global_hashtables(GRAPH_global_context *ggctx)
         curr_vertex = next_GraphIdNode(curr_vertex);
     }
 
-    hash_freeze(ggctx->vertex_hashtable);
-    hash_freeze(ggctx->edge_hashtable);
+    if (ggctx->vertex_metadata_loaded)
+        hash_freeze(ggctx->vertex_hashtable);
+    if (ggctx->edge_metadata_loaded)
+        hash_freeze(ggctx->edge_hashtable);
     hash_freeze(ggctx->edge_tid_hashtable);
 }
 
@@ -1842,6 +1912,25 @@ static bool free_specific_GRAPH_global_context(GRAPH_global_context *ggctx)
     /* free the vertices list */
     free_ListGraphId(ggctx->vertices);
     ggctx->vertices = NULL;
+
+    if (ggctx->edge_hashtable != NULL)
+    {
+        HASH_SEQ_STATUS edge_status;
+        edge_entry *edge_value;
+
+        hash_seq_init(&edge_status, ggctx->edge_hashtable);
+        while ((edge_value = hash_seq_search(&edge_status)) != NULL)
+        {
+            pfree_if_not_null(edge_value->cached_property_key);
+            pfree_if_not_null(DatumGetPointer(
+                edge_value->cached_property_value));
+            edge_value->cached_property_key = NULL;
+            edge_value->cached_property_key_len = 0;
+            edge_value->cached_property_key_char = '\0';
+            edge_value->cached_property_value = (Datum) 0;
+            edge_value->cached_property_value_valid = false;
+        }
+    }
 
     free_ag_label_names(&ggctx->vertex_labels);
     free_ag_label_names(&ggctx->edge_labels);
@@ -2334,6 +2423,34 @@ vertex_entry *get_vertex_entry(GRAPH_global_context *ggctx, graphid vertex_id)
     return ve;
 }
 
+vertex_entry *ensure_vertex_entry_skeleton(GRAPH_global_context *ggctx,
+                                           graphid vertex_id)
+{
+    vertex_entry *ve;
+    label_cache_data *label_cache;
+    ItemPointerData invalid_tid;
+    Oid vertex_label_table_oid = InvalidOid;
+    const char *vertex_label_name = NULL;
+
+    ve = get_vertex_entry(ggctx, vertex_id);
+    if (ve != NULL)
+        return ve;
+
+    label_cache = search_label_graph_oid_cache_cached(
+        ggctx->graph_oid, get_graphid_label_id(vertex_id));
+    if (label_cache != NULL)
+    {
+        vertex_label_table_oid = label_cache->relation;
+        vertex_label_name = NameStr(label_cache->name);
+    }
+
+    ItemPointerSetInvalid(&invalid_tid);
+    (void) insert_vertex_entry(ggctx, vertex_id, vertex_label_table_oid,
+                               vertex_label_name, invalid_tid);
+
+    return get_vertex_entry(ggctx, vertex_id);
+}
+
 /* helper function to retrieve an edge_entry from the graph's edge hash table */
 edge_entry *get_edge_entry(GRAPH_global_context *ggctx, graphid edge_id)
 {
@@ -2558,20 +2675,326 @@ Datum get_vertex_entry_properties(vertex_entry *ve)
 Datum get_vertex_entry_properties_with_cache(vertex_entry *ve,
                                              HTAB *relation_cache)
 {
+    if (ve->cached_properties_valid)
+    {
+        return ve->cached_properties;
+    }
+
+    if (!ItemPointerIsValid(&ve->tid))
+    {
+        return fetch_vertex_entry_properties_by_id(ve, relation_cache);
+    }
+
     return fetch_entry_properties(
         ve->vertex_label_table_oid, ve->tid, 2, relation_cache,
         "get_vertex_entry_properties: stale TID - "
         "vertex entry references a tuple that is no longer visible");
 }
 
+int64 prefetch_vertex_entry_properties_by_ids(
+    GRAPH_global_context *ggctx, const graphid *vertex_ids,
+    int64 nvertex_ids, HTAB **relation_cache, const char *cache_name)
+{
+    HTAB *needed_vertices;
+    HASHCTL hash_ctl;
+    Oid *relids;
+    int64 *rel_candidate_counts;
+    int64 nrelids = 0;
+    int64 prefetch_needed = 0;
+    int64 loaded = 0;
+    int64 i;
+
+    Assert(ggctx != NULL);
+    Assert(vertex_ids != NULL || nvertex_ids == 0);
+    Assert(relation_cache != NULL);
+
+    if (nvertex_ids <= 0)
+        return 0;
+
+    memset(&hash_ctl, 0, sizeof(hash_ctl));
+    hash_ctl.keysize = sizeof(graphid);
+    hash_ctl.entrysize = sizeof(VertexPropertyPrefetchEntry);
+    needed_vertices = hash_create("vertex property prefetch candidates",
+                                  (long)nvertex_ids, &hash_ctl,
+                                  HASH_ELEM | HASH_BLOBS);
+    relids = palloc(sizeof(Oid) * nvertex_ids);
+    rel_candidate_counts = palloc0(sizeof(int64) * nvertex_ids);
+
+    for (i = 0; i < nvertex_ids; i++)
+    {
+        VertexPropertyPrefetchEntry *entry;
+        vertex_entry *ve;
+        graphid vertex_id = vertex_ids[i];
+        bool found;
+        bool relid_seen = false;
+        int64 relidx;
+
+        ve = get_vertex_entry(ggctx, vertex_id);
+        if (ve == NULL || ve->cached_properties_valid ||
+            !OidIsValid(ve->vertex_label_table_oid))
+            continue;
+
+        entry = hash_search(needed_vertices, &vertex_id, HASH_ENTER, &found);
+        if (found)
+            continue;
+
+        entry->ve = ve;
+
+        for (relidx = 0; relidx < nrelids; relidx++)
+        {
+            if (relids[relidx] == ve->vertex_label_table_oid)
+            {
+                relid_seen = true;
+                rel_candidate_counts[relidx]++;
+                break;
+            }
+        }
+        if (!relid_seen)
+        {
+            relids[nrelids++] = ve->vertex_label_table_oid;
+            rel_candidate_counts[nrelids - 1] = 1;
+        }
+    }
+
+    for (i = 0; i < nrelids; i++)
+    {
+        if (rel_candidate_counts[i] >=
+            AGE_VERTEX_PROPERTY_PREFETCH_MIN_REL_CANDIDATES)
+        {
+            prefetch_needed += rel_candidate_counts[i];
+        }
+    }
+
+    if (prefetch_needed == 0)
+    {
+        hash_destroy(needed_vertices);
+        pfree(rel_candidate_counts);
+        pfree(relids);
+        return 0;
+    }
+
+    if (*relation_cache == NULL)
+    {
+        *relation_cache = create_entry_property_relation_cache(cache_name);
+    }
+
+    for (i = 0; i < nrelids && loaded < prefetch_needed; i++)
+    {
+        Relation rel;
+        TupleDesc tupdesc;
+        TableScanDesc scan_desc;
+        HeapTuple tuple;
+
+        if (rel_candidate_counts[i] <
+            AGE_VERTEX_PROPERTY_PREFETCH_MIN_REL_CANDIDATES)
+        {
+            continue;
+        }
+
+        rel = get_entry_property_relation(relids[i], *relation_cache);
+        tupdesc = RelationGetDescr(rel);
+        scan_desc = table_beginscan(rel, GetActiveSnapshot(), 0, NULL);
+        while ((tuple = heap_getnext(scan_desc, ForwardScanDirection)) != NULL)
+        {
+            VertexPropertyPrefetchEntry *entry;
+            graphid vertex_id;
+            Datum vertex_id_datum;
+            bool isnull;
+
+            vertex_id_datum = heap_getattr(
+                tuple, Anum_ag_label_vertex_table_id, tupdesc, &isnull);
+            if (isnull)
+                continue;
+
+            vertex_id = DatumGetInt64(vertex_id_datum);
+            entry = hash_search(needed_vertices, &vertex_id, HASH_FIND,
+                                NULL);
+            if (entry != NULL &&
+                entry->ve->vertex_label_table_oid == relids[i] &&
+                !entry->ve->cached_properties_valid)
+            {
+                Datum props;
+
+                entry->ve->tid = tuple->t_self;
+                props = heap_getattr(tuple,
+                                     Anum_ag_label_vertex_table_properties,
+                                     tupdesc, &isnull);
+                if (!isnull)
+                {
+                    MemoryContext oldctx;
+
+                    oldctx = MemoryContextSwitchTo(TopMemoryContext);
+                    entry->ve->cached_properties = datumCopy(props, false, -1);
+                    entry->ve->cached_properties_valid = true;
+                    MemoryContextSwitchTo(oldctx);
+                }
+                loaded++;
+                if (loaded >= prefetch_needed)
+                    break;
+            }
+        }
+        table_endscan(scan_desc);
+    }
+
+    hash_destroy(needed_vertices);
+    pfree(rel_candidate_counts);
+    pfree(relids);
+
+    return loaded;
+}
+
+bool get_vertex_entry_cached_properties(vertex_entry *ve, Datum *properties)
+{
+    Assert(ve != NULL);
+    Assert(properties != NULL);
+
+    *properties = (Datum) 0;
+    if (!ve->cached_properties_valid)
+    {
+        return false;
+    }
+
+    *properties = ve->cached_properties;
+    return true;
+}
+
 Datum get_vertex_entry_properties_with_relation(vertex_entry *ve, Relation rel)
 {
     Assert(RelationGetRelid(rel) == ve->vertex_label_table_oid);
+
+    if (!ItemPointerIsValid(&ve->tid))
+    {
+        return fetch_vertex_entry_properties_by_id(ve, NULL);
+    }
 
     return fetch_entry_properties_from_relation(
         rel, ve->tid, 2,
         "get_vertex_entry_properties: stale TID - "
         "vertex entry references a tuple that is no longer visible");
+}
+
+static Datum fetch_vertex_entry_properties_by_id(vertex_entry *ve,
+                                                 HTAB *relation_cache)
+{
+    Relation rel;
+    Oid index_oid;
+    TableScanDesc scan_desc;
+    HeapTuple tuple;
+    TupleDesc tupdesc;
+    Datum result = (Datum) 0;
+    bool close_rel = false;
+
+    if (!OidIsValid(ve->vertex_label_table_oid))
+    {
+        elog(ERROR, "vertex entry has no label relation for lazy fetch");
+    }
+
+    rel = get_entry_property_relation(ve->vertex_label_table_oid,
+                                      relation_cache);
+    close_rel = relation_cache == NULL;
+    tupdesc = RelationGetDescr(rel);
+    index_oid = find_usable_btree_index_for_attr(
+        rel, Anum_ag_label_vertex_table_id);
+    if (OidIsValid(index_oid))
+    {
+        Relation index_rel;
+        IndexScanDesc index_scan;
+        TupleTableSlot *slot;
+        ScanKeyData scan_key;
+
+        ScanKeyInit(&scan_key, Anum_ag_label_vertex_table_id,
+                    BTEqualStrategyNumber, F_INT8EQ,
+                    GRAPHID_GET_DATUM(ve->vertex_id));
+        index_rel = index_open(index_oid, AccessShareLock);
+        slot = table_slot_create(rel, NULL);
+        index_scan = index_beginscan(rel, index_rel, GetActiveSnapshot(),
+                                     NULL, 1, 0);
+        index_rescan(index_scan, &scan_key, 1, NULL, 0);
+        if (index_getnext_slot(index_scan, ForwardScanDirection, slot))
+        {
+            bool should_free;
+            bool isnull;
+            Datum props;
+
+            tuple = ExecFetchSlotHeapTuple(slot, true, &should_free);
+            ve->tid = tuple->t_self;
+            props = heap_getattr(tuple, Anum_ag_label_vertex_table_properties,
+                                 tupdesc, &isnull);
+            if (!isnull)
+            {
+                MemoryContext oldctx;
+
+                oldctx = MemoryContextSwitchTo(TopMemoryContext);
+                result = datumCopy(props, false, -1);
+                MemoryContextSwitchTo(oldctx);
+                ve->cached_properties = result;
+                ve->cached_properties_valid = true;
+            }
+            if (should_free)
+            {
+                heap_freetuple(tuple);
+            }
+        }
+        index_endscan(index_scan);
+        ExecDropSingleTupleTableSlot(slot);
+        index_close(index_rel, AccessShareLock);
+        if (result != (Datum) 0)
+        {
+            if (close_rel)
+            {
+                table_close(rel, AccessShareLock);
+            }
+            return result;
+        }
+    }
+
+    scan_desc = table_beginscan(rel, GetActiveSnapshot(), 0, NULL);
+    while ((tuple = heap_getnext(scan_desc, ForwardScanDirection)) != NULL)
+    {
+        graphid vertex_id;
+        bool isnull;
+
+        vertex_id = DatumGetInt64(heap_getattr(
+            tuple, Anum_ag_label_vertex_table_id, tupdesc, &isnull));
+        if (isnull || vertex_id != ve->vertex_id)
+        {
+            continue;
+        }
+
+        ve->tid = tuple->t_self;
+        {
+            bool props_isnull;
+            Datum props;
+
+            props = heap_getattr(tuple,
+                                 Anum_ag_label_vertex_table_properties,
+                                 tupdesc, &props_isnull);
+            if (!props_isnull)
+            {
+                MemoryContext oldctx;
+
+                oldctx = MemoryContextSwitchTo(TopMemoryContext);
+                result = datumCopy(props, false, -1);
+                MemoryContextSwitchTo(oldctx);
+                ve->cached_properties = result;
+                ve->cached_properties_valid = true;
+            }
+        }
+        break;
+    }
+    table_endscan(scan_desc);
+    if (close_rel)
+    {
+        table_close(rel, AccessShareLock);
+    }
+
+    if (result == (Datum) 0)
+    {
+        elog(ERROR, "vertex entry lazy fetch could not find vertex id "
+             INT64_FORMAT, ve->vertex_id);
+    }
+
+    return result;
 }
 
 bool get_vertex_entry_cached_property(vertex_entry *ve, agtype_value *key,
@@ -2632,6 +3055,10 @@ bool get_vertex_entry_property_with_cache(vertex_entry *ve,
     {
         return true;
     }
+    if (!ItemPointerIsValid(&ve->tid))
+    {
+        (void) fetch_vertex_entry_properties_by_id(ve, relation_cache);
+    }
 
     rel = get_entry_property_relation(ve->vertex_label_table_oid,
                                       relation_cache);
@@ -2661,6 +3088,10 @@ bool get_vertex_entry_property_with_lazy_cache(vertex_entry *ve,
     {
         return true;
     }
+    if (!ItemPointerIsValid(&ve->tid))
+    {
+        (void) fetch_vertex_entry_properties_by_id(ve, *relation_cache);
+    }
 
     if (*relation_cache == NULL)
     {
@@ -2685,6 +3116,10 @@ bool get_vertex_entry_scalar_property_with_lazy_cache(vertex_entry *ve,
     {
         return true;
     }
+    if (!ItemPointerIsValid(&ve->tid))
+    {
+        (void) fetch_vertex_entry_properties_by_id(ve, *relation_cache);
+    }
 
     if (*relation_cache == NULL)
     {
@@ -2695,6 +3130,68 @@ bool get_vertex_entry_scalar_property_with_lazy_cache(vertex_entry *ve,
                                       *relation_cache);
     return get_vertex_entry_scalar_property_with_relation(ve, rel, key,
                                                          result);
+}
+
+bool cache_vertex_entry_tuple_scalar_property(
+    GRAPH_global_context *ggctx, Oid relid, HeapTuple tuple,
+    TupleDesc tupdesc, agtype_value *key)
+{
+    Datum vertex_id_datum;
+    Datum props;
+    graphid vertex_id;
+    vertex_entry *ve;
+    agtype *properties;
+    agtype_value property_value;
+    bool property_value_needs_free = false;
+    bool found = false;
+    bool isnull;
+
+    Assert(ggctx != NULL);
+    Assert(tuple != NULL);
+    Assert(tupdesc != NULL);
+    Assert(key != NULL);
+
+    vertex_id_datum = heap_getattr(tuple, Anum_ag_label_vertex_table_id,
+                                   tupdesc, &isnull);
+    if (isnull)
+        return false;
+
+    vertex_id = DatumGetInt64(vertex_id_datum);
+    ve = (vertex_entry *)hash_search(ggctx->vertex_hashtable,
+                                     (void *)&vertex_id,
+                                     HASH_FIND, &found);
+    if (!found || ve->vertex_label_table_oid != relid)
+        return false;
+
+    props = heap_getattr(tuple, Anum_ag_label_vertex_table_properties,
+                         tupdesc, &isnull);
+    if (isnull)
+        return false;
+
+    ve->tid = tuple->t_self;
+    if (!ve->cached_properties_valid)
+    {
+        MemoryContext oldctx;
+
+        oldctx = MemoryContextSwitchTo(TopMemoryContext);
+        ve->cached_properties = datumCopy(props, false, -1);
+        ve->cached_properties_valid = true;
+        MemoryContextSwitchTo(oldctx);
+    }
+
+    properties = DATUM_GET_AGTYPE_P(props);
+    if (find_agtype_value_from_container_no_copy(&properties->root,
+                                                 AGT_FOBJECT, key,
+                                                 &property_value,
+                                                 &property_value_needs_free) &&
+        property_value.type != AGTV_NULL)
+    {
+        cache_vertex_entry_scalar_property(ve, key, &property_value);
+    }
+    if (property_value_needs_free)
+        pfree_agtype_value_content(&property_value);
+
+    return true;
 }
 
 BlockNumber get_vertex_entry_tid_block(vertex_entry *ve)
@@ -2712,6 +3209,11 @@ int64 prefetch_vertex_entry_block_scalar_property_cache(
     Assert(ggctx != NULL);
     Assert(ve != NULL);
     Assert(key != NULL);
+
+    if (!ItemPointerIsValid(&ve->tid))
+    {
+        (void) fetch_vertex_entry_properties_by_id(ve, *relation_cache);
+    }
 
     if (*relation_cache == NULL)
     {
@@ -2743,6 +3245,10 @@ bool get_vertex_entry_property_with_relation(vertex_entry *ve, Relation rel,
     if (get_vertex_entry_cached_property(ve, key, result))
     {
         return true;
+    }
+    if (!ItemPointerIsValid(&ve->tid))
+    {
+        (void) fetch_vertex_entry_properties_by_id(ve, NULL);
     }
 
     return get_vertex_entry_property_with_relation_uncached(ve, rel, key,
@@ -2934,6 +3440,41 @@ static void cache_vertex_entry_scalar_property(vertex_entry *ve,
             agtype_value_to_agtype(property_value));
     }
     ve->cached_property_value_valid = true;
+    MemoryContextSwitchTo(oldctx);
+}
+
+static void cache_edge_entry_scalar_property(edge_entry *ee,
+                                             agtype_value *key,
+                                             agtype_value *property_value)
+{
+    MemoryContext oldctx;
+
+    oldctx = MemoryContextSwitchTo(TopMemoryContext);
+    pfree_if_not_null(ee->cached_property_key);
+    pfree_if_not_null(DatumGetPointer(ee->cached_property_value));
+    ee->cached_property_key_len = key->val.string.len;
+    if (key->val.string.len == 1)
+    {
+        ee->cached_property_key = NULL;
+        ee->cached_property_key_char = key->val.string.val[0];
+    }
+    else
+    {
+        ee->cached_property_key = pnstrdup(key->val.string.val,
+                                           key->val.string.len);
+        ee->cached_property_key_char = '\0';
+    }
+    if (property_value->type == AGTV_INTEGER)
+    {
+        ee->cached_property_value = PointerGetDatum(
+            agtype_integer_to_agtype(property_value->val.int_value));
+    }
+    else
+    {
+        ee->cached_property_value = PointerGetDatum(
+            agtype_value_to_agtype(property_value));
+    }
+    ee->cached_property_value_valid = true;
     MemoryContextSwitchTo(oldctx);
 }
 
@@ -3144,6 +3685,115 @@ Datum get_edge_entry_properties_with_cache(edge_entry *ee,
         ee->edge_label_table_oid, ee->tid, 4, relation_cache,
         "get_edge_entry_properties: stale TID - "
         "edge entry references a tuple that is no longer visible");
+}
+
+bool get_edge_entry_cached_property(edge_entry *ee, agtype_value *key,
+                                    Datum *result)
+{
+    Assert(key != NULL);
+    Assert(result != NULL);
+
+    *result = (Datum) 0;
+    if (ee->cached_property_value_valid &&
+        ee->cached_property_key_len == key->val.string.len &&
+        (key->val.string.len == 1 ?
+         ee->cached_property_key_char == key->val.string.val[0] :
+         memcmp(ee->cached_property_key, key->val.string.val,
+                key->val.string.len) == 0))
+    {
+        *result = ee->cached_property_value;
+        return true;
+    }
+
+    return false;
+}
+
+bool get_edge_entry_property_with_cache(edge_entry *ee,
+                                        HTAB *relation_cache,
+                                        agtype_value *key, Datum *result)
+{
+    Relation rel;
+    bool close_rel;
+
+    Assert(key != NULL);
+    Assert(result != NULL);
+
+    if (get_edge_entry_cached_property(ee, key, result))
+    {
+        return true;
+    }
+
+    rel = get_entry_property_relation(ee->edge_label_table_oid,
+                                      relation_cache);
+    close_rel = relation_cache == NULL;
+    if (get_edge_entry_property_with_relation_uncached(ee, rel, key, result))
+    {
+        if (close_rel)
+        {
+            table_close(rel, AccessShareLock);
+        }
+        return true;
+    }
+
+    if (close_rel)
+    {
+        table_close(rel, AccessShareLock);
+    }
+
+    return false;
+}
+
+bool get_edge_entry_property_with_relation(edge_entry *ee, Relation rel,
+                                           agtype_value *key, Datum *result)
+{
+    Assert(RelationGetRelid(rel) == ee->edge_label_table_oid);
+
+    if (get_edge_entry_cached_property(ee, key, result))
+    {
+        return true;
+    }
+
+    return get_edge_entry_property_with_relation_uncached(ee, rel, key,
+                                                         result);
+}
+
+static bool get_edge_entry_property_with_relation_uncached(edge_entry *ee,
+                                                           Relation rel,
+                                                           agtype_value *key,
+                                                           Datum *result)
+{
+    agtype *properties;
+    agtype_value property_value;
+    bool property_value_needs_free = false;
+    bool found;
+    bool property_found = false;
+
+    Assert(RelationGetRelid(rel) == ee->edge_label_table_oid);
+    Assert(key != NULL);
+    Assert(result != NULL);
+
+    *result = (Datum) 0;
+    properties = DATUM_GET_AGTYPE_P(
+        fetch_entry_properties_from_relation(
+            rel, ee->tid, 4,
+            "get_edge_entry_property: stale TID - "
+            "edge entry references a tuple that is no longer visible"));
+
+    found = find_agtype_value_from_container_no_copy(
+        &properties->root, AGT_FOBJECT, key, &property_value,
+        &property_value_needs_free);
+    if (found && property_value.type != AGTV_NULL)
+    {
+        cache_edge_entry_scalar_property(ee, key, &property_value);
+        *result = ee->cached_property_value;
+        property_found = true;
+    }
+    if (property_value_needs_free)
+    {
+        pfree_agtype_value_content(&property_value);
+    }
+
+    return property_found;
 }
 
 HTAB *create_entry_property_relation_cache(const char *name)

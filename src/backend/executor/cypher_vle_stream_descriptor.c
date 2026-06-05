@@ -1,0 +1,565 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+#include "postgres.h"
+
+#include "executor/cypher_vle_stream.h"
+#include "nodes/cypher_nodes.h"
+#include "nodes/pg_list.h"
+#include "nodes/value.h"
+#include "utils/agtype.h"
+#include "utils/builtins.h"
+
+static const char *age_vle_stream_arg_name(int argno);
+static bool age_vle_stream_const_flag(CustomScan *cscan, int argno);
+static bool age_vle_stream_private_bool(List *descriptor, int index);
+static int64 age_vle_stream_private_int64(List *descriptor, int index);
+static char *age_vle_stream_private_text(List *descriptor, int index);
+static Datum age_vle_stream_private_agtype(List *descriptor, int index,
+                                           bool *isnull);
+static const char *age_vle_output_requirement_name(
+    AgeVLEOutputRequirement requirement);
+
+void read_age_vle_stream_graph(CustomScan *cscan,
+                               AgeVLEStreamGraph *graph)
+{
+    List *descriptor;
+
+    Assert(cscan != NULL);
+    Assert(graph != NULL);
+
+    descriptor = list_nth_node(List, cscan->custom_private,
+                               AGE_VLE_STREAM_PRIVATE_GRAPH);
+    Assert(list_length(descriptor) == AGE_VLE_STREAM_GRAPH_COUNT);
+
+    graph->graph_known =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_GRAPH_KNOWN);
+    graph->graph_null =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_GRAPH_NULL);
+    graph->graph_name =
+        age_vle_stream_private_text(descriptor,
+                                    AGE_VLE_STREAM_GRAPH_VALUE);
+}
+
+void read_age_vle_stream_edge(CustomScan *cscan,
+                              AgeVLEStreamEdge *edge)
+{
+    List *descriptor;
+
+    Assert(cscan != NULL);
+    Assert(edge != NULL);
+
+    descriptor = list_nth_node(List, cscan->custom_private,
+                               AGE_VLE_STREAM_PRIVATE_EDGE);
+    Assert(list_length(descriptor) == AGE_VLE_STREAM_EDGE_COUNT);
+
+    edge->edge_known =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_EDGE_KNOWN);
+    edge->label_known =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_EDGE_LABEL_KNOWN);
+    edge->label_name =
+        age_vle_stream_private_text(descriptor,
+                                    AGE_VLE_STREAM_EDGE_LABEL_VALUE);
+    edge->properties_known =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_EDGE_PROPERTIES_KNOWN);
+    edge->properties_value =
+        age_vle_stream_private_agtype(
+            descriptor, AGE_VLE_STREAM_EDGE_PROPERTIES_VALUE,
+            &edge->properties_null);
+    edge->properties_count =
+        (int)age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_PROPERTIES_COUNT);
+}
+
+void read_age_vle_stream_range_direction(CustomScan *cscan,
+                                         AgeVLEStreamRangeDirection *range)
+{
+    List *descriptor;
+
+    Assert(cscan != NULL);
+    Assert(range != NULL);
+
+    descriptor = list_nth_node(List, cscan->custom_private,
+                               AGE_VLE_STREAM_PRIVATE_RANGE_DIRECTION);
+    Assert(list_length(descriptor) == AGE_VLE_STREAM_RANGE_DIRECTION_COUNT);
+
+    range->lower_known =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_RANGE_LOWER_KNOWN);
+    range->lower_null =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_RANGE_LOWER_NULL);
+    range->lower_value =
+        age_vle_stream_private_int64(descriptor,
+                                     AGE_VLE_STREAM_RANGE_LOWER_VALUE);
+    range->upper_known =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_RANGE_UPPER_KNOWN);
+    range->upper_null =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_RANGE_UPPER_NULL);
+    range->upper_value =
+        age_vle_stream_private_int64(descriptor,
+                                     AGE_VLE_STREAM_RANGE_UPPER_VALUE);
+    range->direction_known =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_DIRECTION_KNOWN);
+    range->direction_null =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_DIRECTION_NULL);
+    range->direction_value =
+        age_vle_stream_private_int64(descriptor,
+                                     AGE_VLE_STREAM_DIRECTION_VALUE);
+}
+
+void read_age_vle_stream_output(CustomScan *cscan,
+                                AgeVLEStreamOutput *output)
+{
+    List *descriptor;
+
+    Assert(cscan != NULL);
+    Assert(output != NULL);
+
+    descriptor = list_nth_node(List, cscan->custom_private,
+                               AGE_VLE_STREAM_PRIVATE_OUTPUT);
+    Assert(list_length(descriptor) == AGE_VLE_STREAM_OUTPUT_COUNT);
+
+    output->grammar_known =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_OUTPUT_GRAMMAR_KNOWN);
+    output->grammar_null =
+        age_vle_stream_private_bool(descriptor,
+                                    AGE_VLE_STREAM_OUTPUT_GRAMMAR_NULL);
+    output->grammar_value =
+        age_vle_stream_private_int64(descriptor,
+                                     AGE_VLE_STREAM_OUTPUT_GRAMMAR_VALUE);
+    output->requirement =
+        (AgeVLEOutputRequirement)age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_OUTPUT_REQUIREMENT);
+    output->terminal_key_known =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_KNOWN);
+    output->terminal_key_null =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_NULL);
+    output->terminal_key_value =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_VALUE);
+    output->terminal_key_len =
+        (int)age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_LEN);
+    output->terminal_key_is_char =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_OUTPUT_TERMINAL_KEY_IS_CHAR);
+    output->materializer_vertex_prefetch =
+        age_vle_stream_private_bool(
+            descriptor,
+            AGE_VLE_STREAM_OUTPUT_MATERIALIZER_VERTEX_PREFETCH);
+    output->materializer_prefetch_min_rel_candidates =
+        (int)age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_OUTPUT_MATERIALIZER_PREFETCH_MIN_REL_CANDIDATES);
+}
+
+void read_age_vle_stream_edge_source(CustomScan *cscan,
+                                     AgeVLEStreamEdgeSource *source)
+{
+    List *descriptor;
+
+    Assert(cscan != NULL);
+    Assert(source != NULL);
+
+    descriptor = list_nth_node(List, cscan->custom_private,
+                               AGE_VLE_STREAM_PRIVATE_EDGE_SOURCE);
+    Assert(list_length(descriptor) == AGE_VLE_STREAM_EDGE_SOURCE_COUNT);
+
+    source->kind =
+        (AgeVLEStreamEdgeSourceKind)age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_KIND);
+    source->adjacency_out =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_ADJACENCY_OUT);
+    source->adjacency_in =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_ADJACENCY_IN);
+    source->endpoint_start =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_ENDPOINT_START);
+    source->endpoint_end =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_ENDPOINT_END);
+    source->local_edge_state =
+        age_vle_stream_private_bool(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_LOCAL_EDGE_STATE);
+    source->outgoing_kind =
+        (AgeVLEStreamDirectedSourceKind)age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_OUTGOING_KIND);
+    source->incoming_kind =
+        (AgeVLEStreamDirectedSourceKind)age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_INCOMING_KIND);
+    source->relation_tuples =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_RELATION_TUPLES);
+    source->start_fanout =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_START_FANOUT);
+    source->end_fanout =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT);
+    source->cost_policy =
+        age_vle_stream_private_text(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_COST_POLICY);
+    source->policy_outgoing_kind =
+        (AgeVLEStreamDirectedSourceKind)age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_OUTGOING_KIND);
+    source->policy_incoming_kind =
+        (AgeVLEStreamDirectedSourceKind)age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_INCOMING_KIND);
+}
+
+const char *age_vle_stream_shape_name(AgeVLEStreamOutput *output, int nargs)
+{
+    if (output != NULL)
+    {
+        if (output->requirement ==
+            AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY)
+            return "terminal-property";
+        if (output->requirement ==
+            AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_VERTEX)
+            return "terminal-vertex";
+        if (output->requirement ==
+            AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES)
+            return "terminal-properties";
+    }
+
+    if (nargs == AGE_VLE_STREAM_ARG_GRAMMAR_NODE + 1)
+        return "cypher";
+    if (nargs == AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 1)
+        return "terminal-property";
+
+    return "unknown";
+}
+
+List *make_age_vle_stream_slot_descriptions(CustomScan *cscan, int nargs)
+{
+    List *descriptions = NIL;
+    int argno;
+
+    for (argno = 0; argno < nargs; argno++)
+    {
+        descriptions = lappend(descriptions,
+                               psprintf("%s=%s",
+                                        age_vle_stream_arg_name(argno),
+                                        age_vle_stream_const_flag(cscan, argno) ?
+                                        "const" : "dynamic"));
+    }
+
+    return descriptions;
+}
+
+char *format_age_vle_stream_graph(AgeVLEStreamGraph *graph)
+{
+    if (!graph->graph_known)
+        return pstrdup("dynamic");
+
+    if (graph->graph_null)
+        return pstrdup("null");
+
+    return pstrdup(graph->graph_name == NULL ? "" : graph->graph_name);
+}
+
+char *format_age_vle_stream_edge(AgeVLEStreamEdge *edge)
+{
+    const char *label_text;
+    const char *properties_text;
+
+    if (!edge->edge_known)
+        return pstrdup("dynamic");
+
+    label_text = edge->label_known ?
+        (edge->label_name == NULL ? "" : edge->label_name) :
+        "dynamic";
+    properties_text = edge->properties_known ?
+        psprintf("%d", edge->properties_count) :
+        "dynamic";
+
+    return psprintf("label=%s, properties=%s", label_text, properties_text);
+}
+
+char *format_age_vle_stream_endpoints(CustomScan *cscan)
+{
+    const char *start_text;
+    const char *end_text;
+
+    start_text = age_vle_stream_const_flag(cscan, AGE_VLE_STREAM_ARG_START) ?
+        "const-id" : "runtime-id";
+    end_text = age_vle_stream_const_flag(cscan, AGE_VLE_STREAM_ARG_END) ?
+        "const-id" : "runtime-id";
+
+    return psprintf("start=%s, end=%s", start_text, end_text);
+}
+
+char *format_age_vle_stream_range(AgeVLEStreamRangeDirection *range)
+{
+    const char *lower_text;
+    const char *upper_text;
+
+    lower_text = range->lower_known ?
+        (range->lower_null ? "default(1)" :
+         psprintf("%lld", (long long)range->lower_value)) :
+        "dynamic";
+    upper_text = range->upper_known ?
+        (range->upper_null ? "unbounded" :
+         psprintf("%lld", (long long)range->upper_value)) :
+        "dynamic";
+
+    return psprintf("%s..%s", lower_text, upper_text);
+}
+
+const char *format_age_vle_stream_direction(AgeVLEStreamRangeDirection *range)
+{
+    if (!range->direction_known)
+        return "dynamic";
+
+    if (range->direction_null)
+        return "null";
+
+    switch ((cypher_rel_dir)range->direction_value)
+    {
+        case CYPHER_REL_DIR_NONE:
+            return "any";
+        case CYPHER_REL_DIR_LEFT:
+            return "left";
+        case CYPHER_REL_DIR_RIGHT:
+            return "right";
+    }
+
+    return psprintf("unknown(%lld)", (long long)range->direction_value);
+}
+
+char *format_age_vle_stream_output(AgeVLEStreamOutput *output, int nargs)
+{
+    const char *grammar_text;
+
+    if (!output->grammar_known)
+        grammar_text = "dynamic";
+    else if (output->grammar_null)
+        grammar_text = "null";
+    else if (output->grammar_value < 0)
+        grammar_text = "terminal-only";
+    else
+        grammar_text = "cached";
+
+    if (output->requirement == AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY)
+    {
+        const char *key_text;
+
+        key_text = output->terminal_key_known ?
+            (output->terminal_key_null ? "null" :
+             (output->terminal_key_value == NULL ? "" :
+              output->terminal_key_value)) :
+            "dynamic";
+
+        return psprintf("terminal-property(requirement=%s, grammar=%s, "
+                        "key=%s, len=%d, char-fast=%s)",
+                        age_vle_output_requirement_name(output->requirement),
+                        grammar_text, key_text, output->terminal_key_len,
+                        output->terminal_key_is_char ? "true" : "false");
+    }
+    if (output->requirement == AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_VERTEX)
+    {
+        return psprintf("terminal-vertex(requirement=%s, grammar=%s)",
+                        age_vle_output_requirement_name(output->requirement),
+                        grammar_text);
+    }
+    if (output->requirement ==
+        AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES)
+    {
+        return psprintf("terminal-properties(requirement=%s, grammar=%s)",
+                        age_vle_output_requirement_name(output->requirement),
+                        grammar_text);
+    }
+
+    return psprintf("path(requirement=%s, grammar=%s)",
+                    age_vle_output_requirement_name(output->requirement),
+                    grammar_text);
+}
+
+const char *format_age_vle_stream_materialization(
+    AgeVLEStreamOutput *output)
+{
+    if (output == NULL)
+        return "unknown";
+
+    switch (output->requirement)
+    {
+        case AGE_VLE_OUTPUT_REQUIREMENT_PATH:
+            if (output->materializer_vertex_prefetch)
+            {
+                return psprintf("path-container, vertex-prefetch=label-batch"
+                                "(min-rel-candidates=%d)",
+                                output->materializer_prefetch_min_rel_candidates);
+            }
+            return "path-container";
+        case AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_VERTEX:
+            return "terminal-vertex-container";
+        case AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES:
+            return "terminal-properties-direct";
+        case AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY:
+            return "terminal-property-direct";
+        case AGE_VLE_OUTPUT_REQUIREMENT_UNKNOWN:
+            return "unknown";
+    }
+
+    return "unknown";
+}
+
+static const char *age_vle_output_requirement_name(
+    AgeVLEOutputRequirement requirement)
+{
+    switch (requirement)
+    {
+        case AGE_VLE_OUTPUT_REQUIREMENT_PATH:
+            return "path";
+        case AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_VERTEX:
+            return "terminal-vertex";
+        case AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES:
+            return "terminal-properties";
+        case AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY:
+            return "terminal-property";
+        case AGE_VLE_OUTPUT_REQUIREMENT_UNKNOWN:
+            return "unknown";
+    }
+
+    return "unknown";
+}
+
+const char *format_age_vle_stream_terminal_slot(CustomScan *cscan,
+                                                AgeVLEStreamOutput *output,
+                                                int nargs)
+{
+    const char *slot_kind;
+    const char *slot_source;
+
+    if (nargs <= AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY)
+        return "absent";
+
+    slot_kind = "property-key";
+    if (output != NULL &&
+        output->requirement == AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES)
+    {
+        slot_kind = "full-properties";
+    }
+
+    slot_source = age_vle_stream_const_flag(
+        cscan, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY) ?
+        "const" : "dynamic";
+
+    return psprintf("%s, source=%s", slot_kind, slot_source);
+}
+
+static const char *age_vle_stream_arg_name(int argno)
+{
+    switch (argno)
+    {
+        case AGE_VLE_STREAM_ARG_GRAPH:
+            return "graph";
+        case AGE_VLE_STREAM_ARG_START:
+            return "start";
+        case AGE_VLE_STREAM_ARG_END:
+            return "end";
+        case AGE_VLE_STREAM_ARG_EDGE:
+            return "edge";
+        case AGE_VLE_STREAM_ARG_LOWER:
+            return "lower";
+        case AGE_VLE_STREAM_ARG_UPPER:
+            return "upper";
+        case AGE_VLE_STREAM_ARG_DIRECTION:
+            return "direction";
+        case AGE_VLE_STREAM_ARG_GRAMMAR_NODE:
+            return "grammar-node";
+        case AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY:
+            return "terminal-property";
+    }
+
+    return "unknown";
+}
+
+static bool age_vle_stream_const_flag(CustomScan *cscan, int argno)
+{
+    List *const_flags = list_nth_node(List, cscan->custom_private,
+                                      AGE_VLE_STREAM_PRIVATE_CONST_FLAGS);
+    Integer *const_flag;
+
+    if (argno < 0 || argno >= list_length(const_flags))
+        return false;
+
+    const_flag = list_nth_node(Integer, const_flags, argno);
+
+    return intVal(const_flag) != 0;
+}
+
+static bool age_vle_stream_private_bool(List *descriptor, int index)
+{
+    Integer *value = list_nth_node(Integer, descriptor, index);
+
+    return intVal(value) != 0;
+}
+
+static int64 age_vle_stream_private_int64(List *descriptor, int index)
+{
+    Const *value = list_nth_node(Const, descriptor, index);
+
+    Assert(value->consttype == INT8OID);
+    Assert(!value->constisnull);
+
+    return DatumGetInt64(value->constvalue);
+}
+
+static char *age_vle_stream_private_text(List *descriptor, int index)
+{
+    Const *value = list_nth_node(Const, descriptor, index);
+
+    Assert(value->consttype == TEXTOID);
+
+    if (value->constisnull)
+        return NULL;
+
+    return TextDatumGetCString(value->constvalue);
+}
+
+static Datum age_vle_stream_private_agtype(List *descriptor, int index,
+                                           bool *isnull)
+{
+    Const *value = list_nth_node(Const, descriptor, index);
+
+    Assert(value->consttype == AGTYPEOID);
+    Assert(isnull != NULL);
+
+    *isnull = value->constisnull;
+    if (value->constisnull)
+        return (Datum)0;
+
+    return value->constvalue;
+}

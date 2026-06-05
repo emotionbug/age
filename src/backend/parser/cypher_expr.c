@@ -28,6 +28,7 @@
 #include "catalog/dependency.h"
 #include "catalog/ag_label.h"
 #include "commands/extension.h"
+#include "executor/cypher_vle_stream.h"
 #include "fmgr.h"
 #include "commands/label_commands.h"
 #include "miscadmin.h"
@@ -175,7 +176,6 @@ static Oid age_vle_terminal_vertex_oid = InvalidOid;
 static Oid age_vle_terminal_vertex_properties_oid = InvalidOid;
 static Oid age_vle_terminal_vertex_property_oid = InvalidOid;
 static Oid age_vle_terminal_vertex_property_from_path_oid = InvalidOid;
-static Oid age_vle_terminal_property_output_oid = InvalidOid;
 
 static Node *transform_cypher_expr_recurse(cypher_parsestate *cpstate,
                                            Node *expr);
@@ -834,13 +834,10 @@ static bool parse_keys_func_arg(FuncCall *fn, NodeTag arg_type, Node **arg);
 static bool is_func_name_unary(FuncCall *fn, const char *func_name);
 static bool is_func_name_unary_arg(FuncCall *fn, const char *func_name,
                                    NodeTag arg_type);
-static bool is_func_name_either(FuncCall *fn, const char *left_name,
-                                const char *right_name);
 static bool is_func_name_either_unary_arg(FuncCall *fn,
                                           const char *left_name,
                                           const char *right_name,
                                           NodeTag arg_type);
-static bool is_vle_func_name(FuncCall *fn);
 static bool is_vle_field_name(const char *field_name, bool allow_type);
 static bool is_endpoint_function_name(const char *func_name);
 static bool is_start_endpoint_function_name(const char *func_name);
@@ -958,6 +955,8 @@ static Node *try_transform_vle_terminal_vertex_property_access(
 static bool retarget_vle_terminal_property_output(cypher_parsestate *cpstate,
                                                   Node *vle_path,
                                                   Const *key_const);
+static bool retarget_vle_terminal_properties_output(
+    cypher_parsestate *cpstate, Node *raw_properties);
 static FuncExpr *make_vle_index_properties_expr(cypher_parsestate *cpstate,
                                                 A_Indirection *indexed_arg,
                                                 int location);
@@ -1056,7 +1055,6 @@ static Oid get_age_vle_terminal_vertex_oid(void);
 static Oid get_age_vle_terminal_vertex_properties_oid(void);
 static Oid get_age_vle_terminal_vertex_property_oid(void);
 static Oid get_age_vle_terminal_vertex_property_from_path_oid(void);
-static Oid get_age_vle_terminal_property_output_oid(void);
 static bool function_exists(char *funcname, char *extension);
 static Node *coerce_expr_flexible(ParseState *pstate, Node *expr,
                                   Oid source_oid, Oid target_oid,
@@ -2700,8 +2698,18 @@ static Node *try_transform_current_entity_properties(cypher_parsestate *cpstate,
 
     if (!entity->declared_in_current_clause)
     {
-        return make_raw_attr_var(pstate, var_name,
-                                 AG_VERTEX_COLNAME_PROPERTIES, fn->location);
+        Node *raw_properties;
+
+        raw_properties = make_raw_attr_var(pstate, var_name,
+                                           AG_VERTEX_COLNAME_PROPERTIES,
+                                           fn->location);
+        if (entity->has_raw_targets &&
+            retarget_vle_terminal_properties_output(cpstate, raw_properties))
+        {
+            return raw_properties;
+        }
+
+        return raw_properties;
     }
 
     pnsi = refnameNamespaceItem(pstate, NULL, var_name, location,
@@ -5630,6 +5638,8 @@ static bool function_needs_graph_name_argument(const char *name, int name_len)
         case 'v':
             return (name_len == 3 && memcmp(name, "vle", 3) == 0) ||
                    (name_len == 12 &&
+                    memcmp(name, "vle_internal", 12) == 0) ||
+                   (name_len == 12 &&
                     memcmp(name, "vertex_stats", 12) == 0);
         default:
             return false;
@@ -5875,7 +5885,6 @@ static void invalidate_function_caches(Datum arg, int cache_id,
     age_vle_terminal_vertex_properties_oid = InvalidOid;
     age_vle_terminal_vertex_property_oid = InvalidOid;
     age_vle_terminal_vertex_property_from_path_oid = InvalidOid;
-    age_vle_terminal_property_output_oid = InvalidOid;
     cypher_vle_agg_invalidate_oids();
 }
 
@@ -6863,21 +6872,6 @@ static Oid get_age_vle_terminal_vertex_property_from_path_oid(void)
     return age_vle_terminal_vertex_property_from_path_oid;
 }
 
-static Oid get_age_vle_terminal_property_output_oid(void)
-{
-    initialize_function_caches();
-
-    if (!OidIsValid(age_vle_terminal_property_output_oid))
-    {
-        age_vle_terminal_property_output_oid =
-            get_ag_func_oid("age_vle", 9, AGTYPEOID, AGTYPEOID, AGTYPEOID,
-                            AGTYPEOID, AGTYPEOID, AGTYPEOID, AGTYPEOID,
-                            AGTYPEOID, AGTYPEOID);
-    }
-
-    return age_vle_terminal_property_output_oid;
-}
-
 static Expr *get_current_single_vle_path_expr_internal(
     cypher_parsestate *cpstate, Node *arg, bool require_fixed_one_hop)
 {
@@ -6971,6 +6965,7 @@ static Expr *get_arbitrary_single_vle_path_expr(cypher_parsestate *cpstate,
 static bool is_fixed_one_hop_vle_rel(cypher_relationship *rel)
 {
     FuncCall *fn = NULL;
+    char *func_name = NULL;
     int64 lower;
     int64 upper;
 
@@ -6980,7 +6975,9 @@ static bool is_fixed_one_hop_vle_rel(cypher_relationship *rel)
     }
 
     fn = (FuncCall *)rel->varlen;
-    if (!is_vle_func_name(fn) || list_length(fn->args) < 5)
+    if (!parse_single_func_name(fn, &func_name) ||
+        pg_strcasecmp(func_name, "vle_internal") != 0 ||
+        list_length(fn->args) < 5)
     {
         return false;
     }
@@ -12734,16 +12731,6 @@ static bool is_func_name_unary_arg(FuncCall *fn, const char *func_name,
         pg_strcasecmp(actual_name, func_name) == 0;
 }
 
-static bool is_func_name_either(FuncCall *fn, const char *left_name,
-                                const char *right_name)
-{
-    char *actual_name = NULL;
-
-    return parse_single_func_name(fn, &actual_name) &&
-        (pg_strcasecmp(actual_name, left_name) == 0 ||
-         pg_strcasecmp(actual_name, right_name) == 0);
-}
-
 static bool is_func_name_either_unary_arg(FuncCall *fn,
                                           const char *left_name,
                                           const char *right_name,
@@ -12754,11 +12741,6 @@ static bool is_func_name_either_unary_arg(FuncCall *fn,
     return parse_single_unary_func_arg_name(fn, arg_type, &actual_name) &&
         (pg_strcasecmp(actual_name, left_name) == 0 ||
          pg_strcasecmp(actual_name, right_name) == 0);
-}
-
-static bool is_vle_func_name(FuncCall *fn)
-{
-    return is_func_name_either(fn, "vle", "age_vle");
 }
 
 static bool is_endpoint_function_name(const char *func_name)
@@ -13696,13 +13678,13 @@ static bool retarget_vle_terminal_property_output(cypher_parsestate *cpstate,
 {
     ParseState *pstate = &cpstate->pstate;
     RangeTblEntry *outer_rte;
-    RangeTblEntry *func_rte;
-    RangeTblFunction *rtfunc;
+    RangeTblEntry *vle_rte;
     TargetEntry *sub_te;
-    FuncExpr *vle_func;
     Var *outer_var;
     Var *inner_var;
     Query *subquery;
+    List *row;
+    Const *marker;
 
     if (vle_path == NULL || !IsA(vle_path, Var) ||
         key_const == NULL || key_const->consttype != AGTYPEOID)
@@ -13740,34 +13722,168 @@ static bool retarget_vle_terminal_property_output(cypher_parsestate *cpstate,
         return false;
     }
 
-    func_rte = rt_fetch(inner_var->varno, subquery->rtable);
-    if (func_rte == NULL || func_rte->rtekind != RTE_FUNCTION ||
-        list_length(func_rte->functions) != 1)
+    vle_rte = rt_fetch(inner_var->varno, subquery->rtable);
+    if (vle_rte == NULL ||
+        vle_rte->rtekind != RTE_VALUES ||
+        list_length(vle_rte->values_lists) != 1 ||
+        vle_rte->eref == NULL ||
+        vle_rte->eref->colnames == NIL)
     {
         return false;
     }
 
-    rtfunc = linitial(func_rte->functions);
-    if (rtfunc == NULL || rtfunc->funcexpr == NULL ||
-        !IsA(rtfunc->funcexpr, FuncExpr))
+    row = linitial_node(List, vle_rte->values_lists);
+    if (list_length(row) == AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 3)
+    {
+        Const *existing_key = list_nth_node(
+            Const, row, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
+
+        return !existing_key->constisnull && equal(existing_key, key_const);
+    }
+    if (list_length(row) != AGE_VLE_STREAM_ARG_GRAMMAR_NODE + 3 ||
+        !IsA(lsecond(row), Const))
     {
         return false;
     }
 
-    vle_func = castNode(FuncExpr, rtfunc->funcexpr);
-    if (list_length(vle_func->args) == 9)
-    {
-        return vle_func->funcid == get_age_vle_terminal_property_output_oid();
-    }
-    if (list_length(vle_func->args) != 8 ||
-        exprType((Node *)vle_func) != AGTYPEOID ||
-        !vle_func->funcretset)
+    marker = lsecond_node(Const, row);
+    if (marker->constisnull ||
+        marker->consttype != TEXTOID ||
+        strcmp(TextDatumGetCString(marker->constvalue),
+               AGE_VLE_STREAM_MARKER) != 0)
     {
         return false;
     }
 
-    vle_func->args = lappend(vle_func->args, copyObject(key_const));
-    vle_func->funcid = get_age_vle_terminal_property_output_oid();
+    row = lappend(row, copyObject(key_const));
+    vle_rte->values_lists = list_make1(row);
+    vle_rte->coltypes = lappend_oid(vle_rte->coltypes, AGTYPEOID);
+    vle_rte->coltypmods = lappend_int(vle_rte->coltypmods, -1);
+    vle_rte->colcollations = lappend_oid(vle_rte->colcollations, InvalidOid);
+    vle_rte->eref->colnames =
+        lappend(vle_rte->eref->colnames,
+                makeString("__age_vle_terminal_property"));
+    if (vle_rte->alias != NULL && vle_rte->alias != vle_rte->eref)
+    {
+        vle_rte->alias->colnames =
+            lappend(vle_rte->alias->colnames,
+                    makeString("__age_vle_terminal_property"));
+    }
+
+    return true;
+}
+
+static bool retarget_vle_terminal_properties_output(
+    cypher_parsestate *cpstate, Node *raw_properties)
+{
+    ParseState *pstate = &cpstate->pstate;
+    RangeTblEntry *outer_rte;
+    RangeTblEntry *vle_rte;
+    TargetEntry *sub_te;
+    Var *outer_var;
+    Var *inner_var;
+    FuncExpr *properties_expr;
+    Query *subquery;
+    List *row;
+    Const *marker;
+
+    if (raw_properties == NULL || !IsA(raw_properties, Var))
+    {
+        return false;
+    }
+
+    outer_var = castNode(Var, raw_properties);
+    if (outer_var->varlevelsup != 0 ||
+        outer_var->varno <= 0 ||
+        outer_var->varno > list_length(pstate->p_rtable))
+    {
+        return false;
+    }
+
+    outer_rte = rt_fetch(outer_var->varno, pstate->p_rtable);
+    if (outer_rte == NULL || outer_rte->rtekind != RTE_SUBQUERY ||
+        outer_rte->subquery == NULL)
+    {
+        return false;
+    }
+
+    subquery = outer_rte->subquery;
+    sub_te = get_tle_by_resno(subquery->targetList, outer_var->varattno);
+    if (sub_te == NULL || sub_te->expr == NULL ||
+        !IsA(sub_te->expr, FuncExpr))
+    {
+        return false;
+    }
+
+    properties_expr = castNode(FuncExpr, sub_te->expr);
+    if (properties_expr->funcid != get_age_vle_terminal_vertex_properties_oid() ||
+        list_length(properties_expr->args) != 1 ||
+        !IsA(linitial(properties_expr->args), Var))
+    {
+        return false;
+    }
+
+    inner_var = linitial_node(Var, properties_expr->args);
+    if (inner_var->varlevelsup != 0 ||
+        inner_var->varno <= 0 ||
+        inner_var->varno > list_length(subquery->rtable))
+    {
+        return false;
+    }
+
+    vle_rte = rt_fetch(inner_var->varno, subquery->rtable);
+    if (vle_rte == NULL ||
+        vle_rte->rtekind != RTE_VALUES ||
+        list_length(vle_rte->values_lists) != 1 ||
+        vle_rte->eref == NULL ||
+        vle_rte->eref->colnames == NIL)
+    {
+        return false;
+    }
+
+    row = linitial_node(List, vle_rte->values_lists);
+    if (list_length(row) == AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 3)
+    {
+        Const *existing_key = list_nth_node(
+            Const, row, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
+
+        if (!existing_key->constisnull)
+        {
+            return false;
+        }
+        sub_te->expr = (Expr *)copyObject(inner_var);
+        return true;
+    }
+    if (list_length(row) != AGE_VLE_STREAM_ARG_GRAMMAR_NODE + 3 ||
+        !IsA(lsecond(row), Const))
+    {
+        return false;
+    }
+
+    marker = lsecond_node(Const, row);
+    if (marker->constisnull ||
+        marker->consttype != TEXTOID ||
+        strcmp(TextDatumGetCString(marker->constvalue),
+               AGE_VLE_STREAM_MARKER) != 0)
+    {
+        return false;
+    }
+
+    row = lappend(row, make_null_agtype_const());
+    vle_rte->values_lists = list_make1(row);
+    vle_rte->coltypes = lappend_oid(vle_rte->coltypes, AGTYPEOID);
+    vle_rte->coltypmods = lappend_int(vle_rte->coltypmods, -1);
+    vle_rte->colcollations = lappend_oid(vle_rte->colcollations, InvalidOid);
+    vle_rte->eref->colnames =
+        lappend(vle_rte->eref->colnames,
+                makeString("__age_vle_terminal_property"));
+    if (vle_rte->alias != NULL && vle_rte->alias != vle_rte->eref)
+    {
+        vle_rte->alias->colnames =
+            lappend(vle_rte->alias->colnames,
+                    makeString("__age_vle_terminal_property"));
+    }
+    sub_te->expr = (Expr *)copyObject(inner_var);
 
     return true;
 }

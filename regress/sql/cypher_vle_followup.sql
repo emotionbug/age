@@ -25,12 +25,6 @@ SELECT * FROM cypher('cypher_vle_followup', $$
         (c)-[:D {bucket: 1}]->(a)
 $$) AS (r agtype);
 
-CREATE TEMP TABLE vle_followup_points AS
-SELECT * FROM cypher('cypher_vle_followup', $$
-    MATCH (a:Node {name: 'a'}), (d:Node {name: 'd'})
-    RETURN a, d
-$$) AS (a agtype, d agtype);
-
 -- Reversed two-bound traversal should find the reverse chain and back edge.
 SELECT * FROM cypher('cypher_vle_followup', $$
     MATCH p=(:Node {name: 'd'})<-[*2..3]-(:Node {name: 'a'})
@@ -48,17 +42,6 @@ SELECT * FROM cypher('cypher_vle_followup', $$
     RETURN count(p)
 $$) AS (paths agtype);
 
--- Empty finite ranges should not traverse.
-SELECT count(edges) FROM vle_followup_points,
-age_vle(
-    '"cypher_vle_followup"'::agtype,
-    a,
-    d,
-    '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {}}::edge'::agtype,
-    '3'::agtype,
-    '2'::agtype,
-    '1'::agtype);
-
 -- Unbound-start VLE with a missing endpoint should return no rows.
 SELECT * FROM cypher('cypher_vle_followup', $$
     MATCH p=()-[*1..2]->(:Missing {name: 'nope'})
@@ -71,7 +54,6 @@ SELECT * FROM cypher('cypher_vle_followup', $$
     RETURN count(p)
 $$) AS (paths agtype);
 
-DROP TABLE vle_followup_points;
 SELECT drop_graph('cypher_vle_followup', true);
 
 \pset format aligned

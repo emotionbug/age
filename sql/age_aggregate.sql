@@ -320,9 +320,57 @@ CREATE FUNCTION ag_catalog.age_array_agg_list_property_transfn(internal, agtype,
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
 
+-- array_agg transfer function for key/value map slots
+CREATE FUNCTION ag_catalog.age_array_agg_map_slots_transfn(internal, variadic "any")
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- array_agg transfer function for list value slots
+CREATE FUNCTION ag_catalog.age_array_agg_list_slots_transfn(internal, variadic "any")
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
 -- array_agg final function for direct property extraction
 CREATE FUNCTION ag_catalog.age_array_agg_property_finalfn(internal)
     RETURNS agtype[]
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- array_agg final function for slot-vector map/list state
+CREATE FUNCTION ag_catalog.age_array_agg_slots_finalfn(internal)
+    RETURNS agtype[]
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- array_agg combine function for slot-vector map/list state
+CREATE FUNCTION ag_catalog.age_array_agg_slots_combine(internal, internal)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- array_agg serialize function for slot-vector map/list state
+CREATE FUNCTION ag_catalog.age_array_agg_slots_serialize(internal)
+    RETURNS bytea
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- array_agg deserialize function for slot-vector map/list state
+CREATE FUNCTION ag_catalog.age_array_agg_slots_deserialize(bytea, internal)
+    RETURNS internal
     LANGUAGE c
     IMMUTABLE
 PARALLEL SAFE
@@ -441,5 +489,29 @@ CREATE AGGREGATE ag_catalog.age_array_agg_list_property(agtype, agtype[])
     stype = internal,
     sfunc = ag_catalog.age_array_agg_list_property_transfn,
     finalfunc = ag_catalog.age_array_agg_property_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_array_agg_map_slots(variadic "any")
+CREATE AGGREGATE ag_catalog.age_array_agg_map_slots(variadic "any")
+(
+    stype = internal,
+    sfunc = ag_catalog.age_array_agg_map_slots_transfn,
+    combinefunc = ag_catalog.age_array_agg_slots_combine,
+    serialfunc = ag_catalog.age_array_agg_slots_serialize,
+    deserialfunc = ag_catalog.age_array_agg_slots_deserialize,
+    finalfunc = ag_catalog.age_array_agg_slots_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_array_agg_list_slots(variadic "any")
+CREATE AGGREGATE ag_catalog.age_array_agg_list_slots(variadic "any")
+(
+    stype = internal,
+    sfunc = ag_catalog.age_array_agg_list_slots_transfn,
+    combinefunc = ag_catalog.age_array_agg_slots_combine,
+    serialfunc = ag_catalog.age_array_agg_slots_serialize,
+    deserialfunc = ag_catalog.age_array_agg_slots_deserialize,
+    finalfunc = ag_catalog.age_array_agg_slots_finalfn,
     parallel = safe
 );

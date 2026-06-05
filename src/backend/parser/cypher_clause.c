@@ -28,6 +28,7 @@
 #include "catalog/index.h"
 #include "access/heapam.h"
 #include "access/tableam.h"
+#include "catalog/pg_collation_d.h"
 #include "commands/defrem.h"
 #include "catalog/pg_aggregate.h"
 #include "miscadmin.h"
@@ -44,6 +45,7 @@
 #include "parser/parse_relation.h"
 #include "rewrite/rewriteHandler.h"
 #include "utils/inval.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -51,6 +53,7 @@
 #include "catalog/ag_graph.h"
 #include "catalog/ag_label.h"
 #include "commands/label_commands.h"
+#include "executor/cypher_vle_stream.h"
 #include "optimizer/cypher_paths.h"
 #include "parser/cypher_analyze.h"
 #include "parser/cypher_clause.h"
@@ -443,6 +446,8 @@ static Node *transform_from_clause_item(cypher_parsestate *cpstate, Node *n,
                                         List **namespace);
 static ParseNamespaceItem *append_VLE_Func_to_FromClause(cypher_parsestate *cpstate,
                                                          Node *n);
+static ParseNamespaceItem *append_VLE_Values_to_FromClause(
+    cypher_parsestate *cpstate, FuncCall *func, Alias *alias);
 static void setNamespaceLateralState(List *namespace, bool lateral_only,
                                      bool lateral_ok);
 static bool isa_special_VLE_case(cypher_path *path);
@@ -3860,6 +3865,86 @@ static ParseNamespaceItem *append_VLE_Func_to_FromClause(cypher_parsestate *cpst
     return lfirst(list_head(namespace));
 }
 
+static ParseNamespaceItem *append_VLE_Values_to_FromClause(
+    cypher_parsestate *cpstate, FuncCall *func, Alias *alias)
+{
+    ParseState *pstate = &cpstate->pstate;
+    List *row = NIL;
+    List *values = NIL;
+    List *coltypes = NIL;
+    List *coltypmods = NIL;
+    List *colcollations = NIL;
+    List *namespace = NIL;
+    ListCell *lc;
+    ParseNamespaceItem *pnsi;
+    RangeTblRef *rtr;
+    int i;
+
+    Assert(func != NULL);
+    Assert(alias != NULL);
+
+    Assert(!pstate->p_lateral_active);
+    pstate->p_lateral_active = true;
+
+    row = lappend(row,
+                  makeFuncExpr(get_volatile_wrapper_func_oid(), AGTYPEOID,
+                               list_make1(makeNullConst(AGTYPEOID, -1,
+                                                        InvalidOid)),
+                               InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL));
+    row = lappend(row,
+                  makeConst(TEXTOID, -1, C_COLLATION_OID, -1,
+                            CStringGetTextDatum(AGE_VLE_STREAM_MARKER),
+                            false, false));
+    row = lappend(row,
+                  makeConst(AGTYPEOID, -1, InvalidOid, -1,
+                            string_to_agtype(cpstate->graph_name), false,
+                            false));
+    foreach(lc, func->args)
+    {
+        Node *arg = (Node *)lfirst(lc);
+        Node *expr = transform_cypher_expr(cpstate, arg,
+                                           EXPR_KIND_FROM_FUNCTION);
+
+        row = lappend(row, expr);
+    }
+    pstate->p_lateral_active = false;
+
+    assign_list_collations(pstate, row);
+
+    values = list_make1(row);
+    coltypes = lappend_oid(coltypes, AGTYPEOID);
+    coltypmods = lappend_int(coltypmods, -1);
+    colcollations = lappend_oid(colcollations, InvalidOid);
+    coltypes = lappend_oid(coltypes, TEXTOID);
+    coltypmods = lappend_int(coltypmods, -1);
+    colcollations = lappend_oid(colcollations, C_COLLATION_OID);
+    coltypes = lappend_oid(coltypes, AGTYPEOID);
+    coltypmods = lappend_int(coltypmods, -1);
+    colcollations = lappend_oid(colcollations, InvalidOid);
+    for (i = 0; i < list_length(func->args); i++)
+    {
+        coltypes = lappend_oid(coltypes, AGTYPEOID);
+        coltypmods = lappend_int(coltypmods, -1);
+        colcollations = lappend_oid(colcollations, InvalidOid);
+    }
+
+    pnsi = addRangeTableEntryForValues(pstate, values, coltypes, coltypmods,
+                                       colcollations, alias, true, true);
+    namespace = list_make1(pnsi);
+
+    checkNameSpaceConflicts(pstate, pstate->p_namespace, namespace);
+    setNamespaceLateralState(namespace, true, true);
+
+    rtr = makeNode(RangeTblRef);
+    rtr->rtindex = pnsi->p_rtindex;
+    pstate->p_joinlist = lappend(pstate->p_joinlist, rtr);
+    pstate->p_namespace = list_concat(pstate->p_namespace, namespace);
+
+    setNamespaceLateralState(pstate->p_namespace, false, true);
+
+    return pnsi;
+}
+
 /*
  * Code borrowed from PG's transformRangeFunction
  *
@@ -4188,7 +4273,7 @@ static List *make_join_condition_for_edge(cypher_parsestate *cpstate,
             Node *end_arg = lsecond(vle_func->args);
 
             /*
-             * age_vle() already enforces both endpoints when both endpoint
+             * AGE VLE stream already enforces both endpoints when both endpoint
              * arguments are bound. Avoid adding a redundant terminal-edge join
              * filter that forces path post-filtering.
              */
@@ -5367,18 +5452,19 @@ static transform_entity *transform_VLE_edge_entity(cypher_parsestate *cpstate,
 {
     ParseState *pstate = NULL;
     TargetEntry *te = NULL;
-    RangeFunction *rf = NULL;
     FuncCall *func = NULL;
     Alias *alias = NULL;
     Node *var = NULL;
     transform_entity *vle_entity = NULL;
     ParseNamespaceItem *pnsi;
+    int vle_nargs;
 
     /* it better be a function call node */
     Assert(IsA(rel->varlen, FuncCall));
 
     /* get the function */
     func = (FuncCall*)rel->varlen;
+    vle_nargs = list_length(func->args) + 1;
 
     /* only our functions are supported here */
     if (!is_single_func_name(func))
@@ -5391,26 +5477,38 @@ static transform_entity *transform_VLE_edge_entity(cypher_parsestate *cpstate,
     /* set the pstate */
     pstate = &cpstate->pstate;
 
-    /* make a RangeFunction node */
-    rf = makeNode(RangeFunction);
-    rf->lateral = false;
-    rf->ordinality = false;
-    rf->is_rowsfrom = false;
-    rf->functions = list_make1(list_make2(rel->varlen, NIL));
-
     /*
-     * Build an alias for the RangeFunction. This is needed so we
+     * Build an alias for the VLE stream RTE. This is needed so we
      * can chain VLEs together
      */
     alias = makeNode(Alias);
     alias->aliasname = get_next_default_alias(cpstate);
-    alias->colnames = NIL;
-    rf->alias = alias;
+    alias->colnames = list_make1(makeString("edges"));
+    alias->colnames = lappend(alias->colnames, makeString("__age_vle_marker"));
+    if (vle_nargs > AGE_VLE_STREAM_ARG_GRAPH)
+        alias->colnames = lappend(alias->colnames, makeString("__age_vle_graph"));
+    if (vle_nargs > AGE_VLE_STREAM_ARG_START)
+        alias->colnames = lappend(alias->colnames, makeString("__age_vle_start"));
+    if (vle_nargs > AGE_VLE_STREAM_ARG_END)
+        alias->colnames = lappend(alias->colnames, makeString("__age_vle_end"));
+    if (vle_nargs > AGE_VLE_STREAM_ARG_EDGE)
+        alias->colnames = lappend(alias->colnames, makeString("__age_vle_edge"));
+    if (vle_nargs > AGE_VLE_STREAM_ARG_LOWER)
+        alias->colnames = lappend(alias->colnames, makeString("__age_vle_lower"));
+    if (vle_nargs > AGE_VLE_STREAM_ARG_UPPER)
+        alias->colnames = lappend(alias->colnames, makeString("__age_vle_upper"));
+    if (vle_nargs > AGE_VLE_STREAM_ARG_DIRECTION)
+        alias->colnames = lappend(alias->colnames, makeString("__age_vle_direction"));
+    if (vle_nargs > AGE_VLE_STREAM_ARG_GRAMMAR_NODE)
+        alias->colnames = lappend(alias->colnames, makeString("__age_vle_grammar_node"));
+    if (vle_nargs > AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY)
+        alias->colnames = lappend(alias->colnames, makeString("__age_vle_terminal_property"));
 
     /*
-     * Add the RangeFunction to the FROM clause
+     * Add the VLE descriptor row to the FROM clause. The planner replaces this
+     * marker RTE with AGE VLE Stream CustomScan.
      */
-    pnsi = append_VLE_Func_to_FromClause(cpstate, (Node*)rf);
+    pnsi = append_VLE_Values_to_FromClause(cpstate, func, alias);
     Assert(pnsi != NULL);
 
     /* Get the var node for the VLE functions column name. */
@@ -5830,7 +5928,8 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
              * A terminal anonymous node after a single VLE segment does not
              * add bindings or filters when the start node is already
              * constrained. Keeping it in the join tree forces a full vertex
-             * scan plus age_match_vle_terminal_edge(), even though age_vle()
+             * scan plus age_match_vle_terminal_edge(), even though AGE VLE
+             * stream
              * has already generated valid terminal vertices for paths-from
              * traversal.
              */
@@ -5861,7 +5960,7 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
 
             /*
              * Symmetric case for right-bound VLE: the anonymous start vertex is
-             * not bound, filtered, or returned. Let age_vle() iterate starts
+             * not bound, filtered, or returned. Let AGE VLE stream iterate starts
              * internally in paths-to mode.
              */
             if (path->var_name == NULL &&
@@ -6477,6 +6576,7 @@ transform_match_create_path_variable(cypher_parsestate *cpstate,
     List *entity_exprs = NIL;
     ListCell *lc = NULL;
     bool null_path_entity = false;
+    transform_entity *entity;
 
     if (list_length(entities) < 1)
     {
@@ -6507,23 +6607,25 @@ transform_match_create_path_variable(cypher_parsestate *cpstate,
         }
     }
 
-    /*
-     * If we have a NULL in the path, there is an invalid label, so there aren't
-     * any paths to be selected - the path variable will be NULL. In this case
-     * we need to return a NULL constant instead.
-     */
-    if (null_path_entity)
-    {
-        expr = (Expr*)makeNullConst(AGTYPEOID, -1, InvalidOid);
-    }
+    expr = try_make_vle_path_materialize_expr(entities);
     /* otherwise, build the expr node for the function */
-    else
+    if (expr == NULL)
     {
-        transform_entity *entity;
-
-        expr = try_make_vle_path_materialize_expr(entities);
-        if (expr == NULL)
+        /*
+         * If we have a NULL in the path, there is an invalid label, so there
+         * aren't any paths to be selected - the path variable will be NULL. In
+         * this case we need to return a NULL constant instead. VLE stream paths
+         * are handled before this branch because their endpoints may be omitted
+         * from the join tree while the stream value remains complete.
+         */
+        if (null_path_entity)
+        {
+            expr = (Expr*)makeNullConst(AGTYPEOID, -1, InvalidOid);
+        }
+        else
+        {
             expr = try_make_fixed_path_raw_expr(entities);
+        }
         if (expr == NULL)
         {
             /* get the oid for the path creation function */
@@ -6533,10 +6635,10 @@ transform_match_create_path_variable(cypher_parsestate *cpstate,
                                        InvalidOid, InvalidOid,
                                        COERCE_EXPLICIT_CALL);
         }
-
-        entity = make_transform_entity(cpstate, ENT_PATH, (Node *)path, expr);
-        cpstate->entities = lappend(cpstate->entities, entity);
     }
+
+    entity = make_transform_entity(cpstate, ENT_PATH, (Node *)path, expr);
+    cpstate->entities = lappend(cpstate->entities, entity);
 
     resno = cpstate->pstate.p_next_resno++;
 

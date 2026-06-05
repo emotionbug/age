@@ -3397,7 +3397,7 @@ static cypher_relationship *build_VLE_relation(List *left_arg,
     args = lappend(args, make_int_const(unique_number, -1));
 
     /* build the VLE function node */
-    cr->varlen = make_function_expr(list_make1(makeString("vle")), args,
+    cr->varlen = make_function_expr(list_make1(makeString("vle_internal")), args,
                                     cr_location);
     /* return the VLE relation node */
     return cr;

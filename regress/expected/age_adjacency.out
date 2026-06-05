@@ -685,20 +685,12 @@ BEGIN
            plan_text NOT LIKE '%age_match_vle_terminal_edge%' THEN
             has_pathless_right_vle_terminal_id_join := true;
         END IF;
-        IF plan_text LIKE '%Function Call: age_vle(%' AND
-           plan_text LIKE '%''"i"''::agtype%' THEN
-            has_pathless_right_vle_terminal_id_join := true;
-        END IF;
         IF plan_text LIKE '%Custom Scan (AGE VLE Stream)%' THEN
             has_pathless_right_vle_terminal_id_join := true;
         END IF;
         IF plan_text LIKE '%agtype_access_operator%' AND
            plan_text LIKE '%n.properties%' AND
            plan_text NOT LIKE '%_agtype_build_vertex(%' THEN
-            has_pathless_right_vle_direct_property_projection := true;
-        END IF;
-        IF plan_text LIKE '%Function Call: age_vle(%' AND
-           plan_text LIKE '%''"i"''::agtype%' THEN
             has_pathless_right_vle_direct_property_projection := true;
         END IF;
         IF plan_text LIKE '%Custom Scan (AGE VLE Stream)%' THEN
@@ -5335,10 +5327,6 @@ BEGIN
          AS (plan agtype)',
         graph_name)
     LOOP
-        IF plan_text LIKE '%Function Call: age_vle(%' AND
-           plan_text LIKE '%''"i"''::agtype%' THEN
-            has_terminal_property_vle := true;
-        END IF;
         IF plan_text LIKE '%Custom Scan (AGE VLE Stream)%' THEN
             has_terminal_property_vle := true;
         END IF;

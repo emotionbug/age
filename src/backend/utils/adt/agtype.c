@@ -114,6 +114,21 @@ typedef struct agtype_ctid_field_cache
     MemoryContextCallback callback;
 } agtype_ctid_field_cache;
 
+typedef struct age_array_agg_slots_state
+{
+    MemoryContext aggcontext;
+    bool is_map;
+    int nslots;
+    int nkeys;
+    agtype_value *keys;
+    int nelems;
+    int capacity;
+    Datum *values;
+    bool *nulls;
+} age_array_agg_slots_state;
+
+#define AGE_ARRAY_AGG_SLOTS_SERIAL_VERSION 1
+
 static int agtype_sortsupport_cmp(Datum x, Datum y, SortSupport ssup);
 static bool agtype_scalar_integer_value(agtype *agt, int64 *int_value);
 static bool agtype_scalar_float_value(agtype *agt, float8 *float_value);
@@ -15084,6 +15099,543 @@ Datum age_array_agg_property_finalfn(PG_FUNCTION_ARGS)
                                false);
 
     PG_RETURN_DATUM(result);
+}
+
+static bool agtype_datum_is_null_value(Datum value)
+{
+    agtype *agt;
+    agtype_value scalar;
+    bool value_needs_free = false;
+    bool is_null;
+
+    agt = DATUM_GET_AGTYPE_P(value);
+    if (!AGTYPE_CONTAINER_IS_SCALAR(&agt->root))
+        return false;
+
+    get_scalar_agtype_value_no_copy(agt, &scalar, &value_needs_free);
+    is_null = scalar.type == AGTV_NULL;
+    free_agtype_value_no_copy(&scalar, value_needs_free);
+
+    return is_null;
+}
+
+static age_array_agg_slots_state *init_array_agg_slots_state(
+    MemoryContext aggcontext, bool is_map, int nslots)
+{
+    age_array_agg_slots_state *state;
+
+    state = MemoryContextAllocZero(aggcontext, sizeof(*state));
+    state->aggcontext = aggcontext;
+    state->is_map = is_map;
+    state->nslots = nslots;
+    state->nkeys = is_map ? nslots : 0;
+    state->capacity = 64;
+    state->values = MemoryContextAllocZero(aggcontext,
+                                           sizeof(Datum) * state->capacity *
+                                           nslots);
+    state->nulls = MemoryContextAllocZero(aggcontext,
+                                          sizeof(bool) * state->capacity *
+                                          nslots);
+    if (is_map)
+    {
+        state->keys = MemoryContextAllocZero(aggcontext,
+                                             sizeof(agtype_value) * nslots);
+    }
+
+    return state;
+}
+
+static void ensure_array_agg_slots_capacity(age_array_agg_slots_state *state,
+                                            int required)
+{
+    int old_capacity;
+    int new_capacity;
+    Size old_count;
+    Size new_count;
+
+    if (required <= state->capacity)
+        return;
+
+    old_capacity = state->capacity;
+    new_capacity = state->capacity * 2;
+    while (new_capacity < required)
+        new_capacity *= 2;
+    old_count = (Size)old_capacity * state->nslots;
+    new_count = (Size)new_capacity * state->nslots;
+
+    state->values = repalloc(state->values, sizeof(Datum) * new_count);
+    state->nulls = repalloc(state->nulls, sizeof(bool) * new_count);
+    memset(&state->values[old_count], 0,
+           sizeof(Datum) * (new_count - old_count));
+    memset(&state->nulls[old_count], 0,
+           sizeof(bool) * (new_count - old_count));
+    state->capacity = new_capacity;
+}
+
+static void copy_array_agg_slots_keys(age_array_agg_slots_state *dst,
+                                      age_array_agg_slots_state *src)
+{
+    int i;
+
+    if (!src->is_map || dst->keys[0].type == AGTV_STRING)
+        return;
+
+    for (i = 0; i < src->nkeys; i++)
+    {
+        dst->keys[i].type = AGTV_STRING;
+        dst->keys[i].val.string.len = src->keys[i].val.string.len;
+        dst->keys[i].val.string.val =
+            MemoryContextAlloc(dst->aggcontext,
+                               src->keys[i].val.string.len);
+        memcpy(dst->keys[i].val.string.val, src->keys[i].val.string.val,
+               src->keys[i].val.string.len);
+    }
+}
+
+static age_array_agg_slots_state *copy_array_agg_slots_state(
+    MemoryContext aggcontext, age_array_agg_slots_state *src)
+{
+    age_array_agg_slots_state *dst;
+    int total_slots;
+    int i;
+
+    dst = init_array_agg_slots_state(aggcontext, src->is_map, src->nslots);
+    ensure_array_agg_slots_capacity(dst, src->nelems);
+    copy_array_agg_slots_keys(dst, src);
+
+    total_slots = src->nelems * src->nslots;
+    for (i = 0; i < total_slots; i++)
+    {
+        dst->nulls[i] = src->nulls[i];
+        if (!src->nulls[i])
+            dst->values[i] =
+                PointerGetDatum(PG_DETOAST_DATUM_COPY(src->values[i]));
+    }
+    dst->nelems = src->nelems;
+
+    return dst;
+}
+
+static void append_array_agg_slots_state(age_array_agg_slots_state *dst,
+                                         age_array_agg_slots_state *src)
+{
+    int dst_offset;
+    int total_slots;
+    int i;
+
+    if (dst->is_map != src->is_map || dst->nslots != src->nslots)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("cannot combine array aggregate slot states with different layouts")));
+
+    copy_array_agg_slots_keys(dst, src);
+    ensure_array_agg_slots_capacity(dst, dst->nelems + src->nelems);
+
+    dst_offset = dst->nelems * dst->nslots;
+    total_slots = src->nelems * src->nslots;
+    for (i = 0; i < total_slots; i++)
+    {
+        dst->nulls[dst_offset + i] = src->nulls[i];
+        if (!src->nulls[i])
+            dst->values[dst_offset + i] =
+                PointerGetDatum(PG_DETOAST_DATUM_COPY(src->values[i]));
+    }
+
+    dst->nelems += src->nelems;
+}
+
+static void init_array_agg_map_slot_keys(age_array_agg_slots_state *state,
+                                         FunctionCallInfo fcinfo)
+{
+    int key_index = 0;
+    int argno;
+
+    if (!state->is_map || state->keys[0].type == AGTV_STRING)
+        return;
+
+    for (argno = 1; argno + 1 < PG_NARGS(); argno += 2)
+    {
+        text *key_text;
+
+        if (PG_ARGISNULL(argno))
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("age_array_agg_map_slots requires non-null keys")));
+
+        key_text = PG_GETARG_TEXT_PP(argno);
+        state->keys[key_index].type = AGTV_STRING;
+        state->keys[key_index].val.string.len = VARSIZE_ANY_EXHDR(key_text);
+        state->keys[key_index].val.string.val =
+            MemoryContextAlloc(state->aggcontext,
+                               state->keys[key_index].val.string.len);
+        memcpy(state->keys[key_index].val.string.val, VARDATA_ANY(key_text),
+               state->keys[key_index].val.string.len);
+        PG_FREE_IF_COPY(key_text, argno);
+        key_index++;
+    }
+}
+
+static void append_array_agg_slots_value(age_array_agg_slots_state *state,
+                                         int slot_index, bool is_null,
+                                         Datum value)
+{
+    int index;
+
+    index = state->nelems * state->nslots + slot_index;
+    state->nulls[index] = is_null;
+    if (!is_null)
+        state->values[index] =
+            PointerGetDatum(PG_DETOAST_DATUM_COPY(value));
+}
+
+static agtype *build_array_agg_map_slots_element(
+    age_array_agg_slots_state *state, int row)
+{
+    agtype_in_state result;
+    int slot_index;
+
+    memset(&result, 0, sizeof(result));
+    result.res = push_agtype_value(&result.parse_state, WAGT_BEGIN_OBJECT,
+                                   NULL);
+
+    for (slot_index = 0; slot_index < state->nslots; slot_index++)
+    {
+        int value_index = row * state->nslots + slot_index;
+
+        if (state->nulls[value_index] ||
+            agtype_datum_is_null_value(state->values[value_index]))
+        {
+            continue;
+        }
+
+        result.res = push_agtype_value(&result.parse_state, WAGT_KEY,
+                                       &state->keys[slot_index]);
+        add_agtype(state->values[value_index], false, &result, AGTYPEOID,
+                   false);
+    }
+
+    result.res = push_agtype_value(&result.parse_state, WAGT_END_OBJECT, NULL);
+
+    return agtype_value_to_agtype(result.res);
+}
+
+static agtype *build_array_agg_list_slots_element(
+    age_array_agg_slots_state *state, int row)
+{
+    agtype_in_state result;
+    int slot_index;
+
+    memset(&result, 0, sizeof(result));
+    result.res = push_agtype_value(&result.parse_state, WAGT_BEGIN_ARRAY,
+                                   NULL);
+
+    for (slot_index = 0; slot_index < state->nslots; slot_index++)
+    {
+        int value_index = row * state->nslots + slot_index;
+
+        add_agtype(state->values[value_index], state->nulls[value_index],
+                   &result, AGTYPEOID, false);
+    }
+
+    result.res = push_agtype_value(&result.parse_state, WAGT_END_ARRAY, NULL);
+
+    return agtype_value_to_agtype(result.res);
+}
+
+PG_FUNCTION_INFO_V1(age_array_agg_map_slots_transfn);
+
+Datum age_array_agg_map_slots_transfn(PG_FUNCTION_ARGS)
+{
+    MemoryContext aggcontext;
+    age_array_agg_slots_state *state;
+    MemoryContext old_mcxt;
+    int nslots;
+    int argno;
+    int slot_index = 0;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_array_agg_map_slots_transfn called in non-aggregate context");
+
+    if ((PG_NARGS() - 1) % 2 != 0)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_array_agg_map_slots requires key/value pairs")));
+
+    old_mcxt = MemoryContextSwitchTo(aggcontext);
+
+    nslots = (PG_NARGS() - 1) / 2;
+    if (PG_ARGISNULL(0))
+        state = init_array_agg_slots_state(aggcontext, true, nslots);
+    else
+        state = (age_array_agg_slots_state *)PG_GETARG_POINTER(0);
+
+    if (!state->is_map || state->nslots != nslots)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_array_agg_map_slots argument layout changed")));
+
+    init_array_agg_map_slot_keys(state, fcinfo);
+    ensure_array_agg_slots_capacity(state, state->nelems + 1);
+
+    for (argno = 2; argno < PG_NARGS(); argno += 2)
+        append_array_agg_slots_value(state, slot_index++, PG_ARGISNULL(argno),
+                                     PG_ARGISNULL(argno) ? (Datum)0 :
+                                     PG_GETARG_DATUM(argno));
+    state->nelems++;
+
+    MemoryContextSwitchTo(old_mcxt);
+
+    PG_RETURN_POINTER(state);
+}
+
+PG_FUNCTION_INFO_V1(age_array_agg_list_slots_transfn);
+
+Datum age_array_agg_list_slots_transfn(PG_FUNCTION_ARGS)
+{
+    MemoryContext aggcontext;
+    age_array_agg_slots_state *state;
+    MemoryContext old_mcxt;
+    int nslots;
+    int argno;
+    int slot_index = 0;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_array_agg_list_slots_transfn called in non-aggregate context");
+
+    old_mcxt = MemoryContextSwitchTo(aggcontext);
+
+    nslots = PG_NARGS() - 1;
+    if (PG_ARGISNULL(0))
+        state = init_array_agg_slots_state(aggcontext, false, nslots);
+    else
+        state = (age_array_agg_slots_state *)PG_GETARG_POINTER(0);
+
+    if (state->is_map || state->nslots != nslots)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_array_agg_list_slots argument layout changed")));
+
+    ensure_array_agg_slots_capacity(state, state->nelems + 1);
+    for (argno = 1; argno < PG_NARGS(); argno++)
+        append_array_agg_slots_value(state, slot_index++, PG_ARGISNULL(argno),
+                                     PG_ARGISNULL(argno) ? (Datum)0 :
+                                     PG_GETARG_DATUM(argno));
+    state->nelems++;
+
+    MemoryContextSwitchTo(old_mcxt);
+
+    PG_RETURN_POINTER(state);
+}
+
+PG_FUNCTION_INFO_V1(age_array_agg_slots_finalfn);
+
+Datum age_array_agg_slots_finalfn(PG_FUNCTION_ARGS)
+{
+    age_array_agg_slots_state *state;
+    ArrayBuildState *array_state = NULL;
+    Datum result;
+    int dims[1];
+    int lbs[1];
+    int row;
+
+    Assert(AggCheckCallContext(fcinfo, NULL));
+
+    state = PG_ARGISNULL(0) ? NULL :
+        (age_array_agg_slots_state *)PG_GETARG_POINTER(0);
+    if (state == NULL)
+        PG_RETURN_NULL();
+
+    for (row = 0; row < state->nelems; row++)
+    {
+        agtype *elem;
+
+        if (state->is_map)
+            elem = build_array_agg_map_slots_element(state, row);
+        else
+            elem = build_array_agg_list_slots_element(state, row);
+
+        array_state = accumArrayResult(array_state, PointerGetDatum(elem),
+                                       false, AGTYPEOID,
+                                       CurrentMemoryContext);
+    }
+
+    dims[0] = state->nelems;
+    lbs[0] = 1;
+
+    result = makeMdArrayResult(array_state, 1, dims, lbs,
+                               CurrentMemoryContext, false);
+
+    PG_RETURN_DATUM(result);
+}
+
+PG_FUNCTION_INFO_V1(age_array_agg_slots_combine);
+
+Datum age_array_agg_slots_combine(PG_FUNCTION_ARGS)
+{
+    MemoryContext aggcontext;
+    age_array_agg_slots_state *state1;
+    age_array_agg_slots_state *state2;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_array_agg_slots_combine called in non-aggregate context");
+
+    state1 = PG_ARGISNULL(0) ? NULL :
+        (age_array_agg_slots_state *)PG_GETARG_POINTER(0);
+    state2 = PG_ARGISNULL(1) ? NULL :
+        (age_array_agg_slots_state *)PG_GETARG_POINTER(1);
+
+    if (state2 == NULL)
+    {
+        if (state1 == NULL)
+            PG_RETURN_NULL();
+        PG_RETURN_POINTER(state1);
+    }
+
+    if (state1 == NULL)
+        PG_RETURN_POINTER(copy_array_agg_slots_state(aggcontext, state2));
+
+    if (state2->nelems > 0)
+        append_array_agg_slots_state(state1, state2);
+
+    PG_RETURN_POINTER(state1);
+}
+
+PG_FUNCTION_INFO_V1(age_array_agg_slots_serialize);
+
+Datum age_array_agg_slots_serialize(PG_FUNCTION_ARGS)
+{
+    age_array_agg_slots_state *state;
+    StringInfoData buf;
+    bytea *result;
+    int total_slots;
+    int i;
+
+    if (!AggCheckCallContext(fcinfo, NULL))
+        elog(ERROR, "age_array_agg_slots_serialize called in non-aggregate context");
+
+    state = (age_array_agg_slots_state *)PG_GETARG_POINTER(0);
+
+    pq_begintypsend(&buf);
+    pq_sendint8(&buf, AGE_ARRAY_AGG_SLOTS_SERIAL_VERSION);
+    pq_sendint8(&buf, state->is_map ? 1 : 0);
+    pq_sendint32(&buf, state->nslots);
+    pq_sendint32(&buf, state->nelems);
+
+    if (state->is_map)
+    {
+        for (i = 0; i < state->nkeys; i++)
+        {
+            pq_sendint32(&buf, state->keys[i].val.string.len);
+            pq_sendbytes(&buf, state->keys[i].val.string.val,
+                         state->keys[i].val.string.len);
+        }
+    }
+
+    total_slots = state->nelems * state->nslots;
+    for (i = 0; i < total_slots; i++)
+    {
+        pq_sendint8(&buf, state->nulls[i] ? 1 : 0);
+        if (!state->nulls[i])
+        {
+            agtype *value = DATUM_GET_AGTYPE_P(state->values[i]);
+            int value_len = VARSIZE_ANY(value);
+
+            pq_sendint32(&buf, value_len);
+            pq_sendbytes(&buf, (char *)value, value_len);
+        }
+    }
+
+    result = pq_endtypsend(&buf);
+    PG_RETURN_BYTEA_P(result);
+}
+
+PG_FUNCTION_INFO_V1(age_array_agg_slots_deserialize);
+
+Datum age_array_agg_slots_deserialize(PG_FUNCTION_ARGS)
+{
+    bytea *serialized;
+    StringInfoData buf;
+    MemoryContext aggcontext;
+    age_array_agg_slots_state *state;
+    int version;
+    bool is_map;
+    int nslots;
+    int nelems;
+    int total_slots;
+    int i;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_array_agg_slots_deserialize called in non-aggregate context");
+
+    serialized = PG_GETARG_BYTEA_PP(0);
+    initReadOnlyStringInfo(&buf, VARDATA_ANY(serialized),
+                           VARSIZE_ANY_EXHDR(serialized));
+
+    version = pq_getmsgbyte(&buf);
+    if (version != AGE_ARRAY_AGG_SLOTS_SERIAL_VERSION)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("unsupported age_array_agg_slots serialized version %d",
+                        version)));
+
+    is_map = pq_getmsgbyte(&buf) != 0;
+    nslots = pq_getmsgint(&buf, 4);
+    nelems = pq_getmsgint(&buf, 4);
+    if (nslots <= 0 || nelems < 0)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("invalid age_array_agg_slots serialized layout")));
+
+    state = init_array_agg_slots_state(aggcontext, is_map, nslots);
+    ensure_array_agg_slots_capacity(state, nelems);
+
+    if (is_map)
+    {
+        for (i = 0; i < state->nkeys; i++)
+        {
+            int key_len = pq_getmsgint(&buf, 4);
+            const char *key_data;
+
+            if (key_len < 0)
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("invalid age_array_agg_slots key length")));
+
+            key_data = pq_getmsgbytes(&buf, key_len);
+            state->keys[i].type = AGTV_STRING;
+            state->keys[i].val.string.len = key_len;
+            state->keys[i].val.string.val =
+                MemoryContextAlloc(aggcontext, key_len);
+            memcpy(state->keys[i].val.string.val, key_data, key_len);
+        }
+    }
+
+    total_slots = nelems * nslots;
+    for (i = 0; i < total_slots; i++)
+    {
+        state->nulls[i] = pq_getmsgbyte(&buf) != 0;
+        if (!state->nulls[i])
+        {
+            int value_len = pq_getmsgint(&buf, 4);
+            const char *value_data;
+            agtype *value;
+
+            if (value_len < (int)VARHDRSZ)
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("invalid age_array_agg_slots value length")));
+
+            value_data = pq_getmsgbytes(&buf, value_len);
+            value = MemoryContextAlloc(aggcontext, value_len);
+            memcpy(value, value_data, value_len);
+            state->values[i] = PointerGetDatum(value);
+        }
+    }
+
+    pq_getmsgend(&buf);
+    state->nelems = nelems;
+
+    PG_RETURN_POINTER(state);
 }
 
 static bool init_map2_cache_text_key(FunctionCallInfo fcinfo,

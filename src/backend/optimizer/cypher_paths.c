@@ -20,16 +20,20 @@
 #include "postgres.h"
 
 #include "access/genam.h"
+#include "access/relation.h"
 #include "access/table.h"
 #include "catalog/namespace.h"
-#include "catalog/pg_statistic.h"
+#include "catalog/pg_collation_d.h"
+#include "catalog/pg_am.h"
 #include "catalog/pg_type_d.h"
 #include "catalog/ag_namespace.h"
 #include "catalog/ag_label.h"
+#include "catalog/ag_graph.h"
 #include "executor/cypher_adjacency_match.h"
 #include "executor/cypher_property_projection.h"
 #include "executor/cypher_vle_stream.h"
 #include "nodes/makefuncs.h"
+#include "nodes/cypher_nodes.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/primnodes.h"
 #include "optimizer/cost.h"
@@ -43,7 +47,8 @@
 #include "parser/parse_func.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/inval.h"
-#include "utils/array.h"
+#include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
@@ -57,7 +62,10 @@
 #include "parser/cypher_property_signature.h"
 #include "utils/ag_func.h"
 #include "utils/ag_guc.h"
+#include "utils/ag_cache.h"
 #include "utils/agtype.h"
+#include "utils/age_vle_root.h"
+#include "utils/age_vle_source_cost.h"
 #include "utils/graphid.h"
 
 typedef enum cypher_clause_kind
@@ -88,12 +96,6 @@ static Oid cypher_create_clause_func_oid = InvalidOid;
 static Oid cypher_set_clause_func_oid = InvalidOid;
 static Oid cypher_delete_clause_func_oid = InvalidOid;
 static Oid cypher_merge_clause_func_oid = InvalidOid;
-static Oid agtype_eq_func_oid = InvalidOid;
-static Oid agtype_lt_func_oid = InvalidOid;
-static Oid agtype_le_func_oid = InvalidOid;
-static Oid agtype_gt_func_oid = InvalidOid;
-static Oid agtype_ge_func_oid = InvalidOid;
-static Oid count_any_agg_func_oid = InvalidOid;
 static bool cypher_clause_func_callback_registered = false;
 
 static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -124,8 +126,6 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
                                              RelOptInfo *rel,
                                              CustomPath *cp,
                                              CypherAdjacencyMatchCandidate *candidate);
-static double estimate_adjacency_match_endpoint_fanout(
-    RelOptInfo *rel, CypherAdjacencyMatchCandidate *candidate);
 static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
                                            RelOptInfo *rel,
                                            CustomPath *best_path,
@@ -152,69 +152,26 @@ static void adjust_adjacency_match_join_rows(RelOptInfo *joinrel,
 static bool path_contains_adjacency_match(Path *path);
 static bool path_required_outer_is_subset(Path *path, Relids relids);
 static const char *path_param_info_string(Path *path);
-static bool detect_simple_property_projection(PlannerInfo *root,
-                                              RelOptInfo *input_rel,
-                                              RelOptInfo *output_rel,
-                                              CypherCachedPropertySlotDescriptor *slot,
-                                              const char **target_source);
-static bool is_simple_property_access_target(
-    Node *node, CypherCachedPropertySlotDescriptor *slot);
-static bool rewrite_count_property_access_pathtarget(PathTarget *target);
-static bool rewrite_property_access_aggregate_expr(Node *node);
-static bool rewrite_property_access_aggregate_walker(Node *node,
-                                                     void *context);
-static void add_narrow_distinct_collect_paths(PlannerInfo *root,
-                                             RelOptInfo *output_rel);
-static Path *try_narrow_distinct_collect_path(PlannerInfo *root,
-                                             RelOptInfo *output_rel,
-                                             Path *path,
-                                             CypherTypedCollectHandoff *handoff,
-                                             CypherCachedPropertySlotDescriptor *slot);
+static void add_narrow_typed_collect_paths(PlannerInfo *root,
+                                           RelOptInfo *output_rel);
+static void add_narrow_array_agg_property_paths(PlannerInfo *root,
+                                                RelOptInfo *output_rel);
+static Path *try_narrow_typed_collect_path(PlannerInfo *root,
+                                           RelOptInfo *output_rel,
+                                           Path *path,
+                                           List *handoffs);
+static Path *try_narrow_array_agg_property_path(
+    PlannerInfo *root, Path *path,
+    CypherArrayAggPropertyHandoff *handoff);
 static bool pathtarget_contains_only_expr(PathTarget *target, Node *expr);
-static bool rewrite_count_property_access_expr(Node *node);
-static bool is_count_any_aggref(Aggref *aggref);
-static bool extract_count_property_access_args(Aggref *aggref, Node **object,
-                                               Node **key);
-static bool same_property_source(Node *left, Node *right);
-static Oid get_cached_count_any_agg_oid(void);
-static Oid get_cached_agtype_field_exists_nonnull_oid(void);
-static Oid get_cached_agtype_field_equals_oid(void);
-static Oid get_cached_agtype_field_cmp_oid(void);
-static Oid get_cached_agtype_eq_oid(void);
-static Oid get_cached_agtype_cmp_func_oid(const char *name, Oid *cache);
-static bool rewrite_property_equals_restrictions(PlannerInfo *root,
-                                                 RelOptInfo *rel, Index rti);
-static Node *replace_property_index_side(OpExpr *op, bool replace_left,
-                                         Node *index_expr);
 static Node *rewrite_property_index_surface_mutator(Node *node, void *context);
-static void canonicalize_property_index_predicates(RelOptInfo *rel);
-static void canonicalize_property_index_restrictions(RelOptInfo *rel);
-static bool collect_canonical_property_index_exprs_walker(Node *node,
-                                                          void *context);
-static Node *canonicalize_property_index_exprs_mutator(Node *node,
-                                                       void *context);
-static List *collect_canonical_property_index_exprs(RelOptInfo *rel);
-static bool property_expr_list_contains(List *exprs, Node *expr);
-static Node *try_rewrite_property_equals_clause(Node *clause, Index rti,
-                                                RelOptInfo *rel);
-static bool match_property_access_expr(Node *node, Index rti,
-                                       Node **properties, Node **key);
-static bool property_object_belongs_to_rti(Node *node, Index rti);
-static Expr *make_int4_zero_compare_expr(FuncExpr *cmp_expr,
-                                         const char *operator_name);
-static const char *property_compare_operator_name(Oid opfuncid,
-                                                  bool commuted);
 static void add_property_projection_custom_path(PlannerInfo *root,
                                                 RelOptInfo *input_rel,
                                                 RelOptInfo *output_rel,
-                                                CypherCachedPropertySlotDescriptor *slot,
+                                                List *slots,
                                                 FinalPathExtraData *extra);
+static List *make_property_projection_slot_private(List *slots);
 static Const *make_oid_const(Oid value);
-static bool detect_ordered_property_projection_delay(PlannerInfo *root,
-                                                     Node **properties,
-                                                     List **keys,
-                                                     bool *reuse_sort_output,
-                                                     TargetEntry **sort_tle);
 static void add_deferred_ordered_property_projection_path(
     PlannerInfo *root, RelOptInfo *input_rel, RelOptInfo *output_rel,
     FinalPathExtraData *extra);
@@ -268,13 +225,35 @@ static void add_deferred_count_agtype_plain_paths(PlannerInfo *root,
                                                   RelOptInfo *output_rel,
                                                   PathTarget *lower_target,
                                                   PathTarget *final_target);
-static bool build_count_agtype_deferred_targets(PlannerInfo *root,
-                                                PathTarget **lower_target,
-                                                PathTarget **final_target);
-static bool is_age_vle_function_rte(RangeTblEntry *rte, FuncExpr **func_expr);
+static bool is_age_vle_values_rte(RangeTblEntry *rte, List **func_args);
 static void add_age_vle_stream_custom_path(PlannerInfo *root, RelOptInfo *rel,
                                            RangeTblEntry *rte,
-                                           FuncExpr *func_expr);
+                                           List *func_args);
+static List *make_age_vle_stream_const_flags(List *func_args);
+static List *make_age_vle_stream_graph(List *func_args);
+static List *make_age_vle_stream_edge(List *func_args);
+static List *make_age_vle_stream_range_direction(List *func_args);
+static List *make_age_vle_stream_output(List *func_args);
+static List *make_age_vle_stream_edge_source(List *graph, List *edge,
+                                             List *range_direction,
+                                             List *output);
+static void get_vle_stream_edge_source_indexes(
+    const char *graph_name, const char *label_name,
+    Oid *edge_label_oid,
+    bool *adjacency_out, bool *adjacency_in,
+    bool *endpoint_start, bool *endpoint_end);
+static bool vle_stream_age_adjacency_index_matches(Relation index_rel,
+                                                   bool outgoing);
+static AgeVLEStreamDirectedSourceKind
+age_vle_stream_directed_source_from_traversal(
+    VLETraversalSourceKind source_kind);
+static bool get_age_vle_stream_integer_const(Node *node, int64 *value,
+                                             bool *isnull);
+static bool get_age_vle_stream_string_const(Node *node, char **value,
+                                            bool *isnull);
+static Const *make_int8_const(int64 value);
+static Const *make_text_const(const char *value);
+static Const *make_agtype_const(agtype *value);
 static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
                                       CustomPath *best_path, List *tlist,
                                       List *clauses, List *custom_plans);
@@ -283,10 +262,6 @@ static Plan *plan_age_property_projection_path(PlannerInfo *root,
                                                CustomPath *best_path,
                                                List *tlist, List *clauses,
                                                List *custom_plans);
-static Oid agtype_field_exists_nonnull_func_oid = InvalidOid;
-static Oid agtype_field_equals_func_oid = InvalidOid;
-static Oid agtype_field_cmp_func_oid = InvalidOid;
-
 static const CustomPathMethods age_adjacency_match_path_methods = {
     AGE_ADJACENCY_MATCH_SCAN_NAME,
     plan_age_adjacency_match_path,
@@ -454,20 +429,24 @@ static Node *rewrite_property_index_surface_mutator(Node *node, void *context)
 
     if (cypher_find_matching_property_index_handoff_for_rte(
             surface_context->rte, surface_context->rti, left,
-            &index_handoff) &&
-        !equal(index_handoff.index_expr, left))
+            &index_handoff))
     {
-        return replace_property_index_side(op, true,
-                                           index_handoff.index_expr);
+        Node *index_expr;
+
+        index_expr = cypher_make_property_index_handoff_expr(&index_handoff);
+        if (index_expr != NULL && !equal(index_expr, left))
+            return cypher_replace_property_index_side(op, true, index_expr);
     }
 
     if (cypher_find_matching_property_index_handoff_for_rte(
             surface_context->rte, surface_context->rti, right,
-            &index_handoff) &&
-        !equal(index_handoff.index_expr, right))
+            &index_handoff))
     {
-        return replace_property_index_side(op, false,
-                                           index_handoff.index_expr);
+        Node *index_expr;
+
+        index_expr = cypher_make_property_index_handoff_expr(&index_handoff);
+        if (index_expr != NULL && !equal(index_expr, right))
+            return cypher_replace_property_index_side(op, false, index_expr);
     }
 
     return expression_tree_mutator(node, rewrite_property_index_surface_mutator,
@@ -478,16 +457,15 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
                              RangeTblEntry *rte)
 {
     CypherAdjacencyMatchCandidate *candidate;
-    FuncExpr *vle_func_expr = NULL;
 
     if (prev_set_rel_pathlist_hook)
         prev_set_rel_pathlist_hook(root, rel, rti, rte);
 
-    if (rewrite_property_equals_restrictions(root, rel, rti))
+    if (cypher_rewrite_property_equals_restrictions(root, rel, rti))
     {
-        canonicalize_property_index_predicates(rel);
+        cypher_canonicalize_property_index_predicates(rel);
         check_index_predicates(root, rel);
-        canonicalize_property_index_restrictions(rel);
+        cypher_canonicalize_property_index_restrictions(rel);
         create_index_paths(root, rel);
     }
 
@@ -525,9 +503,14 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
         add_adjacency_match_custom_path(root, rel, candidate);
     }
 
-    if (is_age_vle_function_rte(rte, &vle_func_expr))
+    if (rte != NULL)
     {
-        add_age_vle_stream_custom_path(root, rel, rte, vle_func_expr);
+        List *vle_values_args = NIL;
+
+        if (is_age_vle_values_rte(rte, &vle_values_args))
+        {
+            add_age_vle_stream_custom_path(root, rel, rte, vle_values_args);
+        }
     }
 
     switch (get_cypher_clause_kind(rte))
@@ -570,7 +553,7 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
                                RelOptInfo *input_rel,
                                RelOptInfo *output_rel, void *extra)
 {
-    CypherCachedPropertySlotDescriptor property_slot;
+    List *property_slots = NIL;
     const char *target_source = NULL;
 
     if (prev_create_upper_paths_hook != NULL)
@@ -578,12 +561,14 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 
     if (stage == UPPERREL_GROUP_AGG)
     {
-        if (rewrite_count_property_access_pathtarget(output_rel->reltarget))
+        if (cypher_rewrite_property_access_aggregate_pathtarget(
+                output_rel->reltarget))
         {
             ereport(DEBUG2,
                     (errmsg_internal("AGE property access aggregate rewritten")));
         }
-        add_narrow_distinct_collect_paths(root, output_rel);
+        add_narrow_typed_collect_paths(root, output_rel);
+        add_narrow_array_agg_property_paths(root, output_rel);
         return;
     }
 
@@ -595,21 +580,21 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
     add_deferred_ordered_property_projection_path(root, input_rel, output_rel,
                                                  (FinalPathExtraData *)extra);
 
-    if (detect_simple_property_projection(root, input_rel, output_rel,
-                                          &property_slot, &target_source))
+    if (cypher_detect_simple_property_projection(root, input_rel, output_rel,
+                                                 &property_slots,
+                                                 &target_source))
     {
         ereport(DEBUG2,
                 (errmsg_internal("AGE simple property projection visible after "
                                  "scan/join target: input_paths=%d "
                                  "output_paths=%d target_source=%s "
-                                 "value_type=%u field_result_type=%u",
+                                 "slot_count=%d",
                                  list_length(input_rel->pathlist),
                                  list_length(output_rel->pathlist),
                                  target_source,
-                                 property_slot.value_type,
-                                 property_slot.field_result_type)));
+                                 list_length(property_slots))));
         add_property_projection_custom_path(root, input_rel, output_rel,
-                                            &property_slot,
+                                            property_slots,
                                             (FinalPathExtraData *)extra);
     }
 }
@@ -670,259 +655,18 @@ static void log_adjacency_match_join_paths(RelOptInfo *joinrel,
     }
 }
 
-static bool detect_simple_property_projection(PlannerInfo *root,
-                                              RelOptInfo *input_rel,
-                                              RelOptInfo *output_rel,
-                                              CypherCachedPropertySlotDescriptor *slot,
-                                              const char **target_source)
-{
-    Node *expr;
-
-    (void)root;
-
-    if (input_rel != NULL &&
-        input_rel->reltarget != NULL &&
-        list_length(input_rel->reltarget->exprs) == 1)
-    {
-        expr = linitial(input_rel->reltarget->exprs);
-        if (is_simple_property_access_target(expr, slot))
-        {
-            *target_source = "input_rel";
-            return true;
-        }
-    }
-
-    if (output_rel != NULL &&
-        output_rel->reltarget != NULL &&
-        list_length(output_rel->reltarget->exprs) == 1)
-    {
-        expr = linitial(output_rel->reltarget->exprs);
-        if (is_simple_property_access_target(expr, slot))
-        {
-            *target_source = "output_rel";
-            return true;
-        }
-    }
-
-    return false;
-}
-
-static bool is_simple_property_access_target(
-    Node *node, CypherCachedPropertySlotDescriptor *slot)
-{
-    CypherPropertyHandoffDescriptor handoff;
-    CypherCachedPropertySlotDescriptor candidate;
-    Var *properties_var;
-    Const *key_const;
-
-    if (node == NULL || slot == NULL)
-        return false;
-
-    memset(&handoff, 0, sizeof(handoff));
-    if (!cypher_extract_property_access_signature(
-            node, &handoff.property_signature) ||
-        !cypher_make_cached_property_slot_descriptor(&handoff, &candidate))
-        return false;
-
-    if (list_length(candidate.keys) != 1 ||
-        !IsA(candidate.container, Var) ||
-        !IsA(linitial(candidate.keys), Const))
-        return false;
-
-    if (candidate.field_result_type != AGTYPEOID &&
-        candidate.field_result_type != INT8OID &&
-        candidate.field_result_type != FLOAT8OID &&
-        candidate.field_result_type != NUMERICOID &&
-        candidate.field_result_type != TEXTOID)
-    {
-        return false;
-    }
-
-    properties_var = castNode(Var, candidate.container);
-    key_const = linitial_node(Const, candidate.keys);
-
-    if (properties_var->varattno != Anum_ag_label_vertex_table_properties ||
-        key_const->constisnull ||
-        key_const->consttype != AGTYPEOID)
-    {
-        return false;
-    }
-
-    *slot = candidate;
-    return true;
-}
-
-static bool detect_ordered_property_projection_delay(PlannerInfo *root,
-                                                     Node **properties,
-                                                     List **keys,
-                                                     bool *reuse_sort_output,
-                                                     TargetEntry **sort_tle)
-{
-    TargetEntry *output_tle = NULL;
-    SortGroupClause *sort_clause;
-    CypherPropertyAccessSignature output_signature;
-    CypherPropertyAccessSignature sort_signature;
-    ListCell *lc;
-
-    if (root == NULL || root->parse == NULL ||
-        root->parse->sortClause == NIL ||
-        root->parse->distinctClause != NIL ||
-        list_length(root->parse->sortClause) != 1 ||
-        root->parse->limitCount == NULL)
-    {
-        return false;
-    }
-
-    foreach(lc, root->parse->targetList)
-    {
-        TargetEntry *tle = lfirst_node(TargetEntry, lc);
-
-        if (tle->resjunk)
-            continue;
-
-        if (output_tle != NULL)
-            return false;
-
-        output_tle = tle;
-    }
-
-    if (output_tle == NULL ||
-        !cypher_extract_property_access_signature((Node *)output_tle->expr,
-                                                  &output_signature))
-    {
-        return false;
-    }
-
-    sort_clause = linitial_node(SortGroupClause, root->parse->sortClause);
-    *sort_tle = get_sortgroupref_tle(sort_clause->tleSortGroupRef,
-                                     root->parse->targetList);
-
-    if (*sort_tle == NULL ||
-        (!(*sort_tle)->resjunk && *sort_tle != output_tle) ||
-        !cypher_extract_property_access_signature((Node *)(*sort_tle)->expr,
-                                                  &sort_signature) ||
-        sort_signature.value_type == AGTYPEOID)
-    {
-        return false;
-    }
-
-    if (!same_property_source(output_signature.container,
-                              sort_signature.container) ||
-        !equal(output_signature.keys, sort_signature.keys))
-    {
-        return false;
-    }
-
-    *reuse_sort_output =
-        output_signature.value_type == sort_signature.value_type &&
-        output_signature.field_result_type == sort_signature.field_result_type;
-    if (output_signature.value_type != AGTYPEOID && !*reuse_sort_output)
-        return false;
-
-    *properties = output_signature.container;
-    *keys = output_signature.keys;
-    return true;
-}
-
 static void add_deferred_ordered_property_projection_path(
     PlannerInfo *root, RelOptInfo *input_rel, RelOptInfo *output_rel,
     FinalPathExtraData *extra)
 {
-    Node *properties = NULL;
-    List *keys = NIL;
-    TargetEntry *sort_tle = NULL;
     PathTarget *lower_target;
     PathTarget *final_target;
-    Var *properties_var;
-    Var *lookup_var;
-    Node *final_output_expr;
-    Oid relid;
-    AttrNumber properties_attno;
-    bool reuse_sort_output = false;
 
-    if (input_rel == NULL || output_rel == NULL || extra == NULL ||
-        !extra->limit_needed ||
-        !detect_ordered_property_projection_delay(root, &properties,
-                                                  &keys,
-                                                  &reuse_sort_output,
-                                                  &sort_tle) ||
-        !IsA(properties, Var))
+    if (!cypher_build_ordered_property_projection_targets(
+            root, input_rel, output_rel, extra, &lower_target, &final_target))
     {
         return;
     }
-
-    properties_var = castNode(Var, properties);
-    if (!reuse_sort_output &&
-        (properties_var->varno <= 0 ||
-         properties_var->varno >= root->simple_rel_array_size ||
-         root->simple_rte_array[properties_var->varno] == NULL ||
-         root->simple_rte_array[properties_var->varno]->rtekind != RTE_RELATION))
-    {
-        return;
-    }
-
-    if (!reuse_sort_output &&
-        properties_var->varattno != Anum_ag_label_vertex_table_properties)
-    {
-        if (properties_var->varattno != Anum_ag_label_edge_table_properties)
-            return;
-    }
-
-    properties_attno = properties_var->varattno;
-
-    if (reuse_sort_output)
-    {
-        lookup_var = NULL;
-        final_output_expr = (Node *)copyObject(sort_tle->expr);
-    }
-    else
-    {
-        relid = root->simple_rte_array[properties_var->varno]->relid;
-        if (properties_attno == Anum_ag_label_edge_table_properties)
-        {
-            lookup_var = makeVar(properties_var->varno,
-                                 Anum_ag_label_edge_table_id,
-                                 GRAPHIDOID, -1, InvalidOid,
-                                 properties_var->varlevelsup);
-            final_output_expr = cypher_make_id_property_path_field_agtype_expr(
-                relid, (Node *)lookup_var, properties_attno, keys);
-        }
-        else
-        {
-            lookup_var = makeVar(properties_var->varno,
-                                 SelfItemPointerAttributeNumber,
-                                 TIDOID, -1, InvalidOid,
-                                 properties_var->varlevelsup);
-            final_output_expr = cypher_make_ctid_property_path_field_agtype_expr(
-                relid, (Node *)lookup_var, properties_attno, keys);
-        }
-    }
-
-    if (final_output_expr == NULL)
-        return;
-
-    lower_target = create_empty_pathtarget();
-    if (lookup_var != NULL)
-        add_column_to_pathtarget(lower_target, (Expr *)copyObject(lookup_var),
-                                 0);
-    add_column_to_pathtarget(lower_target, (Expr *)copyObject(sort_tle->expr),
-                             sort_tle->ressortgroupref);
-    lower_target = set_pathtarget_cost_width(root, lower_target);
-
-    final_target = create_empty_pathtarget();
-    if (reuse_sort_output)
-    {
-        add_column_to_pathtarget(final_target, (Expr *)final_output_expr,
-                                 sort_tle->ressortgroupref);
-    }
-    else
-    {
-        add_column_to_pathtarget(final_target, (Expr *)final_output_expr, 0);
-        add_column_to_pathtarget(final_target,
-                                 (Expr *)copyObject(sort_tle->expr),
-                                 sort_tle->ressortgroupref);
-    }
-    final_target = set_pathtarget_cost_width(root, final_target);
 
     add_deferred_projection_paths(root, output_rel, lower_target, final_target,
                                   extra, 1.0,
@@ -1500,8 +1244,8 @@ static void add_deferred_count_agtype_projection_path(
     PathTarget *final_target;
 
     if (root == NULL || output_rel == NULL ||
-        !build_count_agtype_deferred_targets(root, &lower_target,
-                                             &final_target))
+        !cypher_build_scalar_final_deferred_targets(
+            root, root->processed_tlist, &lower_target, &final_target))
     {
         return;
     }
@@ -1558,198 +1302,103 @@ static void add_deferred_count_agtype_plain_paths(PlannerInfo *root,
         add_path(output_rel, lfirst(lc));
 }
 
-static bool build_count_agtype_deferred_targets(PlannerInfo *root,
-                                                PathTarget **lower_target,
-                                                PathTarget **final_target)
+static void add_narrow_array_agg_property_paths(PlannerInfo *root,
+                                                RelOptInfo *output_rel)
 {
-    ListCell *lc;
-    bool found = false;
-
-    if (root == NULL || root->processed_tlist == NIL)
-        return false;
-
-    *lower_target = create_empty_pathtarget();
-    *final_target = create_empty_pathtarget();
-
-    foreach(lc, root->processed_tlist)
-    {
-        TargetEntry *tle = lfirst_node(TargetEntry, lc);
-        CypherScalarFinalHandoff handoff;
-
-        if (!tle->resjunk &&
-            cypher_extract_scalar_final_handoff((Node *)tle->expr, &handoff))
-        {
-            CypherCachedPropertySlotDescriptor slot;
-            FuncExpr *final_expr;
-            Expr *canonical_arg;
-            Node *slot_expr = NULL;
-
-            if (handoff.has_property_descriptor &&
-                cypher_make_cached_property_slot_descriptor(
-                    &handoff.property_descriptor, &slot))
-            {
-                slot_expr = cypher_make_cached_property_slot_expr(&slot);
-            }
-
-            handoff.scalar_expr = slot_expr != NULL ?
-                slot_expr : copyObject(handoff.scalar_expr);
-            canonical_arg = cypher_add_or_get_lower_scalar_handoff(
-                *lower_target, &handoff, tle->ressortgroupref);
-            if (canonical_arg == NULL)
-                return false;
-
-            final_expr = castNode(FuncExpr, copyObject(tle->expr));
-            final_expr->args = list_make1(copyObject(canonical_arg));
-            add_column_to_pathtarget(*final_target, (Expr *)final_expr,
-                                     tle->ressortgroupref);
-            found = true;
-        }
-        else
-        {
-            add_column_to_pathtarget(*final_target,
-                                     (Expr *)copyObject(tle->expr),
-                                     tle->ressortgroupref);
-            add_column_to_pathtarget(*lower_target,
-                                     (Expr *)copyObject(tle->expr),
-                                     tle->ressortgroupref);
-        }
-    }
-
-    if (!found)
-        return false;
-
-    *lower_target = set_pathtarget_cost_width(root, *lower_target);
-    *final_target = set_pathtarget_cost_width(root, *final_target);
-
-    return true;
-}
-
-static bool rewrite_count_property_access_pathtarget(PathTarget *target)
-{
-    ListCell *lc;
-    bool rewritten = false;
-
-    if (target == NULL)
-        return false;
-
-    foreach(lc, target->exprs)
-    {
-        Node *expr = lfirst(lc);
-
-        if (rewrite_property_access_aggregate_expr(expr))
-            rewritten = true;
-    }
-
-    return rewritten;
-}
-
-static bool rewrite_property_access_aggregate_expr(Node *node)
-{
-    bool rewritten = false;
-
-    rewrite_property_access_aggregate_walker(node, &rewritten);
-
-    return rewritten;
-}
-
-static bool rewrite_property_access_aggregate_walker(Node *node,
-                                                     void *context)
-{
-    bool *rewritten = (bool *)context;
-
-    if (node == NULL)
-        return false;
-
-    if (cypher_rewrite_collect_typed_scalar_expr(node) ||
-        cypher_rewrite_collect_numeric_property_expr(node) ||
-        cypher_rewrite_array_agg_property_expr(node) ||
-        rewrite_count_property_access_expr(node))
-    {
-        *rewritten = true;
-        return false;
-    }
-
-    return expression_tree_walker(node,
-                                  rewrite_property_access_aggregate_walker,
-                                  context);
-}
-
-static void add_narrow_distinct_collect_paths(PlannerInfo *root,
-                                              RelOptInfo *output_rel)
-{
-    CypherTypedCollectHandoff handoff;
-    CypherCachedPropertySlotDescriptor property_slot;
-    CypherCachedPropertySlotDescriptor *slot = NULL;
-    List *new_paths = NIL;
+    CypherArrayAggPropertyHandoff handoff;
+    Path *best_narrow_path = NULL;
     ListCell *lc;
 
     if (root == NULL || output_rel == NULL || output_rel->pathlist == NIL)
         return;
 
-    if (!cypher_find_typed_distinct_collect_handoff(output_rel->reltarget,
-                                                   &handoff))
+    if (!cypher_find_array_agg_property_handoff(output_rel->reltarget,
+                                                &handoff))
         return;
-
-    if (handoff.has_property_descriptor &&
-        cypher_make_cached_property_slot_descriptor(
-            &handoff.property_descriptor, &property_slot))
-    {
-        slot = &property_slot;
-    }
 
     foreach(lc, output_rel->pathlist)
     {
         Path *path = lfirst(lc);
         Path *new_path;
 
-        new_path = try_narrow_distinct_collect_path(root, output_rel, path,
-                                                    &handoff, slot);
+        new_path = try_narrow_array_agg_property_path(root, path, &handoff);
         if (new_path != NULL)
-            new_paths = lappend(new_paths, new_path);
+        {
+            lfirst(lc) = new_path;
+            if (best_narrow_path == NULL ||
+                compare_path_costs(new_path, best_narrow_path, TOTAL_COST) < 0)
+            {
+                best_narrow_path = new_path;
+            }
+            if (output_rel->cheapest_total_path == path)
+                output_rel->cheapest_total_path = new_path;
+            if (output_rel->cheapest_startup_path == path)
+                output_rel->cheapest_startup_path = new_path;
+        }
     }
 
-    foreach(lc, new_paths)
-        add_path(output_rel, lfirst(lc));
+    if (best_narrow_path != NULL)
+    {
+        output_rel->cheapest_total_path = best_narrow_path;
+        output_rel->cheapest_startup_path = best_narrow_path;
+    }
 }
 
-static Path *try_narrow_distinct_collect_path(PlannerInfo *root,
-                                              RelOptInfo *output_rel,
-                                              Path *path,
-                                              CypherTypedCollectHandoff *handoff,
-                                              CypherCachedPropertySlotDescriptor *slot)
+static Path *try_narrow_array_agg_property_path(
+    PlannerInfo *root, Path *path, CypherArrayAggPropertyHandoff *handoff)
 {
     AggPath *agg_path;
     PathTarget *narrow_target;
+    PathTarget *agg_target;
     Path *narrow_subpath;
+    Path *agg_subpath;
     AggPath *new_agg;
-    Node *arg;
-    Node *slot_expr = NULL;
+    List *arg_plans;
 
-    if (path == NULL || handoff == NULL || handoff->arg_expr == NULL ||
+    if (path == NULL || handoff == NULL || handoff->arg_exprs == NIL ||
         !IsA(path, AggPath))
+    {
         return NULL;
-
-    if (slot != NULL)
-        slot_expr = cypher_make_cached_property_slot_expr(slot);
-
-    arg = slot_expr != NULL ? slot_expr : handoff->arg_expr;
+    }
 
     agg_path = (AggPath *)path;
-    if (agg_path->aggstrategy != AGG_PLAIN ||
-        agg_path->groupClause != NIL ||
-        agg_path->qual != NIL ||
-        agg_path->subpath == NULL)
+    if (agg_path->aggstrategy == AGG_PLAIN)
+    {
+        if (agg_path->groupClause != NIL)
+            return NULL;
+    }
+    else if (agg_path->aggstrategy == AGG_SORTED ||
+             agg_path->aggstrategy == AGG_HASHED)
+    {
+        if (agg_path->groupClause == NIL)
+            return NULL;
+    }
+    else
     {
         return NULL;
     }
 
-    if (pathtarget_contains_only_expr(agg_path->subpath->pathtarget, arg))
+    if (agg_path->qual != NIL || agg_path->subpath == NULL)
+        return NULL;
+
+    if (list_length(handoff->arg_exprs) == 1 &&
+        pathtarget_contains_only_expr(agg_path->subpath->pathtarget,
+                                      linitial(handoff->arg_exprs)))
     {
         return NULL;
     }
+
+    arg_plans = cypher_build_array_agg_property_arg_plans(
+        agg_path->subpath->pathtarget, handoff);
+    if (arg_plans == NIL)
+        return NULL;
 
     narrow_target = create_empty_pathtarget();
-    add_column_to_pathtarget(narrow_target, (Expr *)copyObject(arg), 0);
+    if (!cypher_add_aggregate_group_exprs_to_target(narrow_target, agg_path))
+        return NULL;
+    if (!cypher_add_array_agg_property_arg_plans_to_target(narrow_target,
+                                                           arg_plans))
+        return NULL;
     narrow_target = set_pathtarget_cost_width(root, narrow_target);
 
     narrow_subpath = copy_path_with_deferred_projection_target(
@@ -1757,10 +1406,161 @@ static Path *try_narrow_distinct_collect_path(PlannerInfo *root,
     if (narrow_subpath == NULL)
         return NULL;
 
+    agg_subpath = (Path *)create_projection_path(root, narrow_subpath->parent,
+                                                 narrow_subpath,
+                                                 narrow_target);
+
+    agg_target = cypher_build_array_agg_property_target(
+        root, agg_path->path.pathtarget, handoff, arg_plans);
+    if (agg_target == NULL)
+        return NULL;
+
     new_agg = palloc(sizeof(*new_agg));
     memcpy(new_agg, agg_path, sizeof(*new_agg));
     new_agg->path.pathtype = T_Agg;
-    new_agg->subpath = narrow_subpath;
+    new_agg->path.pathtarget = agg_target;
+    new_agg->subpath = agg_subpath;
+    new_agg->path.startup_cost = agg_path->path.startup_cost;
+    new_agg->path.total_cost = Max(agg_path->path.startup_cost,
+                                   agg_path->path.total_cost - 1.0);
+
+    return (Path *)new_agg;
+}
+
+static void add_narrow_typed_collect_paths(PlannerInfo *root,
+                                           RelOptInfo *output_rel)
+{
+    List *handoffs = NIL;
+    Path *best_narrow_path = NULL;
+    ListCell *lc;
+
+    if (root == NULL || output_rel == NULL || output_rel->pathlist == NIL)
+        return;
+
+    if (!cypher_find_multi_typed_collect_handoffs(output_rel->reltarget,
+                                                  &handoffs))
+    {
+        return;
+    }
+
+    foreach(lc, output_rel->pathlist)
+    {
+        Path *path = lfirst(lc);
+        Path *new_path;
+
+        new_path = try_narrow_typed_collect_path(root, output_rel, path,
+                                                 handoffs);
+        if (new_path != NULL)
+        {
+            lfirst(lc) = new_path;
+            if (best_narrow_path == NULL ||
+                compare_path_costs(new_path, best_narrow_path, TOTAL_COST) < 0)
+            {
+                best_narrow_path = new_path;
+            }
+            if (output_rel->cheapest_total_path == path)
+                output_rel->cheapest_total_path = new_path;
+            if (output_rel->cheapest_startup_path == path)
+                output_rel->cheapest_startup_path = new_path;
+        }
+    }
+
+    if (best_narrow_path != NULL)
+    {
+        output_rel->cheapest_total_path = best_narrow_path;
+        output_rel->cheapest_startup_path = best_narrow_path;
+    }
+}
+
+static Path *try_narrow_typed_collect_path(PlannerInfo *root,
+                                           RelOptInfo *output_rel,
+                                           Path *path,
+                                           List *handoffs)
+{
+    AggPath *agg_path;
+    PathTarget *narrow_target;
+    PathTarget *agg_target;
+    Path *narrow_subpath;
+    Path *agg_subpath;
+    AggPath *new_agg;
+    List *arg_plans;
+
+    if (path == NULL || handoffs == NIL || !IsA(path, AggPath))
+        return NULL;
+
+    agg_path = (AggPath *)path;
+    if (agg_path->aggstrategy == AGG_PLAIN)
+    {
+        if (agg_path->groupClause != NIL)
+            return NULL;
+    }
+    else if (agg_path->aggstrategy == AGG_SORTED ||
+             agg_path->aggstrategy == AGG_HASHED)
+    {
+        if (agg_path->groupClause == NIL)
+            return NULL;
+    }
+    else
+    {
+        return NULL;
+    }
+
+    if (agg_path->qual != NIL || agg_path->subpath == NULL)
+        return NULL;
+
+    arg_plans = cypher_build_typed_collect_arg_plans(
+        agg_path->subpath->pathtarget, handoffs);
+    if (arg_plans == NIL)
+        return NULL;
+
+    if (list_length(arg_plans) == 1)
+    {
+        CypherTypedCollectArgPlan *arg_plan = linitial(arg_plans);
+
+        if (pathtarget_contains_only_expr(agg_path->subpath->pathtarget,
+                                          arg_plan->arg))
+        {
+            return NULL;
+        }
+    }
+
+    /*
+     * create_agg_plan() asks its child for CP_LABEL_TLIST, which otherwise
+     * lets a projection-capable base scan fall back to its physical tlist.
+     */
+    narrow_target = create_empty_pathtarget();
+    if (!cypher_add_aggregate_group_exprs_to_target(narrow_target, agg_path))
+        return NULL;
+    if (!cypher_add_typed_collect_arg_plans_to_target(narrow_target,
+                                                      arg_plans))
+        return NULL;
+    narrow_target = set_pathtarget_cost_width(root, narrow_target);
+
+    narrow_subpath = copy_path_with_deferred_projection_target(
+        root, agg_path->subpath, narrow_target, false);
+    if (narrow_subpath == NULL)
+        return NULL;
+
+    agg_subpath = narrow_subpath;
+    if (list_length(handoffs) == 1 &&
+        ((CypherTypedCollectHandoff *)linitial(handoffs))->aggref->aggdistinct == NIL)
+    {
+        agg_subpath = (Path *)create_projection_path(root,
+                                                     narrow_subpath->parent,
+                                                     narrow_subpath,
+                                                     narrow_target);
+    }
+
+    agg_target = cypher_build_typed_collect_agg_target(
+        root, agg_path->path.pathtarget, arg_plans);
+    if (agg_target == NULL)
+        return NULL;
+
+    new_agg = palloc(sizeof(*new_agg));
+    memcpy(new_agg, agg_path, sizeof(*new_agg));
+    new_agg->path.pathtype = T_Agg;
+    new_agg->path.pathtarget = agg_target;
+    new_agg->subpath = agg_subpath;
     new_agg->path.startup_cost = agg_path->path.startup_cost;
     new_agg->path.total_cost = Max(agg_path->path.startup_cost,
                                    agg_path->path.total_cost - 1.0);
@@ -1776,105 +1576,10 @@ static bool pathtarget_contains_only_expr(PathTarget *target, Node *expr)
     return equal(linitial(target->exprs), expr);
 }
 
-static bool rewrite_count_property_access_expr(Node *node)
-{
-    Aggref *aggref;
-    FuncExpr *exists_expr;
-    TargetEntry *arg_tle;
-    Node *object = NULL;
-    Node *key = NULL;
-
-    if (node == NULL || !IsA(node, Aggref))
-        return false;
-
-    aggref = castNode(Aggref, node);
-    if (!is_count_any_aggref(aggref))
-        return false;
-
-    if (!extract_count_property_access_args(aggref, &object, &key))
-        return false;
-
-    exists_expr = makeFuncExpr(
-        get_cached_agtype_field_exists_nonnull_oid(),
-        BOOLOID,
-        list_make2(copyObject(object), copyObject(key)),
-        InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
-    exists_expr->location = exprLocation(object);
-
-    arg_tle = linitial_node(TargetEntry, aggref->args);
-    arg_tle->expr = (Expr *)exists_expr;
-    aggref->aggargtypes = list_make1_oid(BOOLOID);
-
-    return true;
-}
-
-static bool is_count_any_aggref(Aggref *aggref)
-{
-    return aggref != NULL &&
-        aggref->aggfnoid == get_cached_count_any_agg_oid() &&
-        !aggref->aggstar &&
-        aggref->aggdirectargs == NIL &&
-        aggref->aggorder == NIL &&
-        aggref->aggdistinct == NIL &&
-        aggref->aggfilter == NULL &&
-        list_length(aggref->args) == 1;
-}
-
-static bool extract_count_property_access_args(Aggref *aggref, Node **object,
-                                               Node **key)
-{
-    TargetEntry *arg_tle;
-
-    arg_tle = linitial_node(TargetEntry, aggref->args);
-    if (arg_tle == NULL || arg_tle->expr == NULL)
-        return false;
-
-    return cypher_extract_property_access_terminal_args((Node *)arg_tle->expr,
-                                                        object, key);
-}
-
-static bool same_property_source(Node *left, Node *right)
-{
-    Var *left_var;
-    Var *right_var;
-
-    if (left == NULL || right == NULL)
-        return false;
-
-    if (equal(left, right))
-        return true;
-
-    if (!IsA(left, Var) || !IsA(right, Var))
-        return false;
-
-    left_var = castNode(Var, left);
-    right_var = castNode(Var, right);
-
-    return left_var->varno == right_var->varno &&
-        left_var->varattno == right_var->varattno &&
-        left_var->varlevelsup == right_var->varlevelsup &&
-        left_var->vartype == right_var->vartype;
-}
-
-static Oid get_cached_count_any_agg_oid(void)
-{
-    if (!OidIsValid(count_any_agg_func_oid))
-    {
-        Oid argtype = ANYOID;
-
-        count_any_agg_func_oid =
-            LookupFuncName(list_make2(makeString("pg_catalog"),
-                                      makeString("count")),
-                           1, &argtype, false);
-    }
-
-    return count_any_agg_func_oid;
-}
-
 static void add_property_projection_custom_path(PlannerInfo *root,
                                                 RelOptInfo *input_rel,
                                                 RelOptInfo *output_rel,
-                                                CypherCachedPropertySlotDescriptor *slot,
+                                                List *slots,
                                                 FinalPathExtraData *extra)
 {
     CustomPath *cp;
@@ -1882,7 +1587,7 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     RelOptInfo *base_rel;
     RangeTblEntry *base_rte;
     Var *properties_var;
-    Const *key_const;
+    CypherCachedPropertySlotDescriptor *first_slot;
     Index scanrelid;
     int scanrelid_int;
     Path *reference_path;
@@ -1891,7 +1596,7 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     Cost random_page_cost;
     Cost seq_page_cost;
 
-    if (input_rel == NULL || output_rel == NULL || slot == NULL ||
+    if (input_rel == NULL || output_rel == NULL || slots == NIL ||
         root->parse == NULL ||
         input_rel->pathlist == NIL ||
         !bms_get_singleton_member(input_rel->relids, &scanrelid_int))
@@ -1899,23 +1604,40 @@ static void add_property_projection_custom_path(PlannerInfo *root,
         return;
     }
     scanrelid = (Index)scanrelid_int;
+    first_slot = linitial(slots);
 
-    if (slot->container == NULL ||
-        slot->keys == NIL ||
-        list_length(slot->keys) != 1 ||
-        !IsA(slot->container, Var) ||
-        !IsA(linitial(slot->keys), Const))
+    if (first_slot->container == NULL ||
+        first_slot->keys == NIL ||
+        !IsA(first_slot->container, Var))
     {
         return;
     }
 
-    properties_var = castNode(Var, slot->container);
-    key_const = linitial_node(Const, slot->keys);
+    properties_var = castNode(Var, first_slot->container);
     if (properties_var->varno != scanrelid ||
         scanrelid <= 0 ||
         scanrelid >= root->simple_rel_array_size)
     {
         return;
+    }
+    foreach_ptr(CypherCachedPropertySlotDescriptor, slot, slots)
+    {
+        Var *slot_properties_var;
+
+        if (slot->container == NULL ||
+            slot->keys == NIL ||
+            !IsA(slot->container, Var))
+        {
+            return;
+        }
+
+        slot_properties_var = castNode(Var, slot->container);
+        if (slot_properties_var->varno != scanrelid ||
+            slot_properties_var->varattno !=
+            Anum_ag_label_vertex_table_properties)
+        {
+            return;
+        }
     }
 
     base_rel = root->simple_rel_array[scanrelid];
@@ -1952,10 +1674,8 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     cp->path.total_cost = seq_page_cost * pages + cpu_tuple_cost * rows;
     cp->flags = CUSTOMPATH_SUPPORT_PROJECTION;
     cp->custom_paths = NIL;
-    cp->custom_private = list_make4(copyObject(key_const),
-                                    makeInteger(scanrelid),
-                                    make_oid_const(slot->value_type),
-                                    make_oid_const(slot->field_result_type));
+    cp->custom_private = list_make2(make_property_projection_slot_private(slots),
+                                    makeInteger(scanrelid));
     cp->methods = &age_property_projection_path_methods;
 
     path = (Path *)cp;
@@ -1974,11 +1694,31 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     ereport(DEBUG2,
             (errmsg_internal("AGE property projection CustomPath added: "
                              "scanrelid=%u rows=%.0f total_cost=%.2f "
-                             "limit_needed=%s",
+                             "slot_count=%d limit_needed=%s",
                              scanrelid, cp->path.rows,
                              cp->path.total_cost,
+                             list_length(slots),
                              extra != NULL && extra->limit_needed ?
                              "true" : "false")));
+}
+
+static List *make_property_projection_slot_private(List *slots)
+{
+    List *slot_private = NIL;
+    ListCell *lc;
+
+    foreach(lc, slots)
+    {
+        CypherCachedPropertySlotDescriptor *slot = lfirst(lc);
+
+        slot_private = lappend(
+            slot_private,
+            list_make3(copyObject(slot->keys),
+                       make_oid_const(slot->value_type),
+                       make_oid_const(slot->field_result_type)));
+    }
+
+    return slot_private;
 }
 
 static Plan *plan_age_property_projection_path(PlannerInfo *root,
@@ -1988,10 +1728,8 @@ static Plan *plan_age_property_projection_path(PlannerInfo *root,
                                                List *custom_plans)
 {
     CustomScan *cs;
-    Const *key_const;
+    List *slot_private;
     Integer *scanrelid_value;
-    Const *value_type_const;
-    Const *field_result_type_const;
     Index scanrelid;
 
     (void) root;
@@ -1999,11 +1737,8 @@ static Plan *plan_age_property_projection_path(PlannerInfo *root,
     (void) clauses;
     (void) custom_plans;
 
-    key_const = linitial_node(Const, best_path->custom_private);
+    slot_private = linitial_node(List, best_path->custom_private);
     scanrelid_value = lsecond_node(Integer, best_path->custom_private);
-    value_type_const = list_nth_node(Const, best_path->custom_private, 2);
-    field_result_type_const = list_nth_node(Const, best_path->custom_private,
-                                            3);
     scanrelid = intVal(scanrelid_value);
 
     cs = makeNode(CustomScan);
@@ -2023,9 +1758,7 @@ static Plan *plan_age_property_projection_path(PlannerInfo *root,
     cs->flags = best_path->flags;
     cs->custom_plans = NIL;
     cs->custom_exprs = NIL;
-    cs->custom_private = list_make3(copyObject(key_const),
-                                    copyObject(value_type_const),
-                                    copyObject(field_result_type_const));
+    cs->custom_private = copyObject(slot_private);
     cs->custom_scan_tlist = copyObject(tlist);
     cs->custom_relids = bms_make_singleton(scanrelid);
     cs->methods = &age_property_projection_scan_methods;
@@ -2039,65 +1772,76 @@ static Const *make_oid_const(Oid value)
                      ObjectIdGetDatum(value), false, true);
 }
 
-static bool is_age_vle_function_rte(RangeTblEntry *rte, FuncExpr **func_expr)
+static bool is_age_vle_values_rte(RangeTblEntry *rte, List **func_args)
 {
-    RangeTblFunction *rtfunc;
-    FuncExpr *candidate;
-    const char *func_name;
+    List *row;
+    List *args = NIL;
+    ListCell *lc;
+    int colno = 0;
+    Const *marker;
 
-    if (func_expr != NULL)
-        *func_expr = NULL;
+    if (func_args != NULL)
+        *func_args = NIL;
 
     if (rte == NULL ||
-        rte->rtekind != RTE_FUNCTION ||
-        rte->funcordinality ||
-        list_length(rte->functions) != 1)
+        rte->rtekind != RTE_VALUES ||
+        list_length(rte->values_lists) != 1 ||
+        rte->eref == NULL ||
+        rte->eref->colnames == NIL)
     {
         return false;
     }
 
-    rtfunc = linitial_node(RangeTblFunction, rte->functions);
-    if (!IsA(rtfunc->funcexpr, FuncExpr) ||
-        rtfunc->funccolcount != 1)
+    row = linitial_node(List, rte->values_lists);
+    if (list_length(row) != AGE_VLE_STREAM_ARG_GRAMMAR_NODE + 3 &&
+        list_length(row) != AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 3)
+    {
+        return false;
+    }
+    if (!IsA(lsecond(row), Const))
+        return false;
+
+    marker = lsecond_node(Const, row);
+    if (marker->constisnull ||
+        marker->consttype != TEXTOID ||
+        strcmp(TextDatumGetCString(marker->constvalue),
+               AGE_VLE_STREAM_MARKER) != 0)
     {
         return false;
     }
 
-    candidate = (FuncExpr *)rtfunc->funcexpr;
-    if (candidate->funcresulttype != AGTYPEOID ||
-        !candidate->funcretset)
+    foreach(lc, row)
     {
-        return false;
+        if (colno > 1)
+            args = lappend(args, lfirst(lc));
+        colno++;
     }
 
-    func_name = get_func_name(candidate->funcid);
-    if (func_name == NULL ||
-        strcmp(func_name, "age_vle") != 0)
-    {
-        return false;
-    }
+    if (func_args != NULL)
+        *func_args = args;
 
-    if (func_expr != NULL)
-        *func_expr = candidate;
     return true;
 }
 
 static void add_age_vle_stream_custom_path(PlannerInfo *root, RelOptInfo *rel,
                                            RangeTblEntry *rte,
-                                           FuncExpr *func_expr)
+                                           List *func_args)
 {
     CustomPath *cp;
     Path *reference_path;
+    List *custom_private = NIL;
 
     if (rel == NULL ||
         rel->reloptkind != RELOPT_BASEREL ||
         rel->pathlist == NIL ||
-        func_expr == NULL)
+        func_args == NIL)
     {
         return;
     }
 
     reference_path = linitial(rel->pathlist);
+    if (rte->rtekind == RTE_VALUES)
+        rel->pathlist = NIL;
 
     cp = makeNode(CustomPath);
     cp->path.pathtype = T_CustomScan;
@@ -2113,7 +1857,28 @@ static void add_age_vle_stream_custom_path(PlannerInfo *root, RelOptInfo *rel,
     cp->path.total_cost = reference_path->total_cost * 0.80;
     cp->flags = 0;
     cp->custom_paths = NIL;
-    cp->custom_private = list_make1(copyObject(func_expr));
+    custom_private = lappend(custom_private, copyObject(func_args));
+    custom_private = lappend(custom_private,
+                             makeInteger(list_length(func_args)));
+    custom_private = lappend(custom_private,
+                             make_age_vle_stream_const_flags(
+                                 func_args));
+    custom_private = lappend(custom_private,
+                             make_age_vle_stream_graph(func_args));
+    custom_private = lappend(custom_private,
+                             make_age_vle_stream_edge(func_args));
+    custom_private = lappend(custom_private,
+                             make_age_vle_stream_range_direction(
+                                 func_args));
+    custom_private = lappend(custom_private,
+                             make_age_vle_stream_output(func_args));
+    custom_private = lappend(custom_private,
+                             make_age_vle_stream_edge_source(
+                                 list_nth_node(List, custom_private, 3),
+                                 list_nth_node(List, custom_private, 4),
+                                 list_nth_node(List, custom_private, 5),
+                                 list_nth_node(List, custom_private, 6)));
+    cp->custom_private = custom_private;
     cp->methods = &age_vle_stream_path_methods;
 
     add_path(rel, (Path *)cp);
@@ -2131,13 +1896,27 @@ static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
                                       List *clauses, List *custom_plans)
 {
     CustomScan *cs;
-    FuncExpr *func_expr;
+    List *func_args;
+    Integer *nargs_value;
+    List *const_flags;
+    List *graph;
+    List *edge;
+    List *range_direction;
+    List *output;
+    List *edge_source;
 
     (void) root;
     (void) clauses;
     (void) custom_plans;
 
-    func_expr = linitial_node(FuncExpr, best_path->custom_private);
+    func_args = linitial_node(List, best_path->custom_private);
+    nargs_value = lsecond_node(Integer, best_path->custom_private);
+    const_flags = list_nth_node(List, best_path->custom_private, 2);
+    graph = list_nth_node(List, best_path->custom_private, 3);
+    edge = list_nth_node(List, best_path->custom_private, 4);
+    range_direction = list_nth_node(List, best_path->custom_private, 5);
+    output = list_nth_node(List, best_path->custom_private, 6);
+    edge_source = list_nth_node(List, best_path->custom_private, 7);
 
     cs = makeNode(CustomScan);
     cs->scan.plan.startup_cost = best_path->path.startup_cost;
@@ -2155,8 +1934,17 @@ static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
 
     cs->flags = best_path->flags;
     cs->custom_plans = NIL;
-    cs->custom_exprs = list_make1(copyObject(func_expr));
+    cs->custom_exprs = copyObject(func_args);
     cs->custom_private = NIL;
+    cs->custom_private = lappend(cs->custom_private, copyObject(nargs_value));
+    cs->custom_private = lappend(cs->custom_private, copyObject(const_flags));
+    cs->custom_private = lappend(cs->custom_private, copyObject(graph));
+    cs->custom_private = lappend(cs->custom_private, copyObject(edge));
+    cs->custom_private = lappend(cs->custom_private,
+                                 copyObject(range_direction));
+    cs->custom_private = lappend(cs->custom_private, copyObject(output));
+    cs->custom_private = lappend(cs->custom_private,
+                                 copyObject(edge_source));
     cs->custom_scan_tlist = copyObject(tlist);
     cs->custom_relids = bms_make_singleton(rel->relid);
     cs->methods = &age_vle_stream_scan_methods;
@@ -2164,473 +1952,701 @@ static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
     return (Plan *)cs;
 }
 
-static Oid get_cached_agtype_eq_oid(void)
+static List *make_age_vle_stream_const_flags(List *func_args)
 {
-    if (!OidIsValid(agtype_eq_func_oid))
-    {
-        agtype_eq_func_oid =
-            get_ag_func_oid("agtype_eq", 2, AGTYPEOID, AGTYPEOID);
-    }
-
-    return agtype_eq_func_oid;
-}
-
-static Oid get_cached_agtype_cmp_func_oid(const char *name, Oid *cache)
-{
-    if (!OidIsValid(*cache))
-    {
-        *cache = get_ag_func_oid(name, 2, AGTYPEOID, AGTYPEOID);
-    }
-
-    return *cache;
-}
-
-static Oid get_cached_agtype_field_exists_nonnull_oid(void)
-{
-    if (!OidIsValid(agtype_field_exists_nonnull_func_oid))
-    {
-        agtype_field_exists_nonnull_func_oid =
-            get_ag_func_oid("agtype_object_field_exists_nonnull", 2,
-                            AGTYPEOID, AGTYPEOID);
-    }
-
-    return agtype_field_exists_nonnull_func_oid;
-}
-
-static Oid get_cached_agtype_field_equals_oid(void)
-{
-    if (!OidIsValid(agtype_field_equals_func_oid))
-    {
-        agtype_field_equals_func_oid =
-            get_ag_func_oid("agtype_object_field_equals", 3,
-                            AGTYPEOID, AGTYPEOID, AGTYPEOID);
-    }
-
-    return agtype_field_equals_func_oid;
-}
-
-static Oid get_cached_agtype_field_cmp_oid(void)
-{
-    if (!OidIsValid(agtype_field_cmp_func_oid))
-    {
-        agtype_field_cmp_func_oid =
-            get_ag_func_oid("agtype_object_field_cmp", 3,
-                            AGTYPEOID, AGTYPEOID, AGTYPEOID);
-    }
-
-    return agtype_field_cmp_func_oid;
-}
-
-static bool rewrite_property_equals_restrictions(PlannerInfo *root,
-                                                 RelOptInfo *rel, Index rti)
-{
-    RangeTblEntry *rte;
-    ListCell *lc;
-    bool rewritten_any = false;
-
-    if (root == NULL ||
-        rti <= 0 ||
-        rti >= root->simple_rel_array_size ||
-        rel == NULL ||
-        rel->baserestrictinfo == NIL)
-    {
-        return false;
-    }
-
-    rte = root->simple_rte_array[rti];
-    if (rte == NULL || rte->rtekind != RTE_RELATION)
-    {
-        return false;
-    }
-
-    foreach(lc, rel->baserestrictinfo)
-    {
-        RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
-        Node *rewritten;
-
-        if (rinfo->pseudoconstant)
-            continue;
-
-        rewritten = try_rewrite_property_equals_clause((Node *)rinfo->clause, rti,
-                                                       rel);
-        if (rewritten != NULL)
-        {
-            rinfo->clause = (Expr *)rewritten;
-            rewritten_any = true;
-        }
-    }
-
-    return rewritten_any;
-}
-
-static Node *replace_property_index_side(OpExpr *op, bool replace_left,
-                                         Node *index_expr)
-{
-    OpExpr *copy;
-    Node *left;
-    Node *right;
-
-    if (op == NULL || index_expr == NULL)
-        return NULL;
-
-    copy = copyObject(op);
-    left = linitial(copy->args);
-    right = lsecond(copy->args);
-    copy->args = replace_left ?
-        list_make2(copyObject(index_expr), right) :
-        list_make2(left, copyObject(index_expr));
-
-    return (Node *)copy;
-}
-
-static void canonicalize_property_index_predicates(RelOptInfo *rel)
-{
-    ListCell *lc;
-    List *canonical_exprs;
-
-    if (rel == NULL)
-        return;
-
-    canonical_exprs = collect_canonical_property_index_exprs(rel);
-    if (canonical_exprs == NIL)
-        return;
-
-    foreach(lc, rel->indexlist)
-    {
-        IndexOptInfo *index = lfirst_node(IndexOptInfo, lc);
-
-        if (index->indpred == NIL)
-            continue;
-
-        index->indpred = (List *)
-            expression_tree_mutator((Node *)index->indpred,
-                                    canonicalize_property_index_exprs_mutator,
-                                    canonical_exprs);
-    }
-}
-
-static void canonicalize_property_index_restrictions(RelOptInfo *rel)
-{
-    ListCell *index_lc;
-    List *canonical_exprs;
-
-    if (rel == NULL)
-        return;
-
-    canonical_exprs = collect_canonical_property_index_exprs(rel);
-    if (canonical_exprs == NIL)
-        return;
-
-    foreach(index_lc, rel->indexlist)
-    {
-        IndexOptInfo *index = lfirst_node(IndexOptInfo, index_lc);
-        ListCell *rinfo_lc;
-
-        foreach(rinfo_lc, index->indrestrictinfo)
-        {
-            RestrictInfo *rinfo = lfirst_node(RestrictInfo, rinfo_lc);
-
-            rinfo->clause = (Expr *)
-                expression_tree_mutator(
-                    (Node *)rinfo->clause,
-                    canonicalize_property_index_exprs_mutator,
-                    canonical_exprs);
-        }
-    }
-}
-
-static List *collect_canonical_property_index_exprs(RelOptInfo *rel)
-{
-    List *exprs = NIL;
+    List *flags = NIL;
     ListCell *lc;
 
-    if (rel == NULL)
-        return NIL;
-
-    foreach(lc, rel->indexlist)
+    foreach(lc, func_args)
     {
-        IndexOptInfo *index = lfirst_node(IndexOptInfo, lc);
+        Node *arg = (Node *)lfirst(lc);
 
-        expression_tree_walker((Node *)index->indexprs,
-                               collect_canonical_property_index_exprs_walker,
-                               &exprs);
-        expression_tree_walker((Node *)index->indpred,
-                               collect_canonical_property_index_exprs_walker,
-                               &exprs);
+        flags = lappend(flags, makeInteger(IsA(arg, Const) ? 1 : 0));
     }
 
-    return exprs;
+    return flags;
 }
 
-static bool collect_canonical_property_index_exprs_walker(Node *node,
-                                                          void *context)
+static List *make_age_vle_stream_graph(List *func_args)
 {
-    List **exprs = (List **)context;
-    CypherPropertyHandoffDescriptor handoff;
-    CypherCachedPropertySlotDescriptor slot;
-    Node *slot_expr;
+    char *graph_name = NULL;
+    bool graph_null = false;
+    bool graph_known;
+    List *descriptor = NIL;
 
-    if (node == NULL)
-        return false;
+    graph_known =
+        list_length(func_args) > AGE_VLE_STREAM_ARG_GRAPH &&
+        get_age_vle_stream_string_const(
+            list_nth(func_args, AGE_VLE_STREAM_ARG_GRAPH), &graph_name,
+            &graph_null);
 
-    memset(&handoff, 0, sizeof(handoff));
-    if (cypher_extract_property_access_signature(
-            node, &handoff.property_signature) &&
-        cypher_make_cached_property_slot_descriptor(&handoff, &slot) &&
-        (slot.value_type != AGTYPEOID ||
-         slot.field_result_type != AGTYPEOID))
+    descriptor = lappend(descriptor, makeInteger(graph_known ? 1 : 0));
+    descriptor = lappend(descriptor, makeInteger(graph_null ? 1 : 0));
+    descriptor = lappend(descriptor, make_text_const(graph_name));
+
+    if (graph_name != NULL)
+        pfree(graph_name);
+
+    return descriptor;
+}
+
+static List *make_age_vle_stream_edge(List *func_args)
+{
+    Node *node;
+    Const *const_arg;
+    agtype *agt;
+    agtype_value edge_value;
+    agtype_value *label_value;
+    agtype_value *properties_value;
+    agtype *properties = NULL;
+    char *label_name = NULL;
+    int properties_count = 0;
+    bool needs_free = false;
+    bool found;
+    bool edge_known = false;
+    bool label_known = false;
+    bool properties_known = false;
+    List *descriptor = NIL;
+
+    if (list_length(func_args) <= AGE_VLE_STREAM_ARG_EDGE)
+        goto build_descriptor;
+
+    node = list_nth(func_args, AGE_VLE_STREAM_ARG_EDGE);
+    if (node == NULL || !IsA(node, Const))
+        goto build_descriptor;
+
+    const_arg = (Const *)node;
+    if (const_arg->constisnull || const_arg->consttype != AGTYPEOID)
+        goto build_descriptor;
+
+    agt = DATUM_GET_AGTYPE_P(const_arg->constvalue);
+    if (!AGTYPE_CONTAINER_IS_SCALAR(&agt->root))
+        goto build_descriptor;
+
+    found = get_ith_agtype_value_from_container_no_copy(&agt->root, 0,
+                                                        &edge_value,
+                                                        &needs_free);
+    if (!found || edge_value.type != AGTV_EDGE)
     {
-        slot_expr = cypher_make_cached_property_slot_expr(&slot);
-        if (slot_expr != NULL && equal(slot_expr, node) &&
-            !property_expr_list_contains(*exprs, slot_expr))
+        if (needs_free)
+            pfree_agtype_value_content(&edge_value);
+        goto build_descriptor;
+    }
+
+    edge_known = true;
+    label_value = AGTYPE_EDGE_GET_LABEL(&edge_value);
+    if (label_value->type == AGTV_STRING)
+    {
+        label_name = pnstrdup(label_value->val.string.val,
+                              label_value->val.string.len);
+        label_known = true;
+    }
+
+    properties_value = AGTYPE_EDGE_GET_PROPERTIES(&edge_value);
+    if (properties_value->type == AGTV_OBJECT)
+    {
+        properties_count = properties_value->val.object.num_pairs;
+        properties = agtype_value_to_agtype(properties_value);
+        properties_known = true;
+    }
+
+    if (needs_free)
+        pfree_agtype_value_content(&edge_value);
+
+build_descriptor:
+    descriptor = lappend(descriptor, makeInteger(edge_known ? 1 : 0));
+    descriptor = lappend(descriptor, makeInteger(label_known ? 1 : 0));
+    descriptor = lappend(descriptor, make_text_const(label_name));
+    descriptor = lappend(descriptor, makeInteger(properties_known ? 1 : 0));
+    descriptor = lappend(descriptor, makeInteger(properties == NULL ? 1 : 0));
+    descriptor = lappend(descriptor, make_agtype_const(properties));
+    descriptor = lappend(descriptor, make_int8_const(properties_count));
+
+    if (label_name != NULL)
+        pfree(label_name);
+
+    return descriptor;
+}
+
+static List *make_age_vle_stream_range_direction(List *func_args)
+{
+    int64 lower = 0;
+    int64 upper = 0;
+    int64 direction = 0;
+    bool lower_null = false;
+    bool upper_null = false;
+    bool direction_null = false;
+    bool lower_known;
+    bool upper_known;
+    bool direction_known;
+    List *descriptor = NIL;
+
+    lower_known =
+        list_length(func_args) > AGE_VLE_STREAM_ARG_LOWER &&
+        get_age_vle_stream_integer_const(
+            list_nth(func_args, AGE_VLE_STREAM_ARG_LOWER), &lower,
+            &lower_null);
+    upper_known =
+        list_length(func_args) > AGE_VLE_STREAM_ARG_UPPER &&
+        get_age_vle_stream_integer_const(
+            list_nth(func_args, AGE_VLE_STREAM_ARG_UPPER), &upper,
+            &upper_null);
+    direction_known =
+        list_length(func_args) > AGE_VLE_STREAM_ARG_DIRECTION &&
+        get_age_vle_stream_integer_const(
+            list_nth(func_args, AGE_VLE_STREAM_ARG_DIRECTION), &direction,
+            &direction_null);
+
+    descriptor = lappend(descriptor, makeInteger(lower_known ? 1 : 0));
+    descriptor = lappend(descriptor, makeInteger(lower_null ? 1 : 0));
+    descriptor = lappend(descriptor, make_int8_const(lower));
+    descriptor = lappend(descriptor, makeInteger(upper_known ? 1 : 0));
+    descriptor = lappend(descriptor, makeInteger(upper_null ? 1 : 0));
+    descriptor = lappend(descriptor, make_int8_const(upper));
+    descriptor = lappend(descriptor, makeInteger(direction_known ? 1 : 0));
+    descriptor = lappend(descriptor, makeInteger(direction_null ? 1 : 0));
+    descriptor = lappend(descriptor, make_int8_const(direction));
+
+    return descriptor;
+}
+
+static List *make_age_vle_stream_output(List *func_args)
+{
+    int64 grammar = 0;
+    bool grammar_null = false;
+    bool grammar_known;
+    char *terminal_key = NULL;
+    bool terminal_key_null = true;
+    bool terminal_key_known = false;
+    int terminal_key_len = 0;
+    AgeVLEOutputRequirement output_requirement =
+        AGE_VLE_OUTPUT_REQUIREMENT_PATH;
+    bool materializer_vertex_prefetch;
+    List *descriptor = NIL;
+
+    grammar_known =
+        list_length(func_args) > AGE_VLE_STREAM_ARG_GRAMMAR_NODE &&
+        get_age_vle_stream_integer_const(
+            list_nth(func_args, AGE_VLE_STREAM_ARG_GRAMMAR_NODE), &grammar,
+            &grammar_null);
+    if (list_length(func_args) > AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY)
+    {
+        terminal_key_known =
+            get_age_vle_stream_string_const(
+                list_nth(func_args, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY),
+                &terminal_key, &terminal_key_null);
+        if (terminal_key_known && terminal_key_null)
         {
-            *exprs = lappend(*exprs, slot_expr);
+            output_requirement =
+                AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES;
         }
-
-        return false;
+        else
+        {
+            output_requirement = AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY;
+        }
+        if (terminal_key_known && !terminal_key_null && terminal_key != NULL)
+        {
+            terminal_key_len = strlen(terminal_key);
+        }
     }
-
-    return expression_tree_walker(
-        node, collect_canonical_property_index_exprs_walker, context);
-}
-
-static Node *canonicalize_property_index_exprs_mutator(Node *node,
-                                                       void *context)
-{
-    List *exprs = (List *)context;
-    CypherPropertyHandoffDescriptor handoff;
-    CypherCachedPropertySlotDescriptor slot;
-    Node *slot_expr;
-
-    if (node == NULL)
-        return NULL;
-
-    memset(&handoff, 0, sizeof(handoff));
-    if (cypher_extract_property_access_signature(
-            node, &handoff.property_signature) &&
-        cypher_make_cached_property_slot_descriptor(&handoff, &slot) &&
-        (slot.value_type != AGTYPEOID ||
-         slot.field_result_type != AGTYPEOID))
+    else if (grammar_known && !grammar_null && grammar < 0)
     {
-        slot_expr = cypher_make_cached_property_slot_expr(&slot);
-        if (slot_expr != NULL && property_expr_list_contains(exprs, slot_expr))
-            return slot_expr;
+        output_requirement = AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_VERTEX;
     }
+    materializer_vertex_prefetch =
+        output_requirement == AGE_VLE_OUTPUT_REQUIREMENT_PATH;
 
-    return expression_tree_mutator(
-        node, canonicalize_property_index_exprs_mutator, context);
+    descriptor = lappend(descriptor, makeInteger(grammar_known ? 1 : 0));
+    descriptor = lappend(descriptor, makeInteger(grammar_null ? 1 : 0));
+    descriptor = lappend(descriptor, make_int8_const(grammar));
+    descriptor = lappend(descriptor,
+                         make_int8_const((int64)output_requirement));
+    descriptor = lappend(descriptor, makeInteger(terminal_key_known ? 1 : 0));
+    descriptor = lappend(descriptor, makeInteger(terminal_key_null ? 1 : 0));
+    descriptor = lappend(descriptor, make_text_const(terminal_key));
+    descriptor = lappend(descriptor, make_int8_const(terminal_key_len));
+    descriptor = lappend(descriptor,
+                         makeInteger(terminal_key_len == 1 ? 1 : 0));
+    descriptor = lappend(descriptor,
+                         makeInteger(materializer_vertex_prefetch ? 1 : 0));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(AGE_VERTEX_PROPERTY_PREFETCH_MIN_REL_CANDIDATES));
+
+    if (terminal_key != NULL)
+        pfree(terminal_key);
+
+    return descriptor;
 }
 
-static bool property_expr_list_contains(List *exprs, Node *expr)
+static List *make_age_vle_stream_edge_source(List *graph, List *edge,
+                                             List *range_direction,
+                                             List *output)
 {
+    AgeVLEStreamEdgeSourceKind source_kind =
+        AGE_VLE_STREAM_EDGE_SOURCE_GLOBAL_METADATA;
+    List *descriptor = NIL;
+    bool graph_known;
+    bool graph_null;
+    bool edge_known;
+    bool label_known;
+    bool properties_known;
+    bool grammar_known;
+    bool grammar_null;
+    bool direction_known;
+    bool direction_null;
+    bool upper_known;
+    bool upper_null;
+    int64 properties_count;
+    int64 grammar_value;
+    int64 output_requirement;
+    int64 direction_value;
+    int64 upper_value;
+    bool adjacency_out = false;
+    bool adjacency_in = false;
+    bool endpoint_start = false;
+    bool endpoint_end = false;
+    bool local_edge_state = false;
+    Oid edge_label_oid = InvalidOid;
+    VLESourceFanoutEvidence source_evidence = {InvalidOid, 0.0, 0.0, 0.0};
+    VLETraversalSourceCandidates source_candidates;
+    VLETraversalSourceLayoutInput source_input;
+    VLETraversalSourceLayoutDecision source_decision;
+    VLEStreamSourceCostInput cost_input;
+    VLEStreamSourceCostDecision cost_decision;
+    AgeVLEStreamDirectedSourceKind outgoing_kind =
+        AGE_VLE_STREAM_DIRECTED_SOURCE_NONE;
+    AgeVLEStreamDirectedSourceKind incoming_kind =
+        AGE_VLE_STREAM_DIRECTED_SOURCE_NONE;
+    AgeVLEStreamDirectedSourceKind policy_outgoing_kind =
+        AGE_VLE_STREAM_DIRECTED_SOURCE_NONE;
+    AgeVLEStreamDirectedSourceKind policy_incoming_kind =
+        AGE_VLE_STREAM_DIRECTED_SOURCE_NONE;
+    char *cost_policy = NULL;
+    char *graph_name = NULL;
+    char *label_name = NULL;
+
+    Assert(list_length(graph) == AGE_VLE_STREAM_GRAPH_COUNT);
+    Assert(list_length(edge) == AGE_VLE_STREAM_EDGE_COUNT);
+    Assert(list_length(range_direction) ==
+           AGE_VLE_STREAM_RANGE_DIRECTION_COUNT);
+    Assert(list_length(output) == AGE_VLE_STREAM_OUTPUT_COUNT);
+
+    graph_known = intVal(list_nth_node(Integer, graph,
+                                       AGE_VLE_STREAM_GRAPH_KNOWN)) != 0;
+    graph_null = intVal(list_nth_node(Integer, graph,
+                                      AGE_VLE_STREAM_GRAPH_NULL)) != 0;
+    edge_known = intVal(list_nth_node(Integer, edge,
+                                      AGE_VLE_STREAM_EDGE_KNOWN)) != 0;
+    label_known = intVal(list_nth_node(Integer, edge,
+                                       AGE_VLE_STREAM_EDGE_LABEL_KNOWN)) != 0;
+    properties_known =
+        intVal(list_nth_node(Integer, edge,
+                             AGE_VLE_STREAM_EDGE_PROPERTIES_KNOWN)) != 0;
+    properties_count = DatumGetInt64(
+        list_nth_node(Const, edge,
+                      AGE_VLE_STREAM_EDGE_PROPERTIES_COUNT)->constvalue);
+    grammar_known =
+        intVal(list_nth_node(Integer, output,
+                             AGE_VLE_STREAM_OUTPUT_GRAMMAR_KNOWN)) != 0;
+    grammar_null =
+        intVal(list_nth_node(Integer, output,
+                             AGE_VLE_STREAM_OUTPUT_GRAMMAR_NULL)) != 0;
+    grammar_value = DatumGetInt64(
+        list_nth_node(Const, output,
+                      AGE_VLE_STREAM_OUTPUT_GRAMMAR_VALUE)->constvalue);
+    output_requirement = DatumGetInt64(
+        list_nth_node(Const, output,
+                      AGE_VLE_STREAM_OUTPUT_REQUIREMENT)->constvalue);
+    direction_known =
+        intVal(list_nth_node(Integer, range_direction,
+                             AGE_VLE_STREAM_DIRECTION_KNOWN)) != 0;
+    direction_null =
+        intVal(list_nth_node(Integer, range_direction,
+                             AGE_VLE_STREAM_DIRECTION_NULL)) != 0;
+    direction_value = DatumGetInt64(
+        list_nth_node(Const, range_direction,
+                      AGE_VLE_STREAM_DIRECTION_VALUE)->constvalue);
+    upper_known =
+        intVal(list_nth_node(Integer, range_direction,
+                             AGE_VLE_STREAM_RANGE_UPPER_KNOWN)) != 0;
+    upper_null =
+        intVal(list_nth_node(Integer, range_direction,
+                             AGE_VLE_STREAM_RANGE_UPPER_NULL)) != 0;
+    upper_value = DatumGetInt64(
+        list_nth_node(Const, range_direction,
+                      AGE_VLE_STREAM_RANGE_UPPER_VALUE)->constvalue);
+
+    if (!graph_known || graph_null || !edge_known || !label_known ||
+        !properties_known || !grammar_known || grammar_null ||
+        !direction_known || direction_null)
+    {
+        source_kind = AGE_VLE_STREAM_EDGE_SOURCE_DYNAMIC;
+        goto build_descriptor;
+    }
+
+    graph_name = TextDatumGetCString(
+        list_nth_node(Const, graph,
+                      AGE_VLE_STREAM_GRAPH_VALUE)->constvalue);
+    label_name = TextDatumGetCString(
+        list_nth_node(Const, edge,
+                      AGE_VLE_STREAM_EDGE_LABEL_VALUE)->constvalue);
+
+    get_vle_stream_edge_source_indexes(graph_name, label_name,
+                                       &edge_label_oid,
+                                       &adjacency_out, &adjacency_in,
+                                       &endpoint_start, &endpoint_end);
+    estimate_vle_source_fanout_evidence(&source_evidence, edge_label_oid);
+    if (grammar_value < 0 &&
+        output_requirement != AGE_VLE_OUTPUT_REQUIREMENT_PATH &&
+        properties_count == 0)
+    {
+        bool has_out_source = adjacency_out || endpoint_start;
+        bool has_in_source = adjacency_in || endpoint_end;
+
+        if (((cypher_rel_dir)direction_value == CYPHER_REL_DIR_RIGHT &&
+             has_out_source) ||
+            ((cypher_rel_dir)direction_value == CYPHER_REL_DIR_LEFT &&
+             has_in_source) ||
+            ((cypher_rel_dir)direction_value == CYPHER_REL_DIR_NONE &&
+             has_out_source && has_in_source))
+        {
+            source_kind = AGE_VLE_STREAM_EDGE_SOURCE_LOCAL_INDEX_CANDIDATE;
+            local_edge_state = true;
+        }
+    }
+
+    source_candidates.age_adjacency_out = adjacency_out;
+    source_candidates.age_adjacency_in = adjacency_in;
+    source_candidates.endpoint_start = endpoint_start;
+    source_candidates.endpoint_end = endpoint_end;
+
+    source_input.indexes = NULL;
+    source_input.upper = upper_value;
+    source_input.upper_infinite = !upper_known || upper_null;
+    source_input.use_local_edge_state = local_edge_state;
+    source_input.label_constrained = true;
+    source_input.has_property_constraints = properties_count > 0;
+    source_input.preferred_source_known = false;
+    source_input.preferred_outgoing_kind = VLE_TRAVERSAL_SOURCE_NONE;
+    source_input.preferred_incoming_kind = VLE_TRAVERSAL_SOURCE_NONE;
+    select_vle_traversal_source_layout(&source_decision, &source_input,
+                                       &source_candidates);
+    outgoing_kind = age_vle_stream_directed_source_from_traversal(
+        source_decision.outgoing_kind);
+    incoming_kind = age_vle_stream_directed_source_from_traversal(
+        source_decision.incoming_kind);
+    if (source_kind == AGE_VLE_STREAM_EDGE_SOURCE_LOCAL_INDEX_CANDIDATE)
+    {
+        cost_input.source_kind = source_kind;
+        cost_input.outgoing_kind = outgoing_kind;
+        cost_input.incoming_kind = incoming_kind;
+        cost_input.evidence = &source_evidence;
+        cost_input.upper = upper_value;
+        cost_input.upper_infinite = !upper_known || upper_null;
+        cost_input.has_property_constraints = properties_count > 0;
+        cost_input.endpoint_start = endpoint_start;
+        cost_input.endpoint_end = endpoint_end;
+        cost_input.age_adjacency_out = adjacency_out;
+        cost_input.age_adjacency_in = adjacency_in;
+        choose_vle_stream_source_cost_decision(&cost_decision, &cost_input);
+        policy_outgoing_kind = cost_decision.outgoing_kind;
+        policy_incoming_kind = cost_decision.incoming_kind;
+        cost_policy = cost_decision.policy_text;
+        outgoing_kind = cost_decision.outgoing_kind;
+        incoming_kind = cost_decision.incoming_kind;
+    }
+    else
+    {
+        policy_outgoing_kind = outgoing_kind;
+        policy_incoming_kind = incoming_kind;
+    }
+
+build_descriptor:
+    descriptor = lappend(descriptor, make_int8_const((int64)source_kind));
+    descriptor = lappend(descriptor, makeInteger(adjacency_out ? 1 : 0));
+    descriptor = lappend(descriptor, makeInteger(adjacency_in ? 1 : 0));
+    descriptor = lappend(descriptor, makeInteger(endpoint_start ? 1 : 0));
+    descriptor = lappend(descriptor, makeInteger(endpoint_end ? 1 : 0));
+    descriptor = lappend(descriptor, makeInteger(local_edge_state ? 1 : 0));
+    descriptor = lappend(descriptor, make_int8_const((int64)outgoing_kind));
+    descriptor = lappend(descriptor, make_int8_const((int64)incoming_kind));
+    descriptor = lappend(descriptor, make_int8_const(
+        round_vle_source_cost_evidence(source_evidence.reltuples)));
+    descriptor = lappend(descriptor, make_int8_const(
+        round_vle_source_cost_evidence(source_evidence.start_fanout)));
+    descriptor = lappend(descriptor, make_int8_const(
+        round_vle_source_cost_evidence(source_evidence.end_fanout)));
+    descriptor = lappend(descriptor, make_text_const(cost_policy));
+    descriptor = lappend(descriptor,
+                         make_int8_const((int64)policy_outgoing_kind));
+    descriptor = lappend(descriptor,
+                         make_int8_const((int64)policy_incoming_kind));
+
+    if (graph_name != NULL)
+        pfree(graph_name);
+    if (label_name != NULL)
+        pfree(label_name);
+    if (cost_policy != NULL)
+        pfree(cost_policy);
+
+    return descriptor;
+}
+
+static void get_vle_stream_edge_source_indexes(
+    const char *graph_name, const char *label_name,
+    Oid *edge_label_oid,
+    bool *adjacency_out, bool *adjacency_in,
+    bool *endpoint_start, bool *endpoint_end)
+{
+    static Oid age_adjacency_am_oid = InvalidOid;
+    Oid graph_oid;
+    label_cache_data *label_cache;
+    Relation edge_rel;
+    List *index_list;
     ListCell *lc;
 
-    foreach(lc, exprs)
+    Assert(edge_label_oid != NULL);
+    Assert(adjacency_out != NULL);
+    Assert(adjacency_in != NULL);
+    Assert(endpoint_start != NULL);
+    Assert(endpoint_end != NULL);
+
+    *edge_label_oid = InvalidOid;
+    *adjacency_out = false;
+    *adjacency_in = false;
+    *endpoint_start = false;
+    *endpoint_end = false;
+
+    if (graph_name == NULL || label_name == NULL)
+        return;
+
+    graph_oid = get_graph_oid(graph_name);
+    if (!OidIsValid(graph_oid))
+        return;
+
+    label_cache = search_label_name_graph_cache_cached(label_name, graph_oid);
+    if (label_cache == NULL || !OidIsValid(label_cache->relation))
+        return;
+
+    *edge_label_oid = label_cache->relation;
+    edge_rel = relation_open(label_cache->relation, AccessShareLock);
+    *endpoint_start = OidIsValid(find_usable_btree_index_for_attr(
+        edge_rel, Anum_ag_label_edge_table_start_id));
+    *endpoint_end = OidIsValid(find_usable_btree_index_for_attr(
+        edge_rel, Anum_ag_label_edge_table_end_id));
+
+    if (!OidIsValid(age_adjacency_am_oid))
+        age_adjacency_am_oid =
+            GetSysCacheOid1(AMNAME, Anum_pg_am_oid,
+                            CStringGetDatum("age_adjacency"));
+
+    if (OidIsValid(age_adjacency_am_oid))
     {
-        if (equal(lfirst(lc), expr))
-            return true;
+        index_list = RelationGetIndexList(edge_rel);
+        foreach(lc, index_list)
+        {
+            Oid index_oid = lfirst_oid(lc);
+            Relation index_rel;
+
+            index_rel = index_open(index_oid, AccessShareLock);
+            if (index_rel->rd_rel->relam == age_adjacency_am_oid &&
+                index_rel->rd_index != NULL &&
+                index_rel->rd_index->indisvalid &&
+                index_rel->rd_index->indisready)
+            {
+                if (vle_stream_age_adjacency_index_matches(index_rel, true))
+                    *adjacency_out = true;
+                if (vle_stream_age_adjacency_index_matches(index_rel, false))
+                    *adjacency_in = true;
+            }
+            index_close(index_rel, AccessShareLock);
+            if (*adjacency_out && *adjacency_in)
+                break;
+        }
+        list_free(index_list);
     }
 
-    return false;
+    relation_close(edge_rel, AccessShareLock);
 }
 
-static Node *try_rewrite_property_equals_clause(Node *clause, Index rti,
-                                                RelOptInfo *rel)
+static bool vle_stream_age_adjacency_index_matches(Relation index_rel,
+                                                   bool outgoing)
 {
-    OpExpr *op;
-    Node *left;
-    Node *right;
-    Node *properties = NULL;
-    Node *key = NULL;
+    int2vector *indkey;
 
-    if (clause == NULL || !IsA(clause, OpExpr))
-        return NULL;
-
-    op = (OpExpr *)clause;
-    if (list_length(op->args) != 2)
-        return NULL;
-
-    left = linitial(op->args);
-    right = lsecond(op->args);
-
+    if (index_rel->rd_index->indnkeyatts != 3 ||
+        index_rel->rd_index->indnatts != 3)
     {
-        CypherPropertyIndexHandoff index_handoff;
-
-        if (cypher_find_matching_property_index_handoff(rel, left,
-                                                        &index_handoff))
-        {
-            return replace_property_index_side(op, true,
-                                               index_handoff.index_expr);
-        }
-
-        if (cypher_find_matching_property_index_handoff(rel, right,
-                                                        &index_handoff))
-        {
-            return replace_property_index_side(op, false,
-                                               index_handoff.index_expr);
-        }
+        return false;
     }
 
-    if (match_property_access_expr(left, rti, &properties, &key))
+    indkey = &index_rel->rd_index->indkey;
+    if (outgoing)
     {
-        const char *operator_name;
-
-        if (op->opfuncid == get_cached_agtype_eq_oid())
-        {
-            return (Node *)makeFuncExpr(get_cached_agtype_field_equals_oid(),
-                                        BOOLOID,
-                                        list_make3(copyObject(properties),
-                                                   copyObject(key),
-                                                   copyObject(right)),
-                                        InvalidOid, InvalidOid,
-                                        COERCE_EXPLICIT_CALL);
-        }
-
-        operator_name = property_compare_operator_name(op->opfuncid, false);
-        if (operator_name != NULL)
-        {
-            FuncExpr *cmp_expr;
-
-            cmp_expr = makeFuncExpr(get_cached_agtype_field_cmp_oid(),
-                                    INT4OID,
-                                    list_make3(copyObject(properties),
-                                               copyObject(key),
-                                               copyObject(right)),
-                                    InvalidOid, InvalidOid,
-                                    COERCE_EXPLICIT_CALL);
-            return (Node *)make_int4_zero_compare_expr(cmp_expr,
-                                                       operator_name);
-        }
+        return indkey->values[0] == Anum_ag_label_edge_table_start_id &&
+               indkey->values[1] == Anum_ag_label_edge_table_id &&
+               indkey->values[2] == Anum_ag_label_edge_table_end_id;
     }
 
-    if (match_property_access_expr(right, rti, &properties, &key))
-    {
-        const char *operator_name;
-
-        if (op->opfuncid == get_cached_agtype_eq_oid())
-        {
-            return (Node *)makeFuncExpr(get_cached_agtype_field_equals_oid(),
-                                        BOOLOID,
-                                        list_make3(copyObject(properties),
-                                                   copyObject(key),
-                                                   copyObject(left)),
-                                        InvalidOid, InvalidOid,
-                                        COERCE_EXPLICIT_CALL);
-        }
-
-        operator_name = property_compare_operator_name(op->opfuncid, true);
-        if (operator_name != NULL)
-        {
-            FuncExpr *cmp_expr;
-
-            cmp_expr = makeFuncExpr(get_cached_agtype_field_cmp_oid(),
-                                    INT4OID,
-                                    list_make3(copyObject(properties),
-                                               copyObject(key),
-                                               copyObject(left)),
-                                    InvalidOid, InvalidOid,
-                                    COERCE_EXPLICIT_CALL);
-            return (Node *)make_int4_zero_compare_expr(cmp_expr,
-                                                       operator_name);
-        }
-    }
-
-    return NULL;
+    return indkey->values[0] == Anum_ag_label_edge_table_end_id &&
+           indkey->values[1] == Anum_ag_label_edge_table_id &&
+           indkey->values[2] == Anum_ag_label_edge_table_start_id;
 }
 
-static bool match_property_access_expr(Node *node, Index rti,
-                                       Node **properties, Node **key)
+static AgeVLEStreamDirectedSourceKind
+age_vle_stream_directed_source_from_traversal(
+    VLETraversalSourceKind source_kind)
 {
-    Node *properties_arg;
-    Node *key_arg;
-
-    if (!cypher_extract_property_access_terminal_args(node, &properties_arg,
-                                                     &key_arg))
-        return false;
-
-    if (!IsA(key_arg, Const) ||
-        !property_object_belongs_to_rti(properties_arg, rti))
-        return false;
-
-    if (((Const *)key_arg)->consttype != AGTYPEOID ||
-        ((Const *)key_arg)->constisnull)
+    switch (source_kind)
     {
+        case VLE_TRAVERSAL_SOURCE_NONE:
+            return AGE_VLE_STREAM_DIRECTED_SOURCE_NONE;
+        case VLE_TRAVERSAL_SOURCE_AGE_ADJACENCY:
+            return AGE_VLE_STREAM_DIRECTED_SOURCE_AGE_ADJACENCY;
+        case VLE_TRAVERSAL_SOURCE_ENDPOINT_BTREE:
+            return AGE_VLE_STREAM_DIRECTED_SOURCE_ENDPOINT_BTREE;
+    }
+
+    return AGE_VLE_STREAM_DIRECTED_SOURCE_NONE;
+}
+
+static bool get_age_vle_stream_integer_const(Node *node, int64 *value,
+                                             bool *isnull)
+{
+    Const *const_arg;
+    agtype *agt;
+    agtype_value agtv;
+    bool needs_free = false;
+    bool found;
+
+    Assert(value != NULL);
+    Assert(isnull != NULL);
+
+    *value = 0;
+    *isnull = false;
+
+    if (node == NULL || !IsA(node, Const))
+        return false;
+
+    const_arg = (Const *)node;
+    if (const_arg->constisnull)
+    {
+        *isnull = true;
+        return true;
+    }
+    if (const_arg->consttype != AGTYPEOID)
+        return false;
+
+    agt = DATUM_GET_AGTYPE_P(const_arg->constvalue);
+    if (!AGTYPE_CONTAINER_IS_SCALAR(&agt->root))
+        return false;
+
+    found = get_ith_agtype_value_from_container_no_copy(&agt->root, 0, &agtv,
+                                                        &needs_free);
+    if (!found || agtv.type == AGTV_NULL)
+    {
+        if (needs_free)
+            pfree_agtype_value_content(&agtv);
+        *isnull = true;
+        return true;
+    }
+    if (agtv.type != AGTV_INTEGER)
+    {
+        if (needs_free)
+            pfree_agtype_value_content(&agtv);
         return false;
     }
 
-    *properties = properties_arg;
-    *key = key_arg;
+    *value = agtv.val.int_value;
+    if (needs_free)
+        pfree_agtype_value_content(&agtv);
+
     return true;
 }
 
-static bool property_object_belongs_to_rti(Node *node, Index rti)
+static bool get_age_vle_stream_string_const(Node *node, char **value,
+                                            bool *isnull)
 {
-    List *vars;
-    ListCell *lc;
-    bool found = false;
+    Const *const_arg;
+    agtype *agt;
+    agtype_value agtv;
+    bool needs_free = false;
+    bool found;
 
-    if (node == NULL || exprType(node) != AGTYPEOID)
+    Assert(value != NULL);
+    Assert(isnull != NULL);
+
+    *value = NULL;
+    *isnull = false;
+
+    if (node == NULL || !IsA(node, Const))
         return false;
 
-    vars = pull_var_clause(node,
-                           PVC_RECURSE_AGGREGATES |
-                           PVC_RECURSE_WINDOWFUNCS |
-                           PVC_RECURSE_PLACEHOLDERS);
-
-    foreach(lc, vars)
+    const_arg = (Const *)node;
+    if (const_arg->constisnull)
     {
-        Var *var = lfirst_node(Var, lc);
+        *isnull = true;
+        return true;
+    }
+    if (const_arg->consttype != AGTYPEOID)
+        return false;
 
-        if (var->varno != rti || var->vartype != AGTYPEOID)
-        {
-            list_free(vars);
-            return false;
-        }
-        found = true;
+    agt = DATUM_GET_AGTYPE_P(const_arg->constvalue);
+    if (!AGTYPE_CONTAINER_IS_SCALAR(&agt->root))
+        return false;
+
+    found = get_ith_agtype_value_from_container_no_copy(&agt->root, 0, &agtv,
+                                                        &needs_free);
+    if (!found || agtv.type == AGTV_NULL)
+    {
+        if (needs_free)
+            pfree_agtype_value_content(&agtv);
+        *isnull = true;
+        return true;
+    }
+    if (agtv.type != AGTV_STRING)
+    {
+        if (needs_free)
+            pfree_agtype_value_content(&agtv);
+        return false;
     }
 
-    list_free(vars);
-    return found;
+    *value = pnstrdup(agtv.val.string.val, agtv.val.string.len);
+    if (needs_free)
+        pfree_agtype_value_content(&agtv);
+
+    return true;
 }
 
-static Expr *make_int4_zero_compare_expr(FuncExpr *cmp_expr,
-                                         const char *operator_name)
+static Const *make_int8_const(int64 value)
 {
-    Oid opno;
-    Expr *expr;
-
-    opno = OpernameGetOprid(list_make1(makeString(pstrdup(operator_name))),
-                            INT4OID, INT4OID);
-    if (!OidIsValid(opno))
-        return NULL;
-
-    expr = make_opclause(opno, BOOLOID, false,
-                         (Expr *)cmp_expr,
-                         (Expr *)makeConst(INT4OID, -1, InvalidOid,
-                                           sizeof(int32),
-                                           Int32GetDatum(0), false, true),
-                         InvalidOid, InvalidOid);
-    ((OpExpr *)expr)->opfuncid = get_opcode(opno);
-
-    return expr;
+    return makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
+                     Int64GetDatum(value), false, FLOAT8PASSBYVAL);
 }
 
-static const char *property_compare_operator_name(Oid opfuncid, bool commuted)
+static Const *make_text_const(const char *value)
 {
-    if (opfuncid == get_cached_agtype_cmp_func_oid("agtype_lt",
-                                                   &agtype_lt_func_oid))
-        return commuted ? ">" : "<";
-    if (opfuncid == get_cached_agtype_cmp_func_oid("agtype_le",
-                                                   &agtype_le_func_oid))
-        return commuted ? ">=" : "<=";
-    if (opfuncid == get_cached_agtype_cmp_func_oid("agtype_gt",
-                                                   &agtype_gt_func_oid))
-        return commuted ? "<" : ">";
-    if (opfuncid == get_cached_agtype_cmp_func_oid("agtype_ge",
-                                                   &agtype_ge_func_oid))
-        return commuted ? "<=" : ">=";
+    if (value == NULL)
+    {
+        return makeConst(TEXTOID, -1, InvalidOid, -1, (Datum)0, true,
+                         false);
+    }
 
-    return NULL;
+    return makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                     CStringGetTextDatum(value), false, false);
+}
+
+static Const *make_agtype_const(agtype *value)
+{
+    if (value == NULL)
+    {
+        return makeConst(AGTYPEOID, -1, InvalidOid, -1, (Datum)0, true,
+                         false);
+    }
+
+    return makeConst(AGTYPEOID, -1, InvalidOid, -1, AGTYPE_P_GET_DATUM(value),
+                     false, false);
 }
 
 static void adjust_adjacency_match_join_rows(RelOptInfo *joinrel,
@@ -3056,6 +3072,7 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
                                              CypherAdjacencyMatchCandidate *candidate)
 {
     double rows;
+    VLESourceFanoutEvidence source_evidence;
     double endpoint_fanout;
     double pages;
     double estimated_payload_rows;
@@ -3072,8 +3089,12 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
         rows = 1;
 
     pages = rel->pages > 0 ? rel->pages : 1;
-    endpoint_fanout =
-        estimate_adjacency_match_endpoint_fanout(rel, candidate);
+    estimate_vle_source_fanout_evidence(&source_evidence,
+                                        candidate->edge_label_oid);
+    if (source_evidence.reltuples <= 0 && rel->tuples > 0)
+        source_evidence.reltuples = rel->tuples;
+    endpoint_fanout = select_vle_source_fanout_for_endpoint(
+        &source_evidence, candidate->endpoint_attno);
     if (endpoint_fanout <= 0)
         endpoint_fanout = Min(rows, 8.0);
 
@@ -3100,47 +3121,6 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
 
     (void) root;
     (void) local_seq_page_cost;
-}
-
-static double estimate_adjacency_match_endpoint_fanout(
-    RelOptInfo *rel, CypherAdjacencyMatchCandidate *candidate)
-{
-    HeapTuple stat_tuple;
-    Form_pg_statistic stats;
-    double reltuples;
-    double distinct;
-
-    if (rel == NULL ||
-        candidate == NULL ||
-        !OidIsValid(candidate->edge_label_oid) ||
-        candidate->endpoint_attno <= 0)
-    {
-        return 0;
-    }
-
-    stat_tuple = SearchSysCache3(STATRELATTINH,
-                                 ObjectIdGetDatum(candidate->edge_label_oid),
-                                 Int16GetDatum(candidate->endpoint_attno),
-                                 BoolGetDatum(false));
-    if (!HeapTupleIsValid(stat_tuple))
-        return 0;
-
-    stats = (Form_pg_statistic)GETSTRUCT(stat_tuple);
-    reltuples = rel->tuples > 0 ? rel->tuples : 1;
-
-    if (stats->stadistinct > 0)
-        distinct = stats->stadistinct;
-    else if (stats->stadistinct < 0)
-        distinct = -stats->stadistinct * reltuples;
-    else
-        distinct = 0;
-
-    ReleaseSysCache(stat_tuple);
-
-    if (distinct <= 0)
-        return 0;
-
-    return Max(reltuples / distinct, 1.0);
 }
 
 static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
@@ -3407,7 +3387,6 @@ static void invalidate_cypher_clause_function_oids(Datum arg, int cache_id,
     cypher_set_clause_func_oid = InvalidOid;
     cypher_delete_clause_func_oid = InvalidOid;
     cypher_merge_clause_func_oid = InvalidOid;
-    count_any_agg_func_oid = InvalidOid;
     cypher_property_path_invalidate_oids();
     cypher_property_signature_invalidate_oids();
 }

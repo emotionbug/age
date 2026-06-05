@@ -20,15 +20,129 @@
 #ifndef AG_AGTYPE_VLE_H
 #define AG_AGTYPE_VLE_H
 
+#include "fmgr.h"
+#include "funcapi.h"
 #include "utils/agtype.h"
 #include "utils/age_global_graph.h"
 
 /*
  * We declare the VLE_path_container here, and in this way, so that it may be
  * used elsewhere. However, we keep the contents private by defining it in
- * agtype_vle.c
+ * the VLE container module.
  */
 typedef struct VLE_path_container VLE_path_container;
+typedef struct AgeVLEIterator AgeVLEIterator;
+
+#define AGE_VLE_MAX_ARGS 9
+
+typedef enum AgeVLEOutputRequirement
+{
+    AGE_VLE_OUTPUT_REQUIREMENT_UNKNOWN = 0,
+    AGE_VLE_OUTPUT_REQUIREMENT_PATH,
+    AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_VERTEX,
+    AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES,
+    AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY
+} AgeVLEOutputRequirement;
+
+typedef struct AgeVLEInput
+{
+    int nargs;
+    NullableDatum args[AGE_VLE_MAX_ARGS];
+    AgeVLEOutputRequirement output_requirement;
+    bool graph_name_known;
+    bool graph_name_null;
+    const char *graph_name_value;
+    int graph_name_len;
+    bool start_vertex_known;
+    bool start_vertex_null;
+    graphid start_vertex_id;
+    bool end_vertex_known;
+    bool end_vertex_null;
+    graphid end_vertex_id;
+    bool edge_prototype_known;
+    bool edge_label_known;
+    const char *edge_label_value;
+    int edge_label_len;
+    bool edge_properties_known;
+    bool edge_properties_null;
+    Datum edge_properties_value;
+    int edge_property_constraint_count;
+    bool lower_known;
+    bool lower_null;
+    int64 lower_value;
+    bool upper_known;
+    bool upper_null;
+    int64 upper_value;
+    bool direction_known;
+    bool direction_null;
+    int64 direction_value;
+    bool grammar_node_known;
+    bool grammar_node_null;
+    int64 grammar_node_value;
+    bool terminal_property_key_known;
+    bool terminal_property_key_null;
+    const char *terminal_property_key_value;
+    int terminal_property_key_len;
+    bool terminal_property_key_is_char;
+    char terminal_property_key_char;
+    bool source_policy_known;
+    int source_policy_outgoing_kind;
+    int source_policy_incoming_kind;
+} AgeVLEInput;
+
+typedef struct AgeVLEInputEdgePrototype
+{
+    bool label_known;
+    char *label_name;
+    int label_len;
+    int property_constraint_count;
+    agtype *property_constraint;
+} AgeVLEInputEdgePrototype;
+
+typedef struct AgeVLESourceStats
+{
+    int64 missing_vertex_attempts;
+    int64 missing_vertex_source_hits;
+    int64 age_adjacency_scans;
+    int64 age_adjacency_candidates;
+    int64 age_adjacency_payload_scans;
+    int64 age_adjacency_payload_replays;
+    int64 age_adjacency_payload_cache_seeds;
+    int64 endpoint_btree_scans;
+    int64 endpoint_btree_candidates;
+    int64 packed_scans;
+    int64 packed_candidates;
+    int64 packed_empty_skips;
+    int64 packed_policy_skips;
+    int64 packed_suppress_out;
+    int64 packed_suppress_in;
+    int64 packed_suppress_self;
+    int64 candidates_yielded;
+    int64 candidates_pushed;
+} AgeVLESourceStats;
+
+AgeVLEIterator *age_vle_iterator_create_from_input(AgeVLEInput *input,
+                                                   FuncCallContext *funcctx);
+bool age_vle_iterator_next(AgeVLEIterator *iterator, Datum *result,
+                           bool *is_null);
+void age_vle_iterator_end(AgeVLEIterator *iterator);
+void age_vle_iterator_get_source_stats(AgeVLEIterator *iterator,
+                                       AgeVLESourceStats *stats);
+bool age_vle_input_arg_is_null(AgeVLEInput *input, int argno);
+agtype *age_vle_input_get_agtype(AgeVLEInput *input, int argno);
+bool age_vle_input_get_vertex_or_id(AgeVLEInput *input, int argno,
+                                    const char *type_error_msg,
+                                    graphid *result);
+char *age_vle_input_get_graph_name(AgeVLEInput *input, int *graph_name_len);
+int64 age_vle_input_get_grammar_node(AgeVLEInput *input);
+void age_vle_input_get_edge_prototype(AgeVLEInput *input,
+                                      AgeVLEInputEdgePrototype *edge);
+int64 age_vle_input_get_range_lower(AgeVLEInput *input);
+void age_vle_input_get_range_upper(AgeVLEInput *input, int64 *upper,
+                                   bool *is_infinite);
+int64 age_vle_input_get_direction(AgeVLEInput *input);
+bool age_vle_input_get_terminal_property_key(AgeVLEInput *input,
+                                             agtype_value *key_value);
 
 /*
  * Mode offsets for age_materialize_vle_slice_boundary().  The lower bits are

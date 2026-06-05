@@ -63,6 +63,7 @@ OBJS = src/backend/age.o \
        src/backend/executor/cypher_adjacency_match.o \
        src/backend/executor/cypher_property_projection.o \
        src/backend/executor/cypher_vle_stream.o \
+       src/backend/executor/cypher_vle_stream_descriptor.o \
        src/backend/executor/cypher_merge.o \
        src/backend/executor/cypher_set.o \
        src/backend/executor/cypher_utils.o \
@@ -99,6 +100,20 @@ OBJS = src/backend/age.o \
        src/backend/utils/adt/age_global_graph.o \
        src/backend/utils/adt/age_session_info.o \
        src/backend/utils/adt/age_vle.o \
+       src/backend/utils/adt/age_vle_adjacency_cache.o \
+       src/backend/utils/adt/age_vle_apply.o \
+       src/backend/utils/adt/age_vle_candidate_source.o \
+       src/backend/utils/adt/age_vle_context.o \
+       src/backend/utils/adt/age_vle_container.o \
+       src/backend/utils/adt/age_vle_input.o \
+       src/backend/utils/adt/age_vle_iterator_materialization.o \
+       src/backend/utils/adt/age_vle_materializer_cache.o \
+       src/backend/utils/adt/age_vle_root.o \
+       src/backend/utils/adt/age_vle_setup.o \
+       src/backend/utils/adt/age_vle_source_cost.o \
+       src/backend/utils/adt/age_vle_terminal_output.o \
+       src/backend/utils/adt/age_vle_terminal_property_batch.o \
+       src/backend/utils/adt/age_vle_traversal.o \
        src/backend/utils/adt/cypher_funcs.o \
        src/backend/utils/adt/ag_float8_supp.o \
        src/backend/utils/adt/graphid.o \
