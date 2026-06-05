@@ -27,6 +27,8 @@
 #include "storage/block.h"
 #include "storage/itemptr.h"
 
+#define AGE_VERTEX_PROPERTY_PREFETCH_MIN_REL_CANDIDATES 8
+
 /*
  * Graph nodes and edges are declared here for internal consumers. vertex_entry
  * exposes cached-property fast fields so VLE can inline single-byte probes.
@@ -120,6 +122,8 @@ int64 get_graph_num_loaded_edges(GRAPH_global_context *ggctx);
 bool graph_global_context_has_edge_metadata(GRAPH_global_context *ggctx);
 vertex_entry *get_vertex_entry(GRAPH_global_context *ggctx,
                                graphid vertex_id);
+vertex_entry *ensure_vertex_entry_skeleton(GRAPH_global_context *ggctx,
+                                           graphid vertex_id);
 edge_entry *get_edge_entry(GRAPH_global_context *ggctx, graphid edge_id);
 edge_entry *get_edge_entry_by_tid(GRAPH_global_context *ggctx,
                                   const ItemPointerData *tid);
@@ -149,6 +153,10 @@ char *get_vertex_entry_label_name(vertex_entry *ve);
 Datum get_vertex_entry_properties(vertex_entry *ve);
 Datum get_vertex_entry_properties_with_cache(vertex_entry *ve,
                                              HTAB *relation_cache);
+int64 prefetch_vertex_entry_properties_by_ids(
+    GRAPH_global_context *ggctx, const graphid *vertex_ids,
+    int64 nvertex_ids, HTAB **relation_cache, const char *cache_name);
+bool get_vertex_entry_cached_properties(vertex_entry *ve, Datum *properties);
 Datum get_vertex_entry_properties_with_relation(vertex_entry *ve,
                                                 Relation rel);
 bool get_vertex_entry_cached_property(vertex_entry *ve, agtype_value *key,
@@ -176,6 +184,9 @@ int64 prefetch_vertex_entry_block_scalar_property_cache(
     GRAPH_global_context *ggctx, vertex_entry *ve, HTAB **relation_cache,
     const char *cache_name, agtype_value *key, int64 max_cached,
     Datum *target_result, bool *target_found);
+bool cache_vertex_entry_tuple_scalar_property(
+    GRAPH_global_context *ggctx, Oid relid, HeapTuple tuple,
+    TupleDesc tupdesc, agtype_value *key);
 bool get_vertex_entry_property_with_relation(vertex_entry *ve, Relation rel,
                                              agtype_value *key, Datum *result);
 /* edge entry accessor functions */
@@ -185,6 +196,13 @@ char *get_edge_entry_label_name(edge_entry *ee);
 Datum get_edge_entry_properties(edge_entry *ee);
 Datum get_edge_entry_properties_with_cache(edge_entry *ee,
                                            HTAB *relation_cache);
+bool get_edge_entry_cached_property(edge_entry *ee, agtype_value *key,
+                                    Datum *result);
+bool get_edge_entry_property_with_cache(edge_entry *ee,
+                                        HTAB *relation_cache,
+                                        agtype_value *key, Datum *result);
+bool get_edge_entry_property_with_relation(edge_entry *ee, Relation rel,
+                                           agtype_value *key, Datum *result);
 graphid get_edge_entry_start_vertex_id(edge_entry *ee);
 graphid get_edge_entry_end_vertex_id(edge_entry *ee);
 int64 get_edge_entry_index(edge_entry *ee);

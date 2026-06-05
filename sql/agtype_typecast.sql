@@ -69,44 +69,6 @@ CREATE FUNCTION ag_catalog.agtype_typecast_path(variadic "any")
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
 
--- original VLE function definition
-CREATE FUNCTION ag_catalog.age_vle(IN agtype, IN agtype, IN agtype, IN agtype,
-                                   IN agtype, IN agtype, IN agtype,
-                                   OUT edges agtype)
-    RETURNS SETOF agtype
-LANGUAGE C
-STABLE
-CALLED ON NULL INPUT
-PARALLEL UNSAFE -- might be safe
-ROWS 100
-AS 'MODULE_PATHNAME';
-
--- This is an overloaded function definition to allow for the VLE local context
--- caching mechanism to coexist with the previous VLE version.
-CREATE FUNCTION ag_catalog.age_vle(IN agtype, IN agtype, IN agtype, IN agtype,
-                                   IN agtype, IN agtype, IN agtype, IN agtype,
-                                   OUT edges agtype)
-    RETURNS SETOF agtype
-LANGUAGE C
-STABLE
-CALLED ON NULL INPUT
-PARALLEL UNSAFE -- might be safe
-ROWS 100
-AS 'MODULE_PATHNAME';
-
--- This overload lets terminal-only VLE return one terminal vertex property
--- directly when MATCH lowering can prove that no path container consumer remains.
-CREATE FUNCTION ag_catalog.age_vle(IN agtype, IN agtype, IN agtype, IN agtype,
-                                   IN agtype, IN agtype, IN agtype, IN agtype,
-                                   IN agtype, OUT edges agtype)
-    RETURNS SETOF agtype
-LANGUAGE C
-STABLE
-CALLED ON NULL INPUT
-PARALLEL UNSAFE -- might be safe
-ROWS 100
-AS 'MODULE_PATHNAME';
-
 -- function to build an edge for a VLE match
 CREATE FUNCTION ag_catalog.age_build_vle_match_edge(agtype, agtype)
     RETURNS agtype

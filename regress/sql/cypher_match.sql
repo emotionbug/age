@@ -20,6 +20,16 @@
 LOAD 'age';
 SET search_path TO ag_catalog;
 
+SELECT p.proname || ':' ||
+       a.aggcombinefn::regproc::text || ':' ||
+       a.aggserialfn::regproc::text || ':' ||
+       a.aggdeserialfn::regproc::text AS slots_aggregate_parallel_contract
+FROM pg_aggregate a
+JOIN pg_proc p ON p.oid = a.aggfnoid
+WHERE p.proname IN ('age_array_agg_map_slots',
+                    'age_array_agg_list_slots')
+ORDER BY p.proname;
+
 SELECT create_graph('cypher_match');
 
 SELECT * FROM cypher('cypher_match', $$CREATE (:v)$$) AS (a agtype);
@@ -33,6 +43,18 @@ EXPLAIN (VERBOSE, COSTS OFF)
 SELECT *
 FROM cypher('cypher_match',
             $$MATCH (n:v) RETURN n.i::pg_bigint$$) AS (i bigint);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) RETURN n.i::pg_bigint, n.i::pg_float8$$)
+     AS (i bigint, f float8);
+
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) RETURN n.i::pg_bigint, n.i::pg_float8$$)
+     AS (i bigint, f float8)
+ORDER BY i NULLS FIRST;
 
 SELECT *
 FROM cypher('cypher_match',
@@ -117,10 +139,43 @@ SELECT * FROM cypher_match_normalized_explain(
      ORDER BY n.payload.a::pg_numeric
      LIMIT 1');
 
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.a::pg_numeric$$) AS (i numeric);
+
+SELECT *
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.a::pg_numeric$$) AS (i numeric)
+ORDER BY i;
+
 SELECT * FROM cypher_match_normalized_explain(
     'cypher_match_numeric_path',
     'MATCH (n:NumericPath)
      RETURN collect(DISTINCT n.payload.a::pg_numeric)');
+
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match_numeric_path',
+    'MATCH (n:NumericPath)
+     RETURN collect(n.payload.a::pg_numeric)');
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.b::pg_bigint, collect(n.payload.a::pg_numeric)
+              ORDER BY n.payload.b::pg_bigint$$)
+     AS (b bigint, vals agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN collect(n.payload.a::pg_numeric),
+                     collect(n.payload.b::pg_bigint)$$)
+     AS (a agtype, b agtype);
 
 SELECT * FROM cypher_match_normalized_explain(
     'cypher_match_numeric_path',
@@ -173,6 +228,19 @@ SELECT * FROM cypher('cypher_match_numeric_path', $$
     MATCH (n:NumericPath)
     RETURN collect(n.payload.a::numeric)
 $$) AS (vals agtype);
+
+SELECT *
+FROM cypher('cypher_match_numeric_path', $$
+    MATCH (n:NumericPath)
+    RETURN n.payload.b::pg_bigint, collect(n.payload.a::pg_numeric)
+    ORDER BY n.payload.b::pg_bigint
+$$) AS (b bigint, vals agtype);
+
+SELECT *
+FROM cypher('cypher_match_numeric_path', $$
+    MATCH (n:NumericPath)
+    RETURN collect(n.payload.a::pg_numeric), collect(n.payload.b::pg_bigint)
+$$) AS (a agtype, b agtype);
 
 SELECT * FROM cypher('cypher_match_numeric_path', $$
     MATCH (n:NumericPath)
@@ -1047,293 +1115,6 @@ BEGIN
     END IF;
 END
 $numeric_property_collect_plan$;
-
-DO $property_collect_plan$
-DECLARE
-    plan_text text;
-    has_collect_property boolean := false;
-    has_collect_float8 boolean := false;
-    has_collect_int8 boolean := false;
-    has_collect_text boolean := false;
-    has_collect_distinct_int8 boolean := false;
-    has_collect_distinct_text boolean := false;
-    has_distinct_properties_carry boolean := false;
-    has_collect_numeric_property boolean := false;
-    has_array_agg_property boolean := false;
-    has_array_agg_map2_property boolean := false;
-    has_array_agg_map_property boolean := false;
-    has_array_agg_list_property boolean := false;
-    has_materialized_access boolean := false;
-BEGIN
-    -- These direct collect/array_agg property aggregate rewrites are disabled
-    -- until they can preserve Cypher semantics across subqueries and aggregates.
-    RETURN;
-
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(n.i)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_property%' THEN
-            has_collect_property := true;
-        END IF;
-        IF plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_property THEN
-        RAISE EXCEPTION 'expected collect property projection to use direct property aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in collect property projection';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(n.i::pg_float8)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_float8%' THEN
-            has_collect_float8 := true;
-        END IF;
-        IF plan_text LIKE '%age_collect(%' OR
-           plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_float8 THEN
-        RAISE EXCEPTION 'expected typed float8 collect to use typed transition aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in typed float8 collect';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(n.i::pg_bigint)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_int8%' THEN
-            has_collect_int8 := true;
-        END IF;
-        IF plan_text LIKE '%age_collect(%' OR
-           plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_int8 THEN
-        RAISE EXCEPTION 'expected typed int8 collect to use typed transition aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in typed int8 collect';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(n.i::pg_text)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_text%' THEN
-            has_collect_text := true;
-        END IF;
-        IF plan_text LIKE '%age_collect(%' OR
-           plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_text THEN
-        RAISE EXCEPTION 'expected typed text collect to use typed transition aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in typed text collect';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(DISTINCT n.i::pg_bigint)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_int8(DISTINCT%' THEN
-            has_collect_distinct_int8 := true;
-        END IF;
-        IF plan_text LIKE '%age_collect(DISTINCT%' OR
-           plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-        IF plan_text LIKE '%Output: n.properties,%' THEN
-            has_distinct_properties_carry := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_distinct_int8 THEN
-        RAISE EXCEPTION 'expected typed distinct int8 collect to use typed transition aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in typed distinct int8 collect';
-    END IF;
-    IF has_distinct_properties_carry THEN
-        RAISE EXCEPTION 'unexpected properties carry in typed distinct int8 collect';
-    END IF;
-
-    has_materialized_access := false;
-    has_distinct_properties_carry := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(DISTINCT n.i::pg_text)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_text(DISTINCT%' THEN
-            has_collect_distinct_text := true;
-        END IF;
-        IF plan_text LIKE '%age_collect(DISTINCT%' OR
-           plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-        IF plan_text LIKE '%Output: n.properties,%' THEN
-            has_distinct_properties_carry := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_distinct_text THEN
-        RAISE EXCEPTION 'expected typed distinct text collect to use typed transition aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in typed distinct text collect';
-    END IF;
-    IF has_distinct_properties_carry THEN
-        RAISE EXCEPTION 'unexpected properties carry in typed distinct text collect';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(n.i::numeric)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_numeric_property%' THEN
-            has_collect_numeric_property := true;
-        END IF;
-        IF plan_text LIKE '%age_collect(%' OR
-           plan_text LIKE '%agtype_object_field_numeric_agtype%' OR
-           plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_numeric_property THEN
-        RAISE EXCEPTION 'expected numeric property collect to use direct numeric aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in numeric collect';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT array_length(array_agg(i), 1)
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN n.i$$) AS (i agtype)'
-    LOOP
-        IF plan_text LIKE '%age_array_agg_property%' THEN
-            has_array_agg_property := true;
-        END IF;
-        IF plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_array_agg_property THEN
-        RAISE EXCEPTION 'expected array_agg property projection to use direct property aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in array_agg property projection';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT array_length(array_agg(m), 1)
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN {i: n.i, j: n.i}$$) AS (m agtype)'
-    LOOP
-        IF plan_text LIKE '%age_array_agg_map2_property%' THEN
-            has_array_agg_map2_property := true;
-        END IF;
-        IF plan_text LIKE '%agtype_access_operator%' OR
-           plan_text LIKE '%agtype_build_map_nonull%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_array_agg_map2_property THEN
-        RAISE EXCEPTION 'expected array_agg map property projection to use direct map aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized map/access function in array_agg map projection';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT array_length(array_agg(m), 1)
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN {i: n.i, j: n.i, k: n.i}$$) AS (m agtype)'
-    LOOP
-        IF plan_text LIKE '%age_array_agg_map_property%' THEN
-            has_array_agg_map_property := true;
-        END IF;
-        IF plan_text LIKE '%agtype_access_operator%' OR
-           plan_text LIKE '%agtype_build_map_nonull%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_array_agg_map_property THEN
-        RAISE EXCEPTION 'expected array_agg 3-key map projection to use descriptor aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized map/access function in 3-key array_agg map projection';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT array_length(array_agg(l), 1)
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN [n.i, n.i, n.i]$$) AS (l agtype)'
-    LOOP
-        IF plan_text LIKE '%age_array_agg_list_property%' THEN
-            has_array_agg_list_property := true;
-        END IF;
-        IF plan_text LIKE '%agtype_access_operator%' OR
-           plan_text LIKE '%agtype_build_list%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_array_agg_list_property THEN
-        RAISE EXCEPTION 'expected array_agg list projection to use descriptor aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized list/access function in array_agg list projection';
-    END IF;
-END
-$property_collect_plan$;
 
 SET enable_seqscan = on;
 SET enable_indexscan = on;

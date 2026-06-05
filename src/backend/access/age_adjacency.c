@@ -182,6 +182,16 @@ struct AgeAdjacencyVisiblePayloadScan
     AgeAdjacencyScanTarget target;
     AgeAdjacencyDirectoryPageCache directory_cache;
     AgeAdjacencyMainPageCache main_cache;
+    graphid active_key;
+    bool key_active;
+    bool main_active;
+    uint32 main_remaining;
+    BlockNumber main_blkno;
+    OffsetNumber main_offnum;
+    int main_cache_index;
+    bool main_reached_start;
+    BlockNumber delta_blkno;
+    OffsetNumber delta_offnum;
 };
 
 typedef struct AgeAdjacencyCandidateStore
@@ -238,9 +248,6 @@ static int64 age_adjacency_scan_posting_run(Relation index_rel,
                                             OffsetNumber offnum,
                                             uint32 posting_count, graphid key,
                                             AgeAdjacencyScanTarget *target);
-static int64 age_adjacency_scan_posting_run_cached(
-    AgeAdjacencyVisiblePayloadScan *scan, BlockNumber blkno,
-    OffsetNumber offnum, uint32 posting_count, graphid key);
 static bool age_adjacency_search_directory(Relation index_rel, graphid key,
                                            AgeAdjacencyDirectoryEntryData *entry_out,
                                            int64 *pages_visited,
@@ -267,6 +274,13 @@ static void age_adjacency_probe_directory(Relation index_rel, graphid key,
                                           int64 *entries_scanned);
 static int64 age_adjacency_emit_posting(AgeAdjacencyPosting posting,
                                         AgeAdjacencyScanTarget *target);
+static bool age_adjacency_posting_visible_payload(
+    AgeAdjacencyPosting posting, AgeAdjacencyScanTarget *target,
+    AgeAdjacencyPayload *payload);
+static bool age_adjacency_visible_payload_scan_next_main(
+    AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyPayload *payload);
+static bool age_adjacency_visible_payload_scan_next_delta(
+    AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyPayload *payload);
 static bool age_adjacency_store_candidate(const AgeAdjacencyPayload *payload,
                                           void *callback_state);
 static bool age_adjacency_store_candidate_row(const AgeAdjacencyPayload *payload,
@@ -277,8 +291,6 @@ static int64 age_adjacency_scan_payload_with_meta(Relation index_rel,
                                                   graphid key,
                                                   AgeAdjacencyScanTarget *target,
                                                   const AgeAdjacencyMetaPageData *meta);
-static int64 age_adjacency_visible_payload_scan_with_cache(
-    AgeAdjacencyVisiblePayloadScan *scan, graphid key);
 static IndexBuildResult *age_adjacency_build(Relation heap_rel,
                                              Relation index_rel,
                                              struct IndexInfo *index_info);
@@ -965,6 +977,54 @@ static int64
 age_adjacency_emit_posting(AgeAdjacencyPosting posting,
                            AgeAdjacencyScanTarget *target)
 {
+    AgeAdjacencyPayload payload;
+
+    if (!age_adjacency_posting_visible_payload(posting, target, &payload))
+    {
+        return 0;
+    }
+
+    if (target != NULL && target->tbm != NULL)
+    {
+        tbm_add_tuples(target->tbm, &posting->heap_tid, 1, false);
+    }
+
+    if (target != NULL && target->tupstore != NULL)
+    {
+        Datum values[3];
+        bool nulls[3] = {false, false, false};
+
+        values[0] = ItemPointerGetDatum(&posting->heap_tid);
+        values[1] = GRAPHID_GET_DATUM(posting->edge_id);
+        values[2] = GRAPHID_GET_DATUM(posting->next_vertex_id);
+        tuplestore_putvalues(target->tupstore, target->tupdesc,
+                             values, nulls);
+    }
+
+    if (target != NULL && target->callback != NULL)
+    {
+        if (!target->callback(&payload, target->callback_state))
+        {
+            return -1;
+        }
+    }
+
+    return 1;
+}
+
+static bool
+age_adjacency_posting_visible_payload(AgeAdjacencyPosting posting,
+                                      AgeAdjacencyScanTarget *target,
+                                      AgeAdjacencyPayload *payload)
+{
+    Assert(payload != NULL);
+
+    ItemPointerCopy(&posting->heap_tid, &payload->heap_tid);
+    payload->edge_id = posting->edge_id;
+    payload->next_vertex_id = posting->next_vertex_id;
+    payload->properties = (Datum) 0;
+    payload->properties_isnull = true;
+
     if (target != NULL && target->heap_rel != NULL)
     {
         bool fetch_tuple = true;
@@ -1001,51 +1061,18 @@ age_adjacency_emit_posting(AgeAdjacencyPosting posting,
                                            target->snapshot,
                                            target->slot))
         {
-            return 0;
+            return false;
         }
     }
 
-    if (target != NULL && target->tbm != NULL)
+    if (target != NULL && target->fetch_properties && target->slot != NULL)
     {
-        tbm_add_tuples(target->tbm, &posting->heap_tid, 1, false);
+        payload->properties =
+            slot_getattr(target->slot, Anum_ag_label_edge_table_properties,
+                         &payload->properties_isnull);
     }
 
-    if (target != NULL && target->tupstore != NULL)
-    {
-        Datum values[3];
-        bool nulls[3] = {false, false, false};
-
-        values[0] = ItemPointerGetDatum(&posting->heap_tid);
-        values[1] = GRAPHID_GET_DATUM(posting->edge_id);
-        values[2] = GRAPHID_GET_DATUM(posting->next_vertex_id);
-        tuplestore_putvalues(target->tupstore, target->tupdesc,
-                             values, nulls);
-    }
-
-    if (target != NULL && target->callback != NULL)
-    {
-        AgeAdjacencyPayload payload;
-
-        ItemPointerCopy(&posting->heap_tid, &payload.heap_tid);
-        payload.edge_id = posting->edge_id;
-        payload.next_vertex_id = posting->next_vertex_id;
-        payload.properties = (Datum) 0;
-        payload.properties_isnull = true;
-
-        if (target->fetch_properties && target->slot != NULL)
-        {
-            payload.properties =
-                slot_getattr(target->slot, Anum_ag_label_edge_table_properties,
-                             &payload.properties_isnull);
-        }
-
-        if (!target->callback(&payload, target->callback_state))
-        {
-            return -1;
-        }
-    }
-
-    return 1;
+    return true;
 }
 
 static bool
@@ -1234,56 +1261,6 @@ age_adjacency_load_main_cache(AgeAdjacencyVisiblePayloadScan *scan,
     scan->main_cache.next_blkno = opaque->next_blkno;
     scan->main_cache.valid = true;
     UnlockReleaseBuffer(buf);
-}
-
-static int64
-age_adjacency_scan_posting_run_cached(AgeAdjacencyVisiblePayloadScan *scan,
-                                      BlockNumber blkno, OffsetNumber offnum,
-                                      uint32 posting_count, graphid key)
-{
-    int64 matches = 0;
-    uint32 remaining = posting_count;
-
-    while (remaining > 0 && BlockNumberIsValid(blkno))
-    {
-        int i;
-        bool reached_start = false;
-
-        age_adjacency_load_main_cache(scan, blkno);
-        for (i = 0; i < scan->main_cache.count && remaining > 0; i++)
-        {
-            AgeAdjacencyCachedPosting *cached = &scan->main_cache.postings[i];
-            int64 emitted;
-
-            if (!reached_start)
-            {
-                if (cached->offnum < offnum)
-                {
-                    continue;
-                }
-                reached_start = true;
-            }
-
-            remaining--;
-            if (cached->posting.key != key)
-            {
-                continue;
-            }
-
-            emitted = age_adjacency_emit_posting(&cached->posting,
-                                                 &scan->target);
-            if (emitted < 0)
-            {
-                return matches;
-            }
-            matches += emitted;
-        }
-
-        blkno = scan->main_cache.next_blkno;
-        offnum = FirstOffsetNumber;
-    }
-
-    return matches;
 }
 
 static bool
@@ -1621,80 +1598,6 @@ age_adjacency_scan_payload_with_meta(Relation index_rel, graphid key,
             }
 
             emitted = age_adjacency_emit_posting(posting, target);
-            if (emitted < 0)
-            {
-                UnlockReleaseBuffer(buf);
-                return matches;
-            }
-            matches += emitted;
-        }
-
-        blkno = opaque->next_blkno;
-        UnlockReleaseBuffer(buf);
-    }
-
-    return matches;
-}
-
-static int64
-age_adjacency_visible_payload_scan_with_cache(
-    AgeAdjacencyVisiblePayloadScan *scan, graphid key)
-{
-    AgeAdjacencyDirectoryEntryData entry;
-    BlockNumber blkno;
-    int64 matches = 0;
-
-    if (age_adjacency_find_directory_entry_cached(scan, key, &entry))
-    {
-        matches += age_adjacency_scan_posting_run_cached(
-            scan, entry.first_blkno, entry.first_offnum,
-            entry.posting_count, key);
-    }
-
-    blkno = scan->meta.first_delta_blkno;
-    while (BlockNumberIsValid(blkno))
-    {
-        Buffer buf;
-        Page page;
-        AgeAdjacencyPageOpaque opaque;
-        OffsetNumber offnum;
-        OffsetNumber maxoff;
-
-        buf = ReadBuffer(scan->index_rel, blkno);
-        LockBuffer(buf, BUFFER_LOCK_SHARE);
-        page = BufferGetPage(buf);
-
-        opaque = (AgeAdjacencyPageOpaque) PageGetSpecialPointer(page);
-        if (opaque->magic != AGE_ADJACENCY_MAGIC ||
-            opaque->version != AGE_ADJACENCY_VERSION ||
-            opaque->page_type != AGE_ADJACENCY_PAGE_DELTA)
-        {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INDEX_CORRUPTED),
-                     errmsg("age_adjacency delta page %u is invalid", blkno)));
-        }
-
-        maxoff = PageGetMaxOffsetNumber(page);
-        for (offnum = FirstOffsetNumber;
-             offnum <= maxoff;
-             offnum = OffsetNumberNext(offnum))
-        {
-            ItemId item_id = PageGetItemId(page, offnum);
-            AgeAdjacencyPosting posting;
-            int64 emitted;
-
-            if (!ItemIdIsNormal(item_id))
-            {
-                continue;
-            }
-
-            posting = (AgeAdjacencyPosting) PageGetItem(page, item_id);
-            if (posting->key != key)
-            {
-                continue;
-            }
-
-            emitted = age_adjacency_emit_posting(posting, &scan->target);
             if (emitted < 0)
             {
                 UnlockReleaseBuffer(buf);
@@ -2155,11 +2058,82 @@ age_adjacency_begin_visible_payload_scan(Oid index_oid, Snapshot snapshot,
     return scan;
 }
 
+bool
+age_adjacency_visible_payload_scan_begin_key(
+    AgeAdjacencyVisiblePayloadScan *scan, graphid key)
+{
+    AgeAdjacencyDirectoryEntryData entry;
+
+    if (scan == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload scan is required")));
+    }
+
+    scan->active_key = key;
+    scan->key_active = true;
+    scan->main_active = false;
+    scan->main_remaining = 0;
+    scan->main_blkno = InvalidBlockNumber;
+    scan->main_offnum = FirstOffsetNumber;
+    scan->main_cache_index = 0;
+    scan->main_reached_start = false;
+    scan->delta_blkno = scan->meta.first_delta_blkno;
+    scan->delta_offnum = FirstOffsetNumber;
+    scan->target.callback = NULL;
+    scan->target.callback_state = NULL;
+
+    if (age_adjacency_find_directory_entry_cached(scan, key, &entry))
+    {
+        scan->main_active = true;
+        scan->main_remaining = entry.posting_count;
+        scan->main_blkno = entry.first_blkno;
+        scan->main_offnum = entry.first_offnum;
+    }
+
+    return scan->main_active || BlockNumberIsValid(scan->delta_blkno);
+}
+
+bool
+age_adjacency_visible_payload_scan_next(
+    AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyPayload *payload)
+{
+    if (scan == NULL || payload == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload scan next requires "
+                        "scan and payload")));
+    }
+
+    if (!scan->key_active)
+    {
+        return false;
+    }
+
+    if (age_adjacency_visible_payload_scan_next_main(scan, payload))
+    {
+        return true;
+    }
+
+    if (age_adjacency_visible_payload_scan_next_delta(scan, payload))
+    {
+        return true;
+    }
+
+    scan->key_active = false;
+    return false;
+}
+
 int64
 age_adjacency_visible_payload_scan_foreach(
     AgeAdjacencyVisiblePayloadScan *scan, graphid key,
     AgeAdjacencyPayloadCallback callback, void *callback_state)
 {
+    AgeAdjacencyPayload payload;
+    int64 matches = 0;
+
     if (scan == NULL || callback == NULL)
     {
         ereport(ERROR,
@@ -2168,10 +2142,139 @@ age_adjacency_visible_payload_scan_foreach(
                         "callback")));
     }
 
-    scan->target.callback = callback;
-    scan->target.callback_state = callback_state;
+    (void) age_adjacency_visible_payload_scan_begin_key(scan, key);
+    while (age_adjacency_visible_payload_scan_next(scan, &payload))
+    {
+        if (!callback(&payload, callback_state))
+        {
+            break;
+        }
+        matches++;
+    }
 
-    return age_adjacency_visible_payload_scan_with_cache(scan, key);
+    return matches;
+}
+
+static bool
+age_adjacency_visible_payload_scan_next_main(
+    AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyPayload *payload)
+{
+    Assert(scan != NULL);
+    Assert(payload != NULL);
+
+    while (scan->main_active && scan->main_remaining > 0 &&
+           BlockNumberIsValid(scan->main_blkno))
+    {
+        age_adjacency_load_main_cache(scan, scan->main_blkno);
+        while (scan->main_cache_index < scan->main_cache.count &&
+               scan->main_remaining > 0)
+        {
+            AgeAdjacencyCachedPosting *cached =
+                &scan->main_cache.postings[scan->main_cache_index++];
+
+            if (!scan->main_reached_start)
+            {
+                if (cached->offnum < scan->main_offnum)
+                {
+                    continue;
+                }
+                scan->main_reached_start = true;
+            }
+
+            scan->main_remaining--;
+            if (cached->posting.key != scan->active_key)
+            {
+                continue;
+            }
+
+            if (age_adjacency_posting_visible_payload(&cached->posting,
+                                                      &scan->target,
+                                                      payload))
+            {
+                return true;
+            }
+        }
+
+        scan->main_blkno = scan->main_cache.next_blkno;
+        scan->main_offnum = FirstOffsetNumber;
+        scan->main_cache_index = 0;
+        scan->main_reached_start = false;
+    }
+
+    scan->main_active = false;
+    return false;
+}
+
+static bool
+age_adjacency_visible_payload_scan_next_delta(
+    AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyPayload *payload)
+{
+    Assert(scan != NULL);
+    Assert(payload != NULL);
+
+    while (BlockNumberIsValid(scan->delta_blkno))
+    {
+        Buffer buf;
+        Page page;
+        AgeAdjacencyPageOpaque opaque;
+        OffsetNumber maxoff;
+        OffsetNumber offnum;
+
+        buf = ReadBuffer(scan->index_rel, scan->delta_blkno);
+        LockBuffer(buf, BUFFER_LOCK_SHARE);
+        page = BufferGetPage(buf);
+
+        opaque = (AgeAdjacencyPageOpaque) PageGetSpecialPointer(page);
+        if (opaque->magic != AGE_ADJACENCY_MAGIC ||
+            opaque->version != AGE_ADJACENCY_VERSION ||
+            opaque->page_type != AGE_ADJACENCY_PAGE_DELTA)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INDEX_CORRUPTED),
+                     errmsg("age_adjacency delta page %u is invalid",
+                            scan->delta_blkno)));
+        }
+
+        maxoff = PageGetMaxOffsetNumber(page);
+        for (offnum = scan->delta_offnum;
+             offnum <= maxoff;
+             offnum = OffsetNumberNext(offnum))
+        {
+            ItemId item_id = PageGetItemId(page, offnum);
+            AgeAdjacencyPosting posting;
+
+            if (!ItemIdIsNormal(item_id))
+            {
+                continue;
+            }
+
+            posting = (AgeAdjacencyPosting) PageGetItem(page, item_id);
+            if (posting->key != scan->active_key)
+            {
+                continue;
+            }
+
+            scan->delta_offnum = OffsetNumberNext(offnum);
+            if (scan->delta_offnum > maxoff)
+            {
+                scan->delta_blkno = opaque->next_blkno;
+                scan->delta_offnum = FirstOffsetNumber;
+            }
+            if (age_adjacency_posting_visible_payload(posting,
+                                                      &scan->target,
+                                                      payload))
+            {
+                UnlockReleaseBuffer(buf);
+                return true;
+            }
+        }
+
+        scan->delta_blkno = opaque->next_blkno;
+        scan->delta_offnum = FirstOffsetNumber;
+        UnlockReleaseBuffer(buf);
+    }
+
+    return false;
 }
 
 void

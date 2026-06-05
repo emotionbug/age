@@ -18,6 +18,21 @@
  */
 LOAD 'age';
 SET search_path TO ag_catalog;
+SELECT p.proname || ':' ||
+       a.aggcombinefn::regproc::text || ':' ||
+       a.aggserialfn::regproc::text || ':' ||
+       a.aggdeserialfn::regproc::text AS slots_aggregate_parallel_contract
+FROM pg_aggregate a
+JOIN pg_proc p ON p.oid = a.aggfnoid
+WHERE p.proname IN ('age_array_agg_map_slots',
+                    'age_array_agg_list_slots')
+ORDER BY p.proname;
+                                         slots_aggregate_parallel_contract                                          
+--------------------------------------------------------------------------------------------------------------------
+ age_array_agg_list_slots:age_array_agg_slots_combine:age_array_agg_slots_serialize:age_array_agg_slots_deserialize
+ age_array_agg_map_slots:age_array_agg_slots_combine:age_array_agg_slots_serialize:age_array_agg_slots_deserialize
+(2 rows)
+
 SELECT create_graph('cypher_match');
 NOTICE:  graph "cypher_match" has been created
  create_graph 
@@ -60,11 +75,38 @@ EXPLAIN (VERBOSE, COSTS OFF)
 SELECT *
 FROM cypher('cypher_match',
             $$MATCH (n:v) RETURN n.i::pg_bigint$$) AS (i bigint);
-                            QUERY PLAN                             
--------------------------------------------------------------------
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
  Custom Scan (AGE Property Projection) on cypher_match.v n
    Output: (agtype_object_field_int8(n.properties, '"i"'::agtype))
-(2 rows)
+   Cached Property Slots: 1:{source=heap-properties, key=i, value=bigint, field=bigint}
+   Cached Property Slot Count: 1
+(4 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) RETURN n.i::pg_bigint, n.i::pg_float8$$)
+     AS (i bigint, f float8);
+                                                                            QUERY PLAN                                                                            
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE Property Projection) on cypher_match.v n
+   Output: (agtype_object_field_int8(n.properties, '"i"'::agtype)), (agtype_object_field_float8(n.properties, '"i"'::agtype))
+   Cached Property Slots: 1:{source=heap-properties, key=i, value=bigint, field=bigint}; 2:{source=slot-1, key=i, value=double precision, field=double precision}
+   Cached Property Slot Count: 2
+(4 rows)
+
+SELECT *
+FROM cypher('cypher_match',
+            $$MATCH (n:v) RETURN n.i::pg_bigint, n.i::pg_float8$$)
+     AS (i bigint, f float8)
+ORDER BY i NULLS FIRST;
+ i | f 
+---+---
+   |  
+ 0 | 0
+ 1 | 1
+(3 rows)
 
 SELECT *
 FROM cypher('cypher_match',
@@ -254,6 +296,30 @@ SELECT * FROM cypher_match_normalized_explain(
                            Output: n.ctid, agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)
 (11 rows)
 
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.a::pg_numeric$$) AS (i numeric);
+                                                      QUERY PLAN                                                       
+-----------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE Property Projection) on cypher_match_numeric_path."NumericPath" n
+   Output: (agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype))
+   Cached Property Slots: 1:{source=heap-properties, key=payload.a, value=numeric, field=numeric}
+   Cached Property Slot Count: 1
+(4 rows)
+
+SELECT *
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.a::pg_numeric$$) AS (i numeric)
+ORDER BY i;
+ i 
+---
+ 1
+ 2
+(2 rows)
+
 SELECT * FROM cypher_match_normalized_explain(
     'cypher_match_numeric_path',
     'MATCH (n:NumericPath)
@@ -268,6 +334,52 @@ SELECT * FROM cypher_match_normalized_explain(
          ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
                Output: agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)
 (7 rows)
+
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match_numeric_path',
+    'MATCH (n:NumericPath)
+     RETURN collect(n.payload.a::pg_numeric)');
+                                                      cypher_match_normalized_explain                                                       
+--------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: age_collect_numeric((agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)))
+   ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
+         Output: agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)
+(4 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.b::pg_bigint, collect(n.payload.a::pg_numeric)
+              ORDER BY n.payload.b::pg_bigint$$)
+     AS (b bigint, vals agtype);
+                                                                                                                         QUERY PLAN                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort
+   Output: (agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype)), (age_collect_numeric((agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype))))
+   Sort Key: (agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype))
+   ->  HashAggregate
+         Output: (agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype)), age_collect_numeric((agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)))
+         Group Key: agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype)
+         ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
+               Output: agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype), agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)
+(8 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN collect(n.payload.a::pg_numeric),
+                     collect(n.payload.b::pg_bigint)$$)
+     AS (a agtype, b agtype);
+                                                                                                                               QUERY PLAN                                                                                                                               
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate
+   Output: age_collect_numeric((agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype))), age_collect_int8((agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype)))
+   ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
+         Output: agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype), agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype)
+(4 rows)
 
 SELECT * FROM cypher_match_normalized_explain(
     'cypher_match_numeric_path',
@@ -320,12 +432,12 @@ EXPLAIN (VERBOSE, COSTS OFF)
 SELECT array_length(array_agg(v), 1)
 FROM cypher('cypher_match_numeric_path',
             $$MATCH (n:NumericPath) RETURN n.payload.a$$) AS (v agtype);
-                                         QUERY PLAN                                          
----------------------------------------------------------------------------------------------
+                                                                    QUERY PLAN                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: array_length(age_array_agg_property(n.properties, '["payload", "a"]'::agtype), 1)
+   Output: array_length(array_agg((agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype))), 1)
    ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
-         Output: n.id, n.properties
+         Output: agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)
 (4 rows)
 
 EXPLAIN (VERBOSE, COSTS OFF)
@@ -333,12 +445,12 @@ SELECT array_length(array_agg(m), 1)
 FROM cypher('cypher_match_numeric_path',
             $$MATCH (n:NumericPath) RETURN {a: n.payload.a, b: n.payload.b}$$)
      AS (m agtype);
-                                                                     QUERY PLAN                                                                     
-----------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                            QUERY PLAN                                                                                                                                            
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: array_length(age_array_agg_map2_property(n.properties, 'a'::text, '["payload", "a"]'::agtype, 'b'::text, '["payload", "b"]'::agtype), 1)
+   Output: array_length(age_array_agg_map_slots('a'::text, (agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)), 'b'::text, (agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype))), 1)
    ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
-         Output: n.id, n.properties
+         Output: 'a'::text, agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype), 'b'::text, agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype)
 (4 rows)
 
 EXPLAIN (VERBOSE, COSTS OFF)
@@ -347,12 +459,12 @@ FROM cypher('cypher_match_numeric_path',
             $$MATCH (n:NumericPath)
               RETURN {a: n.payload.a, b: n.payload.b, c: n.payload.c}$$)
      AS (m agtype);
-                                                                                 QUERY PLAN                                                                                 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                       QUERY PLAN                                                                                                                                                                                                        
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: array_length(age_array_agg_map_property(n.properties, '{a,b,c}'::text[], '{"[\"payload\", \"a\"]","[\"payload\", \"b\"]","[\"payload\", \"c\"]"}'::agtype[]), 1)
+   Output: array_length(age_array_agg_map_slots('a'::text, (agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)), 'b'::text, (agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype)), 'c'::text, (agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"c"'::agtype))), 1)
    ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
-         Output: n.id, n.properties
+         Output: 'a'::text, agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype), 'b'::text, agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype), 'c'::text, agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"c"'::agtype)
 (4 rows)
 
 EXPLAIN (VERBOSE, COSTS OFF)
@@ -360,12 +472,12 @@ SELECT array_length(array_agg(l), 1)
 FROM cypher('cypher_match_numeric_path',
             $$MATCH (n:NumericPath) RETURN [n.payload.a, n.payload.b]$$)
      AS (l agtype);
-                                                            QUERY PLAN                                                             
------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                 QUERY PLAN                                                                                                                                  
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
-   Output: array_length(age_array_agg_list_property(n.properties, '{"[\"payload\", \"a\"]","[\"payload\", \"b\"]"}'::agtype[]), 1)
+   Output: array_length(age_array_agg_list_slots((agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)), (agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype))), 1)
    ->  Seq Scan on cypher_match_numeric_path."NumericPath" n
-         Output: n.id, n.properties
+         Output: agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype), agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype)
 (4 rows)
 
 DROP FUNCTION cypher_match_normalized_explain(text, text);
@@ -376,6 +488,28 @@ $$) AS (vals agtype);
            vals           
 --------------------------
  [1::numeric, 2::numeric]
+(1 row)
+
+SELECT *
+FROM cypher('cypher_match_numeric_path', $$
+    MATCH (n:NumericPath)
+    RETURN n.payload.b::pg_bigint, collect(n.payload.a::pg_numeric)
+    ORDER BY n.payload.b::pg_bigint
+$$) AS (b bigint, vals agtype);
+ b  |     vals     
+----+--------------
+ 11 | [1::numeric]
+ 12 | [2::numeric]
+(2 rows)
+
+SELECT *
+FROM cypher('cypher_match_numeric_path', $$
+    MATCH (n:NumericPath)
+    RETURN collect(n.payload.a::pg_numeric), collect(n.payload.b::pg_bigint)
+$$) AS (a agtype, b agtype);
+            a             |    b     
+--------------------------+----------
+ [1::numeric, 2::numeric] | [11, 12]
 (1 row)
 
 SELECT * FROM cypher('cypher_match_numeric_path', $$
@@ -1295,292 +1429,6 @@ BEGIN
     END IF;
 END
 $numeric_property_collect_plan$;
-DO $property_collect_plan$
-DECLARE
-    plan_text text;
-    has_collect_property boolean := false;
-    has_collect_float8 boolean := false;
-    has_collect_int8 boolean := false;
-    has_collect_text boolean := false;
-    has_collect_distinct_int8 boolean := false;
-    has_collect_distinct_text boolean := false;
-    has_distinct_properties_carry boolean := false;
-    has_collect_numeric_property boolean := false;
-    has_array_agg_property boolean := false;
-    has_array_agg_map2_property boolean := false;
-    has_array_agg_map_property boolean := false;
-    has_array_agg_list_property boolean := false;
-    has_materialized_access boolean := false;
-BEGIN
-    -- These direct collect/array_agg property aggregate rewrites are disabled
-    -- until they can preserve Cypher semantics across subqueries and aggregates.
-    RETURN;
-
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(n.i)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_property%' THEN
-            has_collect_property := true;
-        END IF;
-        IF plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_property THEN
-        RAISE EXCEPTION 'expected collect property projection to use direct property aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in collect property projection';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(n.i::pg_float8)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_float8%' THEN
-            has_collect_float8 := true;
-        END IF;
-        IF plan_text LIKE '%age_collect(%' OR
-           plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_float8 THEN
-        RAISE EXCEPTION 'expected typed float8 collect to use typed transition aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in typed float8 collect';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(n.i::pg_bigint)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_int8%' THEN
-            has_collect_int8 := true;
-        END IF;
-        IF plan_text LIKE '%age_collect(%' OR
-           plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_int8 THEN
-        RAISE EXCEPTION 'expected typed int8 collect to use typed transition aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in typed int8 collect';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(n.i::pg_text)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_text%' THEN
-            has_collect_text := true;
-        END IF;
-        IF plan_text LIKE '%age_collect(%' OR
-           plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_text THEN
-        RAISE EXCEPTION 'expected typed text collect to use typed transition aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in typed text collect';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(DISTINCT n.i::pg_bigint)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_int8(DISTINCT%' THEN
-            has_collect_distinct_int8 := true;
-        END IF;
-        IF plan_text LIKE '%age_collect(DISTINCT%' OR
-           plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-        IF plan_text LIKE '%Output: n.properties,%' THEN
-            has_distinct_properties_carry := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_distinct_int8 THEN
-        RAISE EXCEPTION 'expected typed distinct int8 collect to use typed transition aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in typed distinct int8 collect';
-    END IF;
-    IF has_distinct_properties_carry THEN
-        RAISE EXCEPTION 'unexpected properties carry in typed distinct int8 collect';
-    END IF;
-
-    has_materialized_access := false;
-    has_distinct_properties_carry := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(DISTINCT n.i::pg_text)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_text(DISTINCT%' THEN
-            has_collect_distinct_text := true;
-        END IF;
-        IF plan_text LIKE '%age_collect(DISTINCT%' OR
-           plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-        IF plan_text LIKE '%Output: n.properties,%' THEN
-            has_distinct_properties_carry := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_distinct_text THEN
-        RAISE EXCEPTION 'expected typed distinct text collect to use typed transition aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in typed distinct text collect';
-    END IF;
-    IF has_distinct_properties_carry THEN
-        RAISE EXCEPTION 'unexpected properties carry in typed distinct text collect';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT *
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN collect(n.i::numeric)$$) AS (xs agtype)'
-    LOOP
-        IF plan_text LIKE '%age_collect_numeric_property%' THEN
-            has_collect_numeric_property := true;
-        END IF;
-        IF plan_text LIKE '%age_collect(%' OR
-           plan_text LIKE '%agtype_object_field_numeric_agtype%' OR
-           plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_collect_numeric_property THEN
-        RAISE EXCEPTION 'expected numeric property collect to use direct numeric aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in numeric collect';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT array_length(array_agg(i), 1)
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN n.i$$) AS (i agtype)'
-    LOOP
-        IF plan_text LIKE '%age_array_agg_property%' THEN
-            has_array_agg_property := true;
-        END IF;
-        IF plan_text LIKE '%agtype_access_operator%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_array_agg_property THEN
-        RAISE EXCEPTION 'expected array_agg property projection to use direct property aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized property access in array_agg property projection';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT array_length(array_agg(m), 1)
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN {i: n.i, j: n.i}$$) AS (m agtype)'
-    LOOP
-        IF plan_text LIKE '%age_array_agg_map2_property%' THEN
-            has_array_agg_map2_property := true;
-        END IF;
-        IF plan_text LIKE '%agtype_access_operator%' OR
-           plan_text LIKE '%agtype_build_map_nonull%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_array_agg_map2_property THEN
-        RAISE EXCEPTION 'expected array_agg map property projection to use direct map aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized map/access function in array_agg map projection';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT array_length(array_agg(m), 1)
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN {i: n.i, j: n.i, k: n.i}$$) AS (m agtype)'
-    LOOP
-        IF plan_text LIKE '%age_array_agg_map_property%' THEN
-            has_array_agg_map_property := true;
-        END IF;
-        IF plan_text LIKE '%agtype_access_operator%' OR
-           plan_text LIKE '%agtype_build_map_nonull%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_array_agg_map_property THEN
-        RAISE EXCEPTION 'expected array_agg 3-key map projection to use descriptor aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized map/access function in 3-key array_agg map projection';
-    END IF;
-
-    has_materialized_access := false;
-    FOR plan_text IN EXECUTE
-        'EXPLAIN (VERBOSE, COSTS OFF)
-         SELECT array_length(array_agg(l), 1)
-         FROM cypher(''cypher_match'',
-                     $$MATCH (n:v) RETURN [n.i, n.i, n.i]$$) AS (l agtype)'
-    LOOP
-        IF plan_text LIKE '%age_array_agg_list_property%' THEN
-            has_array_agg_list_property := true;
-        END IF;
-        IF plan_text LIKE '%agtype_access_operator%' OR
-           plan_text LIKE '%agtype_build_list%' THEN
-            has_materialized_access := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_array_agg_list_property THEN
-        RAISE EXCEPTION 'expected array_agg list projection to use descriptor aggregate';
-    END IF;
-    IF has_materialized_access THEN
-        RAISE EXCEPTION 'unexpected materialized list/access function in array_agg list projection';
-    END IF;
-END
-$property_collect_plan$;
 SET enable_seqscan = on;
 SET enable_indexscan = on;
 SET enable_bitmapscan = on;
@@ -2292,8 +2140,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
               RETURN relationships(p)$$) AS (r agtype)
 $plan$);
-                                                       plan                                                       
-------------------------------------------------------------------------------------------------------------------
+                                                                             plan                                                                              
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_edges(_age_default_alias_0.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_vle_function_end_var_2
@@ -2304,7 +2152,18 @@ $plan$);
                Output: _age_default_vle_function_start_var_1.id, _age_default_vle_function_start_var_1.properties
          ->  Custom Scan (AGE VLE Stream)
                Output: _age_default_alias_0.edges
-(10 rows)
+               VLE Shape: cypher
+               VLE Arguments: 8
+               VLE Argument Slots: graph=const, start=dynamic, end=dynamic, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+               VLE Graph: cypher_match
+               VLE Edge: label=e1, properties=0
+               VLE Edge Source: global-metadata, fixed-source=out=none/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=global-edge-state
+               VLE Endpoints: start=runtime-id, end=runtime-id
+               VLE Range: 1..2
+               VLE Direction: right
+               VLE Output: path(requirement=path, grammar=cached)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+(21 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
 SELECT *
@@ -2334,11 +2193,22 @@ $plan$);
                                  Output: a.id, a.properties
                            ->  Custom Scan (AGE VLE Stream)
                                  Output: _age_default_alias_0.edges
+                                 VLE Shape: cypher
+                                 VLE Arguments: 8
+                                 VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+                                 VLE Graph: cypher_match
+                                 VLE Edge: label=e1, properties=0
+                                 VLE Edge Source: global-metadata, fixed-source=out=none/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=global-edge-state
+                                 VLE Endpoints: start=runtime-id, end=const-id
+                                 VLE Range: 1..2
+                                 VLE Direction: right
+                                 VLE Output: path(requirement=path, grammar=cached)
+                                 VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
                      ->  Hash
                            Output: b.id
                            ->  Seq Scan on cypher_match.v1 b
                                  Output: b.id
-(22 rows)
+(33 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
 SELECT *
@@ -2368,11 +2238,22 @@ $plan$);
                                  Output: a.id, a.properties
                            ->  Custom Scan (AGE VLE Stream)
                                  Output: _age_default_alias_0.edges
+                                 VLE Shape: cypher
+                                 VLE Arguments: 8
+                                 VLE Argument Slots: graph=const, start=dynamic, end=const, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+                                 VLE Graph: cypher_match
+                                 VLE Edge: label=e1, properties=0
+                                 VLE Edge Source: global-metadata, fixed-source=out=none/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=global-edge-state
+                                 VLE Endpoints: start=runtime-id, end=const-id
+                                 VLE Range: 1..2
+                                 VLE Direction: right
+                                 VLE Output: path(requirement=path, grammar=cached)
+                                 VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
                      ->  Hash
                            Output: b.id
                            ->  Seq Scan on cypher_match.v1 b
                                  Output: b.id
-(22 rows)
+(33 rows)
 
 SELECT * FROM pg_temp.normalized_verbose_explain($plan$
 SELECT *
@@ -2380,8 +2261,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
               RETURN p$$) AS (p agtype)
 $plan$);
-                                                       plan                                                       
-------------------------------------------------------------------------------------------------------------------
+                                                                             plan                                                                              
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_vle_function_end_var_7
@@ -2392,7 +2273,18 @@ $plan$);
                Output: _age_default_vle_function_start_var_6.id, _age_default_vle_function_start_var_6.properties
          ->  Custom Scan (AGE VLE Stream)
                Output: _age_default_alias_0.edges
-(10 rows)
+               VLE Shape: cypher
+               VLE Arguments: 8
+               VLE Argument Slots: graph=const, start=dynamic, end=dynamic, edge=const, lower=const, upper=const, direction=const, grammar-node=const
+               VLE Graph: cypher_match
+               VLE Edge: label=e1, properties=0
+               VLE Edge Source: global-metadata, fixed-source=out=none/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=global-edge-state
+               VLE Endpoints: start=runtime-id, end=runtime-id
+               VLE Range: 1..2
+               VLE Direction: right
+               VLE Output: path(requirement=path, grammar=cached)
+               VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8)
+(21 rows)
 
 --Undirected Path Tests
 SELECT * FROM cypher('cypher_match', $$

@@ -48,6 +48,10 @@ extern int64 age_adjacency_foreach_visible_payload(Oid index_oid,
                                                    void *callback_state);
 extern AgeAdjacencyVisiblePayloadScan *age_adjacency_begin_visible_payload_scan(
     Oid index_oid, Snapshot snapshot, bool fetch_properties);
+extern bool age_adjacency_visible_payload_scan_begin_key(
+    AgeAdjacencyVisiblePayloadScan *scan, graphid key);
+extern bool age_adjacency_visible_payload_scan_next(
+    AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyPayload *payload);
 extern int64 age_adjacency_visible_payload_scan_foreach(
     AgeAdjacencyVisiblePayloadScan *scan, graphid key,
     AgeAdjacencyPayloadCallback callback, void *callback_state);

@@ -22,56 +22,8 @@ SET search_path TO ag_catalog;
 
 SELECT create_graph('cypher_vle');
 
---
--- Create table to hold the start and end vertices to test the SRF
---
-
-CREATE TABLE start_and_end_points (start_vertex agtype, end_vertex agtype);
-
 -- Create a graph to test
 SELECT * FROM cypher('cypher_vle', $$CREATE (b:begin)-[:edge {name: 'main edge', number: 1, dangerous: {type: "all", level: "all"}}]->(u1:middle)-[:edge {name: 'main edge', number: 2, dangerous: {type: "all", level: "all"}, packages: [2,4,6]}]->(u2:middle)-[:edge {name: 'main edge', number: 3, dangerous: {type: "all", level: "all"}}]->(u3:middle)-[:edge {name: 'main edge', number: 4, dangerous: {type: "all", level: "all"}}]->(e:end), (u1)-[:self_loop {name: 'self loop', number: 1, dangerous: {type: "all", level: "all"}}]->(u1), (e)-[:self_loop {name: 'self loop', number: 2, dangerous: {type: "all", level: "all"}}]->(e), (b)-[:alternate_edge {name: 'alternate edge', number: 1, packages: [2,4,6], dangerous: {type: "poisons", level: "all"}}]->(u1), (u2)-[:alternate_edge {name: 'alternate edge', number: 2, packages: [2,4,6], dangerous: {type: "poisons", level: "all"}}]->(u3), (u3)-[:alternate_edge {name: 'alternate edge', number: 3, packages: [2,4,6], dangerous: {type: "poisons", level: "all"}}]->(e), (u2)-[:bypass_edge {name: 'bypass edge', number: 1, packages: [1,3,5,7]}]->(e), (e)-[:alternate_edge {name: 'backup edge', number: 1, packages: [1,3,5,7]}]->(u3), (u3)-[:alternate_edge {name: 'backup edge', number: 2, packages: [1,3,5,7]}]->(u2), (u2)-[:bypass_edge {name: 'bypass edge', number: 2, packages: [1,3,5,7], dangerous: {type: "poisons", level: "all"}}]->(b) RETURN b, e $$) AS (b agtype, e agtype);
-
--- Insert start and end points for graph
-INSERT INTO start_and_end_points (SELECT * FROM cypher('cypher_vle', $$MATCH (b:begin)-[:edge]->()-[:edge]->()-[:edge]->()-[:edge]->(e:end) RETURN b, e $$) AS (b agtype, e agtype));
-
--- Display our points
-SELECT * FROM start_and_end_points;
-
--- Count the total paths from left (start) to right (end) -[]-> should be 400
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {}}::edge'::agtype, '1'::agtype, 'null'::agtype, '1'::agtype) group by ctid;
-
--- Count the total paths from right (end) to left (start) <-[]- should be 2
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {}}::edge'::agtype, '1'::agtype, 'null'::agtype, '-1'::agtype) group by ctid;
-
--- Count the total paths undirectional -[]- should be 7092
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {}}::edge'::agtype, '1'::agtype, 'null'::agtype, '0'::agtype) group by ctid;
-
--- All paths of length 3 -[]-> should be 2
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {}}::edge'::agtype, '3'::agtype, '3'::agtype, '1'::agtype);
-
--- All paths of length 3 <-[]- should be 1
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {}}::edge'::agtype, '3'::agtype, '3'::agtype, '-1'::agtype);
-
--- All paths of length 3 -[]- should be 12
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {}}::edge'::agtype, '3'::agtype, '3'::agtype, '0'::agtype);
-
--- Test edge label matching - should match 1
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "edge", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {}}::edge'::agtype, '1'::agtype, 'null'::agtype, '1'::agtype);
-
--- Test scalar property matching - should match 1
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {"name": "main edge"}}::edge'::agtype, '1'::agtype, 'null'::agtype, '1'::agtype);
-
--- Test object property matching - should match 4
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {"dangerous": {"type": "all", "level": "all"}}}::edge'::agtype, '1'::agtype, 'null'::agtype, '1'::agtype);
-
--- Test array property matching - should match 2
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {"packages": [1,3,5,7]}}::edge'::agtype, '1'::agtype, 'null'::agtype, '0'::agtype);
-
--- Test array property matching - should match 1
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {"packages": [2,4,6]}}::edge'::agtype, '1'::agtype, 'null'::agtype, '0'::agtype);
-
--- Test object property matching - should match 1
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {"dangerous": {"type": "poisons", "level": "all"}}}::edge'::agtype, '1'::agtype, 'null'::agtype, '0'::agtype);
 
 -- Test the VLE match integration
 -- Each should find 400
@@ -80,18 +32,24 @@ SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[*..]->(v:end) RETURN count
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[*0..]->(v:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[*1..]->(v:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[*1..200]->(v:end) RETURN count(*) $$) AS (e agtype);
+-- Bounded path counts should flow through the Cypher VLE stream, not direct SRF calls.
+SELECT * FROM cypher('cypher_vle', $$MATCH p=(u:begin)-[*3..3]->(v:end) RETURN count(p) $$) AS (paths agtype);
 -- Each should find 2
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)<-[*]-(v:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)<-[*..]-(v:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)<-[*0..]-(v:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)<-[*1..]-(v:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)<-[*1..200]-(v:end) RETURN count(*) $$) AS (e agtype);
+-- Should find 1
+SELECT * FROM cypher('cypher_vle', $$MATCH p=(u:begin)<-[*3..3]-(v:end) RETURN count(p) $$) AS (paths agtype);
 -- Each should find 7092
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[*]-(v:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[*..]-(v:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[*0..]-(v:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[*1..]-(v:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[*1..200]-(v:end) RETURN count(*) $$) AS (e agtype);
+-- Should find 12
+SELECT * FROM cypher('cypher_vle', $$MATCH p=(u:begin)-[*3..3]-(v:end) RETURN count(p) $$) AS (paths agtype);
 -- Each should find 1
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[:edge*]-(v:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[:edge* {name: "main edge"}]-(v:end) RETURN count(*) $$) AS (e agtype);
@@ -104,10 +62,8 @@ SELECT * FROM cypher('cypher_vle', $$MATCH ()<-[*4..4 {name: "main edge"}]-(v) R
 SELECT * FROM cypher('cypher_vle', $$MATCH ()-[*]->() RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u)-[*]->() RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH ()-[*]->(v) RETURN count(*) $$) AS (e agtype);
--- Empty direct age_vle finite range should not traverse
-SELECT count(edges) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {}}::edge'::agtype, '3'::agtype, '2'::agtype, '1'::agtype);
--- Direct runtime nodes()/relationships() should project compact VLE paths
-SELECT count(age_nodes(edges)), count(age_relationships(edges)), sum((age_length(edges))::text::int) FROM start_and_end_points, age_vle( '"cypher_vle"'::agtype, start_vertex, end_vertex, '{"id": 1111111111111111, "label": "", "end_id": 2222222222222222, "start_id": 333333333333333, "properties": {}}::edge'::agtype, '3'::agtype, '3'::agtype, '1'::agtype);
+-- Runtime nodes()/relationships() should project compact VLE paths through the marker stream.
+SELECT * FROM cypher('cypher_vle', $$MATCH p=(u:begin)-[*3..3]->(v:end) RETURN count(nodes(p)), count(relationships(p)), sum(length(p)) $$) AS (node_lists agtype, relationship_lists agtype, total_length agtype);
 -- Optimized anonymous terminal: bound start, unused anonymous end
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[e*1..2 {name: "main edge"}]->() RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH p=(u:begin)-[e*1..2 {name: "main edge"}]->() RETURN count(p) $$) AS (e agtype);
@@ -115,12 +71,17 @@ SELECT * FROM cypher('cypher_vle', $$MATCH p=(u:begin)-[e*1..2 {name: "main edge
 SELECT * FROM cypher('cypher_vle', $$MATCH ()-[e*1..2 {name: "main edge"}]->(:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH p=()-[e*1..2 {name: "main edge"}]->(:end) RETURN count(p) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$EXPLAIN (COSTS OFF) MATCH p=()-[e*1..2 {name: "main edge"}]->(:end) RETURN count(p) $$) AS (plan agtype);
-SELECT * FROM cypher('cypher_vle', $$EXPLAIN (COSTS OFF) MATCH ()-[e*1..2 {name: "main edge"}]->(:end) RETURN count(*) $$) AS (plan agtype);
+SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH ()-[e*1..2 {name: "main edge"}]->(:end) RETURN count(*) $$) AS (plan agtype);
 SELECT * FROM cypher('cypher_vle', $$EXPLAIN (COSTS OFF) MATCH (:begin)-[e*1..2 {name: "main edge"}]->(:end) RETURN count(*) $$) AS (plan agtype);
 -- Optimized two-bound lower-zero VLE: age_vle handles start=end zero-path semantics.
 SELECT * FROM cypher('cypher_vle', $$MATCH (:begin)-[e*0..2 {name: "main edge"}]->(:end) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)-[e*0..2 {name: "main edge"}]->(u) RETURN count(*) $$) AS (e agtype);
 SELECT * FROM cypher('cypher_vle', $$EXPLAIN (COSTS OFF) MATCH (:begin)-[e*0..2 {name: "main edge"}]->(:end) RETURN count(*) $$) AS (plan agtype);
+-- Terminal property output should retarget the marker stream descriptor, not a SQL function OID.
+SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)-[*1..2]->(n) RETURN n $$) AS (plan agtype);
+SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)-[*1..2]->(n) RETURN properties(n) $$) AS (plan agtype);
+SELECT * FROM cypher('cypher_vle', $$MATCH (:begin)-[*1..2]->(n) RETURN count(n), count(properties(n)) $$) AS (nodes agtype, props agtype);
+SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)-[*1..2]->(n) RETURN n.name $$) AS (plan agtype);
 -- Should find 2
 SELECT * FROM cypher('cypher_vle', $$MATCH (u:begin)<-[e*]-(v:end) RETURN e $$) AS (e agtype);
 -- Should find 5
@@ -189,7 +150,7 @@ SELECT * FROM cypher('cypher_vle', $$MATCH (u)-[e*0..0]->(v) RETURN id(u), e, id
 SELECT * FROM cypher('cypher_vle', $$MATCH p=(u)-[e*0..0]->(v) RETURN id(u), p, id(v) $$) AS (u agtype, p agtype, v agtype);
 -- Each should return 13 and will be the same
 SELECT * FROM cypher('cypher_vle', $$MATCH p=()-[*0..0]->()-[]->() RETURN p $$) AS (p agtype);
-SELECT * FROM cypher('cypher_vle', $$MATCH p=()-[]->()-[*0..0]->() RETURN p $$) AS (p agtype);
+SELECT * FROM cypher('cypher_vle', $$MATCH p=()-[]->()-[*0..0]->() RETURN p ORDER BY p $$) AS (p agtype);
 -- Constrained start with anonymous terminal should stream directly and still materialize paths
 SELECT * FROM cypher('cypher_vle', $$MATCH p=(:begin)-[:edge*1..2]->() RETURN count(p), min(length(p)), max(length(p)) $$) AS (paths agtype, min_length agtype, max_length agtype);
 SELECT * FROM cypher('cypher_vle', $$MATCH p=(:begin)-[:edge*1..1]->() RETURN p $$) AS (p agtype);
@@ -462,6 +423,9 @@ SELECT * FROM cypher('issue_1910', $$ CREATE ({name: 'Donald Defoe'})-[:KNOWS]->
 SELECT * FROM cypher('issue_1910', $$ MATCH (u {name: 'John Doe'})
                                       MERGE (u)-[:KNOWS]->({name: 'Willem Defoe'}) $$) AS (result agtype);
 
+SELECT * FROM cypher('issue_1910', $$ EXPLAIN (VERBOSE, COSTS OFF)
+                                      MATCH (n) WHERE EXISTS((n)-[*]-({name: 'Willem Defoe'}))
+                                      RETURN n.name $$) AS (plan agtype);
 SELECT * FROM cypher('issue_1910', $$ MATCH (n) WHERE EXISTS((n)-[*]-({name: 'Willem Defoe'}))
                                       RETURN n.name $$) AS (name agtype);
 SELECT * FROM cypher('issue_1910', $$ MATCH (n) WHERE EXISTS((n)-[*1]-({name: 'Willem Defoe'}))
@@ -536,441 +500,180 @@ SELECT drop_graph('issue_2092', true);
 SELECT create_graph('vle_index_probe');
 
 SELECT * FROM cypher('vle_index_probe', $$
-    CREATE (:N {i: 0})-[:R]->(:N {i: 1})
+    CREATE (n0:N {i: 0}),
+           (n1:N {i: 1}),
+           (n2:N {i: 2}),
+           (n3:N {i: 3}),
+           (n4:N {i: 4})
+    CREATE (n0)-[:R]->(n1),
+           (n0)-[:R]->(n2),
+           (n1)-[:R]->(n3),
+           (n1)-[:R]->(n4),
+           (n2)-[:R]->(n3),
+           (n2)-[:R]->(n4)
 $$) AS (result agtype);
 
 CREATE INDEX vle_index_probe_n_properties_gin_idx
 ON vle_index_probe."N" USING gin (properties);
+CREATE INDEX vle_index_probe_r_start_idx
+ON vle_index_probe."R" USING btree (start_id);
 ANALYZE vle_index_probe."N";
+ANALYZE vle_index_probe."R";
 
-DO $$
-DECLARE
-    plan_text text;
-    has_bitmap_index_scan boolean := false;
-BEGIN
-    PERFORM set_config('enable_seqscan', 'off', true);
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('vle_index_probe',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[*1..1]->(n) RETURN n.i$cypher$)
-        AS (plan agtype)
-    LOOP
-        IF plan_text LIKE '%Bitmap Index Scan%' AND
-           plan_text LIKE '%vle_index_probe_n_properties_gin_idx%' THEN
-            has_bitmap_index_scan := true;
-        END IF;
-    END LOOP;
-    PERFORM set_config('enable_seqscan', 'on', true);
+SET enable_seqscan = off;
 
-    IF NOT has_bitmap_index_scan THEN
-        RAISE EXCEPTION 'expected VLE start property filter to use properties GIN index';
-    END IF;
-END
-$$;
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[*1..1]->(n) RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
+AS (plan agtype);
+
+CREATE INDEX vle_index_probe_r_start_adj_idx
+ON vle_index_probe."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_index_probe_r_end_adj_idx
+ON vle_index_probe."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_index_probe."R";
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N)-[:R*1..1]->(n) RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
+AS (plan agtype);
+
+SET enable_seqscan = on;
 
 SELECT drop_graph('vle_index_probe', true);
 
-DO $$
-DECLARE
-    plan_text text;
-    length_plan text := '';
-    rel_count_plan text := '';
-    rel_tail_count_plan text := '';
-    rel_tail_empty_plan text := '';
-    rel_slice_count_plan text := '';
-    rel_slice_empty_plan text := '';
-    rel_tail_slice_count_plan text := '';
-    node_count_plan text := '';
-    aggregate_count_plan text := '';
-    tail_last_count_plan text := '';
-    slice_boundary_count_plan text := '';
-    path_plan text := '';
-    constrained_path_plan text := '';
-    rel_index_plan text := '';
-    rel_head_plan text := '';
-    rel_last_plan text := '';
-    node_head_plan text := '';
-    node_property_plan text := '';
-    edge_property_plan text := '';
-BEGIN
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN length(p)$cypher$)
-        AS (plan agtype)
-    LOOP
-        length_plan := length_plan || plan_text || E'\n';
-    END LOOP;
+SELECT create_graph('vle_fanout_policy');
 
-    IF length_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       length_plan NOT LIKE '%age_vle_path_length%' THEN
-        RAISE EXCEPTION 'expected compact VLE length plan to stream age_vle directly: %',
-                        length_plan;
-    END IF;
+SELECT * FROM cypher('vle_fanout_policy', $$
+    CREATE (n0:N {i: 0}),
+           (n1:N {i: 1}),
+           (n2:N {i: 2}),
+           (n3:N {i: 3})
+    CREATE (n0)-[:R]->(n1),
+           (n0)-[:R]->(n2),
+           (n0)-[:R]->(n3)
+$$) AS (result agtype);
 
-    IF length_plan LIKE '%age_match_vle_terminal_edge%' THEN
-        RAISE EXCEPTION 'compact VLE length plan should not expose endpoint joins: %',
-                        length_plan;
-    END IF;
+CREATE INDEX vle_fanout_policy_n_properties_gin_idx
+ON vle_fanout_policy."N" USING gin (properties);
+CREATE INDEX vle_fanout_policy_r_start_idx
+ON vle_fanout_policy."R" USING btree (start_id);
+CREATE INDEX vle_fanout_policy_r_end_idx
+ON vle_fanout_policy."R" USING btree (end_id);
+CREATE INDEX vle_fanout_policy_r_start_adj_idx
+ON vle_fanout_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_fanout_policy_r_end_adj_idx
+ON vle_fanout_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_fanout_policy."N";
+ANALYZE vle_fanout_policy."R";
 
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(relationships(p))$cypher$)
-        AS (plan agtype)
-    LOOP
-        rel_count_plan := rel_count_plan || plan_text || E'\n';
-    END LOOP;
+SET enable_seqscan = off;
 
-    IF rel_count_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       rel_count_plan NOT LIKE '%age_vle_path_length%' THEN
-        RAISE EXCEPTION 'expected compact VLE relationship count plan to stream age_vle directly: %',
-                        rel_count_plan;
-    END IF;
+SELECT * FROM cypher('vle_fanout_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
+AS (plan agtype);
 
-    IF rel_count_plan LIKE '%age_match_vle_terminal_edge%' THEN
-        RAISE EXCEPTION 'compact VLE relationship count plan should not expose endpoint joins: %',
-                        rel_count_plan;
-    END IF;
+SELECT * FROM cypher('vle_fanout_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n.i$$)
+AS (plan agtype);
 
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(tail(relationships(p)))$cypher$)
-        AS (plan agtype)
-    LOOP
-        rel_tail_count_plan := rel_tail_count_plan || plan_text || E'\n';
-    END LOOP;
+SET enable_seqscan = on;
 
-    IF rel_tail_count_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       rel_tail_count_plan NOT LIKE '%age_vle_edge_tail_count%' THEN
-        RAISE EXCEPTION 'expected compact VLE relationship tail count plan to stream age_vle directly: %',
-                        rel_tail_count_plan;
-    END IF;
+SELECT drop_graph('vle_fanout_policy', true);
 
-    IF rel_tail_count_plan LIKE '%age_match_vle_terminal_edge%' THEN
-        RAISE EXCEPTION 'compact VLE relationship tail count plan should not expose endpoint joins: %',
-                        rel_tail_count_plan;
-    END IF;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN length(p)$$)
+AS (plan agtype);
 
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN isEmpty(tail(relationships(p)))$cypher$)
-        AS (plan agtype)
-    LOOP
-        rel_tail_empty_plan := rel_tail_empty_plan || plan_text || E'\n';
-    END LOOP;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(relationships(p))$$)
+AS (plan agtype);
 
-    IF rel_tail_empty_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       rel_tail_empty_plan NOT LIKE '%age_vle_list_is_empty%' THEN
-        RAISE EXCEPTION 'expected compact VLE relationship tail empty plan to stream age_vle directly: %',
-                        rel_tail_empty_plan;
-    END IF;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(tail(relationships(p)))$$)
+AS (plan agtype);
 
-    IF rel_tail_empty_plan LIKE '%age_match_vle_terminal_edge%' THEN
-        RAISE EXCEPTION 'compact VLE relationship tail empty plan should not expose endpoint joins: %',
-                        rel_tail_empty_plan;
-    END IF;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN isEmpty(tail(relationships(p)))$$)
+AS (plan agtype);
 
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(relationships(p)[1..])$cypher$)
-        AS (plan agtype)
-    LOOP
-        rel_slice_count_plan := rel_slice_count_plan || plan_text || E'\n';
-    END LOOP;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(relationships(p)[1..])$$)
+AS (plan agtype);
 
-    IF rel_slice_count_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       rel_slice_count_plan NOT LIKE '%age_vle_list_slice_count%' THEN
-        RAISE EXCEPTION 'expected compact VLE relationship slice count plan to stream age_vle directly: %',
-                        rel_slice_count_plan;
-    END IF;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN isEmpty(relationships(p)[1..])$$)
+AS (plan agtype);
 
-    IF rel_slice_count_plan LIKE '%age_match_vle_terminal_edge%' THEN
-        RAISE EXCEPTION 'compact VLE relationship slice count plan should not expose endpoint joins: %',
-                        rel_slice_count_plan;
-    END IF;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(tail(relationships(p))[0..1])$$)
+AS (plan agtype);
 
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN isEmpty(relationships(p)[1..])$cypher$)
-        AS (plan agtype)
-    LOOP
-        rel_slice_empty_plan := rel_slice_empty_plan || plan_text || E'\n';
-    END LOOP;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(nodes(p))$$)
+AS (plan agtype);
 
-    IF rel_slice_empty_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       rel_slice_empty_plan NOT LIKE '%age_vle_list_slice_is_empty%' THEN
-        RAISE EXCEPTION 'expected compact VLE relationship slice empty plan to stream age_vle directly: %',
-                        rel_slice_empty_plan;
-    END IF;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN count(p)$$)
+AS (plan agtype);
 
-    IF rel_slice_empty_plan LIKE '%age_match_vle_terminal_edge%' THEN
-        RAISE EXCEPTION 'compact VLE relationship slice empty plan should not expose endpoint joins: %',
-                        rel_slice_empty_plan;
-    END IF;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN count(last(tail(nodes(p)))) + count(last(tail(relationships(p)))) + count(startNode(last(tail(relationships(p))))) + count(endNode(last(tail(relationships(p))))) + count(label(last(tail(nodes(p))))) + count(properties(last(tail(nodes(p))))) + count(type(last(tail(relationships(p))))) + count(labels(endNode(last(tail(relationships(p)))))) + count(properties(startNode(last(tail(relationships(p))))))$$)
+AS (plan agtype);
 
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(tail(relationships(p))[0..1])$cypher$)
-        AS (plan agtype)
-    LOOP
-        rel_tail_slice_count_plan := rel_tail_slice_count_plan || plan_text || E'\n';
-    END LOOP;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH ()-[e*2..3]->() RETURN count(last(tail(reverse(e)))) + count(head(reverse(tail(e)))) + count(last(tail(tail(e)))) + count(type(last(tail(reverse(e))))) + count(properties(head(reverse(tail(e)))))$$)
+AS (plan agtype);
 
-    IF rel_tail_slice_count_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       rel_tail_slice_count_plan NOT LIKE '%age_vle_list_slice_count%' THEN
-        RAISE EXCEPTION 'expected compact VLE relationship tail slice count plan to stream age_vle directly: %',
-                        rel_tail_slice_count_plan;
-    END IF;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN p$$)
+AS (plan agtype);
 
-    IF rel_tail_slice_count_plan LIKE '%age_match_vle_terminal_edge%' THEN
-        RAISE EXCEPTION 'compact VLE relationship tail slice count plan should not expose endpoint joins: %',
-                        rel_tail_slice_count_plan;
-    END IF;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:begin)-[:edge*1..2]->() RETURN p$$)
+AS (plan agtype);
 
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN size(nodes(p))$cypher$)
-        AS (plan agtype)
-    LOOP
-        node_count_plan := node_count_plan || plan_text || E'\n';
-    END LOOP;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN relationships(p)[0]$$)
+AS (plan agtype);
 
-    IF node_count_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       node_count_plan NOT LIKE '%age_vle_path_node_count%' THEN
-        RAISE EXCEPTION 'expected compact VLE node count plan to stream age_vle directly: %',
-                        node_count_plan;
-    END IF;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN head(relationships(p))$$)
+AS (plan agtype);
 
-    IF node_count_plan LIKE '%age_match_vle_terminal_edge%' THEN
-        RAISE EXCEPTION 'compact VLE node count plan should not expose endpoint joins: %',
-                        node_count_plan;
-    END IF;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN last(relationships(p))$$)
+AS (plan agtype);
 
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN count(p)$cypher$)
-        AS (plan agtype)
-    LOOP
-        aggregate_count_plan := aggregate_count_plan || plan_text || E'\n';
-    END LOOP;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN head(nodes(p))$$)
+AS (plan agtype);
 
-    IF aggregate_count_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       aggregate_count_plan NOT LIKE '%count(%edges%' THEN
-        RAISE EXCEPTION 'expected compact VLE aggregate count plan to stream and count age_vle edges directly: %',
-                        aggregate_count_plan;
-    END IF;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN last(nodes(p)).id$$)
+AS (plan agtype);
 
-    IF aggregate_count_plan LIKE '%age_match_vle_terminal_edge%' OR
-       aggregate_count_plan LIKE '%_agtype_build_path%' THEN
-        RAISE EXCEPTION 'compact VLE aggregate count plan should not expose endpoint joins or path build: %',
-                        aggregate_count_plan;
-    END IF;
-
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN count(last(tail(nodes(p)))) + count(last(tail(relationships(p)))) + count(startNode(last(tail(relationships(p))))) + count(endNode(last(tail(relationships(p))))) + count(label(last(tail(nodes(p))))) + count(properties(last(tail(nodes(p))))) + count(type(last(tail(relationships(p))))) + count(labels(endNode(last(tail(relationships(p)))))) + count(properties(startNode(last(tail(relationships(p))))))$cypher$)
-        AS (plan agtype)
-    LOOP
-        tail_last_count_plan := tail_last_count_plan || plan_text || E'\n';
-    END LOOP;
-
-    IF tail_last_count_plan NOT LIKE '%age_vle_node_tail_last_id%' OR
-       tail_last_count_plan NOT LIKE '%age_vle_edge_tail_last_id%' OR
-       tail_last_count_plan NOT LIKE '%age_vle_tail_last_edge_endpoint%' THEN
-        RAISE EXCEPTION 'expected VLE tail-last count plan to use direct id/endpoint helpers: %',
-                        tail_last_count_plan;
-    END IF;
-
-    IF tail_last_count_plan LIKE '%age_materialize_vle_node_tail_last%' OR
-       tail_last_count_plan LIKE '%age_materialize_vle_edge_tail_last%' OR
-       tail_last_count_plan LIKE '%age_vle_tail_last_field%' OR
-       tail_last_count_plan LIKE '%age_vle_tail_last_endpoint_field%' THEN
-        RAISE EXCEPTION 'VLE tail-last count plan should not materialize tail-last entities: %',
-                        tail_last_count_plan;
-    END IF;
-
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH ()-[e*2..3]->() RETURN count(last(tail(reverse(e)))) + count(head(reverse(tail(e)))) + count(last(tail(tail(e)))) + count(type(last(tail(reverse(e))))) + count(properties(head(reverse(tail(e)))))$cypher$)
-        AS (plan agtype)
-    LOOP
-        slice_boundary_count_plan := slice_boundary_count_plan || plan_text || E'\n';
-    END LOOP;
-
-    IF slice_boundary_count_plan NOT LIKE '%''253''::agtype%' OR
-       slice_boundary_count_plan NOT LIKE '%''132''::agtype%' OR
-       slice_boundary_count_plan NOT LIKE '%''373''::agtype%' THEN
-        RAISE EXCEPTION 'expected nested VLE slice-boundary count plan to use id modes: %',
-                        slice_boundary_count_plan;
-    END IF;
-
-    IF slice_boundary_count_plan LIKE '%''245''::agtype%' OR
-       slice_boundary_count_plan LIKE '%''124''::agtype%' OR
-       slice_boundary_count_plan LIKE '%''365''::agtype%' THEN
-        RAISE EXCEPTION 'nested VLE slice-boundary count plan should not use entity/field modes: %',
-                        slice_boundary_count_plan;
-    END IF;
-
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN p$cypher$)
-        AS (plan agtype)
-    LOOP
-        path_plan := path_plan || plan_text || E'\n';
-    END LOOP;
-
-    IF path_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       path_plan NOT LIKE '%age_materialize_vle_path%' THEN
-        RAISE EXCEPTION 'materialized VLE path plan should stream compact descriptor to final path materializer: %',
-                        path_plan;
-    END IF;
-
-    IF path_plan NOT LIKE '%age_match_vle_terminal_edge%' THEN
-        RAISE EXCEPTION 'materialized VLE path plan should keep endpoint joins: %',
-                        path_plan;
-    END IF;
-
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:begin)-[:edge*1..2]->() RETURN p$cypher$)
-        AS (plan agtype)
-    LOOP
-        constrained_path_plan := constrained_path_plan || plan_text || E'\n';
-    END LOOP;
-
-    IF constrained_path_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       constrained_path_plan NOT LIKE '%age_materialize_vle_path%' THEN
-        RAISE EXCEPTION 'constrained VLE path plan should stream compact descriptor to final path materializer: %',
-                        constrained_path_plan;
-    END IF;
-
-    IF constrained_path_plan LIKE '%age_match_vle_terminal_edge%' OR
-       constrained_path_plan LIKE '%_agtype_build_path%' THEN
-        RAISE EXCEPTION 'constrained VLE path plan should not expose endpoint joins or path build: %',
-                        constrained_path_plan;
-    END IF;
-
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN relationships(p)[0]$cypher$)
-        AS (plan agtype)
-    LOOP
-        rel_index_plan := rel_index_plan || plan_text || E'\n';
-    END LOOP;
-
-    IF rel_index_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       rel_index_plan NOT LIKE '%age_materialize_vle_edge_at%' OR
-       rel_index_plan LIKE '%age_materialize_vle_edges%' OR
-       rel_index_plan LIKE '%agtype_access_operator%' THEN
-        RAISE EXCEPTION 'expected VLE relationship index to materialize one edge from compact descriptor: %',
-                        rel_index_plan;
-    END IF;
-
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN head(relationships(p))$cypher$)
-        AS (plan agtype)
-    LOOP
-        rel_head_plan := rel_head_plan || plan_text || E'\n';
-    END LOOP;
-
-    IF rel_head_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       rel_head_plan NOT LIKE '%age_materialize_vle_edge_at%' OR
-       rel_head_plan LIKE '%age_materialize_vle_edges%' OR
-       rel_head_plan LIKE '%age_head%' THEN
-        RAISE EXCEPTION 'expected VLE relationship head to materialize one edge from compact descriptor: %',
-                        rel_head_plan;
-    END IF;
-
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN last(relationships(p))$cypher$)
-        AS (plan agtype)
-    LOOP
-        rel_last_plan := rel_last_plan || plan_text || E'\n';
-    END LOOP;
-
-    IF rel_last_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       rel_last_plan NOT LIKE '%age_materialize_vle_edge_at%' OR
-       rel_last_plan LIKE '%age_materialize_vle_edges%' OR
-       rel_last_plan LIKE '%age_last%' THEN
-        RAISE EXCEPTION 'expected VLE relationship last to materialize one edge from compact descriptor: %',
-                        rel_last_plan;
-    END IF;
-
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN head(nodes(p))$cypher$)
-        AS (plan agtype)
-    LOOP
-        node_head_plan := node_head_plan || plan_text || E'\n';
-    END LOOP;
-
-    IF node_head_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       node_head_plan NOT LIKE '%age_materialize_vle_node_at%' OR
-       node_head_plan LIKE '%age_materialize_vle_nodes%' OR
-       node_head_plan LIKE '%age_head%' THEN
-        RAISE EXCEPTION 'expected VLE node head to materialize one node from compact descriptor: %',
-                        node_head_plan;
-    END IF;
-
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN last(nodes(p)).id$cypher$)
-        AS (plan agtype)
-    LOOP
-        node_property_plan := node_property_plan || plan_text || E'\n';
-    END LOOP;
-
-    IF node_property_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       node_property_plan NOT LIKE '%age_vle_node_property_at%' OR
-       node_property_plan LIKE '%age_vle_node_properties_at%' OR
-       node_property_plan LIKE '%agtype_access_operator%' THEN
-        RAISE EXCEPTION 'expected VLE node property access to read one property from compact descriptor: %',
-                        node_property_plan;
-    END IF;
-
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('cypher_vle',
-                    $cypher$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN last(relationships(p)).id$cypher$)
-        AS (plan agtype)
-    LOOP
-        edge_property_plan := edge_property_plan || plan_text || E'\n';
-    END LOOP;
-
-    IF edge_property_plan NOT LIKE '%Custom Scan (AGE VLE Stream)%' OR
-       edge_property_plan NOT LIKE '%age_vle_edge_property_at%' OR
-       edge_property_plan LIKE '%age_vle_edge_properties_at%' OR
-       edge_property_plan LIKE '%agtype_access_operator%' THEN
-        RAISE EXCEPTION 'expected VLE edge property access to read one property from compact descriptor: %',
-                        edge_property_plan;
-    END IF;
-END
-$$;
+SELECT * FROM cypher('cypher_vle',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN last(relationships(p)).id$$)
+AS (plan agtype);
 
 --
 -- Clean up
 --
-
-DROP TABLE start_and_end_points;
 
 SELECT drop_graph('cypher_vle', true);
 
