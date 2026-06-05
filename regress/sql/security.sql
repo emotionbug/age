@@ -471,6 +471,7 @@ REVOKE EXECUTE ON FUNCTION ag_catalog.drop_graph(name, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ag_catalog.create_vlabel(cstring, cstring) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ag_catalog.create_elabel(cstring, cstring) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ag_catalog.create_property_index(cstring, cstring, cstring) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ag_catalog.create_property_index(cstring, cstring, cstring, cstring) FROM PUBLIC;
 
 SET ROLE security_test_noexec;
 
@@ -510,6 +511,7 @@ GRANT EXECUTE ON FUNCTION ag_catalog.drop_graph(name, boolean) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ag_catalog.create_vlabel(cstring, cstring) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ag_catalog.create_elabel(cstring, cstring) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION ag_catalog.create_property_index(cstring, cstring, cstring) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION ag_catalog.create_property_index(cstring, cstring, cstring, cstring) TO PUBLIC;
 
 -- ============================================================================
 -- PART 12: startNode/endNode Permission Tests

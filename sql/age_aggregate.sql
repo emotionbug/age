@@ -256,8 +256,24 @@ CREATE FUNCTION ag_catalog.age_collect_text_finalfn(internal)
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
 
+-- collect transfer function for typed numeric values
+CREATE FUNCTION ag_catalog.age_collect_numeric_transfn(internal, numeric)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
 -- collect transfer function for direct numeric property extraction
 CREATE FUNCTION ag_catalog.age_collect_numeric_property_transfn(internal, agtype, agtype)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- collect transfer function for direct numeric property path extraction
+CREATE FUNCTION ag_catalog.age_collect_numeric_path_property_transfn(internal, agtype, agtype[])
     RETURNS internal
     LANGUAGE c
     IMMUTABLE
@@ -365,11 +381,29 @@ CREATE AGGREGATE ag_catalog.age_collect_text(text)
     parallel = safe
 );
 
+-- aggregate definition for age_collect_numeric(numeric)
+CREATE AGGREGATE ag_catalog.age_collect_numeric(numeric)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_numeric_transfn,
+    finalfunc = ag_catalog.age_collect_numeric_finalfn,
+    parallel = safe
+);
+
 -- aggregate definition for age_collect_numeric_property(agtype, agtype)
 CREATE AGGREGATE ag_catalog.age_collect_numeric_property(agtype, agtype)
 (
     stype = internal,
     sfunc = ag_catalog.age_collect_numeric_property_transfn,
+    finalfunc = ag_catalog.age_collect_numeric_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_collect_numeric_path_property(agtype, agtype[])
+CREATE AGGREGATE ag_catalog.age_collect_numeric_path_property(agtype, agtype[])
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_numeric_path_property_transfn,
     finalfunc = ag_catalog.age_collect_numeric_finalfn,
     parallel = safe
 );

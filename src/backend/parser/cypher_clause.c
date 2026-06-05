@@ -58,6 +58,7 @@
 #include "parser/cypher_item.h"
 #include "parser/cypher_parse_agg.h"
 #include "parser/cypher_transform_entity.h"
+#include "parser/cypher_property_signature.h"
 #include "utils/ag_cache.h"
 #include "utils/ag_func.h"
 #include "utils/ag_guc.h"
@@ -133,9 +134,6 @@ static List *transform_cypher_order_by(cypher_parsestate *cpstate,
 static TargetEntry *find_target_list_entry(cypher_parsestate *cpstate,
                                            Node *node, List **target_list,
                                            ParseExprKind expr_kind);
-static bool equal_property_access_signature(Node *left, Node *right);
-static bool extract_property_access_signature(Node *node, Oid *funcid,
-                                              Node **container, Node **key);
 static Node *transform_cypher_limit(cypher_parsestate *cpstate, Node *node,
                                     ParseExprKind expr_kind,
                                     const char *construct_name);
@@ -2958,7 +2956,7 @@ static TargetEntry *find_target_list_entry(cypher_parsestate *cpstate,
         {
             return te;
         }
-        if (equal_property_access_signature(expr, te_expr))
+        if (cypher_equal_property_access_signature(expr, te_expr))
         {
             return te;
         }
@@ -2969,62 +2967,6 @@ static TargetEntry *find_target_list_entry(cypher_parsestate *cpstate,
     *target_list = lappend(*target_list, te);
 
     return te;
-}
-
-static bool equal_property_access_signature(Node *left, Node *right)
-{
-    Oid left_funcid;
-    Oid right_funcid;
-    Node *left_container;
-    Node *right_container;
-    Node *left_key;
-    Node *right_key;
-
-    if (!extract_property_access_signature(left, &left_funcid,
-                                           &left_container, &left_key) ||
-        !extract_property_access_signature(right, &right_funcid,
-                                           &right_container, &right_key))
-    {
-        return false;
-    }
-
-    return left_funcid == right_funcid &&
-           equal(left_container, right_container) &&
-           equal(left_key, right_key);
-}
-
-static bool extract_property_access_signature(Node *node, Oid *funcid,
-                                              Node **container, Node **key)
-{
-    FuncExpr *func;
-
-    if (node == NULL || !IsA(node, FuncExpr))
-        return false;
-
-    func = castNode(FuncExpr, node);
-
-    if (list_length(func->args) == 2)
-    {
-        *funcid = func->funcid;
-        *container = linitial(func->args);
-        *key = lsecond(func->args);
-        return true;
-    }
-
-    if (list_length(func->args) == 1 && IsA(linitial(func->args), ArrayExpr))
-    {
-        ArrayExpr *array = linitial_node(ArrayExpr, func->args);
-
-        if (list_length(array->elements) != 2)
-            return false;
-
-        *funcid = func->funcid;
-        *container = linitial(array->elements);
-        *key = lsecond(array->elements);
-        return true;
-    }
-
-    return false;
 }
 
 /* see transformLimitClause() */
@@ -5109,11 +5051,75 @@ static bool is_unary_raw_func(FuncCall *fn, const char *func_name)
            pg_strcasecmp(strVal(func_name_node), func_name) == 0;
 }
 
+static bool is_tail_reverse_raw_func(FuncCall *fn)
+{
+    Node *func_name_node;
+    char *func_name;
+
+    if (fn == NULL || fn->funcname == NIL || list_length(fn->args) != 1)
+        return false;
+
+    func_name_node = llast(fn->funcname);
+    if (!IsA(func_name_node, String))
+        return false;
+
+    func_name = strVal(func_name_node);
+    return pg_strcasecmp(func_name, "tail") == 0 ||
+           pg_strcasecmp(func_name, "reverse") == 0;
+}
+
+static bool is_single_slice_indirection(A_Indirection *a_ind)
+{
+    A_Indices *indices;
+
+    if (a_ind == NULL ||
+        list_length(a_ind->indirection) != 1 ||
+        !IsA(linitial(a_ind->indirection), A_Indices))
+    {
+        return false;
+    }
+
+    indices = linitial_node(A_Indices, a_ind->indirection);
+    return indices->is_slice;
+}
+
+static bool is_compact_vle_path_list_consumer(Node *node,
+                                              const char *path_name)
+{
+    FuncCall *fn;
+    A_Indirection *a_ind;
+
+    if (node == NULL)
+        return false;
+
+    if (IsA(node, A_Indirection))
+    {
+        a_ind = (A_Indirection *)node;
+        return is_single_slice_indirection(a_ind) &&
+               is_compact_vle_path_list_consumer(a_ind->arg, path_name);
+    }
+
+    if (!IsA(node, FuncCall))
+        return false;
+
+    fn = (FuncCall *)node;
+    if ((is_unary_raw_func(fn, "relationships") ||
+         is_unary_raw_func(fn, "nodes")) &&
+        is_single_column_ref_name(linitial(fn->args), path_name))
+    {
+        return true;
+    }
+
+    if (is_tail_reverse_raw_func(fn))
+        return is_compact_vle_path_list_consumer(linitial(fn->args),
+                                                 path_name);
+
+    return false;
+}
+
 static bool is_compact_vle_path_consumer(Node *node, const char *path_name)
 {
     FuncCall *fn;
-    FuncCall *inner_fn;
-    char *inner_name;
 
     if (node == NULL || !IsA(node, FuncCall))
         return false;
@@ -5133,18 +5139,11 @@ static bool is_compact_vle_path_consumer(Node *node, const char *path_name)
         is_single_column_ref_name(linitial(fn->args), path_name))
         return true;
 
-    if (!is_unary_raw_func(fn, "size") || !IsA(linitial(fn->args), FuncCall))
+    if (!is_unary_raw_func(fn, "size") &&
+        !is_unary_raw_func(fn, "isEmpty"))
         return false;
 
-    inner_fn = (FuncCall *)linitial(fn->args);
-    if (!is_unary_raw_func(inner_fn, "relationships") &&
-        !is_unary_raw_func(inner_fn, "nodes"))
-        return false;
-
-    inner_name = strVal(llast(inner_fn->funcname));
-    return (pg_strcasecmp(inner_name, "relationships") == 0 ||
-            pg_strcasecmp(inner_name, "nodes") == 0) &&
-           is_single_column_ref_name(linitial(inner_fn->args), path_name);
+    return is_compact_vle_path_list_consumer(linitial(fn->args), path_name);
 }
 
 static bool compact_vle_path_consumer_walker(Node *node, void *context)
@@ -10082,6 +10081,7 @@ static void invalidate_clause_function_oids(Datum arg, int cache_id,
     build_vertex_label_func_oid = InvalidOid;
     volatile_wrapper_func_oid = InvalidOid;
     age_properties_func_oid = InvalidOid;
+    cypher_property_signature_invalidate_oids();
     agtype_contains_operator_oid = InvalidOid;
     agtype_contains_operator_func_oid = InvalidOid;
     vle_terminal_vertex_func_oid = InvalidOid;

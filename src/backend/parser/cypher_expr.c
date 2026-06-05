@@ -52,7 +52,9 @@
 #include "utils/syscache.h"
 
 #include "parser/cypher_expr.h"
+#include "parser/cypher_property_signature.h"
 #include "parser/cypher_transform_entity.h"
+#include "parser/cypher_vle_agg.h"
 #include "utils/ag_func.h"
 #include "utils/agtype.h"
 #include "utils/age_vle.h"
@@ -67,6 +69,7 @@
 #define FUNC_AGTYPE_TYPECAST_INT "agtype_typecast_int"
 #define FUNC_AGTYPE_TYPECAST_PG_FLOAT8 "agtype_to_float8"
 #define FUNC_AGTYPE_TYPECAST_PG_BIGINT "agtype_to_int8"
+#define FUNC_AGTYPE_TYPECAST_PG_NUMERIC "agtype_to_numeric"
 #define FUNC_AGTYPE_TYPECAST_BOOL "agtype_typecast_bool"
 #define FUNC_AGTYPE_TYPECAST_PG_TEXT "agtype_to_text"
 
@@ -103,10 +106,12 @@ static HTAB *function_exists_cache = NULL;
 static HTAB *function_extension_cache = NULL;
 static bool function_cache_callback_registered = false;
 static Oid agtype_access_operator_oid = InvalidOid;
+static Oid agtype_object_field_agtype_oid = InvalidOid;
 static Oid agtype_object_field_int8_oid = InvalidOid;
 static Oid agtype_object_field_float8_oid = InvalidOid;
 static Oid agtype_object_field_text_agtype_oid = InvalidOid;
 static Oid agtype_object_field_numeric_agtype_oid = InvalidOid;
+static Oid agtype_object_field_numeric_oid = InvalidOid;
 static Oid agtype_access_slice_oid = InvalidOid;
 static Oid agtype_in_operator_oid = InvalidOid;
 static Oid agtype_add_oid = InvalidOid;
@@ -179,6 +184,11 @@ static Node *transform_ColumnRef(cypher_parsestate *cpstate, ColumnRef *cref);
 static Node *transform_A_Indirection(cypher_parsestate *cpstate,
                                      A_Indirection *a_ind);
 static Node *transform_AEXPR_OP(cypher_parsestate *cpstate, A_Expr *a);
+static void coerce_pg_scalar_property_comparison(cypher_parsestate *cpstate,
+                                                 A_Expr *a, Node **left,
+                                                 Node **right);
+static bool is_pg_scalar_property_expr(Node *node, Oid *result_type);
+static bool is_scalar_comparison_operator(List *opname);
 static Node *transform_cypher_comparison_aexpr_OP(cypher_parsestate *cpstate,
                                                   cypher_comparison_aexpr *a);
 static Node *transform_BoolExpr(cypher_parsestate *cpstate, BoolExpr *expr);
@@ -353,9 +363,6 @@ static Node *transform_CoalesceExpr(cypher_parsestate *cpstate,
 static Node *transform_SubLink(cypher_parsestate *cpstate, SubLink *sublink);
 static Node *transform_FuncCall(cypher_parsestate *cpstate, FuncCall *fn);
 static bool try_rewrite_collect_property_access(Aggref *aggref);
-static bool extract_collect_property_access_args(Expr *expr,
-                                                 Node **properties,
-                                                 Node **key);
 static Node *try_rewrite_pg_scalar_property_access(FuncExpr *func_expr,
                                                    Oid helper_oid,
                                                    Oid result_type);
@@ -982,10 +989,12 @@ static void invalidate_function_caches(Datum arg, int cache_id,
 static void initialize_function_extension_cache(void);
 static void initialize_function_exists_cache(void);
 static Oid get_agtype_access_operator_oid(void);
+static Oid get_agtype_object_field_agtype_oid(void);
 static Oid get_agtype_object_field_int8_oid(void);
 static Oid get_agtype_object_field_float8_oid(void);
 static Oid get_agtype_object_field_text_agtype_oid(void);
 static Oid get_agtype_object_field_numeric_agtype_oid(void);
+static Oid get_agtype_object_field_numeric_oid(void);
 static Oid get_agtype_access_slice_oid(void);
 static Oid get_agtype_in_operator_oid(void);
 static Oid get_agtype_add_oid(void);
@@ -1550,9 +1559,101 @@ static Node *transform_AEXPR_OP(cypher_parsestate *cpstate, A_Expr *a)
 
     lexpr = transform_cypher_expr_recurse(cpstate, a->lexpr);
     rexpr = transform_cypher_expr_recurse(cpstate, a->rexpr);
+    coerce_pg_scalar_property_comparison(cpstate, a, &lexpr, &rexpr);
 
     return (Node *)make_op(pstate, a->name, lexpr, rexpr, last_srf,
                            a->location);
+}
+
+static void coerce_pg_scalar_property_comparison(cypher_parsestate *cpstate,
+                                                 A_Expr *a, Node **left,
+                                                 Node **right)
+{
+    ParseState *pstate = (ParseState *)cpstate;
+    Oid scalar_type = InvalidOid;
+
+    if (a == NULL || left == NULL || right == NULL ||
+        !is_scalar_comparison_operator(a->name))
+        return;
+
+    if (is_pg_scalar_property_expr(*left, &scalar_type) &&
+        exprType(*right) == AGTYPEOID)
+    {
+        Node *coerced;
+
+        coerced = coerce_to_target_type(pstate, *right, AGTYPEOID,
+                                        scalar_type, -1,
+                                        COERCION_EXPLICIT,
+                                        COERCE_EXPLICIT_CAST,
+                                        a->location);
+        if (coerced != NULL)
+            *right = coerced;
+        return;
+    }
+
+    if (is_pg_scalar_property_expr(*right, &scalar_type) &&
+        exprType(*left) == AGTYPEOID)
+    {
+        Node *coerced;
+
+        coerced = coerce_to_target_type(pstate, *left, AGTYPEOID,
+                                        scalar_type, -1,
+                                        COERCION_EXPLICIT,
+                                        COERCE_EXPLICIT_CAST,
+                                        a->location);
+        if (coerced != NULL)
+            *left = coerced;
+    }
+}
+
+static bool is_pg_scalar_property_expr(Node *node, Oid *result_type)
+{
+    FuncExpr *func;
+
+    if (result_type != NULL)
+        *result_type = InvalidOid;
+
+    if (node == NULL || !IsA(node, FuncExpr))
+        return false;
+
+    func = castNode(FuncExpr, node);
+    if (func->funcid == get_agtype_object_field_int8_oid())
+    {
+        if (result_type != NULL)
+            *result_type = INT8OID;
+        return true;
+    }
+    if (func->funcid == get_agtype_object_field_float8_oid())
+    {
+        if (result_type != NULL)
+            *result_type = FLOAT8OID;
+        return true;
+    }
+    if (func->funcid == get_agtype_object_field_text_agtype_oid())
+    {
+        if (result_type != NULL)
+            *result_type = TEXTOID;
+        return true;
+    }
+
+    return false;
+}
+
+static bool is_scalar_comparison_operator(List *opname)
+{
+    char *name;
+
+    if (list_length(opname) != 1)
+        return false;
+
+    name = strVal(linitial(opname));
+    return strcmp(name, "=") == 0 ||
+        strcmp(name, "<>") == 0 ||
+        strcmp(name, "!=") == 0 ||
+        strcmp(name, "<") == 0 ||
+        strcmp(name, "<=") == 0 ||
+        strcmp(name, ">") == 0 ||
+        strcmp(name, ">=") == 0;
 }
 
 static Node *try_parse_current_entity_id_column(cypher_parsestate *cpstate,
@@ -2633,13 +2734,30 @@ static FuncExpr *make_agtype_access_expr(List *access_args, int location,
                                          bool expand_variadic)
 {
     FuncExpr *access_expr;
+    Node *access_arg;
+    ListCell *lc;
+    bool first_arg = true;
 
-    if (expand_variadic && list_length(access_args) == 2)
+    if (expand_variadic && list_length(access_args) >= 2)
     {
-        access_expr = makeFuncExpr(get_agtype_access_operator_oid(), AGTYPEOID,
-                                   access_args, InvalidOid, InvalidOid,
-                                   COERCE_EXPLICIT_CALL);
-        access_expr->location = location;
+        access_arg = linitial(access_args);
+
+        foreach(lc, access_args)
+        {
+            if (first_arg)
+            {
+                first_arg = false;
+                continue;
+            }
+
+            access_expr = makeFuncExpr(get_agtype_object_field_agtype_oid(),
+                                       AGTYPEOID,
+                                       list_make2(access_arg, lfirst(lc)),
+                                       InvalidOid, InvalidOid,
+                                       COERCE_EXPLICIT_CALL);
+            access_expr->location = location;
+            access_arg = (Node *)access_expr;
+        }
 
         return access_expr;
     }
@@ -5063,6 +5181,13 @@ static Node *transform_cypher_typecast(cypher_parsestate *cpstate,
             scalar_property_helper_oid = get_agtype_object_field_int8_oid();
             scalar_property_result_type = INT8OID;
         }
+        else if (typecast_len == 10 &&
+                 pg_strcasecmp(typecast, "pg_numeric") == 0)
+        {
+            fname = lappend(fname, makeString(FUNC_AGTYPE_TYPECAST_PG_NUMERIC));
+            scalar_property_helper_oid = get_agtype_object_field_numeric_oid();
+            scalar_property_result_type = NUMERICOID;
+        }
         else if ((typecast_len == 4 &&
                   pg_strcasecmp(typecast, "bool") == 0) ||
                  (typecast_len == 7 &&
@@ -5681,10 +5806,12 @@ static void invalidate_function_caches(Datum arg, int cache_id,
     }
 
     agtype_access_operator_oid = InvalidOid;
+    agtype_object_field_agtype_oid = InvalidOid;
     agtype_object_field_int8_oid = InvalidOid;
     agtype_object_field_float8_oid = InvalidOid;
     agtype_object_field_text_agtype_oid = InvalidOid;
     agtype_object_field_numeric_agtype_oid = InvalidOid;
+    agtype_object_field_numeric_oid = InvalidOid;
     agtype_access_slice_oid = InvalidOid;
     agtype_in_operator_oid = InvalidOid;
     agtype_add_oid = InvalidOid;
@@ -5749,6 +5876,7 @@ static void invalidate_function_caches(Datum arg, int cache_id,
     age_vle_terminal_vertex_property_oid = InvalidOid;
     age_vle_terminal_vertex_property_from_path_oid = InvalidOid;
     age_vle_terminal_property_output_oid = InvalidOid;
+    cypher_vle_agg_invalidate_oids();
 }
 
 static Oid get_agtype_access_operator_oid(void)
@@ -5762,6 +5890,20 @@ static Oid get_agtype_access_operator_oid(void)
     }
 
     return agtype_access_operator_oid;
+}
+
+static Oid get_agtype_object_field_agtype_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(agtype_object_field_agtype_oid))
+    {
+        agtype_object_field_agtype_oid =
+            get_ag_func_oid("agtype_object_field_agtype", 2,
+                            AGTYPEOID, AGTYPEOID);
+    }
+
+    return agtype_object_field_agtype_oid;
 }
 
 static Oid get_agtype_object_field_int8_oid(void)
@@ -5820,49 +5962,21 @@ static Oid get_agtype_object_field_numeric_agtype_oid(void)
     return agtype_object_field_numeric_agtype_oid;
 }
 
+static Oid get_agtype_object_field_numeric_oid(void)
+{
+    if (!OidIsValid(agtype_object_field_numeric_oid))
+    {
+        agtype_object_field_numeric_oid =
+            get_ag_func_oid("agtype_object_field_numeric", 2,
+                            AGTYPEOID, AGTYPEOID);
+    }
+
+    return agtype_object_field_numeric_oid;
+}
+
 static bool try_rewrite_collect_property_access(Aggref *aggref)
 {
     return false;
-}
-
-static bool extract_collect_property_access_args(Expr *expr,
-                                                 Node **properties,
-                                                 Node **key)
-{
-    FuncExpr *func;
-
-    if (expr == NULL || !IsA(expr, FuncExpr))
-        return false;
-
-    func = castNode(FuncExpr, expr);
-    if (func->funcid != get_agtype_access_operator_oid())
-        return false;
-
-    if (list_length(func->args) == 2)
-    {
-        *properties = linitial(func->args);
-        *key = lsecond(func->args);
-    }
-    else if (list_length(func->args) == 1 && IsA(linitial(func->args), ArrayExpr))
-    {
-        ArrayExpr *array = linitial_node(ArrayExpr, func->args);
-
-        if (list_length(array->elements) != 2)
-            return false;
-
-        *properties = linitial(array->elements);
-        *key = lsecond(array->elements);
-    }
-    else
-    {
-        return false;
-    }
-
-    return *properties != NULL &&
-        *key != NULL &&
-        IsA(*properties, Var) &&
-        exprType(*properties) == AGTYPEOID &&
-        exprType(*key) == AGTYPEOID;
 }
 
 static Node *try_rewrite_pg_scalar_property_access(FuncExpr *func_expr,
@@ -5883,7 +5997,7 @@ static Node *try_rewrite_pg_scalar_property_access(FuncExpr *func_expr,
     }
 
     arg = linitial(func_expr->args);
-    if (!extract_collect_property_access_args((Expr *)arg, &properties, &key))
+    if (!cypher_extract_property_access_terminal_args(arg, &properties, &key))
         return NULL;
 
     helper = makeFuncExpr(helper_oid, result_type,
@@ -8230,7 +8344,7 @@ static Node *try_transform_fixed_path_indexed_property_access(
     }
 
     access_expr = make_agtype_access_expr(args, exprLocation((Node *)a_ind),
-                                          false);
+                                          true);
 
     return make_agtype_case_when_not_null(edge_id, (Expr *)access_expr,
                                           exprLocation((Node *)a_ind));
@@ -8277,7 +8391,7 @@ static Node *try_transform_fixed_path_indexed_endpoint_property_access(
     }
 
     access_expr = make_agtype_access_expr(args, exprLocation((Node *)a_ind),
-                                          false);
+                                          true);
 
     return make_agtype_case_when_not_null(edge_id, (Expr *)access_expr,
                                           exprLocation((Node *)a_ind));
@@ -8323,7 +8437,7 @@ static Node *try_transform_current_edge_endpoint_property_access(
     }
 
     access_expr = make_agtype_access_expr(args, exprLocation((Node *)a_ind),
-                                          false);
+                                          true);
 
     return make_agtype_case_when_not_null(edge_id, (Expr *)access_expr,
                                           exprLocation((Node *)a_ind));
@@ -13994,7 +14108,7 @@ build_access:
     }
 
     access_expr = make_agtype_access_expr(args, exprLocation(a_ind->arg),
-                                          false);
+                                          true);
 
     return (Node *)access_expr;
 }
@@ -14449,6 +14563,7 @@ static Node *transform_FuncCall(cypher_parsestate *cpstate, FuncCall *fn)
 
     if (retval != NULL && retval->type == T_Aggref)
     {
+        cypher_rewrite_vle_tail_last_count_agg(castNode(Aggref, retval));
         try_rewrite_collect_property_access(castNode(Aggref, retval));
     }
 

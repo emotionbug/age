@@ -21,9 +21,12 @@
 
 #include "access/tableam.h"
 #include "catalog/ag_label.h"
+#include "catalog/pg_type_d.h"
 #include "executor/cypher_property_projection.h"
 #include "executor/executor.h"
 #include "utils/agtype.h"
+#include "utils/builtins.h"
+#include "utils/numeric.h"
 #include "utils/rel.h"
 
 typedef struct AgePropertyProjectionScanState
@@ -36,6 +39,8 @@ typedef struct AgePropertyProjectionScanState
     agtype *bool_false_value;
     agtype *bool_true_value;
     agtype_value key;
+    Oid value_type;
+    Oid field_result_type;
 } AgePropertyProjectionScanState;
 
 static Node *create_age_property_projection_scan_state(CustomScan *cscan);
@@ -49,6 +54,13 @@ static void load_property_projection_key(AgePropertyProjectionScanState *state,
                                          CustomScan *cscan);
 static agtype *property_projection_value_to_agtype(
     AgePropertyProjectionScanState *state, agtype_value *value);
+static bool property_projection_value_to_datum(
+    AgePropertyProjectionScanState *state, agtype_value *value,
+    Datum *result);
+static Datum property_projection_value_to_int8(agtype_value *value);
+static Datum property_projection_value_to_float8(agtype_value *value);
+static Datum property_projection_value_to_numeric(agtype_value *value);
+static Datum property_projection_value_to_text(agtype_value *value);
 static agtype *prepare_property_projection_buffer(
     AgePropertyProjectionScanState *state, Size required_size);
 static agtype *property_projection_integer_to_agtype(
@@ -152,10 +164,9 @@ static TupleTableSlot *access_age_property_projection_scan(ScanState *node)
             }
             else
             {
-                slot->tts_values[0] =
-                    AGTYPE_P_GET_DATUM(
-                        property_projection_value_to_agtype(state, &value));
-                slot->tts_isnull[0] = false;
+                slot->tts_isnull[0] =
+                    !property_projection_value_to_datum(
+                        state, &value, &slot->tts_values[0]);
             }
             if (value_needs_free)
                 pfree_agtype_value_content(&value);
@@ -198,13 +209,23 @@ static void load_property_projection_key(AgePropertyProjectionScanState *state,
                                          CustomScan *cscan)
 {
     Const *key_const;
+    Const *value_type_const;
+    Const *field_result_type_const;
     agtype *key_agtype;
     agtype_value key_value;
     bool key_needs_free = false;
 
-    Assert(list_length(cscan->custom_private) == 1);
+    Assert(list_length(cscan->custom_private) == 3);
     key_const = linitial_node(Const, cscan->custom_private);
+    value_type_const = lsecond_node(Const, cscan->custom_private);
+    field_result_type_const = list_nth_node(Const, cscan->custom_private, 2);
     Assert(!key_const->constisnull);
+    Assert(!value_type_const->constisnull);
+    Assert(!field_result_type_const->constisnull);
+
+    state->value_type = DatumGetObjectId(value_type_const->constvalue);
+    state->field_result_type =
+        DatumGetObjectId(field_result_type_const->constvalue);
 
     key_agtype = DATUM_GET_AGTYPE_P(key_const->constvalue);
     (void)get_ith_agtype_value_from_container_no_copy(&key_agtype->root, 0,
@@ -250,6 +271,137 @@ static agtype *property_projection_value_to_agtype(
     }
 
     return agtype_value_to_agtype(value);
+}
+
+static bool property_projection_value_to_datum(
+    AgePropertyProjectionScanState *state, agtype_value *value,
+    Datum *result)
+{
+    if (state->field_result_type == AGTYPEOID)
+    {
+        *result = AGTYPE_P_GET_DATUM(
+            property_projection_value_to_agtype(state, value));
+        return true;
+    }
+    if (state->field_result_type == INT8OID)
+    {
+        *result = property_projection_value_to_int8(value);
+        return true;
+    }
+    if (state->field_result_type == FLOAT8OID)
+    {
+        *result = property_projection_value_to_float8(value);
+        return true;
+    }
+    if (state->field_result_type == NUMERICOID)
+    {
+        *result = property_projection_value_to_numeric(value);
+        return true;
+    }
+    if (state->field_result_type == TEXTOID)
+    {
+        *result = property_projection_value_to_text(value);
+        return true;
+    }
+
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("unsupported cached property field result type %u",
+                    state->field_result_type)));
+    return false;
+}
+
+static Datum property_projection_value_to_int8(agtype_value *value)
+{
+    switch (value->type)
+    {
+    case AGTV_INTEGER:
+        return Int64GetDatum(value->val.int_value);
+    case AGTV_FLOAT:
+        return DirectFunctionCall1(dtoi8,
+                                   Float8GetDatum(value->val.float_value));
+    case AGTV_NUMERIC:
+        return DirectFunctionCall1(numeric_int8,
+                                   NumericGetDatum(value->val.numeric));
+    case AGTV_BOOL:
+        return Int64GetDatum(value->val.boolean ? 1 : 0);
+    default:
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("typecast expression must be an integer-compatible value")));
+    }
+}
+
+static Datum property_projection_value_to_float8(agtype_value *value)
+{
+    switch (value->type)
+    {
+    case AGTV_FLOAT:
+        return Float8GetDatum(value->val.float_value);
+    case AGTV_INTEGER:
+        return Float8GetDatum((float8)value->val.int_value);
+    case AGTV_NUMERIC:
+        return DirectFunctionCall1(numeric_float8,
+                                   NumericGetDatum(value->val.numeric));
+    case AGTV_STRING:
+        {
+            char *str = pnstrdup(value->val.string.val,
+                                 value->val.string.len);
+            Datum result = DirectFunctionCall1(float8in,
+                                               CStringGetDatum(str));
+
+            pfree(str);
+            return result;
+        }
+    default:
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("typecast expression must be a float-compatible value")));
+    }
+}
+
+static Datum property_projection_value_to_numeric(agtype_value *value)
+{
+    switch (value->type)
+    {
+    case AGTV_INTEGER:
+        return DirectFunctionCall1(int8_numeric,
+                                   Int64GetDatum(value->val.int_value));
+    case AGTV_FLOAT:
+        return DirectFunctionCall1(float8_numeric,
+                                   Float8GetDatum(value->val.float_value));
+    case AGTV_NUMERIC:
+        return NumericGetDatum(value->val.numeric);
+    case AGTV_STRING:
+        {
+            char *str = pnstrdup(value->val.string.val,
+                                 value->val.string.len);
+            Datum result = DirectFunctionCall3(numeric_in,
+                                               CStringGetDatum(str),
+                                               ObjectIdGetDatum(InvalidOid),
+                                               Int32GetDatum(-1));
+
+            pfree(str);
+            return result;
+        }
+    default:
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("typecast expression must be a number or a string")));
+    }
+}
+
+static Datum property_projection_value_to_text(agtype_value *value)
+{
+    if (value->type != AGTV_STRING)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("typecast expression must be a string")));
+    }
+
+    return PointerGetDatum(cstring_to_text_with_len(value->val.string.val,
+                                                    value->val.string.len));
 }
 
 static agtype *prepare_property_projection_buffer(

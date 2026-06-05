@@ -67,6 +67,22 @@ RETURNS NULL ON NULL INPUT
 PARALLEL RESTRICTED
 AS 'MODULE_PATHNAME';
 
+CREATE FUNCTION ag_catalog.agtype_ctid_property_field_agtype(oid, tid, int4, agtype)
+    RETURNS agtype
+    LANGUAGE c
+    STABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL RESTRICTED
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_id_property_field_agtype(oid, graphid, int4, agtype)
+    RETURNS agtype
+    LANGUAGE c
+    STABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL RESTRICTED
+AS 'MODULE_PATHNAME';
+
 -- get agtype object field or array element
 CREATE OPERATOR -> (
   LEFTARG = agtype,
@@ -204,6 +220,14 @@ AS 'MODULE_PATHNAME';
 
 CREATE FUNCTION ag_catalog.agtype_object_field_numeric_agtype(agtype, agtype)
     RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.agtype_object_field_numeric(agtype, agtype)
+    RETURNS numeric
     LANGUAGE c
     IMMUTABLE
 RETURNS NULL ON NULL INPUT

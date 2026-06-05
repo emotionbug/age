@@ -90,9 +90,18 @@ static void create_index_on_column(char *schema_name,
                                    char *colname,
                                    bool unique);
 static void create_index_on_property(char *schema_name, char *rel_name,
-                                     char *property_name);
+                                     char *property_name,
+                                     char *property_type);
 static Node *build_property_index_expr(char *property_name);
-static char *make_property_index_name(char *rel_name, char *property_name);
+static Node *build_typed_property_index_expr(char *property_name,
+                                             char *property_type);
+static char *property_index_helper_for_type(char *property_type);
+static void build_property_terminal_index_args(char *property_name,
+                                               Node **container, Node **key);
+static Node *build_property_key_const(char *property_name);
+static List *build_property_path_index_args(char *property_name);
+static char *make_property_index_name(char *rel_name, char *property_name,
+                                      char *property_type);
 static Oid create_label_with_graph_cache(char *graph_name, char *label_name,
                                          char label_type, List *parents,
                                          graph_cache_data *cache_data);
@@ -325,6 +334,7 @@ Datum create_property_index(PG_FUNCTION_ARGS)
     char *graph_name;
     char *label_name;
     char *property_name;
+    char *property_type = NULL;
     graph_cache_data *graph_cache;
     char *rel_name;
 
@@ -337,10 +347,15 @@ Datum create_property_index(PG_FUNCTION_ARGS)
     if (PG_ARGISNULL(2))
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                         errmsg("property name must not be NULL")));
+    if (PG_NARGS() > 3 && PG_ARGISNULL(3))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("property type must not be NULL")));
 
     graph_name = PG_GETARG_CSTRING(0);
     label_name = PG_GETARG_CSTRING(1);
     property_name = PG_GETARG_CSTRING(2);
+    if (PG_NARGS() > 3)
+        property_type = PG_GETARG_CSTRING(3);
 
     if (is_valid_graph_name(graph_name) == 0)
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -351,6 +366,9 @@ Datum create_property_index(PG_FUNCTION_ARGS)
     if (property_name[0] == '\0')
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                         errmsg("property name must not be empty")));
+    if (property_type != NULL && property_type[0] == '\0')
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("property type must not be empty")));
 
     graph_cache = search_graph_name_cache_cached(graph_name);
     if (graph_cache == NULL)
@@ -364,7 +382,8 @@ Datum create_property_index(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_UNDEFINED_SCHEMA),
                  errmsg("label \"%s\" does not exist", label_name)));
 
-    create_index_on_property(graph_name, rel_name, property_name);
+    create_index_on_property(graph_name, rel_name, property_name,
+                             property_type);
 
     PG_RETURN_VOID();
 }
@@ -660,7 +679,8 @@ static void create_index_on_column(char *schema_name,
 }
 
 static void create_index_on_property(char *schema_name, char *rel_name,
-                                     char *property_name)
+                                     char *property_name,
+                                     char *property_type)
 {
     IndexStmt *index_stmt;
     IndexElem *index_expr;
@@ -669,7 +689,9 @@ static void create_index_on_property(char *schema_name, char *rel_name,
     index_stmt = makeNode(IndexStmt);
     index_expr = makeNode(IndexElem);
     index_expr->name = NULL;
-    index_expr->expr = build_property_index_expr(property_name);
+    index_expr->expr = property_type == NULL ?
+        build_property_index_expr(property_name) :
+        build_typed_property_index_expr(property_name, property_type);
     index_expr->indexcolname = NULL;
     index_expr->collation = NIL;
     index_expr->opclass = NIL;
@@ -677,7 +699,8 @@ static void create_index_on_property(char *schema_name, char *rel_name,
     index_expr->ordering = SORTBY_DEFAULT;
     index_expr->nulls_ordering = SORTBY_NULLS_DEFAULT;
 
-    index_stmt->idxname = make_property_index_name(rel_name, property_name);
+    index_stmt->idxname = make_property_index_name(rel_name, property_name,
+                                                   property_type);
     index_stmt->relation = makeRangeVar(schema_name, rel_name, -1);
     index_stmt->accessMethod = "btree";
     index_stmt->tableSpace = NULL;
@@ -713,15 +736,136 @@ static void create_index_on_property(char *schema_name, char *rel_name,
 
 static Node *build_property_index_expr(char *property_name)
 {
-    ColumnRef *properties;
+    FuncCall *access_call;
+    List *args;
+
+    args = build_property_path_index_args(property_name);
+    access_call = makeFuncCall(
+        list_make2(makeString("ag_catalog"),
+                   makeString("agtype_access_operator")),
+        args, COERCE_SQL_SYNTAX, -1);
+
+    if (list_length(args) == 1)
+        access_call->func_variadic = true;
+
+    return (Node *)access_call;
+}
+
+static Node *build_typed_property_index_expr(char *property_name,
+                                             char *property_type)
+{
+    FuncCall *access_call;
+    char *function_name;
+    Node *container;
+    Node *key;
+
+    if (pg_strcasecmp(property_type, "agtype") == 0)
+    {
+        return build_property_index_expr(property_name);
+    }
+
+    function_name = property_index_helper_for_type(property_type);
+    build_property_terminal_index_args(property_name, &container, &key);
+
+    access_call = makeFuncCall(
+        list_make2(makeString("ag_catalog"), makeString(function_name)),
+        list_make2(container, key),
+        COERCE_SQL_SYNTAX, -1);
+
+    return (Node *)access_call;
+}
+
+static char *property_index_helper_for_type(char *property_type)
+{
+    if (pg_strcasecmp(property_type, "pg_bigint") == 0 ||
+        pg_strcasecmp(property_type, "bigint") == 0 ||
+        pg_strcasecmp(property_type, "int8") == 0)
+    {
+        return "agtype_object_field_int8";
+    }
+    if (pg_strcasecmp(property_type, "pg_float8") == 0 ||
+        pg_strcasecmp(property_type, "float8") == 0 ||
+        pg_strcasecmp(property_type, "double precision") == 0)
+    {
+        return "agtype_object_field_float8";
+    }
+    if (pg_strcasecmp(property_type, "pg_text") == 0 ||
+        pg_strcasecmp(property_type, "text") == 0)
+    {
+        return "agtype_object_field_text_agtype";
+    }
+    if (pg_strcasecmp(property_type, "pg_numeric") == 0)
+    {
+        return "agtype_object_field_numeric";
+    }
+    if (pg_strcasecmp(property_type, "numeric") == 0)
+    {
+        return "agtype_object_field_numeric_agtype";
+    }
+
+    ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                    errmsg("unsupported property index type \"%s\"",
+                           property_type)));
+}
+
+static void build_property_terminal_index_args(char *property_name,
+                                               Node **container, Node **key)
+{
+    List *path_args;
+
+    Assert(container != NULL);
+    Assert(key != NULL);
+
+    path_args = build_property_path_index_args(property_name);
+    if (list_length(path_args) == 2)
+    {
+        *container = linitial(path_args);
+        *key = lsecond(path_args);
+    }
+    else
+    {
+        A_ArrayExpr *path_array = linitial_node(A_ArrayExpr, path_args);
+        A_ArrayExpr *prefix_array;
+        FuncCall *prefix_call;
+        List *prefix_elements = NIL;
+        ListCell *lc;
+        int element_index = 0;
+        int last_index = list_length(path_array->elements) - 1;
+
+        if (last_index < 1)
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("property path requires at least one key")));
+
+        foreach(lc, path_array->elements)
+        {
+            if (element_index < last_index)
+                prefix_elements = lappend(prefix_elements,
+                                          copyObject(lfirst(lc)));
+            else
+                *key = copyObject(lfirst(lc));
+            element_index++;
+        }
+
+        prefix_array = makeNode(A_ArrayExpr);
+        prefix_array->elements = prefix_elements;
+        prefix_array->list_start = -1;
+        prefix_array->list_end = -1;
+        prefix_array->location = -1;
+
+        prefix_call = makeFuncCall(
+            list_make2(makeString("ag_catalog"),
+                       makeString("agtype_access_operator")),
+            list_make1(prefix_array), COERCE_SQL_SYNTAX, -1);
+        prefix_call->func_variadic = true;
+        *container = (Node *)prefix_call;
+    }
+}
+
+static Node *build_property_key_const(char *property_name)
+{
     A_Const *key_const;
     TypeCast *key_cast;
-    FuncCall *access_call;
     StringInfoData escaped_key;
-
-    properties = makeNode(ColumnRef);
-    properties->fields = list_make1(makeString(AG_VERTEX_COLNAME_PROPERTIES));
-    properties->location = -1;
 
     initStringInfo(&escaped_key);
     escape_json(&escaped_key, property_name);
@@ -737,20 +881,68 @@ static Node *build_property_index_expr(char *property_name)
         list_make2(makeString("ag_catalog"), makeString("agtype")));
     key_cast->location = -1;
 
-    access_call = makeFuncCall(
-        list_make2(makeString("ag_catalog"),
-                   makeString("agtype_access_operator")),
-        list_make2(properties, key_cast), COERCE_SQL_SYNTAX, -1);
-
-    return (Node *)access_call;
+    return (Node *)key_cast;
 }
 
-static char *make_property_index_name(char *rel_name, char *property_name)
+static List *build_property_path_index_args(char *property_name)
+{
+    ColumnRef *properties;
+    List *elements;
+    char *path;
+    char *component;
+    char *dot;
+    A_ArrayExpr *array_expr;
+
+    properties = makeNode(ColumnRef);
+    properties->fields = list_make1(makeString(AG_VERTEX_COLNAME_PROPERTIES));
+    properties->location = -1;
+
+    path = pstrdup(property_name);
+    component = path;
+    dot = strchr(component, '.');
+
+    if (dot == NULL)
+        return list_make2(properties, build_property_key_const(component));
+
+    elements = list_make1(properties);
+    for (;;)
+    {
+        dot = strchr(component, '.');
+        if (dot != NULL)
+            *dot = '\0';
+
+        if (component[0] == '\0')
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                            errmsg("property path contains an empty key")));
+
+        elements = lappend(elements, build_property_key_const(component));
+
+        if (dot == NULL)
+            break;
+
+        component = dot + 1;
+    }
+
+    array_expr = makeNode(A_ArrayExpr);
+    array_expr->elements = elements;
+    array_expr->list_start = -1;
+    array_expr->list_end = -1;
+    array_expr->location = -1;
+
+    return list_make1(array_expr);
+}
+
+static char *make_property_index_name(char *rel_name, char *property_name,
+                                      char *property_type)
 {
     char *raw_name;
     int i;
 
-    raw_name = psprintf("%s_%s_property_idx", rel_name, property_name);
+    if (property_type == NULL || pg_strcasecmp(property_type, "agtype") == 0)
+        raw_name = psprintf("%s_%s_property_idx", rel_name, property_name);
+    else
+        raw_name = psprintf("%s_%s_%s_property_idx", rel_name, property_name,
+                            property_type);
 
     for (i = 0; raw_name[i] != '\0'; i++)
     {

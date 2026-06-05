@@ -174,6 +174,7 @@ static void post_parse_analyze(ParseState *pstate, Query *query, JumbleState *js
     context.query = NULL;
     context.query_depth = 0;
     convert_cypher_walker((Node *)query, &context);
+    cypher_rewrite_property_index_surfaces(query);
 
     /*
      * If there is an extra_node returned, we need to check to see if
