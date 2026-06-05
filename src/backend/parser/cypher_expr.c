@@ -138,6 +138,7 @@ static Oid age_vle_list_slice_count_oid = InvalidOid;
 static Oid age_vle_list_slice_is_empty_oid = InvalidOid;
 static Oid age_materialize_vle_list_slice_oid = InvalidOid;
 static Oid age_materialize_vle_slice_boundary_oid = InvalidOid;
+static Oid age_materialize_vle_path_oid = InvalidOid;
 static Oid age_materialize_vle_edges_oid = InvalidOid;
 static Oid age_materialize_vle_nodes_oid = InvalidOid;
 static Oid age_materialize_vle_node_at_oid = InvalidOid;
@@ -956,6 +957,8 @@ static Node *try_transform_vle_terminal_vertex_property_access(
 static bool retarget_vle_terminal_property_output(cypher_parsestate *cpstate,
                                                   Node *vle_path,
                                                   Const *key_const);
+static bool targetlist_has_vle_path_materializer(List *target_list,
+                                                 Var *vle_var);
 static bool retarget_vle_terminal_properties_output(
     cypher_parsestate *cpstate, Node *raw_properties);
 static Node *try_transform_vle_terminal_properties_property_access(
@@ -1022,6 +1025,7 @@ static Oid get_age_vle_list_slice_count_oid(void);
 static Oid get_age_vle_list_slice_is_empty_oid(void);
 static Oid get_age_materialize_vle_list_slice_oid(void);
 static Oid get_age_materialize_vle_slice_boundary_oid(void);
+static Oid get_age_materialize_vle_path_oid(void);
 static Oid get_age_materialize_vle_edges_oid(void);
 static Oid get_age_materialize_vle_nodes_oid(void);
 static Oid get_age_materialize_vle_node_at_oid(void);
@@ -3502,16 +3506,16 @@ static Node *transform_AEXPR_IN(cypher_parsestate *cpstate, A_Expr *a)
 
     foreach(l, (List *) rexpr->elems)
     {
-        Node *rexpr = transform_cypher_expr_recurse(cpstate, lfirst(l));
+        Node *item_expr = transform_cypher_expr_recurse(cpstate, lfirst(l));
 
-        rexprs = lappend(rexprs, rexpr);
-                if (contain_vars_of_level(rexpr, 0))
+        rexprs = lappend(rexprs, item_expr);
+                if (contain_vars_of_level(item_expr, 0))
                 {
-                        rvars = lappend(rvars, rexpr);
+                        rvars = lappend(rvars, item_expr);
                 }
                 else
                 {
-                        rnonvars = lappend(rnonvars, rexpr);
+                        rnonvars = lappend(rnonvars, item_expr);
                 }
     }
 
@@ -3545,10 +3549,11 @@ static Node *transform_AEXPR_IN(cypher_parsestate *cpstate, A_Expr *a)
         aexprs = NIL;
         foreach(l, rnonvars)
         {
-            Node *rexpr = (Node *) lfirst(l);
+            Node *item_expr = (Node *) lfirst(l);
 
-            rexpr = coerce_to_common_type(pstate, rexpr, AGTYPEOID, "IN");
-            aexprs = lappend(aexprs, rexpr);
+            item_expr = coerce_to_common_type(pstate, item_expr, AGTYPEOID,
+                                              "IN");
+            aexprs = lappend(aexprs, item_expr);
         }
         newa = makeNode(ArrayExpr);
         newa->array_typeid = get_array_type(AGTYPEOID);
@@ -3566,11 +3571,11 @@ static Node *transform_AEXPR_IN(cypher_parsestate *cpstate, A_Expr *a)
     /* Must do it the hard way, with a boolean expression tree. */
     foreach(l, rexprs)
     {
-        Node *rexpr = (Node *) lfirst(l);
+        Node *item_expr = (Node *) lfirst(l);
         Node *cmp;
 
         /* Ordinary scalar operator */
-        cmp = (Node *) make_op(pstate, a->name, copyObject(lexpr), rexpr,
+        cmp = (Node *) make_op(pstate, a->name, copyObject(lexpr), item_expr,
                                pstate->p_last_srf, a->location);
 
         cmp = coerce_to_boolean(pstate, cmp, "IN");
@@ -5893,6 +5898,7 @@ static void invalidate_function_caches(Datum arg, int cache_id,
     age_vle_list_slice_is_empty_oid = InvalidOid;
     age_materialize_vle_list_slice_oid = InvalidOid;
     age_materialize_vle_slice_boundary_oid = InvalidOid;
+    age_materialize_vle_path_oid = InvalidOid;
     age_materialize_vle_edges_oid = InvalidOid;
     age_materialize_vle_nodes_oid = InvalidOid;
     age_materialize_vle_node_at_oid = InvalidOid;
@@ -6396,6 +6402,19 @@ static Oid get_age_materialize_vle_slice_boundary_oid(void)
     }
 
     return age_materialize_vle_slice_boundary_oid;
+}
+
+static Oid get_age_materialize_vle_path_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(age_materialize_vle_path_oid))
+    {
+        age_materialize_vle_path_oid =
+            get_ag_func_oid("age_materialize_vle_path", 1, AGTYPEOID);
+    }
+
+    return age_materialize_vle_path_oid;
 }
 
 static Oid get_age_materialize_vle_edges_oid(void)
@@ -13811,6 +13830,11 @@ static bool retarget_vle_terminal_property_output(cypher_parsestate *cpstate,
     {
         return false;
     }
+    if (outer_rte->rtekind == RTE_SUBQUERY &&
+        targetlist_has_vle_path_materializer(subquery->targetList, inner_var))
+    {
+        return false;
+    }
 
     row = linitial_node(List, vle_rte->values_lists);
     if (list_length(row) == AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 3)
@@ -13932,6 +13956,38 @@ static bool retarget_vle_terminal_property_output(cypher_parsestate *cpstate,
     }
 
     return true;
+}
+
+static bool targetlist_has_vle_path_materializer(List *target_list,
+                                                 Var *vle_var)
+{
+    ListCell *lc;
+
+    if (vle_var == NULL)
+        return false;
+
+    foreach(lc, target_list)
+    {
+        TargetEntry *te = lfirst(lc);
+        FuncExpr *func_expr;
+        Node *arg;
+
+        if (te == NULL || te->expr == NULL || !IsA(te->expr, FuncExpr))
+            continue;
+
+        func_expr = castNode(FuncExpr, te->expr);
+        if (func_expr->funcid != get_age_materialize_vle_path_oid() ||
+            list_length(func_expr->args) != 1)
+        {
+            continue;
+        }
+
+        arg = linitial(func_expr->args);
+        if (IsA(arg, Var) && equal(arg, vle_var))
+            return true;
+    }
+
+    return false;
 }
 
 static bool retarget_vle_terminal_properties_output(

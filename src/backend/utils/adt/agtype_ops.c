@@ -388,11 +388,12 @@ Datum agtype_add(PG_FUNCTION_ARGS)
          agtv_rhs->type == AGTV_NUMERIC || agtv_rhs->type == AGTV_STRING))
     {
         int llen = 0;
-        char *lhs = get_string_from_agtype_value(agtv_lhs, &llen);
+        char *lhs_string = get_string_from_agtype_value(agtv_lhs, &llen);
         int rlen = 0;
-        char *rhs = get_string_from_agtype_value(agtv_rhs, &rlen);
+        char *rhs_string = get_string_from_agtype_value(agtv_rhs, &rlen);
 
-        concat_to_agtype_string(&agtv_result, lhs, llen, rhs, rlen);
+        concat_to_agtype_string(&agtv_result, lhs_string, llen,
+                                rhs_string, rlen);
     }
     /* Both are integers - regular addition */
     else if (agtv_lhs->type == AGTV_INTEGER && agtv_rhs->type == AGTV_INTEGER)

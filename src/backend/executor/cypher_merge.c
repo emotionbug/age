@@ -523,20 +523,20 @@ static path_entry **prebuild_path(CustomScanState *node)
     foreach (lc, nodes)
     {
         /* get the node/edge and allocate the memory needed */
-        cypher_target_node *node = lfirst(lc);
+        cypher_target_node *target_node = lfirst(lc);
         path_entry *entry = palloc(sizeof(path_entry));
 
         /* if this isn't an actual passed in tuple */
-        if (CYPHER_TARGET_NODE_INSERT_ENTITY(node->flags))
+        if (CYPHER_TARGET_NODE_INSERT_ENTITY(target_node->flags))
         {
             bool isNull = false;
 
             entry->actual = false;
             entry->id = 0;
             entry->id_isNull = true;
-            entry->direction = node->dir;
-            entry->label = node->relid;
-            entry->prop = ExecEvalExprSwitchContext(node->prop_expr_state,
+            entry->direction = target_node->dir;
+            entry->label = target_node->relid;
+            entry->prop = ExecEvalExprSwitchContext(target_node->prop_expr_state,
                                                           econtext, &isNull);
             entry->prop_isNull = isNull;
             entry->dih = isNull ? 0 : datum_image_hash(entry->prop, false, -1);
@@ -555,16 +555,16 @@ static path_entry **prebuild_path(CustomScanState *node)
             bool vertex_found;
 
             /* check that the variable isn't NULL */
-            if (scanTupleSlot->tts_isnull[node->tuple_position - 1])
+            if (scanTupleSlot->tts_isnull[target_node->tuple_position - 1])
             {
                 ereport(ERROR,
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                          errmsg("Existing variable %s cannot be NULL in MERGE clause",
-                                node->variable_name)));
+                                target_node->variable_name)));
             }
 
             /* get the vertex agtype in the scanTupleSlot */
-            d = scanTupleSlot->tts_values[node->tuple_position - 1];
+            d = scanTupleSlot->tts_values[target_node->tuple_position - 1];
             agt = DATUM_GET_AGTYPE_P(d);
 
             /* Convert to an agtype value */
@@ -600,7 +600,7 @@ static path_entry **prebuild_path(CustomScanState *node)
             entry->prop_isNull = true;
             entry->dih = 0;
 
-            if (!SAFE_TO_SKIP_EXISTENCE_CHECK(node->flags))
+            if (!SAFE_TO_SKIP_EXISTENCE_CHECK(target_node->flags))
             {
                 if (!entity_exists_with_cache(estate, css->graph_oid,
                                               entry->id,
@@ -610,7 +610,7 @@ static path_entry **prebuild_path(CustomScanState *node)
                     ereport(ERROR,
                             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                              errmsg("vertex assigned to variable %s was deleted",
-                                    node->variable_name)));
+                                    target_node->variable_name)));
                 }
             }
         }

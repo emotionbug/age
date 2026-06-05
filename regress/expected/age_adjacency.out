@@ -54,7 +54,7 @@ COPY (
 SELECT index_version::text || ':' || directory_entries::text
 FROM age_adjacency_debug_stats('age_adjacency_smoke_start_idx'::regclass)
 ) TO STDOUT;
-18:2
+1:2
 INSERT INTO age_adjacency_smoke VALUES
 (_graphid(2, 4), _graphid(1, 1), _graphid(1, 6));
 SET enable_seqscan = off;
