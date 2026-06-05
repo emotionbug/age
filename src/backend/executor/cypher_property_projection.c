@@ -40,6 +40,7 @@ typedef struct AgePropertyProjectionSlot
     int source_slot_index;
     Oid value_type;
     Oid field_result_type;
+    int final_materialization_weight;
 } AgePropertyProjectionSlot;
 
 typedef struct AgePropertyProjectionScanState
@@ -341,12 +342,14 @@ static void load_property_projection_slot(AgePropertyProjectionSlot *slot,
     ListCell *lc;
     Const *value_type_const;
     Const *field_result_type_const;
+    Integer *final_materialization_weight;
     int key_index = 0;
 
-    Assert(list_length(descriptor) == 3);
+    Assert(list_length(descriptor) == 4);
     key_consts = linitial_node(List, descriptor);
     value_type_const = lsecond_node(Const, descriptor);
     field_result_type_const = list_nth_node(Const, descriptor, 2);
+    final_materialization_weight = list_nth_node(Integer, descriptor, 3);
     Assert(key_consts != NIL);
     Assert(!value_type_const->constisnull);
     Assert(!field_result_type_const->constisnull);
@@ -355,6 +358,7 @@ static void load_property_projection_slot(AgePropertyProjectionSlot *slot,
     slot->value_type = DatumGetObjectId(value_type_const->constvalue);
     slot->field_result_type =
         DatumGetObjectId(field_result_type_const->constvalue);
+    slot->final_materialization_weight = intVal(final_materialization_weight);
 
     slot->key_count = list_length(key_consts);
     slot->keys = palloc0(sizeof(agtype_value) * slot->key_count);
@@ -485,11 +489,12 @@ static char *format_property_projection_slot(
         psprintf("slot-%d", slot->source_slot_index + 1) :
         pstrdup("heap-properties");
 
-    return psprintf("source=%s, key=%s, value=%s, field=%s",
+    return psprintf("source=%s, key=%s, value=%s, field=%s, final-weight=%d",
                     source,
                     format_property_projection_key_path(slot),
                     format_property_projection_type(slot->value_type),
-                    format_property_projection_type(slot->field_result_type));
+                    format_property_projection_type(slot->field_result_type),
+                    slot->final_materialization_weight);
 }
 
 static char *format_property_projection_slots(

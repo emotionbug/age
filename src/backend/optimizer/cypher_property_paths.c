@@ -102,6 +102,12 @@ typedef struct CypherArrayAggPropertyRewriteContext
     bool rewritten;
 } CypherArrayAggPropertyRewriteContext;
 
+typedef struct CypherCanonicalPropertyIndexExpr
+{
+    CypherCachedPropertySlotDescriptor slot;
+    Node *expr;
+} CypherCanonicalPropertyIndexExpr;
+
 static CypherTypedCollectDescriptor typed_collect_descriptors[] = {
     {FLOAT8OID, "age_collect_float8", &age_collect_float8_agg_func_oid},
     {INT8OID, "age_collect_int8", &age_collect_int8_agg_func_oid},
@@ -145,6 +151,16 @@ static bool extract_map_property_access_args(Expr *expr, Node **properties,
 static bool extract_list_property_access_args(Expr *expr, Node **properties,
                                               List **prop_keys);
 static bool same_property_source(Node *left, Node *right);
+static bool cached_property_slots_share_key_source(
+    const CypherCachedPropertySlotDescriptor *left,
+    const CypherCachedPropertySlotDescriptor *right);
+static bool cached_property_slots_same_physical_signature(
+    const CypherCachedPropertySlotDescriptor *left,
+    const CypherCachedPropertySlotDescriptor *right);
+static bool cached_property_slot_uses_typed_physical_result(
+    const CypherCachedPropertySlotDescriptor *slot);
+static int cached_property_slot_final_materialization_weight(
+    Oid field_result_type);
 static List *extract_map_build_args(FuncExpr *map_expr);
 static Const *make_property_path_agtype_const(List *keys);
 static bool extract_agtype_const_string(Const *key, agtype_value *value);
@@ -190,7 +206,10 @@ static bool collect_canonical_property_index_exprs_walker(Node *node,
                                                           void *context);
 static Node *canonicalize_property_index_exprs_mutator(Node *node,
                                                        void *context);
-static bool property_expr_list_contains(List *exprs, Node *expr);
+static CypherCanonicalPropertyIndexExpr *find_canonical_property_index_expr(
+    List *exprs, const CypherCachedPropertySlotDescriptor *slot, Node *expr);
+static void add_canonical_property_index_expr(
+    List **exprs, const CypherCachedPropertySlotDescriptor *slot, Node *expr);
 static Expr *make_int4_zero_compare_expr(FuncExpr *cmp_expr,
                                          const char *operator_name);
 static const char *property_compare_operator_name(Oid opfuncid,
@@ -1012,10 +1031,15 @@ static bool make_cached_property_slot_descriptor(
         return false;
     }
 
+    slot->has_property_descriptor = true;
+    slot->property_descriptor = *handoff;
     slot->container = handoff->property_signature.container;
     slot->keys = handoff->property_signature.keys;
     slot->value_type = handoff->property_signature.value_type;
     slot->field_result_type = handoff->property_signature.field_result_type;
+    slot->final_materialization_weight =
+        cached_property_slot_final_materialization_weight(
+            slot->field_result_type);
     slot->final_func_oid = handoff->final_func_oid;
     slot->agg_func_oid = handoff->agg_func_oid;
     slot->index_expr = handoff->index_expr;
@@ -1033,6 +1057,12 @@ Node *cypher_make_cached_property_slot_expr(
 
     if (slot == NULL || slot->container == NULL || slot->keys == NIL)
         return NULL;
+
+    if (slot->has_property_descriptor &&
+        slot->property_descriptor.index_expr != NULL)
+    {
+        return copyObject(slot->property_descriptor.index_expr);
+    }
 
     if (slot->index_expr != NULL)
         return copyObject(slot->index_expr);
@@ -1098,6 +1128,8 @@ Node *cypher_make_property_path_slot_expr(Node *container, Node *path,
     slot.keys = keys;
     slot.value_type = value_type;
     slot.field_result_type = field_result_type;
+    slot.final_materialization_weight =
+        cached_property_slot_final_materialization_weight(field_result_type);
 
     return cypher_make_cached_property_slot_expr(&slot);
 }
@@ -2241,6 +2273,50 @@ static bool same_property_source(Node *left, Node *right)
         left_var->vartype == right_var->vartype;
 }
 
+static bool cached_property_slots_share_key_source(
+    const CypherCachedPropertySlotDescriptor *left,
+    const CypherCachedPropertySlotDescriptor *right)
+{
+    if (left == NULL || right == NULL)
+        return false;
+
+    return same_property_source(left->container, right->container) &&
+        equal(left->keys, right->keys);
+}
+
+static bool cached_property_slots_same_physical_signature(
+    const CypherCachedPropertySlotDescriptor *left,
+    const CypherCachedPropertySlotDescriptor *right)
+{
+    if (!cached_property_slots_share_key_source(left, right))
+        return false;
+
+    return left->value_type == right->value_type &&
+        left->field_result_type == right->field_result_type;
+}
+
+static bool cached_property_slot_uses_typed_physical_result(
+    const CypherCachedPropertySlotDescriptor *slot)
+{
+    if (slot == NULL)
+        return false;
+
+    return slot->value_type != AGTYPEOID ||
+        slot->field_result_type != AGTYPEOID;
+}
+
+static int cached_property_slot_final_materialization_weight(
+    Oid field_result_type)
+{
+    if (field_result_type == AGTYPEOID)
+        return 2;
+
+    if (OidIsValid(field_result_type))
+        return 1;
+
+    return 0;
+}
+
 static List *extract_map_build_args(FuncExpr *map_expr)
 {
     ArrayExpr *array;
@@ -2735,15 +2811,13 @@ static bool detect_ordered_property_projection_delay(
         return false;
     }
 
-    if (!same_property_source(output_slot->container, sort_slot->container) ||
-        !equal(output_slot->keys, sort_slot->keys))
+    if (!cached_property_slots_share_key_source(output_slot, sort_slot))
     {
         return false;
     }
 
-    *reuse_sort_output =
-        output_slot->value_type == sort_slot->value_type &&
-        output_slot->field_result_type == sort_slot->field_result_type;
+    *reuse_sort_output = cached_property_slots_same_physical_signature(
+        output_slot, sort_slot);
     if (output_slot->value_type != AGTYPEOID && !*reuse_sort_output)
         return false;
 
@@ -2784,15 +2858,11 @@ static bool collect_canonical_property_index_exprs_walker(Node *node,
         return false;
 
     if (cypher_make_property_access_slot_descriptor(node, &slot) &&
-        (slot.value_type != AGTYPEOID ||
-         slot.field_result_type != AGTYPEOID))
+        cached_property_slot_uses_typed_physical_result(&slot))
     {
         slot_expr = cypher_make_cached_property_slot_expr(&slot);
-        if (slot_expr != NULL && equal(slot_expr, node) &&
-            !property_expr_list_contains(*exprs, slot_expr))
-        {
-            *exprs = lappend(*exprs, slot_expr);
-        }
+        if (slot_expr != NULL)
+            add_canonical_property_index_expr(exprs, &slot, node);
 
         return false;
     }
@@ -2812,29 +2882,56 @@ static Node *canonicalize_property_index_exprs_mutator(Node *node,
         return NULL;
 
     if (cypher_make_property_access_slot_descriptor(node, &slot) &&
-        (slot.value_type != AGTYPEOID ||
-         slot.field_result_type != AGTYPEOID))
+        cached_property_slot_uses_typed_physical_result(&slot))
     {
+        CypherCanonicalPropertyIndexExpr *entry;
+
         slot_expr = cypher_make_cached_property_slot_expr(&slot);
-        if (slot_expr != NULL && property_expr_list_contains(exprs, slot_expr))
-            return slot_expr;
+        entry = find_canonical_property_index_expr(exprs, &slot, slot_expr);
+        if (entry != NULL)
+            return copyObject(entry->expr);
     }
 
     return expression_tree_mutator(
         node, canonicalize_property_index_exprs_mutator, context);
 }
 
-static bool property_expr_list_contains(List *exprs, Node *expr)
+static CypherCanonicalPropertyIndexExpr *find_canonical_property_index_expr(
+    List *exprs, const CypherCachedPropertySlotDescriptor *slot, Node *expr)
 {
     ListCell *lc;
 
     foreach(lc, exprs)
     {
-        if (equal(lfirst(lc), expr))
-            return true;
+        CypherCanonicalPropertyIndexExpr *entry = lfirst(lc);
+
+        if ((expr != NULL && equal(entry->expr, expr)) ||
+            cached_property_slots_same_physical_signature(&entry->slot, slot))
+        {
+            return entry;
+        }
     }
 
-    return false;
+    return NULL;
+}
+
+static void add_canonical_property_index_expr(
+    List **exprs, const CypherCachedPropertySlotDescriptor *slot, Node *expr)
+{
+    CypherCanonicalPropertyIndexExpr *entry;
+
+    if (find_canonical_property_index_expr(*exprs, slot, expr) != NULL)
+        return;
+
+    entry = palloc0(sizeof(CypherCanonicalPropertyIndexExpr));
+    entry->slot = *slot;
+    entry->slot.container = copyObject(slot->container);
+    entry->slot.keys = copyObject(slot->keys);
+    entry->slot.index_expr = copyObject(slot->index_expr);
+    entry->slot.property_descriptor.index_expr =
+        copyObject(slot->property_descriptor.index_expr);
+    entry->expr = copyObject(expr);
+    *exprs = lappend(*exprs, entry);
 }
 
 static Node *try_rewrite_property_equals_clause(Node *clause, Index rti,

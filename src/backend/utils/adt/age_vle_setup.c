@@ -186,8 +186,7 @@ static void init_vle_traversal_load_policy(
         policy->load_vertex_metadata = false;
     }
 
-    if (vle_grammar_node_id < 0 &&
-        !policy->load_edge_property_metadata &&
+    if (!policy->load_edge_property_metadata &&
         OidIsValid(setup->graph_load.edge_label_oid) &&
         (shape->initial_start_valid || shape->initial_end_valid))
     {

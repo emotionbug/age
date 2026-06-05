@@ -68,6 +68,7 @@ typedef struct VLEContextTraversalRootState
     bool reverse_paths_to;         /* traverse paths-to from the bound end */
     bool reverse_output_path;      /* reverse traversal result before return */
     GraphIdNode *next_vertex;      /* for VLE_FUNCTION_PATHS_TO */
+    VLETraversalEmptyCompletionSummary empty_completion;
 } VLEContextTraversalRootState;
 
 typedef struct VLEContextSourceCursor
@@ -172,6 +173,10 @@ typedef struct VLE_local_context
     bool source_policy_known;
     VLETraversalSourceKind source_policy_outgoing_kind;
     VLETraversalSourceKind source_policy_incoming_kind;
+    bool empty_lifecycle_policy_known;
+    bool empty_lifecycle_eligible;
+    int64 empty_lifecycle_depth;
+    int64 empty_lifecycle_batch_size;
     VLEContextTraversalRootState root; /* root, bounds, source scan state */
     VLETraversalState traversal;   /* DFS frames, path stacks, edge state */
     graphid cached_vertex_id;      /* most recent vertex entry loaded by DFS */
@@ -209,6 +214,10 @@ typedef struct VLETraversalContextApply
     bool source_policy_known;
     VLETraversalSourceKind source_policy_outgoing_kind;
     VLETraversalSourceKind source_policy_incoming_kind;
+    bool empty_lifecycle_policy_known;
+    bool empty_lifecycle_eligible;
+    int64 empty_lifecycle_depth;
+    int64 empty_lifecycle_batch_size;
     int64 lower;
     int64 upper;
     bool upper_infinite;
@@ -294,10 +303,26 @@ extern void age_vle_context_release_all_resources(
 extern void age_vle_context_reset_source_stats(VLE_local_context *vlelctx);
 extern void age_vle_context_get_source_stats(
     VLE_local_context *vlelctx, AgeVLESourceStats *stats);
+extern void age_vle_context_record_empty_lifecycle_policy(
+    VLE_local_context *vlelctx);
+extern int64 age_vle_context_empty_lifecycle_batch_size(
+    VLE_local_context *vlelctx);
 extern void age_vle_context_record_source_scan(
     VLE_local_context *vlelctx, VLEContextSourceStatsKind kind);
 extern void age_vle_context_record_source_candidate(
     VLE_local_context *vlelctx, VLEContextSourceStatsKind kind);
+extern void age_vle_context_record_source_empty_scan(
+    VLE_local_context *vlelctx, VLEContextSourceStatsKind kind);
+extern void age_vle_context_record_age_adjacency_empty_source_skip(
+    VLE_local_context *vlelctx, bool outgoing);
+extern void age_vle_context_record_age_adjacency_empty_source_cache_hit(
+    VLE_local_context *vlelctx, bool outgoing);
+extern void age_vle_context_record_age_adjacency_empty_source_frontier_mark(
+    VLE_local_context *vlelctx, bool outgoing);
+extern void age_vle_context_record_age_adjacency_empty_source_frontier_batch(
+    VLE_local_context *vlelctx, bool outgoing, int64 key_count);
+extern void age_vle_context_record_age_adjacency_empty_source_run_skip(
+    VLE_local_context *vlelctx, bool outgoing);
 extern void age_vle_context_record_source_push(VLE_local_context *vlelctx);
 extern void age_vle_context_record_missing_vertex_attempt(
     VLE_local_context *vlelctx);
@@ -312,9 +337,15 @@ extern void age_vle_context_record_packed_policy_skip(
     VLE_local_context *vlelctx);
 extern void age_vle_context_record_age_adjacency_payload_replay(
     VLE_local_context *vlelctx);
+extern void age_vle_context_record_age_adjacency_payload_replay_run(
+    VLE_local_context *vlelctx);
 extern void age_vle_context_record_age_adjacency_payload_scan(
     VLE_local_context *vlelctx);
+extern void age_vle_context_record_age_adjacency_payload_scan_run(
+    VLE_local_context *vlelctx);
 extern void age_vle_context_record_age_adjacency_payload_cache_seed(
+    VLE_local_context *vlelctx);
+extern void age_vle_context_record_age_adjacency_payload_cache_seed_run(
     VLE_local_context *vlelctx);
 extern int64 age_vle_context_get_or_create_local_edge_index(
     VLE_local_context *vlelctx, graphid edge_id);
@@ -437,8 +468,12 @@ extern bool age_vle_context_expansion_source_run_is_eligible(
 extern bool age_vle_context_init_expansion_source_cursor(
     VLE_local_context *vlelctx, VLEContextExpansionSourceRun *run,
     VLEContextSourceCursor *cursor, bool outgoing);
+extern bool age_vle_context_expansion_source_cursor_known_empty(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor);
 extern void age_vle_context_record_expansion_source_result(
     VLEContextExpansionSourceRun *run, bool outgoing, bool used_source);
+extern bool age_vle_context_missing_vertex_sources_known_empty(
+    VLE_local_context *vlelctx, graphid source_vertex_id);
 extern VLEContextPackedAdjacencySource *
 age_vle_context_begin_packed_adjacency_source_from_run(
     VLE_local_context *vlelctx, vertex_entry *entry,
@@ -453,8 +488,13 @@ age_vle_context_begin_age_adjacency_payload_source(
 extern bool age_vle_context_age_adjacency_payload_next(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
     AgeAdjacencyPayload *payload);
-extern void age_vle_context_end_age_adjacency_payload_source(
+extern void age_vle_context_maybe_mark_age_adjacency_frontier_empty(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    graphid next_source_vertex_id);
+extern bool age_vle_context_age_adjacency_payload_source_empty_suppressed(
     VLEContextAgeAdjacencyPayloadSource *source);
+extern void age_vle_context_end_age_adjacency_payload_source(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
 extern VLEContextEndpointIndexSource *age_vle_context_begin_endpoint_index_source(
     const VLEContextSourceCursor *cursor);
 extern bool age_vle_context_endpoint_index_source_next(

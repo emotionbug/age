@@ -70,6 +70,7 @@
 #include "access/table.h"
 #include "common/hashfn.h"
 #include "commands/defrem.h"
+#include "executor/tuptable.h"
 #include "funcapi.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
@@ -295,6 +296,10 @@ static agtype_value *build_vle_edge_value(GRAPH_global_context *ggctx,
 static agtype_value *build_vle_vertex_value(GRAPH_global_context *ggctx,
                                             graphid vertex_id,
                                             HTAB *relation_cache);
+static agtype *build_empty_agtype_object(void);
+static bool scan_vle_label_tuple_by_graphid(Relation rel, AttrNumber id_attno,
+                                            graphid id,
+                                            TupleTableSlot *slot);
 static agtype *build_vle_typed_edge_agtype(
     const VLEMaterializerHandoff *handoff, graphid edge_id);
 static agtype *build_vle_typed_vertex_agtype(
@@ -1159,6 +1164,12 @@ static void add_valid_vertex_edges(VLE_local_context *vlelctx,
     /* there better be a valid vertex */
     if (ve == NULL)
     {
+        if (age_vle_context_missing_vertex_sources_known_empty(vlelctx,
+                                                               vertex_id))
+        {
+            return;
+        }
+
         if (age_vle_push_candidates_from_missing_vertex_source(
                 vlelctx, vertex_id))
         {
@@ -1377,14 +1388,79 @@ static agtype_value *build_vle_vertex_value(GRAPH_global_context *ggctx,
                                             HTAB *relation_cache)
 {
     vertex_entry *ve = NULL;
+    label_cache_data *label_cache = NULL;
+    agtype_value *vertex;
+    agtype *properties;
+    agtype *empty_properties = NULL;
+    char *label_name;
+    bool free_properties = false;
 
     ve = get_vertex_entry(ggctx, vertex_id);
-    Assert(ve != NULL);
+    if (ve != NULL)
+    {
+        label_name = get_vertex_entry_label_name(ve);
+        properties = DATUM_GET_AGTYPE_P(
+            get_vertex_entry_properties_with_cache(ve, relation_cache));
+        if (properties == NULL)
+        {
+            empty_properties = build_empty_agtype_object();
+            properties = empty_properties;
+        }
+    }
+    else
+    {
+        Relation vertex_rel;
+        TupleTableSlot *slot;
+        bool found;
+        bool isnull = false;
+        Datum properties_datum;
 
-    return agtype_value_build_vertex(get_vertex_entry_id(ve),
-                                     get_vertex_entry_label_name(ve),
-                                     get_vertex_entry_properties_with_cache(
-                                         ve, relation_cache));
+        label_cache = search_label_graph_oid_cache_cached(
+            get_GRAPH_global_context_oid(ggctx),
+            get_graphid_label_id(vertex_id));
+        if (label_cache == NULL || !OidIsValid(label_cache->relation))
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_EXCEPTION),
+                     errmsg("missing VLE vertex label for graphid %ld",
+                            (long)vertex_id)));
+
+        vertex_rel = table_open(label_cache->relation, AccessShareLock);
+        slot = table_slot_create(vertex_rel, NULL);
+        found = scan_vle_label_tuple_by_graphid(
+            vertex_rel, Anum_ag_label_vertex_table_id, vertex_id, slot);
+        if (!found)
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_EXCEPTION),
+                     errmsg("missing VLE vertex row for graphid %ld",
+                            (long)vertex_id)));
+
+        properties_datum = slot_getattr(
+            slot, Anum_ag_label_vertex_table_properties, &isnull);
+        if (isnull)
+        {
+            empty_properties = build_empty_agtype_object();
+            properties = empty_properties;
+        }
+        else
+        {
+            properties = (agtype *)PG_DETOAST_DATUM_COPY(properties_datum);
+            free_properties = true;
+        }
+        label_name = NameStr(label_cache->name);
+
+        ExecDropSingleTupleTableSlot(slot);
+        table_close(vertex_rel, AccessShareLock);
+    }
+
+    vertex = agtype_value_build_vertex(vertex_id, label_name,
+                                       PointerGetDatum(properties));
+
+    if (empty_properties != NULL)
+        pfree(empty_properties);
+    else if (free_properties)
+        pfree(properties);
+
+    return vertex;
 }
 
 static agtype *build_empty_agtype_object(void)
@@ -1399,40 +1475,137 @@ static agtype *build_empty_agtype_object(void)
     return object;
 }
 
+static bool scan_vle_label_tuple_by_graphid(Relation rel, AttrNumber id_attno,
+                                            graphid id,
+                                            TupleTableSlot *slot)
+{
+    ScanKeyData scan_keys[1];
+    Oid index_oid;
+    bool found = false;
+
+    Assert(rel != NULL);
+    Assert(slot != NULL);
+
+    index_oid = find_usable_btree_index_for_attr(rel, id_attno);
+    ScanKeyInit(&scan_keys[0], id_attno, BTEqualStrategyNumber, F_GRAPHIDEQ,
+                GRAPHID_GET_DATUM(id));
+
+    if (OidIsValid(index_oid))
+    {
+        Relation index_rel;
+        IndexScanDesc scan_desc;
+
+        index_rel = index_open(index_oid, AccessShareLock);
+        scan_desc = index_beginscan(rel, index_rel, GetActiveSnapshot(),
+                                    NULL, 1, 0);
+        index_rescan(scan_desc, scan_keys, 1, NULL, 0);
+        found = index_getnext_slot(scan_desc, ForwardScanDirection, slot);
+        if (found)
+            ExecMaterializeSlot(slot);
+        index_endscan(scan_desc);
+        index_close(index_rel, AccessShareLock);
+    }
+    else
+    {
+        TableScanDesc scan_desc;
+
+        scan_desc = table_beginscan(rel, GetActiveSnapshot(), 1, scan_keys);
+        found = table_scan_getnextslot(scan_desc, ForwardScanDirection, slot);
+        if (found)
+            ExecMaterializeSlot(slot);
+        table_endscan(scan_desc);
+    }
+
+    return found;
+}
+
 static agtype *build_vle_vertex_object_agtype(
     const VLEMaterializerHandoff *handoff, graphid vertex_id)
 {
     vertex_entry *ve = NULL;
+    label_cache_data *label_cache = NULL;
     agtype_build_state *bstate;
     agtype *properties;
     agtype *empty_properties = NULL;
     agtype *vertex;
+    char *label_name;
+    bool free_properties = false;
 
     Assert(handoff != NULL);
 
     ve = get_vertex_entry(handoff->ggctx, vertex_id);
-    Assert(ve != NULL);
-
-    properties = DATUM_GET_AGTYPE_P(
-        get_vertex_entry_properties_with_cache(ve, handoff->relation_cache));
-    if (properties == NULL)
+    if (ve != NULL)
     {
-        empty_properties = build_empty_agtype_object();
-        properties = empty_properties;
+        label_name = get_vertex_entry_label_name(ve);
+        properties = DATUM_GET_AGTYPE_P(
+            get_vertex_entry_properties_with_cache(ve,
+                                                   handoff->relation_cache));
+        if (properties == NULL)
+        {
+            empty_properties = build_empty_agtype_object();
+            properties = empty_properties;
+        }
+    }
+    else
+    {
+        Relation vertex_rel;
+        TupleTableSlot *slot;
+        bool found;
+        bool isnull = false;
+        Datum properties_datum;
+
+        label_cache = search_label_graph_oid_cache_cached(
+            get_GRAPH_global_context_oid(handoff->ggctx),
+            get_graphid_label_id(vertex_id));
+        if (label_cache == NULL || !OidIsValid(label_cache->relation))
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_EXCEPTION),
+                     errmsg("missing VLE vertex label for graphid %ld",
+                            (long)vertex_id)));
+
+        vertex_rel = table_open(label_cache->relation, AccessShareLock);
+        slot = table_slot_create(vertex_rel, NULL);
+        found = scan_vle_label_tuple_by_graphid(
+            vertex_rel, Anum_ag_label_vertex_table_id, vertex_id, slot);
+
+        if (!found)
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_EXCEPTION),
+                     errmsg("missing VLE vertex row for graphid %ld",
+                            (long)vertex_id)));
+
+        properties_datum = slot_getattr(
+            slot, Anum_ag_label_vertex_table_properties, &isnull);
+        if (isnull)
+        {
+            empty_properties = build_empty_agtype_object();
+            properties = empty_properties;
+        }
+        else
+        {
+            properties = (agtype *)PG_DETOAST_DATUM_COPY(properties_datum);
+            free_properties = true;
+        }
+        label_name = NameStr(label_cache->name);
+
+        ExecDropSingleTupleTableSlot(slot);
+        table_close(vertex_rel, AccessShareLock);
     }
 
     bstate = init_agtype_build_state(3, AGT_FOBJECT);
     write_string(bstate, "id");
     write_string(bstate, "label");
     write_string(bstate, "properties");
-    write_graphid(bstate, get_vertex_entry_id(ve));
-    write_string(bstate, get_vertex_entry_label_name(ve));
+    write_graphid(bstate, vertex_id);
+    write_string(bstate, label_name);
     write_container(bstate, properties);
     vertex = build_agtype(bstate);
     pfree_agtype_build_state(bstate);
 
     if (empty_properties != NULL)
         pfree(empty_properties);
+    else if (free_properties)
+        pfree(properties);
 
     return vertex;
 }
@@ -1441,33 +1614,104 @@ static agtype *build_vle_edge_object_agtype(
     const VLEMaterializerHandoff *handoff, graphid edge_id)
 {
     edge_entry *ee = NULL;
+    label_cache_data *label_cache = NULL;
     agtype_build_state *bstate;
     agtype *properties;
     agtype *empty_properties = NULL;
     agtype *edge;
+    graphid start_id;
+    graphid end_id;
+    char *label_name;
+    bool free_properties = false;
 
     Assert(handoff != NULL);
 
-    ee = get_edge_entry(handoff->ggctx, edge_id);
-    Assert(ee != NULL);
+    ee = find_edge_entry(handoff->ggctx, edge_id);
 
-    if (graph_global_context_has_edge_metadata(handoff->ggctx) &&
-        get_edge_entry_property_size(ee) > 0 &&
-        get_edge_entry_property_count(ee) == 0)
+    if (ee != NULL)
     {
-        empty_properties = build_empty_agtype_object();
-        properties = empty_properties;
-    }
-    else
-    {
-        properties = DATUM_GET_AGTYPE_P(
-            get_edge_entry_properties_with_cache(ee,
-                                                handoff->relation_cache));
-        if (properties == NULL)
+        label_name = get_edge_entry_label_name(ee);
+        start_id = get_edge_entry_start_vertex_id(ee);
+        end_id = get_edge_entry_end_vertex_id(ee);
+
+        if (graph_global_context_has_edge_metadata(handoff->ggctx) &&
+            get_edge_entry_property_size(ee) > 0 &&
+            get_edge_entry_property_count(ee) == 0)
         {
             empty_properties = build_empty_agtype_object();
             properties = empty_properties;
         }
+        else
+        {
+            properties = DATUM_GET_AGTYPE_P(
+                get_edge_entry_properties_with_cache(ee,
+                                                    handoff->relation_cache));
+            if (properties == NULL)
+            {
+                empty_properties = build_empty_agtype_object();
+                properties = empty_properties;
+            }
+        }
+    }
+    else
+    {
+        Relation edge_rel;
+        TupleTableSlot *slot;
+        bool found;
+        bool isnull = false;
+        Datum properties_datum;
+
+        label_cache = search_label_graph_oid_cache_cached(
+            get_GRAPH_global_context_oid(handoff->ggctx),
+            get_graphid_label_id(edge_id));
+        if (label_cache == NULL || !OidIsValid(label_cache->relation))
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_EXCEPTION),
+                     errmsg("missing VLE edge label for graphid %ld",
+                            (long)edge_id)));
+
+        edge_rel = table_open(label_cache->relation, AccessShareLock);
+        slot = table_slot_create(edge_rel, NULL);
+        found = scan_vle_label_tuple_by_graphid(
+            edge_rel, Anum_ag_label_edge_table_id, edge_id, slot);
+
+        if (!found)
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_EXCEPTION),
+                     errmsg("missing VLE edge row for graphid %ld",
+                            (long)edge_id)));
+
+        start_id = DatumGetInt64(slot_getattr(
+            slot, Anum_ag_label_edge_table_start_id, &isnull));
+        if (isnull)
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_EXCEPTION),
+                     errmsg("VLE edge start_id is null for graphid %ld",
+                            (long)edge_id)));
+        end_id = DatumGetInt64(slot_getattr(
+            slot, Anum_ag_label_edge_table_end_id, &isnull));
+        if (isnull)
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_EXCEPTION),
+                     errmsg("VLE edge end_id is null for graphid %ld",
+                            (long)edge_id)));
+
+        properties_datum = slot_getattr(
+            slot, Anum_ag_label_edge_table_properties, &isnull);
+        if (isnull)
+        {
+            empty_properties = build_empty_agtype_object();
+            properties = empty_properties;
+        }
+        else
+        {
+            properties = (agtype *)PG_DETOAST_DATUM_COPY(properties_datum);
+            free_properties = true;
+        }
+        label_name = NameStr(label_cache->name);
+
+        ExecDropSingleTupleTableSlot(slot);
+        table_close(edge_rel, AccessShareLock);
     }
 
     bstate = init_agtype_build_state(5, AGT_FOBJECT);
@@ -1476,16 +1720,18 @@ static agtype *build_vle_edge_object_agtype(
     write_string(bstate, "end_id");
     write_string(bstate, "start_id");
     write_string(bstate, "properties");
-    write_graphid(bstate, get_edge_entry_id(ee));
-    write_string(bstate, get_edge_entry_label_name(ee));
-    write_graphid(bstate, get_edge_entry_end_vertex_id(ee));
-    write_graphid(bstate, get_edge_entry_start_vertex_id(ee));
+    write_graphid(bstate, edge_id);
+    write_string(bstate, label_name);
+    write_graphid(bstate, end_id);
+    write_graphid(bstate, start_id);
     write_container(bstate, properties);
     edge = build_agtype(bstate);
     pfree_agtype_build_state(bstate);
 
     if (empty_properties != NULL)
         pfree(empty_properties);
+    else if (free_properties)
+        pfree(properties);
 
     return edge;
 }

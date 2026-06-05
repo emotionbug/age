@@ -42,6 +42,11 @@ SELECT * FROM cypher('cypher_match', $$MATCH (n:v) RETURN n.i$$) AS (i agtype);
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT *
 FROM cypher('cypher_match',
+            $$MATCH (n:v) RETURN n.i$$) AS (i agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('cypher_match',
             $$MATCH (n:v) RETURN n.i::pg_bigint$$) AS (i bigint);
 
 EXPLAIN (VERBOSE, COSTS OFF)

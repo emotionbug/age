@@ -102,7 +102,7 @@ static void init_candidate_source(
     VLECandidateSource *source, void *state,
     VLECandidateSourceNext next_candidate, VLECandidateSourceEnd end_source,
     const char *trace_name, VLEContextSourceStatsKind stats_kind);
-static void push_candidates_from_source(
+static int64 push_candidates_from_source(
     VLE_local_context *vlelctx, VLECandidateSource *source);
 static bool add_valid_vertex_edges_from_age_adjacency(
     VLE_local_context *vlelctx,
@@ -278,6 +278,13 @@ static bool push_candidates_from_expansion_context_source(
         return false;
     }
 
+    if (age_vle_context_expansion_source_cursor_known_empty(
+            vlelctx, &source_cursor))
+    {
+        age_vle_context_record_expansion_source_result(run, outgoing, true);
+        return true;
+    }
+
     used_source = push_candidates_from_source_cursor(
         vlelctx, &source_cursor, match_context);
     age_vle_context_record_expansion_source_result(run, outgoing,
@@ -334,10 +341,11 @@ static void init_candidate_source(
     source->stats_kind = stats_kind;
 }
 
-static void push_candidates_from_source(
+static int64 push_candidates_from_source(
     VLE_local_context *vlelctx, VLECandidateSource *source)
 {
     VLETraversalCandidate candidate;
+    int64 yielded = 0;
 
     Assert(vlelctx != NULL);
     Assert(source != NULL);
@@ -345,6 +353,7 @@ static void push_candidates_from_source(
 
     while (source->next_candidate(source, &candidate))
     {
+        yielded++;
         age_vle_context_record_source_candidate(vlelctx, source->stats_kind);
         if (age_vle_context_push_candidate_if_matched(
                 vlelctx, &candidate, source->trace_name))
@@ -357,6 +366,8 @@ static void push_candidates_from_source(
     {
         source->end_source(source);
     }
+
+    return yielded;
 }
 
 static bool add_valid_vertex_edges_from_age_adjacency(
@@ -374,6 +385,14 @@ static bool add_valid_vertex_edges_from_age_adjacency(
                                         match_context))
         return false;
 
+    if (age_vle_context_age_adjacency_payload_source_empty_suppressed(
+            source_scan.payload_source))
+    {
+        age_vle_context_end_age_adjacency_payload_source(
+            vlelctx, source_scan.payload_source);
+        return true;
+    }
+
     init_candidate_source(&source, &source_scan,
                           age_adjacency_source_scan_next_candidate,
                           finish_age_adjacency_source_scan,
@@ -381,7 +400,11 @@ static bool add_valid_vertex_edges_from_age_adjacency(
                           VLE_CONTEXT_SOURCE_STATS_AGE_ADJACENCY);
     age_vle_context_record_source_scan(
         vlelctx, VLE_CONTEXT_SOURCE_STATS_AGE_ADJACENCY);
-    push_candidates_from_source(vlelctx, &source);
+    if (push_candidates_from_source(vlelctx, &source) == 0)
+    {
+        age_vle_context_record_source_empty_scan(
+            vlelctx, VLE_CONTEXT_SOURCE_STATS_AGE_ADJACENCY);
+    }
 
     return true;
 }
@@ -537,6 +560,8 @@ static bool age_adjacency_source_scan_next_candidate(
             return false;
 
         next_vertex_id = payload.next_vertex_id;
+        age_vle_context_maybe_mark_age_adjacency_frontier_empty(
+            scan->state.vlelctx, scan->payload_source, next_vertex_id);
         if (!candidate_source_identity_accepts_next_vertex(
                 &scan->state.validation.source_identity, next_vertex_id))
         {
@@ -570,7 +595,7 @@ static void finish_age_adjacency_source_scan(
     Assert(scan != NULL);
 
     age_vle_context_end_age_adjacency_payload_source(
-        scan->payload_source);
+        scan->state.vlelctx, scan->payload_source);
     scan->payload_source = NULL;
 }
 
@@ -603,7 +628,11 @@ static bool add_valid_vertex_edges_from_edge_endpoint_index(
                           VLE_CONTEXT_SOURCE_STATS_ENDPOINT_BTREE);
     age_vle_context_record_source_scan(
         vlelctx, VLE_CONTEXT_SOURCE_STATS_ENDPOINT_BTREE);
-    push_candidates_from_source(vlelctx, &source);
+    if (push_candidates_from_source(vlelctx, &source) == 0)
+    {
+        age_vle_context_record_source_empty_scan(
+            vlelctx, VLE_CONTEXT_SOURCE_STATS_ENDPOINT_BTREE);
+    }
     age_vle_context_end_endpoint_index_source(candidate_source.scan);
 
     return true;

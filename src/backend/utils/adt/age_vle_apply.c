@@ -203,7 +203,7 @@ static void init_vle_traversal_context_apply(
     context_apply->ggctx = apply->ggctx;
     context_apply->use_cache = apply->use_cache;
     context_apply->vle_grammar_node_id = apply->vle_grammar_node_id;
-    context_apply->use_local_edge_state =
+    context_apply->use_local_edge_state = apply->input->source_policy_known ||
         !graph_global_context_has_edge_metadata(apply->ggctx);
     context_apply->edge_property_constraint =
         setup->edge_property_constraint;
@@ -219,6 +219,14 @@ static void init_vle_traversal_context_apply(
         (VLETraversalSourceKind)apply->input->source_policy_outgoing_kind;
     context_apply->source_policy_incoming_kind =
         (VLETraversalSourceKind)apply->input->source_policy_incoming_kind;
+    context_apply->empty_lifecycle_policy_known =
+        apply->input->empty_lifecycle_policy_known;
+    context_apply->empty_lifecycle_eligible =
+        apply->input->empty_lifecycle_eligible;
+    context_apply->empty_lifecycle_depth =
+        apply->input->empty_lifecycle_depth;
+    context_apply->empty_lifecycle_batch_size =
+        apply->input->empty_lifecycle_batch_size;
     context_apply->lower = shape->lower;
     context_apply->upper = shape->upper;
     context_apply->upper_infinite = shape->upper_infinite;
@@ -449,6 +457,7 @@ static bool init_vle_traversal_refresh_apply(
     if (!init_vle_root_descriptor_from_refresh(root,
                                                &root_apply.current_root,
                                                refresh,
+                                               &root_apply.selection,
                                                &root_apply.source_layout))
         return false;
 
@@ -586,6 +595,17 @@ void init_vle_context_refresh_input(AgeVLEInput *input,
     refresh->end_valid = age_vle_input_get_vertex_or_id(
         input, 2, "end vertex argument must be a vertex or the integer id",
         &refresh->end_vertex_id);
+    refresh->source_policy_known = input->source_policy_known;
+    refresh->source_policy_outgoing_kind =
+        (VLETraversalSourceKind)input->source_policy_outgoing_kind;
+    refresh->source_policy_incoming_kind =
+        (VLETraversalSourceKind)input->source_policy_incoming_kind;
+    refresh->empty_lifecycle_policy_known =
+        input->empty_lifecycle_policy_known;
+    refresh->empty_lifecycle_eligible = input->empty_lifecycle_eligible;
+    refresh->empty_lifecycle_depth = input->empty_lifecycle_depth;
+    refresh->empty_lifecycle_batch_size =
+        input->empty_lifecycle_batch_size;
 }
 
 bool apply_cached_vle_context_refresh(
@@ -597,6 +617,19 @@ bool apply_cached_vle_context_refresh(
     Assert(vlelctx != NULL);
     Assert(refresh != NULL);
     Assert(funcctx != NULL);
+
+    vlelctx->source_policy_known = refresh->source_policy_known;
+    vlelctx->source_policy_outgoing_kind =
+        refresh->source_policy_outgoing_kind;
+    vlelctx->source_policy_incoming_kind =
+        refresh->source_policy_incoming_kind;
+    vlelctx->empty_lifecycle_policy_known =
+        refresh->empty_lifecycle_policy_known;
+    vlelctx->empty_lifecycle_eligible = refresh->empty_lifecycle_eligible;
+    vlelctx->empty_lifecycle_depth = refresh->empty_lifecycle_depth;
+    vlelctx->empty_lifecycle_batch_size =
+        refresh->empty_lifecycle_batch_size;
+    age_vle_context_record_empty_lifecycle_policy(vlelctx);
 
     if (!init_vle_traversal_cached_reuse_apply(&reuse_apply, vlelctx,
                                                refresh))

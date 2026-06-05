@@ -114,6 +114,7 @@ GRAPH_global_context *manage_GRAPH_global_contexts_len_for_vle(
     bool load_edge_property_metadata, Oid edge_label_oid,
     bool load_edge_metadata, bool load_vertex_metadata);
 GRAPH_global_context *find_GRAPH_global_context(Oid graph_oid);
+Oid get_GRAPH_global_context_oid(GRAPH_global_context *ggctx);
 bool is_GRAPH_global_context_current(GRAPH_global_context *ggctx);
 bool is_ggctx_invalid(GRAPH_global_context *ggctx);
 /* GRAPH retrieval functions */
@@ -125,6 +126,7 @@ vertex_entry *get_vertex_entry(GRAPH_global_context *ggctx,
 vertex_entry *ensure_vertex_entry_skeleton(GRAPH_global_context *ggctx,
                                            graphid vertex_id);
 edge_entry *get_edge_entry(GRAPH_global_context *ggctx, graphid edge_id);
+edge_entry *find_edge_entry(GRAPH_global_context *ggctx, graphid edge_id);
 edge_entry *get_edge_entry_by_tid(GRAPH_global_context *ggctx,
                                   const ItemPointerData *tid);
 bool get_edge_entry_vle_fields_by_tid(GRAPH_global_context *ggctx,

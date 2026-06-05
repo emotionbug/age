@@ -207,6 +207,15 @@ static void initialize_age_vle_stream_input_descriptor(
     state->input.source_policy_incoming_kind =
         age_vle_stream_source_kind_to_input(
             state->edge_source.policy_incoming_kind);
+    state->input.empty_lifecycle_policy_known =
+        state->edge_source.kind ==
+        AGE_VLE_STREAM_EDGE_SOURCE_LOCAL_INDEX_CANDIDATE;
+    state->input.empty_lifecycle_eligible =
+        state->edge_source.empty_lifecycle_eligible;
+    state->input.empty_lifecycle_depth =
+        state->edge_source.empty_lifecycle_depth;
+    state->input.empty_lifecycle_batch_size =
+        state->edge_source.empty_lifecycle_batch_size;
 }
 
 static int age_vle_stream_source_kind_to_input(
@@ -376,7 +385,8 @@ static void explain_age_vle_stream_scan(CustomScanState *node,
                         format_age_vle_stream_output(&state->output, nargs),
                         es);
     ExplainPropertyText("VLE Materialization",
-                        format_age_vle_stream_materialization(&state->output),
+                        format_age_vle_stream_materialization(
+                            &state->output, &state->edge_source),
                         es);
     if (nargs > AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY)
     {
@@ -389,7 +399,7 @@ static void explain_age_vle_stream_scan(CustomScanState *node,
     {
         ExplainPropertyText("VLE Source Runtime",
                             format_vle_source_runtime_evidence(
-                                &state->source_stats),
+                                &state->source_stats, &state->edge_source),
                             es);
     }
 }
@@ -565,6 +575,10 @@ static void finalize_age_vle_stream_source_stats(
                                            &state->current_source_stats);
     state->source_stats = state->total_source_stats;
     state->source_stats_accumulated = true;
+    record_vle_source_runtime_threshold_feedback(state->graph.graph_name,
+                                                 state->edge.label_name,
+                                                 &state->source_stats,
+                                                 &state->edge_source);
 }
 
 static void accumulate_age_vle_stream_source_stats(
@@ -577,6 +591,49 @@ static void accumulate_age_vle_stream_source_stats(
     total->missing_vertex_source_hits += current->missing_vertex_source_hits;
     total->age_adjacency_scans += current->age_adjacency_scans;
     total->age_adjacency_candidates += current->age_adjacency_candidates;
+    total->age_adjacency_empty_scans +=
+        current->age_adjacency_empty_scans;
+    total->age_adjacency_empty_source_skips +=
+        current->age_adjacency_empty_source_skips;
+    total->age_adjacency_empty_source_skip_out +=
+        current->age_adjacency_empty_source_skip_out;
+    total->age_adjacency_empty_source_skip_in +=
+        current->age_adjacency_empty_source_skip_in;
+    total->age_adjacency_empty_source_cache_hits +=
+        current->age_adjacency_empty_source_cache_hits;
+    total->age_adjacency_empty_source_cache_hit_out +=
+        current->age_adjacency_empty_source_cache_hit_out;
+    total->age_adjacency_empty_source_cache_hit_in +=
+        current->age_adjacency_empty_source_cache_hit_in;
+    total->age_adjacency_empty_source_frontier_marks +=
+        current->age_adjacency_empty_source_frontier_marks;
+    total->age_adjacency_empty_source_frontier_mark_out +=
+        current->age_adjacency_empty_source_frontier_mark_out;
+    total->age_adjacency_empty_source_frontier_mark_in +=
+        current->age_adjacency_empty_source_frontier_mark_in;
+    total->age_adjacency_empty_source_frontier_batch_flushes +=
+        current->age_adjacency_empty_source_frontier_batch_flushes;
+    total->age_adjacency_empty_source_frontier_batch_out +=
+        current->age_adjacency_empty_source_frontier_batch_out;
+    total->age_adjacency_empty_source_frontier_batch_in +=
+        current->age_adjacency_empty_source_frontier_batch_in;
+    total->age_adjacency_empty_source_frontier_batch_keys +=
+        current->age_adjacency_empty_source_frontier_batch_keys;
+    total->age_adjacency_empty_source_frontier_batch_max =
+        Max(total->age_adjacency_empty_source_frontier_batch_max,
+            current->age_adjacency_empty_source_frontier_batch_max);
+    total->age_adjacency_empty_source_run_skips +=
+        current->age_adjacency_empty_source_run_skips;
+    total->age_adjacency_empty_source_run_skip_out +=
+        current->age_adjacency_empty_source_run_skip_out;
+    total->age_adjacency_empty_source_run_skip_in +=
+        current->age_adjacency_empty_source_run_skip_in;
+    total->age_adjacency_payload_scan_runs +=
+        current->age_adjacency_payload_scan_runs;
+    total->age_adjacency_payload_replay_runs +=
+        current->age_adjacency_payload_replay_runs;
+    total->age_adjacency_payload_cache_seed_runs +=
+        current->age_adjacency_payload_cache_seed_runs;
     total->age_adjacency_payload_scans +=
         current->age_adjacency_payload_scans;
     total->age_adjacency_payload_replays +=
@@ -585,6 +642,8 @@ static void accumulate_age_vle_stream_source_stats(
         current->age_adjacency_payload_cache_seeds;
     total->endpoint_btree_scans += current->endpoint_btree_scans;
     total->endpoint_btree_candidates += current->endpoint_btree_candidates;
+    total->endpoint_btree_empty_scans +=
+        current->endpoint_btree_empty_scans;
     total->packed_scans += current->packed_scans;
     total->packed_candidates += current->packed_candidates;
     total->packed_empty_skips += current->packed_empty_skips;
@@ -594,4 +653,25 @@ static void accumulate_age_vle_stream_source_stats(
     total->packed_suppress_self += current->packed_suppress_self;
     total->candidates_yielded += current->candidates_yielded;
     total->candidates_pushed += current->candidates_pushed;
+    total->empty_lifecycle_context_runs +=
+        current->empty_lifecycle_context_runs;
+    total->empty_lifecycle_context_eligible_runs +=
+        current->empty_lifecycle_context_eligible_runs;
+    total->empty_lifecycle_context_depth =
+        Max(total->empty_lifecycle_context_depth,
+            current->empty_lifecycle_context_depth);
+    total->empty_lifecycle_batch_capacity =
+        Max(total->empty_lifecycle_batch_capacity,
+            current->empty_lifecycle_batch_capacity);
+    total->root_empty_completion_count +=
+        current->root_empty_completion_count;
+    total->root_empty_completion_out +=
+        current->root_empty_completion_out;
+    total->root_empty_completion_in +=
+        current->root_empty_completion_in;
+    total->root_empty_batch_capacity =
+        Max(total->root_empty_batch_capacity,
+            current->root_empty_batch_capacity);
+    total->root_empty_saturated_count +=
+        current->root_empty_saturated_count;
 }

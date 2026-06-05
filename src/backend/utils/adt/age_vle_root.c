@@ -32,6 +32,9 @@ static Oid get_source_index_oid(
 static bool traversal_source_candidate_available(
     const VLETraversalSourceCandidates *candidates,
     VLETraversalSourceKind kind, bool outgoing);
+static void init_vle_empty_completion_summary(
+    VLETraversalEmptyCompletionSummary *summary,
+    const VLETraversalRootSelectionInput *selection_input);
 
 cypher_rel_dir reverse_vle_edge_direction(cypher_rel_dir edge_direction)
 {
@@ -74,6 +77,8 @@ void init_vle_root_descriptor_from_setup(
     root->direction = shape->direction;
     root->reverse_paths_to = false;
     root->reverse_output_path = false;
+    init_vle_empty_completion_summary(&root->empty_completion,
+                                      selection_input);
     root->next_vertex = peek_stack_head(get_graph_vertices(ggctx));
     if (root->next_vertex == NULL &&
         setup->graph_load.source_policy.load_policy.load_vertex_metadata)
@@ -159,14 +164,18 @@ bool init_vle_root_descriptor_from_refresh(
     VLETraversalRootDescriptor *root,
     const VLETraversalRootDescriptor *current_root,
     const VLEContextRefreshInput *refresh,
+    const VLETraversalRootSelectionInput *selection_input,
     const VLETraversalSourceLayoutInput *source_layout_input)
 {
     Assert(root != NULL);
     Assert(current_root != NULL);
     Assert(refresh != NULL);
+    Assert(selection_input != NULL);
     Assert(source_layout_input != NULL);
 
     *root = *current_root;
+    init_vle_empty_completion_summary(&root->empty_completion,
+                                      selection_input);
 
     if (!refresh->start_valid)
     {
@@ -208,6 +217,17 @@ bool init_vle_root_descriptor_from_refresh(
                                      source_layout_input, root->direction);
 
     return true;
+}
+
+static void init_vle_empty_completion_summary(
+    VLETraversalEmptyCompletionSummary *summary,
+    const VLETraversalRootSelectionInput *selection_input)
+{
+    Assert(summary != NULL);
+    Assert(selection_input != NULL);
+
+    memset(summary, 0, sizeof(*summary));
+    summary->batch_capacity = selection_input->empty_lifecycle_batch_size;
 }
 
 void init_vle_traversal_source_layout(

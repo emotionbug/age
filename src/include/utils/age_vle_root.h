@@ -93,7 +93,17 @@ typedef struct VLETraversalRootSelectionInput
     Oid edge_label_oid;
     bool empty_length_range;
     bool zero_length_only;
+    int64 empty_lifecycle_batch_size;
 } VLETraversalRootSelectionInput;
+
+typedef struct VLETraversalEmptyCompletionSummary
+{
+    int64 completion_count;
+    int64 out_count;
+    int64 in_count;
+    int64 batch_capacity;
+    bool saturated;
+} VLETraversalEmptyCompletionSummary;
 
 typedef struct VLEContextRefreshInput
 {
@@ -101,6 +111,13 @@ typedef struct VLEContextRefreshInput
     graphid start_vertex_id;
     bool end_valid;
     graphid end_vertex_id;
+    bool source_policy_known;
+    VLETraversalSourceKind source_policy_outgoing_kind;
+    VLETraversalSourceKind source_policy_incoming_kind;
+    bool empty_lifecycle_policy_known;
+    bool empty_lifecycle_eligible;
+    int64 empty_lifecycle_depth;
+    int64 empty_lifecycle_batch_size;
 } VLEContextRefreshInput;
 
 typedef struct VLETraversalRootDescriptor
@@ -113,6 +130,7 @@ typedef struct VLETraversalRootDescriptor
     bool reverse_paths_to;
     bool reverse_output_path;
     VLETraversalSourceLayout source_layout;
+    VLETraversalEmptyCompletionSummary empty_completion;
 } VLETraversalRootDescriptor;
 
 extern cypher_rel_dir reverse_vle_edge_direction(
@@ -126,6 +144,7 @@ extern bool init_vle_root_descriptor_from_refresh(
     VLETraversalRootDescriptor *root,
     const VLETraversalRootDescriptor *current_root,
     const VLEContextRefreshInput *refresh,
+    const VLETraversalRootSelectionInput *selection_input,
     const VLETraversalSourceLayoutInput *source_layout_input);
 extern void init_vle_traversal_source_layout(
     VLETraversalSourceLayout *layout,

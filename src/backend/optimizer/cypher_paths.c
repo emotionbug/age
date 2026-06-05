@@ -1713,9 +1713,10 @@ static List *make_property_projection_slot_private(List *slots)
 
         slot_private = lappend(
             slot_private,
-            list_make3(copyObject(slot->keys),
+            list_make4(copyObject(slot->keys),
                        make_oid_const(slot->value_type),
-                       make_oid_const(slot->field_result_type)));
+                       make_oid_const(slot->field_result_type),
+                       makeInteger(slot->final_materialization_weight)));
     }
 
     return slot_private;
@@ -2198,7 +2199,6 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
     bool upper_known;
     bool upper_null;
     int64 properties_count;
-    int64 grammar_value;
     int64 output_requirement;
     int64 direction_value;
     int64 upper_value;
@@ -2223,6 +2223,35 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
     AgeVLEStreamDirectedSourceKind policy_incoming_kind =
         AGE_VLE_STREAM_DIRECTED_SOURCE_NONE;
     char *cost_policy = NULL;
+    const char *policy_consumer = NULL;
+    const char *policy_consumer_class = NULL;
+    const char *policy_active_direction = NULL;
+    int64 policy_fanout_budget = 0;
+    int64 policy_materialization_weight = 0;
+    const char *policy_class = NULL;
+    const char *policy_recommendation = NULL;
+    bool cache_seed_eligible = false;
+    int64 endpoint_headroom_percent = 0;
+    bool empty_lifecycle_eligible = false;
+    int64 empty_lifecycle_depth = 0;
+    int64 empty_lifecycle_batch_size = 0;
+    bool threshold_input_known = false;
+    int64 threshold_input_headroom_percent = 0;
+    int64 threshold_input_batch_size = 0;
+    int64 threshold_input_observed_count = 0;
+    int64 threshold_input_saturated_count = 0;
+    int64 threshold_input_relaxed_count = 0;
+    const char *threshold_input_source = NULL;
+    const char *threshold_input_reason = NULL;
+    bool payload_input_known = false;
+    int64 payload_input_headroom_percent = 0;
+    int64 payload_input_scan_runs = 0;
+    int64 payload_input_replay_runs = 0;
+    int64 payload_input_seed_runs = 0;
+    int64 payload_input_replay_percent = 0;
+    int64 payload_input_seed_percent = 0;
+    int64 payload_input_observed_count = 0;
+    const char *payload_input_reason = NULL;
     char *graph_name = NULL;
     char *label_name = NULL;
 
@@ -2252,9 +2281,6 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
     grammar_null =
         intVal(list_nth_node(Integer, output,
                              AGE_VLE_STREAM_OUTPUT_GRAMMAR_NULL)) != 0;
-    grammar_value = DatumGetInt64(
-        list_nth_node(Const, output,
-                      AGE_VLE_STREAM_OUTPUT_GRAMMAR_VALUE)->constvalue);
     output_requirement = DatumGetInt64(
         list_nth_node(Const, output,
                       AGE_VLE_STREAM_OUTPUT_REQUIREMENT)->constvalue);
@@ -2297,9 +2323,7 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
                                        &adjacency_out, &adjacency_in,
                                        &endpoint_start, &endpoint_end);
     estimate_vle_source_fanout_evidence(&source_evidence, edge_label_oid);
-    if (grammar_value < 0 &&
-        output_requirement != AGE_VLE_OUTPUT_REQUIREMENT_PATH &&
-        properties_count == 0)
+    if (properties_count == 0)
     {
         bool has_out_source = adjacency_out || endpoint_start;
         bool has_in_source = adjacency_in || endpoint_end;
@@ -2341,18 +2365,63 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
         cost_input.source_kind = source_kind;
         cost_input.outgoing_kind = outgoing_kind;
         cost_input.incoming_kind = incoming_kind;
+        cost_input.graph_name = graph_name;
+        cost_input.label_name = label_name;
         cost_input.evidence = &source_evidence;
         cost_input.upper = upper_value;
         cost_input.upper_infinite = !upper_known || upper_null;
+        cost_input.direction = (cypher_rel_dir)direction_value;
+        cost_input.output_requirement =
+            (AgeVLEOutputRequirement)output_requirement;
         cost_input.has_property_constraints = properties_count > 0;
         cost_input.endpoint_start = endpoint_start;
         cost_input.endpoint_end = endpoint_end;
         cost_input.age_adjacency_out = adjacency_out;
         cost_input.age_adjacency_in = adjacency_in;
+        cost_input.start_fanout_known = source_evidence.start_fanout_known;
+        cost_input.end_fanout_known = source_evidence.end_fanout_known;
         choose_vle_stream_source_cost_decision(&cost_decision, &cost_input);
         policy_outgoing_kind = cost_decision.outgoing_kind;
         policy_incoming_kind = cost_decision.incoming_kind;
         cost_policy = cost_decision.policy_text;
+        policy_consumer = cost_decision.policy_consumer;
+        policy_consumer_class = cost_decision.policy_consumer_class;
+        policy_active_direction = cost_decision.policy_active_direction;
+        policy_fanout_budget = cost_decision.policy_fanout_budget;
+        policy_materialization_weight =
+            cost_decision.policy_materialization_weight;
+        policy_class = cost_decision.policy_class;
+        policy_recommendation = cost_decision.policy_recommendation;
+        cache_seed_eligible = cost_decision.cache_seed_eligible;
+        endpoint_headroom_percent = cost_decision.endpoint_headroom_percent;
+        empty_lifecycle_eligible = cost_decision.empty_lifecycle_eligible;
+        empty_lifecycle_depth = cost_decision.empty_lifecycle_depth;
+        empty_lifecycle_batch_size =
+            cost_decision.empty_lifecycle_batch_size;
+        threshold_input_known = cost_decision.threshold_input_known;
+        threshold_input_headroom_percent =
+            cost_decision.threshold_input_headroom_percent;
+        threshold_input_batch_size = cost_decision.threshold_input_batch_size;
+        threshold_input_observed_count =
+            cost_decision.threshold_input_observed_count;
+        threshold_input_saturated_count =
+            cost_decision.threshold_input_saturated_count;
+        threshold_input_relaxed_count =
+            cost_decision.threshold_input_relaxed_count;
+        threshold_input_source = cost_decision.threshold_input_source;
+        threshold_input_reason = cost_decision.threshold_input_reason;
+        payload_input_known = cost_decision.payload_input_known;
+        payload_input_headroom_percent =
+            cost_decision.payload_input_headroom_percent;
+        payload_input_scan_runs = cost_decision.payload_input_scan_runs;
+        payload_input_replay_runs = cost_decision.payload_input_replay_runs;
+        payload_input_seed_runs = cost_decision.payload_input_seed_runs;
+        payload_input_replay_percent =
+            cost_decision.payload_input_replay_percent;
+        payload_input_seed_percent = cost_decision.payload_input_seed_percent;
+        payload_input_observed_count =
+            cost_decision.payload_input_observed_count;
+        payload_input_reason = cost_decision.payload_input_reason;
         outgoing_kind = cost_decision.outgoing_kind;
         incoming_kind = cost_decision.incoming_kind;
     }
@@ -2369,6 +2438,7 @@ build_descriptor:
     descriptor = lappend(descriptor, makeInteger(endpoint_start ? 1 : 0));
     descriptor = lappend(descriptor, makeInteger(endpoint_end ? 1 : 0));
     descriptor = lappend(descriptor, makeInteger(local_edge_state ? 1 : 0));
+    descriptor = lappend(descriptor, make_int8_const((int64)edge_label_oid));
     descriptor = lappend(descriptor, make_int8_const((int64)outgoing_kind));
     descriptor = lappend(descriptor, make_int8_const((int64)incoming_kind));
     descriptor = lappend(descriptor, make_int8_const(
@@ -2377,11 +2447,67 @@ build_descriptor:
         round_vle_source_cost_evidence(source_evidence.start_fanout)));
     descriptor = lappend(descriptor, make_int8_const(
         round_vle_source_cost_evidence(source_evidence.end_fanout)));
+    descriptor = lappend(descriptor,
+                         makeInteger(source_evidence.relation_tuples_known ?
+                                     1 : 0));
+    descriptor = lappend(descriptor,
+                         makeInteger(source_evidence.start_fanout_known ?
+                                     1 : 0));
+    descriptor = lappend(descriptor,
+                         makeInteger(source_evidence.end_fanout_known ?
+                                     1 : 0));
     descriptor = lappend(descriptor, make_text_const(cost_policy));
     descriptor = lappend(descriptor,
                          make_int8_const((int64)policy_outgoing_kind));
     descriptor = lappend(descriptor,
                          make_int8_const((int64)policy_incoming_kind));
+    descriptor = lappend(descriptor, make_text_const(policy_consumer));
+    descriptor = lappend(descriptor, make_text_const(policy_consumer_class));
+    descriptor = lappend(descriptor, make_text_const(policy_active_direction));
+    descriptor = lappend(descriptor, make_int8_const(policy_fanout_budget));
+    descriptor = lappend(descriptor,
+                         make_int8_const(policy_materialization_weight));
+    descriptor = lappend(descriptor, make_text_const(policy_class));
+    descriptor = lappend(descriptor, make_text_const(policy_recommendation));
+    descriptor = lappend(descriptor, makeInteger(cache_seed_eligible ? 1 : 0));
+    descriptor = lappend(descriptor,
+                         make_int8_const(endpoint_headroom_percent));
+    descriptor = lappend(descriptor,
+                         makeInteger(empty_lifecycle_eligible ? 1 : 0));
+    descriptor = lappend(descriptor,
+                         make_int8_const(empty_lifecycle_depth));
+    descriptor = lappend(descriptor,
+                         make_int8_const(empty_lifecycle_batch_size));
+    descriptor = lappend(descriptor,
+                         makeInteger(threshold_input_known ? 1 : 0));
+    descriptor = lappend(descriptor,
+                         make_int8_const(threshold_input_headroom_percent));
+    descriptor = lappend(descriptor,
+                         make_int8_const(threshold_input_batch_size));
+    descriptor = lappend(descriptor,
+                         make_int8_const(threshold_input_observed_count));
+    descriptor = lappend(descriptor,
+                         make_int8_const(threshold_input_saturated_count));
+    descriptor = lappend(descriptor,
+                         make_int8_const(threshold_input_relaxed_count));
+    descriptor = lappend(descriptor, make_text_const(threshold_input_source));
+    descriptor = lappend(descriptor, make_text_const(threshold_input_reason));
+    descriptor = lappend(descriptor, makeInteger(payload_input_known ? 1 : 0));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_headroom_percent));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_scan_runs));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_replay_runs));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_seed_runs));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_replay_percent));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_seed_percent));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_observed_count));
+    descriptor = lappend(descriptor, make_text_const(payload_input_reason));
 
     if (graph_name != NULL)
         pfree(graph_name);

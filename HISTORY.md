@@ -6,11 +6,687 @@
 - 상세 설계 판단은 `RESEARCH.md`, VLE 구조와 benchmark는 `VLE.md`에 둔다.
 - 되돌린 시도는 이유와 다음 방향만 남긴다.
 
+## 2026-06-05: VLE payload cache run evidence
+
+- `AGE Property Projection` slot descriptor에도 final materialization weight를 추가했다. typed scalar property
+  output은 weight 1, final `agtype` wrapper output은 weight 2로 EXPLAIN의 `Cached Property Slots`에 출력된다.
+  `cypher_match` regression은 `MATCH (n:v) RETURN n.i`의 agtype output과 typed bigint/float output을 모두
+  plan surface로 고정한다.
+- path-materialized/terminal-object strong replay headroom을 terminal-scalar와 분리했다. benchmark replay sweep에서
+  `replay_branches=2, replay_leaves=16`의 25% replay부터 path/object/properties는
+  `payload-replay-ratio-observed` class를 안정적으로 출력했고, terminal-scalar는 같은 25% replay를
+  observed로 유지했다. materialized consumer는 object/path materialization과 label-row fallback 비용을 더 크게
+  갖기 때문에 materialization weight를 planner descriptor에 추가했다. path는 weight 3과 strong replay headroom
+  18%, terminal-object/properties는 weight 2와 headroom 20%, terminal-scalar는 weight 1과 기존 strong headroom
+  25%를 사용한다.
+- `tools/vle_benchmark.sql`에 `replay_branches`, `replay_leaves` psql 변수를 추가했다. 기본값 `0`은
+  기존처럼 `label_fanout_edges`에서 파생하지만, 큰 dataset 측정에서는 replay fan-in과 replay leaf fan-out을
+  fanout benchmark와 독립적으로 조절할 수 있다.
+- benchmark final join summary는 `label_fanout_edges`, `replay_branches_input`, `replay_leaves_input`,
+  resolved `replay_branches`, `replay_leaves`를 같이 출력한다. 여러 smoke 결과를 저장해도 어떤 replay scale에서
+  나온 threshold evidence인지 row 자체로 구분할 수 있다.
+- final join summary에 `rows_returned`, `elapsed_ms`도 추가했다. replay percent/headroom/class와 실행 시간,
+  cardinality를 같은 row에서 비교해 threshold 조정을 판단한다.
+- terminal-scalar replay threshold를 낮은/높은 replay ratio profile로 다시 측정했다. `replay_branches=2,
+  replay_leaves=16`의 25% replay는 seed ratio 50%, headroom 35, `payload-replay-observed`로 유지하고,
+  `replay_branches=3, replay_leaves=16`의 40% replay는 rows/elapsed가 50% profile에 가까워지므로 strong
+  replay로 승격했다. 이에 따라 terminal-scalar strong threshold를 50%에서 40%로 낮췄다.
+- `label_fanout_edges=64` large smoke에서 payload replay shape는 replay ratio 95%, seed ratio 3%를 보였고,
+  terminal-scalar도 strong replay threshold를 넘었다. 따라서 이번 변경에서는 threshold 상수를 감으로 바꾸지 않고
+  replay shape 변수를 열어 낮은/높은 replay ratio를 분리 측정하는 쪽을 우선했다.
+- threshold feedback reason을 planner/runtime class vocabulary로 승격했다. 후속 plan이
+  `threshold-input=.../reason:root-empty-saturated`를 소비하면 `adjacency-empty-batch` /
+  `keep-empty-batch`를 출력하고, observed empty lifecycle은 `adjacency-empty-lifecycle` 후보로 둔다.
+  이는 `adjacency-cache-seeded` 안에 empty completion/batch request가 묻히지 않게 하기 위한 정리다.
+- runtime feedback 우선순위도 맞췄다. payload replay run이 있으면 missing-vertex 또는 empty lifecycle
+  정규화보다 `adjacency-replay`가 우선하고, replay가 없는 planned empty lifecycle evidence만 planner의
+  empty lifecycle class와 맞춘다.
+- payload feedback을 단순 run count가 아니라 replay/seed ratio가 있는 planner input으로 확장했다.
+  `VLE Edge Source`는
+  `payload-input=.../replay-percent:N/seed-percent:N/...`를 출력하고, replay 비율이 25% 이상이면
+  path/object consumer의 endpoint headroom을 0.25까지 낮춰 seed-only feedback보다 더 공격적으로
+  `age_adjacency` lifecycle을 유지한다. terminal-scalar consumer는 같은 25% replay evidence를
+  `payload-replay-observed`로 유지하고 headroom 0.35를 사용해 scalar-only output의 endpoint-btree 여지를
+  더 남긴다. `vle_payload_replay_policy` 후속 path plan은
+  `payload-input=runtime-cache/headroom:25/.../replay-percent:25/seed-percent:50/.../reason:payload-replay-ratio-observed`
+  를, 후속 terminal-property plan은
+  `payload-input=runtime-cache/headroom:35/.../replay-percent:25/seed-percent:50/.../reason:payload-replay-observed`
+  를 고정한다.
+- `vle_payload_replay_policy` regression을 추가해 한 실행 안에서 같은 source vertex의 `age_adjacency`
+  payload cache replay가 실제 발생하는 shape를 고정했다. 첫 `EXPLAIN ANALYZE`는
+  `payload-cache=runs:scan:4/replay:1/seed:2/...`를 출력하고, 후속 `EXPLAIN`은
+  `payload-input=runtime-cache/.../replay-runs:1/.../reason:payload-replay-ratio-observed`를 출력한다.
+  seed-only feedback보다 강한 replay evidence가 planner input으로 들어오는 contract를 hidden assertion 없이
+  plan surface로 검증한다.
+- `age_adjacency` payload cache evidence를 source-run 단위와 tuple/event 단위로 분리했다. fresh scan,
+  payload replay, cache seed run을 따로 누적하고 기존 scan/replay/seed count와 함께 출력한다.
+- `VLE Source Runtime`은
+  `payload-cache=runs:scan:N/replay:N/seed:N/tuples:scan:N/replay:N/seeds:N`을 출력한다.
+- backend-local source feedback cache가 payload scan/replay/seed run evidence도 보관한다. 다음 planning은
+  `payload-input=runtime-cache/headroom:N/scan-runs:N/replay-runs:N/seed-runs:N/replay-percent:N/seed-percent:N/observed:N/reason:...`으로
+  입력 여부를 드러내고, payload cache seed evidence는 endpoint headroom을 더 낮추는 후보가 된다.
+- `tools/vle_benchmark.sql`은 `payload_*_runs`, `payload_scan_tuples`, `payload_replay_tuples`,
+  `payload_seed_events`, `payload_input_*`를 runtime summary와 planner/runtime join summary에 포함한다.
+- benchmark harness에 `payload-replay-path`, `payload-replay-terminal`, `payload-replay-vertex`,
+  `payload-replay-properties` shape를 추가했다. converging `ReplayStart -> ReplayMid -> ReplayHub ->
+  ReplayLeaf` workload로 seed-only feedback과 실제 replay-ratio feedback을 분리해 본다.
+- planner가 `payload-input` replay reason을 소비하면 policy class/recommendation도
+  `adjacency-replay`/`keep-age-adjacency`로 정규화한다. source는 이미 맞지만 class vocabulary가
+  `adjacency-cache-seeded`로 남아 benchmark에서 mismatch로 보이던 상태를 runtime feedback class와 맞췄다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `AgeVLEStreamEdgeSource` descriptor layout 변경 뒤 stale object를 피하기 위해
+    `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config` 후 Werror rebuild
+    실행
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `63600+` 동적 port에서 materialized replay sweep 실행. path/object/properties는
+    25% replay부터 `payload-replay-ratio-observed`를 출력하고, terminal-scalar는 25% observed / 40% strong
+    경계를 유지했다.
+  - 임시 PostgreSQL instance `63800+` 동적 port에서 `replay_branches=2`, `replay_leaves=16` materialization
+    weight smoke 실행. `payload-replay-path`는 weight 3/headroom 18, `payload-replay-vertex`와
+    `payload-replay-properties`는 weight 2/headroom 20, `payload-replay-terminal`은 weight 1/headroom 35를
+    출력했다.
+  - 임시 PostgreSQL instance `62000+` 동적 port에서 small profile `tools/vle_benchmark.sql` smoke 실행
+  - 임시 PostgreSQL instance `63300+` 동적 port에서 `replay_branches=3`, `replay_leaves=16` terminal-scalar
+    threshold smoke 실행. `payload-replay-terminal`은 replay percent 40, headroom 25,
+    `payload-replay-ratio-observed`를 출력했다.
+
+## 2026-06-05: VLE frontier empty batch evidence
+
+- `age_adjacency` frontier known-empty queue flush를 batch lifecycle로 계측했다. runtime stats는 flush 수,
+  direction, queued key 수, 최대 flush 폭을 누적한다.
+- `VLE Source Runtime`은
+  `empty-frontier-batch=flushes:N/out:N/in:N/keys:N/max:N`을 출력한다. 이는 `empty-frontier` mark 수와
+  별도로 source completion queue가 얼마나 큰 batch로 flush됐는지 보여준다.
+- `tools/vle_benchmark.sql`은 `empty_frontier_batch_*` 컬럼을 runtime summary와 planner/runtime join summary에
+  포함한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61973`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE threshold feedback cache state
+
+- backend-local threshold feedback cache가 `observed_count`, `saturated_count`, `relaxed_count`를 보관하게 했다.
+  saturated root empty evidence는 batch를 키우고, non-saturated completion evidence는 관측 completion의 2배와
+  현재 capacity 사이에서 batch를 다시 낮출 수 있다.
+- `VLE Source Runtime`은 `threshold-feedback=.../headroom:N/batch:N/...`을 출력하고, `VLE Edge Source`는
+  `threshold-cache=observed:N/saturated:N/relaxed:N`을 출력한다.
+- `tools/vle_benchmark.sql`은 `threshold_feedback_batch`와 `threshold_cache_*` 컬럼을 planner/runtime summary에
+  포함한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61972`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE saturated feedback batch sizing
+
+- backend-local threshold feedback cache가 endpoint headroom뿐 아니라 다음 `empty-batch` 후보도 보관하게 했다.
+  root empty completion이 batch capacity를 포화하면 다음 planning은 batch를 최소 현재 capacity의 2배 또는
+  관측 completion 수까지 키운다.
+- `VLE Edge Source`의 `threshold-input` surface를
+  `threshold-input=none|runtime-cache/headroom:N/batch:N/source:.../reason:...`으로 확장했다. planner가 읽은
+  batch 후보는 `AgeVLEStreamEdgeSource` descriptor를 거쳐 executor의 empty lifecycle capacity가 된다.
+- `vle_empty_cache_policy` regression fixture를 8-way fan-out으로 넓혀 `threshold-feedback=...reason:root-empty-saturated`
+  뒤 후속 plan이 `empty-batch=eligible/size:16`과
+  `threshold-input=runtime-cache/headroom:35/batch:16/source:out/reason:root-empty-saturated`를 출력하도록 고정했다.
+- `tools/vle_benchmark.sql`은 `threshold_input_batch`를 planner summary와 planner/runtime join summary에 포함한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61971`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE threshold feedback planner cache
+
+- runtime `threshold-feedback`을 `graph,label,edge-label-oid,consumer-class,active-direction` 키의 backend-local
+  feedback cache에 기록하고, 다음 planning의 `VLESourcePolicyProfile`이 이를 endpoint headroom 입력으로
+  소비하도록 연결했다.
+- `AgeVLEStreamEdgeSource` descriptor에 `threshold_input_*` typed field를 추가했다. `VLE Edge Source`는
+  `threshold-input=none|runtime-cache/headroom:N/batch:N/source:.../reason:...`을 출력하므로 raw EXPLAIN에서
+  runtime feedback이 planner input으로 들어왔는지 확인할 수 있다.
+- `vle_empty_cache_policy` regression은 `EXPLAIN ANALYZE` 뒤 같은 shape의 `EXPLAIN`을 실행해
+  `threshold-input=runtime-cache/headroom:50/batch:8/source:out/reason:root-empty-observed`를 고정한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61971`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE empty lifecycle descriptor
+
+- `VLESourceRuntimeThresholdFeedback`을 추가해 root/source empty completion summary를 다음 source policy input
+  후보로 해석한다. `root-empty`가 saturated이면 runtime feedback은 endpoint headroom 후보를 0.35로 낮추고,
+  saturated가 아니면 현재 planned headroom을 유지한 observed feedback으로 남긴다.
+- `VLE Source Runtime`은 `threshold-feedback=eligible|ineligible/headroom:N/source:out|in|both|none/reason:...`
+  을 출력한다. 이는 아직 persistent cache가 아니라, benchmark와 raw EXPLAIN에서 어떤 shape가 threshold 보정
+  입력이 될 수 있는지 보여주는 typed feedback surface다.
+- `tools/vle_benchmark.sql`은 `threshold_feedback`, `threshold_feedback_headroom`,
+  `threshold_feedback_source`, `threshold_feedback_reason`을 runtime summary와 planner/runtime join summary에
+  포함한다.
+- repeated empty source completion을 `VLETraversalEmptyCompletionSummary` root descriptor로 올렸다.
+  source skip/cache/frontier/run completion은 root summary와 source stats snapshot을 함께 갱신하고,
+  `AgeVLEStreamScanState` accumulator가 이 필드를 누적한다.
+- `VLE Source Runtime`은 `root-empty=completion:N/out:N/in:N/batch:N/saturated-roots:N`을 출력한다.
+  `empty-summary`가 전체 source counter 합계라면, `root-empty`는 planned lifecycle batch capacity와 root/source
+  completion 방향성을 같이 보여주는 feedback surface다.
+- `tools/vle_benchmark.sql`은 `root_empty_completion_count`, `root_empty_completion_out`,
+  `root_empty_completion_in`, `root_empty_batch_capacity`, `root_empty_saturated_count`를 runtime summary와
+  planner/runtime join summary에 포함한다.
+- header struct 변경 뒤 stale object로 `AGE VLE stream multi-call context` chunk overwrite가 발생해
+  `make clean` 뒤 Werror rebuild로 ABI 크기 불일치를 제거했다.
+
+- `empty-batch` size가 강한 repeated completion 후보이면 endpoint headroom을 0.50에서 0.35로 낮춘다.
+  작은 synthetic fixture에서는 source가 이미 `age_adjacency`여도, 큰 dataset에서는 endpoint-btree 유지 여지를
+  더 줄이는 threshold 보정이다.
+- `VLE Source Runtime`에 `empty-summary=completion:N/batch:N/saturated:true|false`를 추가해
+  frontier/run/cache/complete evidence가 planned batch capacity를 채웠는지 raw EXPLAIN으로 확인한다.
+- runtime action은 batch가 포화된 `empty-run`/`empty-frontier` evidence에서
+  `keep-empty-run-batch:*` 또는 `keep-empty-frontier-batch:*`를 출력한다.
+- `tools/vle_benchmark.sql`은 `empty_completion_count`, `empty_summary_batch`,
+  `empty_batch_saturated`를 planner/runtime join summary에 포함한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin` temp instance `61968`에서
+    `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE empty lifecycle batch descriptor
+
+- planned empty lifecycle에서 repeated empty completion을 기대할 수 있으면 `empty_lifecycle_batch_size`를
+  planner descriptor에 추가한다.
+- `AgeVLEInput`, context apply, cached refresh, local context, source stats가 같은 batch size를 전달하고
+  `VLE Source Runtime`은 `empty-batch=eligible|ineligible/size:N/capacity:N match=true|false`를 출력한다.
+- `age_adjacency` frontier known-empty queue는 planned batch capacity를 초기 allocation에 사용해, 큰 fan-out에서
+  반복 empty completion을 작은 array growth가 아니라 lifecycle batch 후보로 처리한다.
+- `tools/vle_benchmark.sql`은 planner/runtime join summary에서 `empty_batch`, `empty_batch_size`,
+  `empty_batch_capacity`, `runtime_empty_batch_match`를 출력한다.
+- `AgeVLEInput`과 source stats layout 변경 뒤 incremental build에서는 stale object로 SIGSEGV가 날 수 있으므로,
+  이 종류의 변경은 clean rebuild로 ABI 경계를 맞춘 뒤 판단한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin` temp instance `61967`에서
+    `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE empty lifecycle context handoff
+
+- empty lifecycle descriptor를 `AgeVLEInput`, context apply, cached refresh, local context,
+  source stats까지 관통시켰다.
+- cached context reuse가 planner의 empty lifecycle policy를 잃지 않도록
+  `VLEContextRefreshInput`에도 같은 typed field를 싣고, refresh 시점의 context run을 runtime
+  source stats에 기록한다.
+- `VLE Source Runtime`은 `empty-context=eligible|ineligible/depth:N/runs:N match=true|false`를 출력해
+  raw EXPLAIN만으로 plan descriptor와 executor-local/cached context handoff가 같은지 확인한다.
+- `tools/vle_benchmark.sql` planner/runtime join summary도 `empty_context`, `empty_context_depth`,
+  `empty_context_match`, `runtime_empty_context_match`를 출력한다.
+- 이 변경은 `AgeVLEInput`과 `AgeVLESourceStats`의 cross-module struct layout을 바꾸므로 incremental object가
+  섞이면 allocation corruption처럼 보일 수 있다. 실패 시 되돌리지 않고 clean rebuild로 ABI 경계를 맞춘다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin` temp instance `61966`에서
+    `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE empty lifecycle planner descriptor
+
+- planner source cost decision에 `empty_lifecycle_eligible`와 `empty_lifecycle_depth`를 추가했다.
+- `AGE VLE Stream`의 `AgeVLEStreamEdgeSource` descriptor가 empty source lifecycle eligibility를
+  typed field로 싣고, executor/runtime feedback이 이 field를 직접 읽는다.
+- `VLE Edge Source`는 `empty-lifecycle=eligible|ineligible/depth:N`, `VLE Source Runtime`은
+  `empty-plan=eligible|ineligible/depth:N`을 출력한다.
+- planned `adjacency-cache-seeded` source와 runtime empty suppression/frontier/run evidence를 비교할 때
+  EXPLAIN 문자열을 역파싱하지 않고 descriptor field로 판단한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+
+## 2026-06-05: VLE empty lifecycle benchmark join
+
+- `tools/vle_benchmark.sql` planner summary가 `empty_lifecycle`, `empty_lifecycle_depth`를 출력한다.
+- runtime summary와 planner/runtime join summary가 `empty_plan`, `empty_plan_depth`,
+  `empty_plan_match`, `empty_plan_depth_match`, `runtime_empty_plan_match`를 출력한다.
+- 80-label/8-edge fan-out smoke에서 right/left terminal/path/object shape 모두 planned empty lifecycle과
+  runtime empty plan이 일치했고, `suppression-match=true`, `class_match=true`,
+  `empty_plan_match=true`가 함께 출력됐다.
+- 검증:
+  - `/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin` temp instance `61961`에서
+    `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE runtime empty plan match
+
+- `VLE Source Runtime`에 `empty-plan=... match=true|false`를 추가했다.
+- runtime empty source evidence가 없으면 mismatch로 보지 않고, `age_adjacency` empty probe/suppression/cache/
+  frontier/run evidence가 있으면 planned empty lifecycle eligibility가 있는지 직접 비교한다.
+- `cypher_vle` expected output은 raw EXPLAIN에서 `empty-plan match=true`를 고정한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin` temp instance `61961`에서
+    `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE expansion source-run empty precheck
+
+- missing-vertex 전용으로만 쓰던 known-empty source-run precheck를 일반 expansion source cursor에도 적용했다.
+- `age_vle_context_expansion_source_cursor_known_empty()`가 planned source cursor의 payload cache `known_empty`
+  state를 확인하고, source object를 만들기 전에 `empty-run` skip으로 기록한다.
+- known-empty로 완료된 source direction은 used source로 기록해 packed fallback이 같은 방향을 다시 열지 않게 했다.
+- 80-label/8-edge fan-out smoke에서 right fanout terminal/path/vertex/properties shape의
+  `empty-cache=age_adjacency:8/out:8/in:0`이 `empty-run=age_adjacency:8/out:8/in:0`으로 올라갔다.
+  left fanout은 frontier hint가 없어 기존 `empty-suppressed=age_adjacency:8/out:0/in:8`을 유지했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin` temp instance `61962`에서
+    `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE reverse empty directory probe
+
+- `age_adjacency_visible_payload_scan_key_known_empty()`가 delta가 없는 index에서 directory cache range 밖의 key도
+  directory lookup으로 확인해 negative property를 제공하게 했다.
+- active payload scan의 main cursor와 directory cache는 분리되어 있으므로, frontier hint 중 directory cache가
+  다른 page로 이동해도 현재 source payload scan을 유지한다.
+- 80-label/8-edge fan-out smoke에서 left/reverse terminal/path shape도
+  `empty-suppressed=age_adjacency:8/out:0/in:8` 대신
+  `empty-frontier=age_adjacency:8/out:0/in:8`과 `empty-run=age_adjacency:8/out:0/in:8`을 출력했다.
+- `cypher_vle` expected output은 broader directory negative property로 생긴
+  `empty-frontier`/`empty-run` evidence를 고정한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin` temp instance `61963`에서
+    `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE empty lifecycle pressure vocabulary
+
+- `VLE Source Runtime`에 `empty-evidence=none|empty-scan|endpoint-empty-scan|empty-complete|empty-cache|empty-frontier|empty-run`을
+  추가했다.
+- planned empty lifecycle과 runtime evidence가 일치하면 generic `adjacency-empty-suppressed` pressure로 남기지
+  않고, `adjacency-empty-frontier` 또는 `adjacency-empty-run`처럼 실제 제공된 lifecycle 단계로 분리한다.
+- `tools/vle_benchmark.sql` runtime summary와 planner/runtime join summary도 `empty_evidence`를 추출한다.
+- `cypher_vle` expected output은 raw EXPLAIN에서 planned lifecycle match와 `empty-evidence`, pressure/action
+  vocabulary를 함께 고정한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin` temp instance `61964`에서
+    `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE empty lifecycle source threshold
+
+- cache-seed 가능한 multi-step `age_adjacency` source의 endpoint 유지 headroom을 generic cache seed 75%에서
+  planned empty lifecycle 전용 50%로 분리했다.
+- `VLE Edge Source`는 empty lifecycle eligible source에서 `endpoint-headroom=0.50`을 출력한다.
+- endpoint work가 전체 budget 안에 있지만 empty lifecycle headroom을 넘는 경우 policy reason은
+  `empty-lifecycle-headroom`으로 출력된다. 이는 source enum rollback이 아니라 repeated empty completion을
+  기대하는 root/source lifecycle threshold 보정이다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin` temp instance `61965`에서
+    `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE empty source cache lifecycle
+
+- `age_adjacency` payload cache entry에 `known_empty` state를 추가했다.
+- payload cache replay와 known-empty hit은 payload scan cursor를 열기 전에 판단한다.
+- activation cleanup은 adjacency scan cursor와 output scratch만 정리하고, payload cache는 cached VLE context의
+  전체 cleanup까지 유지한다. cache storage는 activation `multi_call_context`가 아니라 explicit free 대상 context에
+  둬 reset 뒤 dangling pointer가 남지 않게 했다.
+- `VLE Source Runtime`과 benchmark summary에 `empty-cache=age_adjacency:N/out:N/in:N`을 추가했다.
+- `vle_empty_cache_policy` regression fixture는 converging path에서 같은 terminal source가 같은 activation 안에서
+  반복 확장될 때 `empty-cache=age_adjacency:1/out:1/in:0`이 출력되는 plan evidence를 고정한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 fanout small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE suppressed source feedback surface
+
+- `VLE Source Runtime` explain line에 `suppressed-source=out:.../in:...`와
+  `suppression-match=true|false`를 추가했다.
+- suppressed empty source가 planner/executor가 고른 directed source와 맞는지 문자열 재파싱 없이
+  runtime feedback에서 계산한다.
+- `tools/vle_benchmark.sql` runtime summary와 planner/runtime join summary가 `suppressed_source`,
+  `suppression_match`를 추출한다.
+- small fan-out smoke에서 right fan-out은 `suppressed-source=out:age-adjacency/in:none`,
+  left fan-out은 `suppressed-source=out:none/in:age-adjacency`로 출력되고 모두
+  `suppression-match=true`였다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `git diff --check`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 fanout small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE empty adjacency source suppression
+
+- `age_adjacency_visible_payload_scan_begin_key()`가 false인 source vertex는 payload scan을 열지 않고
+  selected empty source completion으로 처리한다.
+- `age_adjacency_empty_source_skips` counter를 추가하고 `VLE Source Runtime`과 benchmark summary에
+  `empty-suppressed=age_adjacency:N`을 출력한다.
+- suppressed empty source counter를 outgoing/incoming 방향별로 나누고,
+  `action=observe-suppression:out|in|both`를 출력한다.
+- missing-vertex fallback에서는 suppressed empty source를 failure가 아니라 handled source로 보아 packed/global
+  fallback이 잘못 활성화되지 않게 했다.
+- 800-label fan-out smoke에서 `age_adjacency` scan이 9회에서 1회로 줄고, empty scan 8회가
+  `empty-suppressed=8`, `pressure=adjacency-empty-suppressed`로 이동했다. right fan-out은 `out:8/in:0`,
+  left fan-out은 `out:0/in:8`로 summary에 분리된다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `tools/vle_benchmark.sql` smoke profile: `run_standard_cases=0`, `800-label-fanout-*`
+
+## 2026-06-05: VLE runtime pressure 출력 추가
+
+- `VLE Source Runtime` explain line에 `pressure=... action=...`을 추가했다.
+- source mismatch, class mismatch, materialized tie, cache seed miss, adjacency density low, endpoint fanout을
+  runtime feedback class와 별도 pressure로 분류한다.
+- `tools/vle_benchmark.sql` runtime summary와 planner/runtime join summary가 `runtime_pressure`,
+  `runtime_action`을 추출한다.
+- fanout small benchmark smoke에서 `800-label-fanout-*` shape들이 `adjacency-density-low` /
+  `check-fallback-suppression`을 출력해 다음 후보가 source selection보다 age_adjacency scan density와 fallback
+  suppression 쪽임을 드러냈다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 fanout small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE materialized tie source policy 보정
+
+- endpoint work가 fanout budget과 같은 tie일 때 consumer class를 반영한다.
+- `terminal-scalar` depth 1 tie는 endpoint-btree를 유지하지만, `path-materialized`와 `terminal-object` tie는
+  final object/path materialization 비용을 반영해 `age_adjacency`를 선호한다.
+- `adjacency-materialized-tie` class와 `prefer-age-adjacency-materialization` recommendation을 추가해 depth/cache
+  seed 근거와 materialization tie 근거를 분리했다.
+- `cypher_vle` regression에 `vle_tie_policy` fixture를 추가해 같은 fanout 1 incoming traversal에서 scalar는
+  endpoint-btree, path/terminal vertex는 `age_adjacency`를 고르는 plan evidence를 고정했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 fanout small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-04: VLE source policy profile descriptor화
+
+- source policy consumer, consumer class, active direction, fanout budget을 `AgeVLEStreamEdgeSource`
+  descriptor field로 추가했다.
+- `VLE Edge Source` explain은 이 field를 `profile=consumer:.../class:.../active:.../budget:...`로 출력하고,
+  `policy=` text는 directed source, depth/work, reason, class/recommendation 중심으로 줄였다.
+- `tools/vle_benchmark.sql` planner summary와 planner/runtime join summary는 `policy=` 내부가 아니라
+  `profile=` surface에서 consumer/active/budget을 추출한다.
+- header layout 변경 뒤 stale `cypher_vle_stream.o`가 old struct offset을 읽어 `planned-class=unknown`과
+  `endpoint-headroom=0.00`을 출력했고, 관련 object를 재컴파일해 descriptor handoff를 확인했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 fanout small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-04: VLE materialization source explain 노출
+
+- `AGE VLE Stream`의 `VLE Materialization` explain line에 `object-source` 또는 `vertex-source`를 추가했다.
+- path/terminal vertex output은 `object-source=global-metadata|label-row-fallback`, terminal properties output은
+  `vertex-source=global-metadata|label-row-fallback`을 출력한다.
+- local edge-state source 뒤 label relation row fallback으로 final object/properties를 만드는 contract를
+  `cypher_vle` expected에 직접 남겨 hidden assertion 대신 raw plan surface로 검증한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance에서 fanout small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-04: VLE terminal consumer source budget 분리
+
+- source policy consumer class를 `terminal-scalar`, `terminal-object`, `path-materialized`로 세분화했다.
+- `terminal-property` direct scalar output은 기존 fanout 2 endpoint-btree budget을 유지한다.
+- `terminal-vertex`와 `terminal-properties`는 final vertex/properties materialization이 필요하므로 fanout 1 budget을
+  사용한다.
+- `cypher_vle` regression에 fanout 2, depth 1 terminal vertex/properties explain fixture를 추가했다.
+- `tools/vle_benchmark.sql` 기본 workload에 `800-label-fanout-vertex`와
+  `800-label-fanout-properties`를 추가해 terminal scalar/object/path consumer를 같이 비교한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-04: VLE runtime feedback planned-class 출력
+
+- `VLE Source Runtime` explain line에 `planned-class`, `class-match`, `planned-recommendation`을 추가했다.
+- planner policy text의 stable `class=... recommendation=...` token을 runtime feedback formatter에서 다시 읽어,
+  raw `EXPLAIN ANALYZE`만으로 planner feedback class와 runtime feedback class가 맞는지 확인할 수 있게 했다.
+- `tools/vle_benchmark.sql` runtime summary와 planner/runtime join summary도 `planned_class`,
+  `runtime_class_match`, `planned_recommendation`을 추출한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-04: VLE source policy profile 추가
+
+- source policy 입력을 `VLESourcePolicyProfile`로 묶어 output requirement, consumer class, fanout budget,
+  finite depth, cost eligibility, cache seed eligibility를 같은 request로 다룬다.
+- `VLE Edge Source` policy text에 `cache-seed=eligible|ineligible`을 추가했다. eligible은 finite multi-step이고
+  `age_adjacency` 후보가 있을 때만 표시한다.
+- `tools/vle_benchmark.sql` planner summary와 planner/runtime join summary도 `cache_seed`를 추출한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-04: VLE cache seed headroom threshold 적용
+
+- cache seed 가능한 multi-step `age_adjacency` 후보에서는 endpoint-btree 유지에 75% endpoint work headroom을
+  요구하도록 source policy를 조정했다.
+- endpoint work가 기존 limit 안이지만 75% headroom을 넘으면 `cache-seed-headroom` reason으로
+  `age_adjacency`를 선택한다.
+- `VLE Edge Source`와 benchmark summary에 `endpoint-headroom=0.75`를 출력한다.
+- `cypher_vle` regression에 `vle_headroom_policy` fixture를 추가해 `reason=out:cache-seed-headroom` plan
+  evidence를 고정했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-04: VLE source policy feedback descriptor화
+
+- `AGE VLE Stream` edge-source descriptor에 planner policy class, recommendation, cache seed eligibility,
+  endpoint headroom percent를 typed field로 추가했다.
+- `VLE Source Runtime` planned-class/planned-recommendation 출력은 더 이상 `VLE Edge Source` policy text를
+  역파싱하지 않고 descriptor field를 읽는다.
+- `cost_policy` 문자열은 explain/benchmark surface로 유지하되 executor feedback contract에서는 분리했다.
+- header layout 변경 뒤 stale `cypher_vle_stream.o`가 old struct offset을 읽어 `planned-class=unknown`이
+  출력되는 regression diff가 났고, CustomScan executor object까지 재컴파일해 descriptor field handoff를 확인했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-04: VLE source policy active direction 적용
+
+- `VLESourcePolicyProfile`에 active direction을 추가해 `right`, `left`, undirected VLE가 실제 사용하는 방향만
+  source policy threshold 대상으로 삼게 했다.
+- directed VLE의 inactive side는 `none` source와 `inactive-direction` reason으로 출력한다. runtime planned source도
+  inactive side를 `none`으로 보여 benchmark `source_match`와 `class_match`가 실제 traversal 방향만 비교한다.
+- `cypher_vle` regression에 left-direction fixture를 추가해 `active=in` plan evidence도 고정했다.
+- `tools/vle_benchmark.sql` planner summary와 planner/runtime join summary에 `active_direction`을 추가했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-04: VLE benchmark active source join 보강
+
+- `tools/vle_benchmark.sql`이 planner policy와 runtime planned source를 active direction 기준으로 분해해
+  `active_planner_source`, `active_planned_source`를 출력하도록 했다.
+- `source_match`는 더 이상 planner policy 문자열 전체에 runtime dominant source가 포함되는지만 보지 않고, `out`,
+  `in`, `both` active direction에 맞는 source를 비교한다.
+- 기본 fan-out benchmark에 `800-label-fanout-left-terminal`, `800-label-fanout-left-path`를 추가해 `active=in`
+  workload도 planner/runtime join summary에 들어가게 했다.
+- 검증:
+  - 임시 PostgreSQL instance `61959`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+
+## 2026-06-04: VLE terminal vertex label-row fallback 적용
+
+- standard+fanout benchmark에서 `800-label-fanout-vertex` `EXPLAIN ANALYZE RETURN n`이 local-source terminal
+  vertex object를 만들 때 global vertex metadata miss로 `build_vle_vertex_value()` assert에 걸리는 것을 확인했다.
+- `build_vle_vertex_value()`가 global metadata miss 시 graphid label id로 label cache를 찾고, vertex label relation의
+  id index/table scan으로 properties row를 읽어 vertex value를 만들도록 확장했다.
+- runtime feedback은 `cache_seed_eligible=false`인 shape에서 payload seed/replay counter만으로
+  `adjacency-cache-seeded` class를 출력하지 않고 planner descriptor의 class/recommendation을 유지한다.
+- `cypher_vle` regression에 terminal-vertex `EXPLAIN ANALYZE` fixture를 추가해 local-source terminal object
+  materialization과 `class-match=true` evidence를 고정했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - standard+fanout small profile `tools/vle_benchmark.sql` smoke 실행
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+
+## 2026-06-04: VLE runtime source planned-match 출력
+
+- `VLE Source Runtime` explain line에 `planned=out:.../in:... source-match=...`를 추가했다.
+- runtime dominant source가 planner fixed-source descriptor의 outgoing/incoming source family 중 하나와 맞는지
+  executor explain이 직접 출력한다.
+- `tools/vle_benchmark.sql` runtime summary와 planner/runtime join summary도 `planned_source`,
+  `runtime_source_match`를 추출한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-04: cached property slot descriptor에 handoff signature 보관
+
+- `CypherCachedPropertySlotDescriptor`가 `CypherPropertyHandoffDescriptor`를 함께 보관하도록 확장했다.
+- ordered property projection delay와 index canonicalization은 raw field 조합 대신 cached slot descriptor helper로
+  key source와 physical signature를 비교한다.
+- header layout 변경 후 stale object file이 `cypher_paths.c`에서 old offset으로 slot을 읽어 crash가 났고,
+  `lldb`로 `add_property_projection_custom_path()`의 `first_slot->container` 접근을 확인했다. `make clean` 뒤
+  전체 rebuild로 종속 object를 재생성했다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match index expr'`
+
+## 2026-06-04: property index canonical entry descriptor화
+
+- partial predicate/restriction canonicalization에서 raw `Node *` 목록 대신 cached property slot descriptor와
+  catalog expression surface를 함께 보관한다.
+- nested typed property index에서 rebuilt helper chain이 catalog expression surface를 바꾸면 index scan이
+  seq scan으로 떨어질 수 있음을 확인했고, canonical entry는 catalog에 저장된 expression을 보존하도록 조정했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match index expr'`
+
+## 2026-06-04: VLE source policy consumer evidence 추가
+
+- `VLEStreamSourceCostInput`에 `AgeVLEOutputRequirement`를 포함해 planner source policy가 어떤 consumer
+  requirement에 대한 결정인지 보존한다.
+- `AGE VLE Stream`의 `VLE Edge Source` policy text와 `tools/vle_benchmark.sql` planner summary에
+  `consumer=... consumer-class=...`를 출력한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+
+## 2026-06-04: VLE source policy combined work 추가
+
+- `VLEStreamSourceCostInput`에 traversal direction을 포함하고, undirected source policy에서 start/end fanout을
+  합친 combined endpoint work를 계산한다.
+- planner source policy가 local-index source를 고르면 runtime local edge-state도 graph metadata load 여부보다
+  planner descriptor를 우선해 같은 source contract를 따른다.
+- path materialization shape는 local edge-state source로 억지 전환하지 않는다. edge object materialization은
+  아직 global edge metadata contract가 필요하므로 terminal/local-safe shape에서만 local source policy를 적용한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+
+## 2026-06-04: VLE planner source policy feedback 연결
+
+- `VLE Edge Source` planner policy text에 `class=... recommendation=...`을 추가했다.
+- endpoint-btree 유지 plan은 `endpoint-direct/keep-endpoint-btree`, multi-step tie는
+  `adjacency-work-tie/prefer-age-adjacency-depth`, work 초과는 `adjacency-work/keep-age-adjacency`,
+  fanout 통계 부재는 `unknown-fanout/collect-endpoint-stats`로 드러난다.
+- `tools/vle_benchmark.sql`은 runtime feedback summary뿐 아니라 planner policy/reason/class/recommendation
+  summary도 추출한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+
+## 2026-06-04: VLE runtime source feedback 분류 추가
+
+- `VLE Source Runtime` feedback에 `class=...`와 `recommendation=...`을 추가했다.
+- endpoint-btree 직접 probe는 `endpoint-direct/keep-endpoint-btree`, `age_adjacency` payload cache seed가
+  발생한 multi-step source는 `adjacency-cache-seeded/prefer-age-adjacency-depth`로 드러난다.
+- source별 scan density, yield/replay/push 숫자와 함께 실행 source의 threshold 보정 방향을 regression-visible하게
+  만들었다.
+- `tools/vle_benchmark.sql`은 `VLE Source Runtime` line에서 dominant source, feedback class, recommendation을
+  별도 summary row로 추출한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+
+## 2026-06-04: VLE source fanout evidence와 tie policy 조정
+
+- `VLESourceFanoutEvidence`에 relation tuple/fanout 통계가 실제로 알려졌는지 나타내는 flag를 추가했다.
+  `AGE VLE Stream` verbose explain은 `stats=rel:.../start:.../end:...`를 출력해 fanout 0과 통계 부재를
+  구분한다.
+- endpoint-btree/`age_adjacency` source 선택에서 fanout 값이 0으로 보인다는 이유만으로 endpoint work를
+  신뢰하지 않고, endpoint fanout 통계가 알려진 경우에만 endpoint work threshold를 적용한다.
+- multi-step VLE에서 endpoint work가 threshold와 같은 tie이면 `age_adjacency`를 선택하도록 조정했다.
+  단일 step tie는 endpoint-btree를 유지하고, `*1..2` 이상 tie는 payload replay 가능성을 우선한다.
+- cached VLE context refresh input에 planner source policy를 포함해 refresh root descriptor가 현재
+  CustomScan descriptor의 source policy를 다시 읽도록 했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+
 ## 2026-06-04: VLE source policy reason 노출
 
 - `VLE Edge Source` policy text에 방향별 선택 사유를 `reason=out:.../in:...` 형태로 추가했다.
 - endpoint-btree 유지 사유는 `endpoint-work`, `age_adjacency` 전환 사유는 `work-exceeds-limit`로 드러나며,
-  source availability fallback은 `endpoint-only`, `unknown-fanout`, `no-source`, `layout`으로 구분된다.
+  source availability/fanout fallback은 `endpoint-only`, `unknown-fanout`, `adjacency-only`, `no-source`,
+  `layout`으로 구분된다.
+- `vle_adjacency_only_policy` regression fixture를 추가해 edge relation fanout statistics가 없는 cold policy에서
+  `reason=out:unknown-fanout/in:unknown-fanout`이 visible explain에 남도록 했다.
 - 검증:
   - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
   - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
@@ -2047,6 +2723,58 @@
 - 기존처럼 각 caller가 `estimate_vle_edge_endpoint_fanout()`과 `get_vle_relation_estimated_tuples()`를 직접
   조합하지 않게 하여 다음 endpoint-btree/`age_adjacency` cost decision 변경의 입력 boundary를 정리했다.
 
+## 2026-06-04: VLE planner/runtime feedback class 정렬
+
+- multi-step VLE에서 planner가 `age_adjacency`를 선택하면 planner policy class를
+  `adjacency-cache-seeded`로 출력하도록 조정했다.
+- `reason=out:.../in:...`은 기존 work-tie/work-exceeds-limit 정보를 유지하고, `class`는 runtime feedback과 같은
+  vocabulary로 맞춘다.
+- small benchmark smoke에서 terminal/path fan-out shape 모두 `source_match=true`, `class_match=true`를 확인했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - 임시 PostgreSQL instance `61959`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-04: VLE benchmark planner/runtime 비교 확장
+
+- `tools/vle_benchmark.sql` 기본 workload에 `800-label-fanout-path`를 추가해 terminal-property consumer와
+  path-materialized consumer를 같은 fan-out graph에서 비교한다.
+- planner summary가 `budget=fanout:N`을 추출하도록 확장했다.
+- benchmark 끝에 planner policy와 runtime feedback을 shape별로 join하는 summary를 추가했다. 이 summary는
+  consumer class, fanout budget, planner policy, runtime dominant source, `source_match`, `class_match`,
+  source별 density를 출력한다.
+- 검증:
+  - 임시 PostgreSQL instance `61959`에서 small profile smoke 실행:
+    `psql -p 61959 -d postgres -v graph=age_vle_bench_smoke -v sparse_nodes=8 -v dense_nodes=4 -v label_fanout_labels=4 -v label_fanout_edges=8 -v run_standard_cases=0 -f tools/vle_benchmark.sql`
+
+## 2026-06-04: VLE consumer별 source budget
+
+- `VLEStreamSourceCostDecision`이 output requirement별 endpoint-btree fanout budget을 사용하도록 바꿨다.
+- terminal-only consumer는 기존 fanout 2 budget을 유지하고, path-materialized consumer는 fanout 1 budget으로
+  낮춰 path output에서 `age_adjacency` 후보를 더 빨리 선택하게 했다.
+- `AGE VLE Stream` explain policy text에 `budget=fanout:N`을 출력한다.
+- `cypher_vle` regression에 fanout 2, depth 1 path output fixture를 추가해 terminal-only는 endpoint-btree를
+  유지하고 path-materialized는 `age_adjacency`로 전환하는 차이를 expected에 남겼다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+
+## 2026-06-04: VLE materialization fallback source 확장
+
+- path/list materialization consumer가 local edge-state source를 사용할 수 있도록 vertex/edge object builder의
+  global metadata 의존을 분리했다.
+- global graph context에 vertex/edge object metadata가 없으면 graphid label id로 label relation을 찾고, id btree
+  index 또는 table scan으로 row를 읽어 object를 materialize한다.
+- planner/runtime local-index gate에서 path 출력과 cached grammar 제한을 제거했다. property constraint가 없는
+  label-constrained VLE는 consumer requirement와 무관하게 local-index 후보가 될 수 있다.
+- `cypher_vle` expected는 path consumer explain이 `local-index-candidate` source policy를 직접 출력하도록 갱신했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+
 ## 2026-06-04: VLE source cost evidence descriptor
 
 - `AGE VLE Stream` edge-source descriptor에 label relation `reltuples`와 endpoint
@@ -2086,6 +2814,73 @@
   - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
   - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
   - `git diff --check`
+
+## 2026-06-05: VLE frontier empty source batching
+
+- `age_adjacency` visible payload scan에 directory-cache 기반 known-empty key hint를 추가했다.
+- VLE `age_adjacency` payload source가 frontier next source key를 source-local batch로 모은 뒤 source 종료 시점에
+  payload cache `known_empty` entry로 반영하도록 했다. active scan 중 payload cache hash를 mutate하지 않고,
+  self-loop/current source key는 batch 대상에서 제외한다.
+- `AgeVLESourceStats`, `VLE Source Runtime`, `tools/vle_benchmark.sql`에
+  `empty-frontier=age_adjacency:N/out:N/in:N` evidence를 추가했다.
+- `vle_frontier_empty_policy` regression fixture를 추가해 frontier mark와 이어지는 known-empty cache hit을
+  `EXPLAIN (ANALYZE, VERBOSE, TIMING OFF, SUMMARY OFF)` expected로 고정했다.
+- lldb로 확인한 SIGSEGV는 새 field 추가 뒤 stale object가 남은 incremental build 문제였다.
+  `make clean` 후 전체 재빌드로 `cleanup_callback` offset mismatch가 해소됐다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `tools/vle_benchmark.sql` smoke profile: `run_standard_cases=0`, `800-label-fanout-*`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `git diff --check`
+
+## 2026-06-05: VLE known-empty source-run precheck
+
+- `age_vle_adjacency_payload_cache_lookup()`를 추가해 payload cache를 생성하지 않는 read-only lookup을 제공했다.
+- missing vertex fallback이 payload source object를 만들기 전에 active source cursor의 `known_empty` state를
+  확인하고, 모든 active direction이 known-empty이면 source-run 자체를 처리된 empty completion으로 접도록 했다.
+- `VLE Source Runtime`과 `tools/vle_benchmark.sql` summary에
+  `empty-run=age_adjacency:N/out:N/in:N` evidence를 추가했다.
+- `vle_empty_cache_policy`와 `vle_frontier_empty_policy` expected는 known-empty source가 payload begin 단계의
+  `empty-cache`보다 더 이른 source-run precheck에서 접히는 것을 보여준다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `tools/vle_benchmark.sql` smoke profile: `run_standard_cases=0`, `800-label-fanout-*`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `git diff --check`
+
+## 2026-06-05: VLE empty lifecycle runtime feedback 보정
+
+- `missing-vertex-source` runtime class가 empty source lifecycle evidence를 덮어 class mismatch로 보이던 문제를
+  정리했다.
+- planned source와 runtime dominant source가 일치하고, planned class가 `adjacency-cache-seeded`이며, empty source
+  suppression/frontier/run evidence가 있으면 runtime feedback class와 recommendation을 planned descriptor와 맞춘다.
+- `adjacency-empty-suppressed` pressure를 cache seed miss보다 먼저 분류해 empty lifecycle pressure가 raw EXPLAIN에
+  직접 남도록 했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `git diff --check`
+
+## 2026-06-05: VLE empty source pressure 분리
+
+- `AgeVLESourceStats`에 `age_adjacency_empty_scans`와 `endpoint_btree_empty_scans`를 추가했다.
+- adjacency/endpoint candidate source wrapper가 yielded candidate 0개인 scan을 empty probe로 기록하고,
+  CustomScan executor가 iterator별 counter를 실행 전체 누적값에 합산한다.
+- `VLE Source Runtime`과 `tools/vle_benchmark.sql` summary가 `empty=age_adjacency:N/endpoint-btree:N`,
+  `runtime_pressure`, `runtime_action`을 함께 출력한다.
+- 800-label fan-out smoke에서 기존 `adjacency-density-low`가 실제로는 `age_adjacency` scan 9회 중 empty
+  8회인 `adjacency-empty-probe` / `suppress-empty-source` 압력임을 분리했다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_global_graph age_adjacency'`
+  - `tools/vle_benchmark.sql` smoke profile: `run_standard_cases=0`, `800-label-fanout-*`
 
 ## 2026-06-04: VLE traversal state 통합
 

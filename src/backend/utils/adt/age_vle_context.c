@@ -44,13 +44,20 @@ struct VLEContextEndpointIndexSource
 struct VLEContextAgeAdjacencyPayloadSource
 {
     graphid source_vertex_id;
+    Oid index_oid;
     AgeAdjacencyVisiblePayloadScan *payload_scan;
     VLEAdjacencyPayloadCacheEntry *cache_entry;
+    graphid *frontier_empty_keys;
     int64 scanned;
     int64 replay_index;
+    int64 frontier_empty_count;
+    int64 frontier_empty_capacity;
     bool use_payload_cache;
     bool replay_payload_cache;
+    bool empty_suppressed;
+    bool outgoing;
     bool pending_payload_valid;
+    bool cache_seed_run_recorded;
     AgeAdjacencyPayload pending_payload;
 };
 
@@ -77,6 +84,10 @@ static void free_edge_property_constraints(VLE_local_context *vlelctx);
 static void free_cached_property_value(agtype_value *value);
 static void free_context_identity(VLE_local_context *vlelctx);
 static void free_terminal_output_resources(VLE_local_context *vlelctx);
+static void reset_root_empty_completion_summary(
+    VLE_local_context *vlelctx);
+static void record_root_empty_completion(
+    VLE_local_context *vlelctx, bool outgoing);
 static AgeAdjacencyVisiblePayloadScan *age_vle_context_get_payload_scan(
     VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor);
 static VLEAdjacencyPayloadCacheEntry *age_vle_context_get_payload_cache_entry(
@@ -97,6 +108,15 @@ static bool next_packed_adjacency_entry(GraphEdgeAdjList *edge_out,
                                         GraphEdgeAdjList *edge_self,
                                         int64 *edge_self_idx,
                                         GraphEdgeAdjEntry **adj_entry);
+static bool age_vle_context_age_adjacency_frontier_empty_seen(
+    VLEContextAgeAdjacencyPayloadSource *source, graphid source_vertex_id);
+static void age_vle_context_queue_age_adjacency_frontier_empty(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    graphid source_vertex_id);
+static void age_vle_context_apply_age_adjacency_frontier_empty(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
+static bool age_vle_context_cursor_known_empty(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor);
 
 void age_vle_context_apply_base(
     VLE_local_context *vlelctx,
@@ -149,12 +169,21 @@ void age_vle_context_apply_base(
         context_apply->source_policy_outgoing_kind;
     vlelctx->source_policy_incoming_kind =
         context_apply->source_policy_incoming_kind;
+    vlelctx->empty_lifecycle_policy_known =
+        context_apply->empty_lifecycle_policy_known;
+    vlelctx->empty_lifecycle_eligible =
+        context_apply->empty_lifecycle_eligible;
+    vlelctx->empty_lifecycle_depth =
+        context_apply->empty_lifecycle_depth;
+    vlelctx->empty_lifecycle_batch_size =
+        context_apply->empty_lifecycle_batch_size;
 
     vlelctx->root.lidx = context_apply->lower;
     vlelctx->root.uidx = context_apply->upper;
     vlelctx->root.uidx_infinite = context_apply->upper_infinite;
     vlelctx->output.terminal_property_prefetch_budget =
         context_apply->terminal_property_prefetch_budget;
+    age_vle_context_record_empty_lifecycle_policy(vlelctx);
 }
 
 static void cache_edge_property_constraints(VLE_local_context *vlelctx)
@@ -281,6 +310,7 @@ void age_vle_context_apply_root(
     vlelctx->root.reverse_paths_to = root->reverse_paths_to;
     vlelctx->root.reverse_output_path = root->reverse_output_path;
     vlelctx->root.source_layout = root->source_layout;
+    vlelctx->root.empty_completion = root->empty_completion;
 }
 
 void age_vle_context_get_current_root(
@@ -297,6 +327,7 @@ void age_vle_context_get_current_root(
     root->reverse_paths_to = vlelctx->root.reverse_paths_to;
     root->reverse_output_path = vlelctx->root.reverse_output_path;
     root->source_layout = vlelctx->root.source_layout;
+    root->empty_completion = vlelctx->root.empty_completion;
 }
 
 int64 age_vle_context_terminal_prefetch_budget(VLE_local_context *vlelctx)
@@ -354,7 +385,6 @@ void age_vle_context_release_runtime_resources(VLE_local_context *vlelctx)
     Assert(vlelctx != NULL);
 
     age_vle_context_close_adjacency_scans(vlelctx);
-    age_vle_context_free_adjacency_payload_cache(vlelctx);
     destroy_entry_property_relation_cache(
         vlelctx->edge_property_relation_cache);
     vlelctx->edge_property_relation_cache = NULL;
@@ -373,6 +403,7 @@ void age_vle_context_release_all_resources(VLE_local_context *vlelctx)
     free_context_identity(vlelctx);
     free_terminal_output_resources(vlelctx);
     age_vle_context_release_runtime_resources(vlelctx);
+    age_vle_context_free_adjacency_payload_cache(vlelctx);
     free_edge_property_constraints(vlelctx);
     age_vle_traversal_state_free(&vlelctx->traversal);
 }
@@ -387,10 +418,137 @@ void age_vle_context_reset_source_stats(VLE_local_context *vlelctx)
 void age_vle_context_get_source_stats(
     VLE_local_context *vlelctx, AgeVLESourceStats *stats)
 {
+    int64 empty_completion_count;
+
     Assert(vlelctx != NULL);
     Assert(stats != NULL);
 
     *stats = vlelctx->source_stats;
+    if (stats->root_empty_completion_count > 0 ||
+        stats->empty_lifecycle_batch_capacity <= 0)
+    {
+        return;
+    }
+
+    empty_completion_count =
+        stats->age_adjacency_empty_source_skips +
+        stats->age_adjacency_empty_source_cache_hits +
+        stats->age_adjacency_empty_source_frontier_marks +
+        stats->age_adjacency_empty_source_run_skips;
+    if (empty_completion_count <= 0)
+        return;
+
+    stats->root_empty_completion_count = empty_completion_count;
+    stats->root_empty_completion_out =
+        stats->age_adjacency_empty_source_skip_out +
+        stats->age_adjacency_empty_source_cache_hit_out +
+        stats->age_adjacency_empty_source_frontier_mark_out +
+        stats->age_adjacency_empty_source_run_skip_out;
+    stats->root_empty_completion_in =
+        stats->age_adjacency_empty_source_skip_in +
+        stats->age_adjacency_empty_source_cache_hit_in +
+        stats->age_adjacency_empty_source_frontier_mark_in +
+        stats->age_adjacency_empty_source_run_skip_in;
+    stats->root_empty_batch_capacity =
+        stats->empty_lifecycle_batch_capacity;
+    stats->root_empty_saturated_count =
+        empty_completion_count >= stats->empty_lifecycle_batch_capacity ?
+        1 : 0;
+}
+
+static void reset_root_empty_completion_summary(
+    VLE_local_context *vlelctx)
+{
+    Assert(vlelctx != NULL);
+
+    vlelctx->root.empty_completion.completion_count = 0;
+    vlelctx->root.empty_completion.out_count = 0;
+    vlelctx->root.empty_completion.in_count = 0;
+    vlelctx->root.empty_completion.saturated = false;
+}
+
+static void record_root_empty_completion(
+    VLE_local_context *vlelctx, bool outgoing)
+{
+    VLETraversalEmptyCompletionSummary *summary;
+    int64 batch_capacity;
+
+    Assert(vlelctx != NULL);
+
+    summary = &vlelctx->root.empty_completion;
+    batch_capacity = summary->batch_capacity;
+    if (batch_capacity <= 0)
+        batch_capacity = vlelctx->source_stats.empty_lifecycle_batch_capacity;
+    if (batch_capacity <= 0 &&
+        vlelctx->empty_lifecycle_policy_known &&
+        vlelctx->empty_lifecycle_eligible)
+    {
+        batch_capacity = vlelctx->empty_lifecycle_batch_size;
+    }
+    if (batch_capacity <= 0)
+        return;
+
+    if (summary->batch_capacity <= 0)
+        summary->batch_capacity = batch_capacity;
+
+    summary->completion_count++;
+    vlelctx->source_stats.root_empty_completion_count++;
+    if (outgoing)
+    {
+        summary->out_count++;
+        vlelctx->source_stats.root_empty_completion_out++;
+    }
+    else
+    {
+        summary->in_count++;
+        vlelctx->source_stats.root_empty_completion_in++;
+    }
+
+    vlelctx->source_stats.root_empty_batch_capacity =
+        Max(vlelctx->source_stats.root_empty_batch_capacity,
+            summary->batch_capacity);
+
+    if (summary->batch_capacity > 0 &&
+        summary->completion_count >= summary->batch_capacity &&
+        !summary->saturated)
+    {
+        summary->saturated = true;
+        vlelctx->source_stats.root_empty_saturated_count++;
+    }
+}
+
+void age_vle_context_record_empty_lifecycle_policy(
+    VLE_local_context *vlelctx)
+{
+    Assert(vlelctx != NULL);
+
+    if (!vlelctx->empty_lifecycle_policy_known)
+        return;
+
+    vlelctx->source_stats.empty_lifecycle_context_runs++;
+    if (vlelctx->empty_lifecycle_eligible)
+    {
+        vlelctx->source_stats.empty_lifecycle_context_eligible_runs++;
+        vlelctx->source_stats.empty_lifecycle_context_depth =
+            Max(vlelctx->source_stats.empty_lifecycle_context_depth,
+                vlelctx->empty_lifecycle_depth);
+        vlelctx->source_stats.empty_lifecycle_batch_capacity =
+            Max(vlelctx->source_stats.empty_lifecycle_batch_capacity,
+                vlelctx->empty_lifecycle_batch_size);
+    }
+}
+
+int64 age_vle_context_empty_lifecycle_batch_size(VLE_local_context *vlelctx)
+{
+    Assert(vlelctx != NULL);
+
+    if (!vlelctx->empty_lifecycle_policy_known ||
+        !vlelctx->empty_lifecycle_eligible)
+    {
+        return 0;
+    }
+
+    return vlelctx->empty_lifecycle_batch_size;
 }
 
 void age_vle_context_record_source_scan(
@@ -430,6 +588,96 @@ void age_vle_context_record_source_candidate(
             vlelctx->source_stats.packed_candidates++;
             break;
     }
+}
+
+void age_vle_context_record_source_empty_scan(
+    VLE_local_context *vlelctx, VLEContextSourceStatsKind kind)
+{
+    Assert(vlelctx != NULL);
+
+    switch (kind)
+    {
+        case VLE_CONTEXT_SOURCE_STATS_AGE_ADJACENCY:
+            vlelctx->source_stats.age_adjacency_empty_scans++;
+            break;
+        case VLE_CONTEXT_SOURCE_STATS_ENDPOINT_BTREE:
+            vlelctx->source_stats.endpoint_btree_empty_scans++;
+            break;
+        case VLE_CONTEXT_SOURCE_STATS_PACKED_ADJACENCY:
+            break;
+    }
+}
+
+void age_vle_context_record_age_adjacency_empty_source_skip(
+    VLE_local_context *vlelctx, bool outgoing)
+{
+    Assert(vlelctx != NULL);
+
+    vlelctx->source_stats.age_adjacency_empty_source_skips++;
+    record_root_empty_completion(vlelctx, outgoing);
+    if (outgoing)
+        vlelctx->source_stats.age_adjacency_empty_source_skip_out++;
+    else
+        vlelctx->source_stats.age_adjacency_empty_source_skip_in++;
+}
+
+void age_vle_context_record_age_adjacency_empty_source_cache_hit(
+    VLE_local_context *vlelctx, bool outgoing)
+{
+    Assert(vlelctx != NULL);
+
+    vlelctx->source_stats.age_adjacency_empty_source_cache_hits++;
+    record_root_empty_completion(vlelctx, outgoing);
+    if (outgoing)
+        vlelctx->source_stats.age_adjacency_empty_source_cache_hit_out++;
+    else
+        vlelctx->source_stats.age_adjacency_empty_source_cache_hit_in++;
+}
+
+void age_vle_context_record_age_adjacency_empty_source_frontier_mark(
+    VLE_local_context *vlelctx, bool outgoing)
+{
+    Assert(vlelctx != NULL);
+
+    vlelctx->source_stats.age_adjacency_empty_source_frontier_marks++;
+    record_root_empty_completion(vlelctx, outgoing);
+    if (outgoing)
+        vlelctx->source_stats.age_adjacency_empty_source_frontier_mark_out++;
+    else
+        vlelctx->source_stats.age_adjacency_empty_source_frontier_mark_in++;
+}
+
+void age_vle_context_record_age_adjacency_empty_source_frontier_batch(
+    VLE_local_context *vlelctx, bool outgoing, int64 key_count)
+{
+    Assert(vlelctx != NULL);
+
+    if (key_count <= 0)
+        return;
+
+    vlelctx->source_stats.age_adjacency_empty_source_frontier_batch_flushes++;
+    vlelctx->source_stats.age_adjacency_empty_source_frontier_batch_keys +=
+        key_count;
+    vlelctx->source_stats.age_adjacency_empty_source_frontier_batch_max =
+        Max(vlelctx->source_stats.age_adjacency_empty_source_frontier_batch_max,
+            key_count);
+    if (outgoing)
+        vlelctx->source_stats.age_adjacency_empty_source_frontier_batch_out++;
+    else
+        vlelctx->source_stats.age_adjacency_empty_source_frontier_batch_in++;
+}
+
+void age_vle_context_record_age_adjacency_empty_source_run_skip(
+    VLE_local_context *vlelctx, bool outgoing)
+{
+    Assert(vlelctx != NULL);
+
+    vlelctx->source_stats.age_adjacency_empty_source_run_skips++;
+    record_root_empty_completion(vlelctx, outgoing);
+    if (outgoing)
+        vlelctx->source_stats.age_adjacency_empty_source_run_skip_out++;
+    else
+        vlelctx->source_stats.age_adjacency_empty_source_run_skip_in++;
 }
 
 void age_vle_context_record_source_push(VLE_local_context *vlelctx)
@@ -490,6 +738,14 @@ void age_vle_context_record_age_adjacency_payload_replay(
     vlelctx->source_stats.age_adjacency_payload_replays++;
 }
 
+void age_vle_context_record_age_adjacency_payload_replay_run(
+    VLE_local_context *vlelctx)
+{
+    Assert(vlelctx != NULL);
+
+    vlelctx->source_stats.age_adjacency_payload_replay_runs++;
+}
+
 void age_vle_context_record_age_adjacency_payload_scan(
     VLE_local_context *vlelctx)
 {
@@ -498,12 +754,28 @@ void age_vle_context_record_age_adjacency_payload_scan(
     vlelctx->source_stats.age_adjacency_payload_scans++;
 }
 
+void age_vle_context_record_age_adjacency_payload_scan_run(
+    VLE_local_context *vlelctx)
+{
+    Assert(vlelctx != NULL);
+
+    vlelctx->source_stats.age_adjacency_payload_scan_runs++;
+}
+
 void age_vle_context_record_age_adjacency_payload_cache_seed(
     VLE_local_context *vlelctx)
 {
     Assert(vlelctx != NULL);
 
     vlelctx->source_stats.age_adjacency_payload_cache_seeds++;
+}
+
+void age_vle_context_record_age_adjacency_payload_cache_seed_run(
+    VLE_local_context *vlelctx)
+{
+    Assert(vlelctx != NULL);
+
+    vlelctx->source_stats.age_adjacency_payload_cache_seed_runs++;
 }
 
 int64 age_vle_context_get_or_create_local_edge_index(
@@ -969,6 +1241,7 @@ void age_vle_context_advance_start_vertex(VLE_local_context *vlelctx)
 
     vlelctx->root.vsid = get_graphid(vlelctx->root.next_vertex);
     vlelctx->root.next_vertex = next_GraphIdNode(vlelctx->root.next_vertex);
+    reset_root_empty_completion_summary(vlelctx);
 }
 
 void age_vle_context_remember_vertex_entry(
@@ -1266,6 +1539,21 @@ bool age_vle_context_init_expansion_source_cursor(
         vlelctx, cursor, run->source_vertex_id, outgoing, skip_self_loops);
 }
 
+bool age_vle_context_expansion_source_cursor_known_empty(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor)
+{
+    Assert(vlelctx != NULL);
+    Assert(cursor != NULL);
+
+    if (!age_vle_context_cursor_known_empty(vlelctx, cursor))
+        return false;
+
+    age_vle_context_record_age_adjacency_empty_source_run_skip(
+        vlelctx, cursor->outgoing);
+
+    return true;
+}
+
 void age_vle_context_record_expansion_source_result(
     VLEContextExpansionSourceRun *run, bool outgoing, bool used_source)
 {
@@ -1275,6 +1563,79 @@ void age_vle_context_record_expansion_source_result(
         run->used_out_source = used_source;
     else
         run->used_in_source = used_source;
+}
+
+bool age_vle_context_missing_vertex_sources_known_empty(
+    VLE_local_context *vlelctx, graphid source_vertex_id)
+{
+    VLEContextExpansionSourceRun run;
+    bool saw_known_empty = false;
+    bool out_known_empty = false;
+    bool in_known_empty = false;
+    bool outgoing;
+
+    Assert(vlelctx != NULL);
+
+    age_vle_context_init_missing_vertex_source_run(vlelctx, &run,
+                                                   source_vertex_id);
+    if (!age_vle_context_expansion_source_run_is_eligible(&run))
+        return false;
+
+    for (outgoing = true; ; outgoing = false)
+    {
+        VLEContextSourceCursor cursor;
+
+        if (age_vle_context_init_expansion_source_cursor(
+                vlelctx, &run, &cursor, outgoing))
+        {
+            if (!age_vle_context_cursor_known_empty(vlelctx, &cursor))
+                return false;
+
+            if (outgoing)
+                out_known_empty = true;
+            else
+                in_known_empty = true;
+            saw_known_empty = true;
+        }
+
+        if (!outgoing)
+            break;
+    }
+
+    if (!saw_known_empty)
+        return false;
+
+    if (out_known_empty)
+        age_vle_context_record_age_adjacency_empty_source_run_skip(vlelctx,
+                                                                   true);
+    if (in_known_empty)
+        age_vle_context_record_age_adjacency_empty_source_run_skip(vlelctx,
+                                                                   false);
+
+    return true;
+}
+
+static bool age_vle_context_cursor_known_empty(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor)
+{
+    VLEAdjacencyPayloadCacheEntry *cache_entry;
+
+    Assert(vlelctx != NULL);
+    Assert(cursor != NULL);
+
+    if (cursor->source_kind != VLE_TRAVERSAL_SOURCE_AGE_ADJACENCY ||
+        cursor->has_property_constraints ||
+        !age_vle_context_uses_local_edge_state(vlelctx) ||
+        !OidIsValid(cursor->index_oid))
+    {
+        return false;
+    }
+
+    cache_entry = age_vle_adjacency_payload_cache_lookup(
+        vlelctx->root.age_adjacency_payload_cache, cursor->index_oid,
+        cursor->source_vertex_id);
+
+    return cache_entry != NULL && cache_entry->known_empty;
 }
 
 static void age_vle_context_init_packed_adjacency_lists(
@@ -1528,7 +1889,8 @@ age_vle_context_begin_age_adjacency_payload_source(
 
     source = palloc0(sizeof(*source));
     source->source_vertex_id = cursor->source_vertex_id;
-    source->payload_scan = age_vle_context_get_payload_scan(vlelctx, cursor);
+    source->index_oid = cursor->index_oid;
+    source->outgoing = cursor->outgoing;
     source->use_payload_cache =
         age_vle_context_uses_local_edge_state(vlelctx) &&
         !cursor->has_property_constraints;
@@ -1540,13 +1902,36 @@ age_vle_context_begin_age_adjacency_payload_source(
         if (found && source->cache_entry->payloads != NULL)
         {
             source->replay_payload_cache = true;
+            age_vle_context_record_age_adjacency_payload_replay_run(vlelctx);
+            return source;
+        }
+        if (found && source->cache_entry->known_empty)
+        {
+            age_vle_context_record_age_adjacency_empty_source_cache_hit(
+                vlelctx, cursor->outgoing);
+            source->empty_suppressed = true;
             return source;
         }
         age_vle_adjacency_payload_cache_discard(source->cache_entry);
     }
 
-    (void) age_adjacency_visible_payload_scan_begin_key(
-        source->payload_scan, source->source_vertex_id);
+    source->payload_scan = age_vle_context_get_payload_scan(vlelctx, cursor);
+
+    if (!age_adjacency_visible_payload_scan_begin_key(
+            source->payload_scan, source->source_vertex_id))
+    {
+        age_vle_context_record_age_adjacency_empty_source_skip(
+            vlelctx, cursor->outgoing);
+        if (source->use_payload_cache)
+        {
+            age_vle_adjacency_payload_cache_mark_empty(source->cache_entry);
+        }
+        source->empty_suppressed = true;
+    }
+    else
+    {
+        age_vle_context_record_age_adjacency_payload_scan_run(vlelctx);
+    }
 
     return source;
 }
@@ -1558,6 +1943,9 @@ bool age_vle_context_age_adjacency_payload_next(
     Assert(vlelctx != NULL);
     Assert(source != NULL);
     Assert(payload != NULL);
+
+    if (source->empty_suppressed)
+        return false;
 
     if (source->replay_payload_cache)
     {
@@ -1588,6 +1976,12 @@ bool age_vle_context_age_adjacency_payload_next(
                     source->cache_entry, &source->pending_payload);
                 age_vle_context_record_age_adjacency_payload_cache_seed(
                     vlelctx);
+                if (!source->cache_seed_run_recorded)
+                {
+                    age_vle_context_record_age_adjacency_payload_cache_seed_run(
+                        vlelctx);
+                    source->cache_seed_run_recorded = true;
+                }
             }
             age_vle_adjacency_payload_cache_append(source->cache_entry,
                                                    payload);
@@ -1599,9 +1993,132 @@ bool age_vle_context_age_adjacency_payload_next(
     return true;
 }
 
-void age_vle_context_end_age_adjacency_payload_source(
+void age_vle_context_maybe_mark_age_adjacency_frontier_empty(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    graphid next_source_vertex_id)
+{
+    Assert(vlelctx != NULL);
+    Assert(source != NULL);
+
+    if (!source->use_payload_cache ||
+        source->payload_scan == NULL ||
+        OidIsValid(source->index_oid) == false ||
+        next_source_vertex_id == source->source_vertex_id)
+    {
+        return;
+    }
+
+    if (!age_adjacency_visible_payload_scan_key_known_empty(
+            source->payload_scan, next_source_vertex_id))
+    {
+        return;
+    }
+
+    age_vle_context_queue_age_adjacency_frontier_empty(
+        vlelctx, source, next_source_vertex_id);
+}
+
+static bool age_vle_context_age_adjacency_frontier_empty_seen(
+    VLEContextAgeAdjacencyPayloadSource *source, graphid source_vertex_id)
+{
+    int64 i;
+
+    Assert(source != NULL);
+
+    for (i = 0; i < source->frontier_empty_count; i++)
+    {
+        if (source->frontier_empty_keys[i] == source_vertex_id)
+            return true;
+    }
+
+    return false;
+}
+
+static void age_vle_context_queue_age_adjacency_frontier_empty(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    graphid source_vertex_id)
+{
+    MemoryContext oldctx;
+    int64 new_capacity;
+    int64 planned_capacity;
+
+    Assert(vlelctx != NULL);
+    Assert(source != NULL);
+
+    if (age_vle_context_age_adjacency_frontier_empty_seen(source,
+                                                          source_vertex_id))
+        return;
+
+    if (source->frontier_empty_count == source->frontier_empty_capacity)
+    {
+        planned_capacity = age_vle_context_empty_lifecycle_batch_size(
+            vlelctx);
+        new_capacity = source->frontier_empty_capacity == 0 ?
+                       Max(planned_capacity, (int64)8) :
+                       source->frontier_empty_capacity * 2;
+        oldctx = MemoryContextSwitchTo(TopMemoryContext);
+        if (source->frontier_empty_keys == NULL)
+        {
+            source->frontier_empty_keys = palloc_array(graphid,
+                                                       new_capacity);
+        }
+        else
+        {
+            source->frontier_empty_keys =
+                repalloc_array(source->frontier_empty_keys, graphid,
+                               new_capacity);
+        }
+        MemoryContextSwitchTo(oldctx);
+        source->frontier_empty_capacity = new_capacity;
+    }
+
+    source->frontier_empty_keys[source->frontier_empty_count++] =
+        source_vertex_id;
+}
+
+static void age_vle_context_apply_age_adjacency_frontier_empty(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source)
+{
+    int64 i;
+
+    Assert(vlelctx != NULL);
+    Assert(source != NULL);
+
+    age_vle_context_record_age_adjacency_empty_source_frontier_batch(
+        vlelctx, source->outgoing, source->frontier_empty_count);
+
+    for (i = 0; i < source->frontier_empty_count; i++)
+    {
+        VLEAdjacencyPayloadCacheEntry *cache_entry;
+        bool found;
+
+        cache_entry = age_vle_adjacency_payload_cache_get(
+            &vlelctx->root.age_adjacency_payload_cache, source->index_oid,
+            source->frontier_empty_keys[i], &found);
+        if (found && cache_entry->known_empty)
+            continue;
+        if (found && cache_entry->payloads != NULL)
+            continue;
+
+        age_vle_adjacency_payload_cache_mark_empty(cache_entry);
+        age_vle_context_record_age_adjacency_empty_source_frontier_mark(
+            vlelctx, source->outgoing);
+    }
+}
+
+bool age_vle_context_age_adjacency_payload_source_empty_suppressed(
     VLEContextAgeAdjacencyPayloadSource *source)
 {
+    Assert(source != NULL);
+
+    return source->empty_suppressed;
+}
+
+void age_vle_context_end_age_adjacency_payload_source(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source)
+{
+    Assert(vlelctx != NULL);
+
     if (source == NULL)
         return;
 
@@ -1613,6 +2130,8 @@ void age_vle_context_end_age_adjacency_payload_source(
     {
         age_vle_adjacency_payload_cache_discard(source->cache_entry);
     }
+    age_vle_context_apply_age_adjacency_frontier_empty(vlelctx, source);
+    pfree_if_not_null(source->frontier_empty_keys);
     pfree(source);
 }
 
@@ -1754,6 +2273,8 @@ void age_vle_context_init_root_selection_input(
     input->zero_length_only = vlelctx->root.lidx == 0 &&
                               !vlelctx->root.uidx_infinite &&
                               vlelctx->root.uidx == 0;
+    input->empty_lifecycle_batch_size =
+        age_vle_context_empty_lifecycle_batch_size(vlelctx);
 }
 
 void age_vle_context_init_root_selection_input_from_apply(
@@ -1770,6 +2291,10 @@ void age_vle_context_init_root_selection_input_from_apply(
     input->zero_length_only = context_apply->lower == 0 &&
                               !context_apply->upper_infinite &&
                               context_apply->upper == 0;
+    input->empty_lifecycle_batch_size =
+        context_apply->empty_lifecycle_policy_known &&
+        context_apply->empty_lifecycle_eligible ?
+        context_apply->empty_lifecycle_batch_size : 0;
 }
 
 void age_vle_context_init_root_apply_input(

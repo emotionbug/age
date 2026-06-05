@@ -545,6 +545,26 @@ SELECT * FROM cypher('vle_index_probe',
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..1]->(n) RETURN p$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 3})<-[:R*1..1]-(n) RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN properties(n)$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N)-[:R*1..1]->(n) RETURN n.i$$)
 AS (plan agtype);
 
@@ -594,6 +614,200 @@ AS (plan agtype);
 SET enable_seqscan = on;
 
 SELECT drop_graph('vle_fanout_policy', true);
+
+SELECT create_graph('vle_tie_policy');
+
+SELECT * FROM cypher('vle_tie_policy', $$
+    CREATE (s0:S {i: 0}), (s1:S {i: 1}), (s2:S {i: 2}), (s3:S {i: 3}),
+           (s4:S {i: 4}), (s5:S {i: 5}), (s6:S {i: 6}), (s7:S {i: 7}),
+           (t0:T {i: 0}), (t1:T {i: 1}), (t2:T {i: 2}), (t3:T {i: 3}),
+           (t4:T {i: 4}), (t5:T {i: 5}), (t6:T {i: 6}), (t7:T {i: 7})
+    CREATE (s0)-[:R]->(t0), (s1)-[:R]->(t1),
+           (s2)-[:R]->(t2), (s3)-[:R]->(t3),
+           (s4)-[:R]->(t4), (s5)-[:R]->(t5),
+           (s6)-[:R]->(t6), (s7)-[:R]->(t7)
+$$) AS (result agtype);
+
+CREATE INDEX vle_tie_policy_t_properties_gin_idx
+ON vle_tie_policy."T" USING gin (properties);
+CREATE INDEX vle_tie_policy_r_start_idx
+ON vle_tie_policy."R" USING btree (start_id);
+CREATE INDEX vle_tie_policy_r_end_idx
+ON vle_tie_policy."R" USING btree (end_id);
+CREATE INDEX vle_tie_policy_r_start_adj_idx
+ON vle_tie_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_tie_policy_r_end_adj_idx
+ON vle_tie_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_tie_policy."T";
+ANALYZE vle_tie_policy."R";
+
+SET enable_seqscan = off;
+
+SELECT * FROM cypher('vle_tie_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:T {i: 0})<-[:R*1..1]-(n) RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_tie_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:T {i: 0})<-[:R*1..1]-(n) RETURN p$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_tie_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:T {i: 0})<-[:R*1..1]-(n) RETURN n$$)
+AS (plan agtype);
+
+SET enable_seqscan = on;
+
+SELECT drop_graph('vle_tie_policy', true);
+
+SELECT create_graph('vle_headroom_policy');
+
+SELECT * FROM cypher('vle_headroom_policy', $$
+    CREATE (n0:N {i: 0}),
+           (n1:N {i: 1}),
+           (n2:N {i: 2}),
+           (n3:N {i: 3}),
+           (n4:N {i: 4}),
+           (n5:N {i: 5}),
+           (n6:N {i: 6}),
+           (n7:N {i: 7})
+    CREATE (n0)-[:R]->(n1),
+           (n0)-[:R]->(n2),
+           (n1)-[:R]->(n3),
+           (n1)-[:R]->(n4),
+           (n2)-[:R]->(n5),
+           (n2)-[:R]->(n6),
+           (n3)-[:R]->(n7)
+$$) AS (result agtype);
+
+CREATE INDEX vle_headroom_policy_n_properties_gin_idx
+ON vle_headroom_policy."N" USING gin (properties);
+CREATE INDEX vle_headroom_policy_r_start_idx
+ON vle_headroom_policy."R" USING btree (start_id);
+CREATE INDEX vle_headroom_policy_r_end_idx
+ON vle_headroom_policy."R" USING btree (end_id);
+CREATE INDEX vle_headroom_policy_r_start_adj_idx
+ON vle_headroom_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_headroom_policy_r_end_adj_idx
+ON vle_headroom_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_headroom_policy."N";
+ANALYZE vle_headroom_policy."R";
+
+SET enable_seqscan = off;
+
+SELECT * FROM cypher('vle_headroom_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
+AS (plan agtype);
+
+SET enable_seqscan = on;
+
+SELECT drop_graph('vle_headroom_policy', true);
+
+SELECT create_graph('vle_empty_cache_policy');
+
+SELECT * FROM cypher('vle_empty_cache_policy', $$
+    CREATE (s:N {i: 0}),
+           (a0:N {i: 1}), (a1:N {i: 2}), (a2:N {i: 3}),
+           (a3:N {i: 4}), (a4:N {i: 5}), (a5:N {i: 6}),
+           (a6:N {i: 7}), (a7:N {i: 8})
+    CREATE (s)-[:R]->(a0), (s)-[:R]->(a1),
+           (s)-[:R]->(a2), (s)-[:R]->(a3),
+           (s)-[:R]->(a4), (s)-[:R]->(a5),
+           (s)-[:R]->(a6), (s)-[:R]->(a7)
+$$) AS (result agtype);
+
+CREATE INDEX vle_empty_cache_policy_n_properties_gin_idx
+ON vle_empty_cache_policy."N" USING gin (properties);
+CREATE INDEX vle_empty_cache_policy_r_start_adj_idx
+ON vle_empty_cache_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_empty_cache_policy_r_end_adj_idx
+ON vle_empty_cache_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_empty_cache_policy."N";
+ANALYZE vle_empty_cache_policy."R";
+
+SET enable_seqscan = off;
+
+SELECT * FROM cypher('vle_empty_cache_policy',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_empty_cache_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+AS (plan agtype);
+
+SET enable_seqscan = on;
+
+SELECT drop_graph('vle_empty_cache_policy', true);
+
+SELECT create_graph('vle_payload_replay_policy');
+
+SELECT * FROM cypher('vle_payload_replay_policy', $$
+    CREATE (s:N {i: 0}), (a:N {i: 1}), (b:N {i: 2}),
+           (x:N {i: 3}), (y0:N {i: 4}), (y1:N {i: 5})
+    CREATE (s)-[:R]->(a), (s)-[:R]->(b),
+           (a)-[:R]->(x), (b)-[:R]->(x),
+           (x)-[:R]->(y0), (x)-[:R]->(y1)
+$$) AS (result agtype);
+
+CREATE INDEX vle_payload_replay_policy_n_properties_gin_idx
+ON vle_payload_replay_policy."N" USING gin (properties);
+CREATE INDEX vle_payload_replay_policy_r_start_adj_idx
+ON vle_payload_replay_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_payload_replay_policy_r_end_adj_idx
+ON vle_payload_replay_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_payload_replay_policy."N";
+ANALYZE vle_payload_replay_policy."R";
+
+SET enable_seqscan = off;
+
+SELECT * FROM cypher('vle_payload_replay_policy',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_payload_replay_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_payload_replay_policy',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n.i$$)
+AS (plan agtype);
+
+SELECT * FROM cypher('vle_payload_replay_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n.i$$)
+AS (plan agtype);
+
+SET enable_seqscan = on;
+
+SELECT drop_graph('vle_payload_replay_policy', true);
+
+SELECT create_graph('vle_adjacency_only_policy');
+
+SELECT * FROM cypher('vle_adjacency_only_policy', $$
+    CREATE (n0:N {i: 0}),
+           (n1:N {i: 1}),
+           (n2:N {i: 2}),
+           (n3:N {i: 3})
+    CREATE (n0)-[:R]->(n1),
+           (n0)-[:R]->(n2),
+           (n0)-[:R]->(n3)
+$$) AS (result agtype);
+
+CREATE INDEX vle_adjacency_only_policy_n_properties_gin_idx
+ON vle_adjacency_only_policy."N" USING gin (properties);
+CREATE INDEX vle_adjacency_only_policy_r_start_adj_idx
+ON vle_adjacency_only_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_adjacency_only_policy_r_end_adj_idx
+ON vle_adjacency_only_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_adjacency_only_policy."N";
+
+SET enable_seqscan = off;
+
+SELECT * FROM cypher('vle_adjacency_only_policy',
+                    $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
+AS (plan agtype);
+
+SET enable_seqscan = on;
+
+SELECT drop_graph('vle_adjacency_only_policy', true);
 
 SELECT * FROM cypher('cypher_vle',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN length(p)$$)
@@ -670,6 +884,33 @@ AS (plan agtype);
 SELECT * FROM cypher('cypher_vle',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=()-[*1..2]->() RETURN last(relationships(p)).id$$)
 AS (plan agtype);
+
+SELECT create_graph('vle_frontier_empty_policy');
+
+SELECT * FROM cypher('vle_frontier_empty_policy', $$
+    CREATE (s:N {i: 0}), (a:N {i: 1}),
+           (padding:N {i: 100}), (tail:N {i: 101})
+    CREATE (s)-[:R]->(a), (padding)-[:R]->(tail)
+$$) AS (result agtype);
+
+CREATE INDEX vle_frontier_empty_policy_n_properties_gin_idx
+ON vle_frontier_empty_policy."N" USING gin (properties);
+CREATE INDEX vle_frontier_empty_policy_r_start_adj_idx
+ON vle_frontier_empty_policy."R" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX vle_frontier_empty_policy_r_end_adj_idx
+ON vle_frontier_empty_policy."R" USING age_adjacency (end_id, id, start_id);
+ANALYZE vle_frontier_empty_policy."N";
+ANALYZE vle_frontier_empty_policy."R";
+
+SET enable_seqscan = off;
+
+SELECT * FROM cypher('vle_frontier_empty_policy',
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH p=(:N {i: 0})-[:R*1..2]->(n) RETURN p$$)
+AS (plan agtype);
+
+SET enable_seqscan = on;
+
+SELECT drop_graph('vle_frontier_empty_policy', true);
 
 --
 -- Clean up

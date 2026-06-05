@@ -47,10 +47,10 @@
   커밋하지 않는다. descriptor/API 이동, caller 정리, 문서 근거, focused 검증이 같은
   주제 안에 있으면 그 단위가 완성된 뒤 하나의 commit으로 묶는다.
 - 코드 정리는 같은 분류를 최대한 묶어 대분류 단위로 진행한다. 단일 파일 정돈, 단일
-  helper rename, 호출부 일부 정리처럼 작은 청소를 따로 끊지 말고, 기존보다 훨씬 큰
-  범위(대략 10배 큰 묶음)를 목표로 module boundary, descriptor family, source/cache
-  lifecycle, projection/index handoff 같은 같은 계열 전체를 한 작업 단위로 정리한다.
-  작은 정리 10개 정도를 모아 하나의 대분류 정리로 만드는 것을 기본 기준으로 삼는다.
+  helper rename, 호출부 일부 정리처럼 작은 청소를 따로 끊지 않는다. 기존보다 대략 10배
+  큰 묶음을 기본값으로 삼고, module boundary, descriptor family, source/cache lifecycle,
+  projection/index handoff처럼 같은 계열 전체를 한 작업 단위로 정리한다. 작은 정리 10개
+  정도가 모여야 하나의 의미 있는 대분류 정리로 본다.
 - Workspace note 문서(`AGENTS.md`, `FEATURES.md`, `HISTORY.md`,
   `RESEARCH.md`, `TODO.md`, `VLE.md`)는 사용자가 명시적으로 요청하지 않는 한
   커밋하지 않는다.
@@ -135,3 +135,7 @@ wsl.exe --cd /home/redfi/postgresql-age bash -lc \
 - fresh install 기준 동작, focused regression, benchmark 근거를 우선한다.
 - 구조 병목이 반복되면 작은 guard 추가보다 자료구조, metadata, auxiliary index/cache,
   load contract, traversal state layout, planner/executor boundary 변경을 우선 검토한다.
+- 코드 정리는 작은 helper/caller 단위로 잘게 끊지 않고 같은 source/cache lifecycle,
+  descriptor family, planner/executor handoff, projection/index handoff를 대분류로 묶는다.
+  대략 기존보다 10배 큰 범위에서 정리 후보를 잡고, 작은 정리 여러 개가 같은 구조 변경
+  의미를 만들 때 함께 진행한다.
