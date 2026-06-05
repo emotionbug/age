@@ -6,6 +6,1095 @@
 - 상세 설계 판단은 `RESEARCH.md`, VLE 구조와 benchmark는 `VLE.md`에 둔다.
 - 되돌린 시도는 이유와 다음 방향만 남긴다.
 
+## 2026-06-05: 조인오더 후보 테이블 방향 정리
+
+- ORCA `CJoinOrderDPv2`의 property별 expression 보존과 Neo4j `expandSolverStep`/`ComponentConnectorPlanner`의
+  ExpandAll/ExpandInto, value join, cartesian/apply connector 분리를 다시 확인했다.
+- 다음 실행 단위를 `AGEGraphJoinComponent`/`AGEGraphJoinConnector` 후보 테이블로 좁혔다. 선택된 후보는 기존
+  `Adjacency Join Order`/`VLE Join Order` EXPLAIN line에 계속 드러내고, 후보 비교 전에는 property별
+  row/cost를 보존한다.
+- PostgreSQL `partial_pathlist`/`Gather`/parallel join path, ORCA distribution/Motion property, Neo4j
+  parallel repeat heuristic을 조사해 candidate table의 parallel metadata로 정리했다.
+- `TODO.md`는 600줄대 배경 설명을 제거하고 현재 우선순위, 다음 실행 단위, 검증 기준만 남겼다.
+- `cypher_graph_join` planner module을 추가해 `AGEGraphJoinComponent`/`AGEGraphJoinConnector` 후보 구조와
+  serializable descriptor를 만들었다. fixed adjacency descriptor와 VLE join hook은 이 후보 entry를 소비하기
+  시작했다.
+- fixed adjacency candidate는 endpoint id restriction을 const key로 낮출 수 있으면 unparameterized CustomPath로
+  등록한다. 후보 table의 `required_outer`와 `parallel-safe` metadata가 실제 runtime slot 의존성을 반영한다.
+- Citus `CustomPath`/`CustomScan`/`DistributedPlan` wrapper와 `multi_explain` task evidence 구조를 확인해,
+  AGE도 planner-only 후보와 executor-visible payload를 분리하는 방향을 유지하기로 했다.
+- fixed adjacency graph join candidate와 `CustomScan` plan이 선택된 `CustomPath`의 `PATH_REQ_OUTER()`와
+  `parallel_safe`를 그대로 보존하게 했다. const endpoint 후보는 unparameterized/parallel-safe로 남고, posting run
+  partition contract가 없는 `parallel-aware` partial path는 아직 열지 않았다.
+- `AGEGraphJoinCandidateTable`을 추가해 VLE와 fixed adjacency가 후보 table에 planner-only candidate를 등록한 뒤
+  선택된 후보 descriptor만 executor-visible `CustomScan` private payload에 싣게 했다. 아직 후보는 각각 하나지만,
+  다음 단계의 node/property seek, value join, `ExpandAll`/`ExpandInto` 비교가 같은 table에 들어갈 수 있다.
+- candidate table에 `Path` 기반 등록 helper를 추가하고 VLE/fixed adjacency가 이를 사용하게 했다. graph join-order
+  walker는 parameterized `IndexPath`와 bitmap index-backed path를 `index-anchored` 후보로 인식해, 실제 executor
+  source가 index path일 때만 node/property seek를 graph 후보로 본다.
+- bound endpoint VLE candidate table에 `ExpandInto` primary와 `ExpandAll` fallback 후보를 함께 등록했다. fallback은
+  같은 executor source를 쓰지만 verification penalty를 더해 기존 선택과 EXPLAIN surface는 유지한다.
+- fixed adjacency에서 terminal property source가 있으면 graph join-order property를 `index-anchored`로 올리고,
+  connector도 `adjacency-value-join` vocabulary를 사용하게 했다.
+- FalkorDB GraphBLAS 구조를 확인했다. relation/label `Delta_Matrix`, algebraic expression, batch filter matrix는 AGE
+  VLE의 큰 frontier 후보 설계에 유용하지만, PostgreSQL extension에서는 GraphBLAS 직접 링크보다 native sparse
+  frontier candidate를 먼저 두는 방향으로 정리했다.
+
+## 2026-06-05: VLE join-order evidence surface 추가
+
+- `AGE VLE Stream` verbose EXPLAIN에 `VLE Join Order` line을 추가했다.
+- connector는 `vle-expand`, `vle-bidirectional-expand`, `vle-composite-expand`로 나누고, order property는
+  `query-order`, `vle-frontier-anchored`, `index-anchored` vocabulary로 정규화했다.
+- ORCA `CLogicalNAryJoin`/`CJoinOrderDPv2`와 Neo4j `ComponentConnectorPlanner`/VarExpand heuristic을 다시 확인해,
+  VLE를 함수 호출 비용이 아니라 graph component connector 후보로 올리는 다음 방향을 문서화했다.
+
+## 2026-06-05: VLE join-order evidence를 join hook에 연결
+
+- adjacency 전용 join path walker를 graph expansion walker로 넓혀 `AGE Adjacency Match`와 `AGE VLE Stream`을
+  같은 row adjustment surface에서 본다.
+- join hook은 bound VLE `CustomPath`의 edge-source descriptor에서 `index-anchored`와
+  `vle-frontier-anchored` property를 읽고, nested join row estimate를 VLE expansion path row 폭으로 조정한다.
+- 조정된 row ratio를 nested join run cost에도 반영해 PostgreSQL `set_cheapest()`가 graph expansion evidence를
+  실제 join path 선택에 사용할 수 있게 했다. `age_adjacency` regression의 directory-anchored shape는 plan이
+  nested loop에서 hash join으로 바뀌어 expected plan surface에 이 변화를 드러낸다.
+- VLE base CustomPath도 marker `Values Scan` rows=1 wrapper에서 벗어나 edge-source fanout, finite upper depth,
+  composite prefilter, materialization weight로 rows/cost를 산정한다. `cypher_vle` expected의 `VLE Join Order rows`는
+  fanout/depth 기반 cardinality로 갱신했다.
+- 양 endpoint가 모두 제공된 VLE는 `vle-expand-into`/`vle-composite-expand-into` connector와
+  `expand-into-verification` property로 출력한다. `cypher_match` expected는 runtime start/end endpoint shape가
+  ExpandInto verification으로 분리되는 것을 고정한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: 조인 오더 리서치 방향 정리
+
+- ORCA `CLogicalNAryJoin`/`CJoinOrderDPv2`와 Neo4j `IDPQueryGraphSolver`/component connector 구조를
+  기준으로 AGE graph pattern join order 방향을 정리했다.
+- 다음 큰 후보를 node/property index seek, fixed `AGE Adjacency Match`, VLE stream, ExpandInto 검증을
+  같은 component/connector descriptor로 비교하는 구조로 잡았다.
+- VLE/`age_adjacency`의 directory fanout, terminal label/property selectivity, value identity matched count를
+  scan-local evidence가 아니라 join order cardinality/connector cost 입력으로 올리는 방향을 문서화했다.
+
+## 2026-06-05: Adjacency join-order descriptor surface 추가
+
+- fixed `AGE Adjacency Match` EXPLAIN에 `Adjacency Join Order` line을 추가했다.
+- component alias, connector kind, bound endpoint, order property, row/fanout evidence를 같은 line에 묶어
+  ORCA/Neo4j식 graph component connector 탐색으로 확장할 첫 surface를 만들었다.
+- join hook이 bound adjacency path의 order property를 읽어 index/directory/adjacency anchored expansion의
+  nested join row estimate를 조정하게 했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: mixed directional family source split 적용
+
+- `active=both` VLE가 exact `both` threshold cache를 찾지 못하고 `out`/`in` family feedback을 합쳐 소비할 때,
+  한쪽 방향의 empty completion이 지배적이면 empty 쪽은 `age_adjacency` lifecycle을 유지하고 반대 productive 방향은
+  `endpoint-btree`로 분리한다.
+- policy reason은 `directional-family-productive`로 출력하고, planned class는 기존 `adjacency-empty-batch` 같은
+  threshold lifecycle class를 유지해 runtime class match를 깨지 않는다.
+- `tools/vle_benchmark.sql`은 split이 적용된 row를 `directional-family-split-applied` /
+  `keep-directional-split`으로 분류한다. smoke에서 `800-label-fanout-family-path`는
+  `out=age-adjacency/in=endpoint-btree`, `source_match=true`, `class_match=true`로 바뀌었다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - 임시 PostgreSQL 18 instance `/tmp/age_vle_bench_directional_pg_21649`, port 55467
+  - `psql -p 55467 -d postgres -v graph=age_vle_bench_directional_smoke -v sparse_nodes=8 -v dense_nodes=4 -v label_fanout_labels=4 -v label_fanout_edges=8 -v value_posting_edges=38 -v replay_branches=4 -v replay_leaves=4 -v run_standard_cases=0 -v preserve_graph=0 -f tools/vle_benchmark.sql`
+
+## 2026-06-05: anonymous edge label source handoff 정리
+
+- VLE edge label이 anonymous인 경우 planner source lookup에서 빈 label이 아니라 graph default edge relation
+  `_ag_label_edge`를 확인하도록 했다.
+- 단, `_ag_label_edge`에 `age_adjacency` index가 없으면 endpoint-btree 후보만으로 dense-local source를 만들지 않고
+  기존 global metadata path를 유지한다. 이 제한으로 기본 regression graph의 anonymous VLE가 invalid packed source로
+  들어가지 않는다.
+- `unknown-fanout`은 source family class가 아니라 age_adjacency 선택 사유이므로 planner policy class는
+  `adjacency-stream`, recommendation은 `collect-endpoint-stats`로 정규화했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: composite missing-vertex feedback 정규화
+
+- planned `adjacency-composite-prefilter` source에서 missing-vertex evidence만 남아도 dominant source가 planned
+  `age_adjacency`와 일치하면 runtime class를 `adjacency-composite-prefilter`로 유지한다.
+- property candidate가 reachable endpoint가 아닌 negative probe는 source handoff 실패가 아니므로
+  `class-mismatch/tune-source-policy`로 올리지 않는다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+  - 임시 PostgreSQL 18 instance `/tmp/age_vle_bench_composite_missing_pg_55450`, port 55450
+  - `psql -p 55450 -d postgres -v graph=age_vle_bench_composite_missing_smoke -v sparse_nodes=8 -v dense_nodes=4 -v label_fanout_labels=4 -v label_fanout_edges=8 -v value_posting_edges=38 -v replay_branches=4 -v replay_leaves=4 -v run_standard_cases=0 -v preserve_graph=0 -f tools/vle_benchmark.sql`
+
+## 2026-06-05: benchmark source policy outcome 추가
+
+- `tools/vle_benchmark.sql` final summary에 `source_policy_outcome`과 `source_policy_next_action`을 추가했다.
+- benchmark row가 source mismatch, class mismatch, value-posting headroom 적용/승격, directional family split 후보,
+  empty lifecycle 유지, payload replay 유지를 먼저 분류하므로 threshold 숫자 보정 전에 깨진 contract와 tuning 후보를
+  분리할 수 있다.
+- 검증:
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+  - 임시 PostgreSQL 18 instance `/tmp/age_vle_bench_policy_outcome_pg_55449`, port 55449
+  - `psql -p 55449 -d postgres -v graph=age_vle_bench_policy_outcome_smoke -v sparse_nodes=8 -v dense_nodes=4 -v label_fanout_labels=4 -v label_fanout_edges=8 -v value_posting_edges=38 -v replay_branches=4 -v replay_leaves=4 -v run_standard_cases=0 -v preserve_graph=0 -f tools/vle_benchmark.sql`
+
+## 2026-06-05: benchmark value-posting headroom table 확장
+
+- `tools/vle_benchmark.sql` planner/runtime join summary에 `value_posting_headroom_expected`와
+  `value_posting_headroom_applied`를 추가했다.
+- materialization weight 기준 expected headroom은 path 18, object 20, scalar 25다. 이 column은
+  `value_posting_policy_decision=policy-value-posting`이 실제 source profile headroom으로 이어졌는지 threshold
+  table에서 바로 비교하기 위한 surface다.
+- 검증:
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+  - 임시 PostgreSQL 18 instance `/tmp/age_vle_bench_headroom_table_pg`, port 55438
+  - `psql -p 55438 -d postgres -v graph=age_vle_bench_headroom_table_smoke -v sparse_nodes=8 -v dense_nodes=4 -v label_fanout_labels=4 -v label_fanout_edges=8 -v value_posting_edges=38 -v replay_branches=4 -v replay_leaves=4 -v run_standard_cases=0 -v preserve_graph=0 -f tools/vle_benchmark.sql`
+
+## 2026-06-05: value-posting feedback headroom 직접 반영
+
+- `adjacency-composite-value-posting` feedback이 replay/cache seed의 보조 signal일 때만 endpoint headroom을 낮추던
+  구조를 바꿨다. value-posting observed class 자체도 source policy input으로 보고 materialization weight별
+  headroom을 선택한다.
+- terminal-scalar value-posting observed plan은 후속 `VLE Source Payload Input`과 `VLE Source Profile`에서
+  `headroom=25` / `endpoint-headroom=0.25`를 출력한다. path/object consumer는 기존 strong replay headroom과 같은
+  materialization weight 기준을 공유한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+  - 임시 PostgreSQL 18 instance `/tmp/age_vle_bench_value_headroom_pg`, port 55437
+  - `psql -p 55437 -d postgres -v graph=age_vle_bench_value_headroom_smoke -v sparse_nodes=8 -v dense_nodes=4 -v label_fanout_labels=4 -v label_fanout_edges=8 -v value_posting_edges=38 -v replay_branches=4 -v replay_leaves=4 -v run_standard_cases=0 -v preserve_graph=0 -f tools/vle_benchmark.sql`
+
+## 2026-06-05: benchmark value-posting policy reason 연결
+
+- `tools/vle_benchmark.sql` final summary가 `VLE Source Policy`의 `policy_reason`을 전달하게 했다.
+- reason에 `composite-value-posting`이 포함되면 `value_posting_policy_decision=policy-value-posting`으로 분류해,
+  source availability, planner policy adoption, identity cache hit, runtime value-posting hit을 같은 benchmark row에서
+  비교할 수 있게 했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+  - 임시 PostgreSQL 18 instance `/tmp/age_vle_bench_policy_reason_pg`, port 55436
+  - `psql -p 55436 -d postgres -v graph=age_vle_bench_policy_reason_smoke -v sparse_nodes=8 -v dense_nodes=4 -v label_fanout_labels=4 -v label_fanout_edges=8 -v value_posting_edges=38 -v replay_branches=4 -v replay_leaves=4 -v run_standard_cases=0 -v preserve_graph=0 -f tools/vle_benchmark.sql`
+
+## 2026-06-05: composite value-posting policy reason
+
+- 후속 planning에서 composite payload feedback이 `adjacency-composite-value-posting`이면 directed source policy reason도
+  `composite-value-posting`으로 출력한다.
+- source kind는 그대로 `age-adjacency`지만, `VLE Source Policy`가 `reason=out:composite-value-posting`을 보여
+  endpoint headroom/source decision이 value-posting lifecycle feedback을 소비했음을 plan surface에 드러낸다.
+
+## 2026-06-05: composite value-posting runtime class match
+
+- planned `adjacency-composite-prefilter` 위에서 label-slice value-posting pruning이 실제 관측되면 runtime feedback을
+  `adjacency-composite-value-posting` / `keep-value-posting`으로 승격한다.
+- `VLE Source Plan`은 planned class가 `adjacency-composite-prefilter`여도 runtime
+  `adjacency-composite-value-posting`을 stronger provided property로 보고 `class-match=true`를 출력한다.
+- payload replay도 cache-seeded lifecycle뿐 아니라 composite source lifecycle을 만족하는 stronger property로 본다.
+
+## 2026-06-05: fixed-chain value-posting replay regression
+
+- `vle_fixed_chain_value_replay` regression fixture를 추가했다. 같은 `N` label fixed chain이 두 경로로 중간
+  vertex에 합류한 뒤 terminal property fanout을 타도록 만들어 `AGE VLE Stream` fixed-chain rewrite, payload replay,
+  cache seed, label-slice value-posting feedback을 같은 shape에서 확인한다.
+- 첫 `EXPLAIN ANALYZE`는 `runs=scan:4/replay:1/seed:2`와 `cache-filter=16/16/0`을 출력한다. 후속
+  `EXPLAIN`은 같은 payload feedback key에서
+  `replay-runs=1 seed-runs=2 value-posting=label-slice/observed:16
+  class=adjacency-composite-value-posting`을 소비한다.
+- mixed-label explicit chain은 fixed-chain VLE rewrite 대상이 아니므로 별도 fixture로 남기지 않았다. 같은 label
+  chain query와 데이터 decoy label을 분리해 rewrite contract와 runtime pruning evidence를 동시에 고정했다.
+
+## 2026-06-05: all-depth terminal property value-posting feedback 정리
+
+- VLE payload feedback이 source-aware value-posting pruning counter를 사용하게 했다. 기존 vertex-set value counter는
+  그대로 유지하고, `value-posting=none` source에서는 property/cache filter를 value-posting evidence로 승격하지 않는다.
+- `value-posting=label-slice` source가 terminal-property cache label filter를 실제로 사용하면 후속 plan의
+  `VLE Source Payload Input`에 `scan-runs`, `seed-runs`,
+  `value-posting=label-slice/observed:N`, `class=adjacency-composite-value-posting`이 함께 남는다.
+- `vle_value_posting_feedback` regression은 `n.i = 59` 후속 plan만 value-posting payload input을 소비하고,
+  `n.i = 1` 후속 plan은 feedback을 공유하지 않는 identity-safe behavior를 유지한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: fixed label-chain terminal property VLE handoff
+
+- `vle_fixed_label_chain` regression에 `age_adjacency (start_id, id, end_id)` index와 `ANALYZE`를 추가해
+  explicit fixed label-chain collapse가 endpoint btree fallback이 아니라 `age-adjacency` local source와
+  cache-seeded profile을 선택하는 surface를 고정했다.
+- fixed-chain rewrite가 마지막 named terminal node를 보존하게 해서 `WHERE n.i = 5 RETURN n.i`가 일반 join tree로
+  풀리지 않고 `AGE VLE Stream` terminal-property output으로 retarget된다.
+- planner는 VLE가 소비한 terminal property predicate를 marker child plan qual에서도 제거한다. terminal-property
+  direct output이 path container가 아니므로 child `Values Scan` filter에 같은 predicate를 남기면 실제 result가
+  사라지는 문제를 막는다.
+- terminal property source filter id는 final vertex expansion에서만 채운다. fixed-chain all-depth label pruning은
+  유지하지만, property value prefilter가 final 직전 expansion의 vertex를 검사하지 않게 분리했다.
+- local `age_adjacency` payload candidate는 terminal output이 frame vertex entry를 요구할 때 skeleton vertex entry를
+  보장한다. direct terminal predicate lookup도 현재 stack terminal 대신 `VLETraversalStep`의 vertex를 우선한다.
+- regression은 `terminal-label=3/all-depth`, `planned=property-prefilter`,
+  `class=adjacency-composite-prefilter` plan과 실제 `terminal_i = 5` 결과를 같이 고정한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle'`
+
+## 2026-06-05: VLE terminal property source metadata
+
+- VLE terminal property predicate key를 `AGE VLE Stream` edge-source descriptor에 추가했다. const predicate와
+  runtime-slot predicate 모두 `AgeVLEInput`과 context apply/root state를 통해 executor로 전달된다.
+- planner는 descriptor가 소비한 terminal property predicate qual을 CustomScan residual filter에서 제거한다.
+  이번 fixed-chain terminal-property direct path 이후 marker child plan의 같은 predicate도 제거한다. 실제 VLE
+  CustomScan output acceptance는 executor가 terminal vertex property lookup과 `agtype_eq` 비교로 수행한다.
+- planner terminal property source prefilter도 all-depth terminal label mode에서만 source-applicable로 본다.
+  variable range endpoint-only terminal label은 `endpoint-label-acceptance` reason과 `metadata-only` composite fanout으로
+  출력해 1-hop value-posting feedback을 깊이 있는 endpoint-only query가 잘못 소비하지 않게 했다.
+- DFS path emission, terminal-property direct DFS, zero-bound emission이 같은 terminal predicate acceptance helper를
+  거치게 했다. 이로써 variable range terminal predicate가 expansion guard로 중간 vertex traversal을 자르지 않고,
+  emitted endpoint만 거른다.
+- `vle_index_probe`와 `vle_value_posting_feedback` regression expected는 residual CustomScan filter가 사라진 상태에서
+  `EXPLAIN ANALYZE` actual rows가 유지되는 것을 고정한다.
+- `vle_value_posting_feedback`에는 1..3 endpoint-only terminal property source/counter fixture를 추가했다. 이 fixture는
+  label table 직접 insert 기반이라 result semantic보다 source descriptor와 runtime feedback surface를 고정한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle'`
+
+- variable range VLE의 endpoint label marker를 traversal acceptance predicate로 분리했다. endpoint-only label은
+  emitted path acceptance에서만 확인하고, expansion continuation은 같은 label로 중간 vertex를 자르지 않는다.
+- source/cursor label pruning은 exact fixed range처럼 endpoint가 곧 expansion terminal인 경우에만 유지한다.
+  variable range에서는 source pruning보다 semantic 보존을 우선하고, label pruning은 acceptance와 zero-bound
+  emission 조건으로 제한한다.
+- optimized right-bound `PATHS_TO`처럼 reverse output path에서는 outer terminal label scan이 endpoint label을
+  이미 보장하므로 DFS step tail에 endpoint label acceptance를 중복 적용하지 않는다.
+- endpoint-only label marker가 edge property predicate를 terminal vertex property prefilter로 잘못 켜지 않도록,
+  terminal property prefilter는 all-depth terminal label mode에서만 source contract로 연결한다.
+- global metadata에 vertex entry가 없는 local-source/materialized path에서도 terminal vertex property lookup이
+  label relation fallback을 사용할 수 있게 skeleton vertex entry를 보장했다.
+- regression expected는 `EXPLAIN (VERBOSE)`에 `terminal-label=N/endpoint`와 marker child slot을 드러내도록
+  갱신했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+- `VLEContextSourceCursor`와 `VLEContextExpansionSourceRun`에 path depth evidence를 추가했다. payload source는
+  `target_path_length`가 finite upper bound에 도달하는 expansion에서만 terminal property filter id를 cache key와
+  payload prefilter에 넣는다.
+- terminal property prefilter 준비도 filter identity가 있는 payload source에만 연결한다. final depth가 아닌
+  expansion은 `terminal_property_filter_id=0`인 상태로 label-only composite filter만 유지하므로, 깊이 있는 VLE의
+  중간 vertex expansion을 terminal property predicate로 잘못 자르지 않는다.
+- VLE terminal label descriptor에 mode를 추가해 기존 fixed/exact label-chain marker는 `all-depth`, 새 endpoint
+  marker는 `endpoint`로 구분한다. executor context는 all-depth label constraint와 endpoint-only label constraint를
+  별도 필드로 보관하고, source cursor/candidate push는 target depth helper를 통해 label id를 고른다.
+- variable range VLE에서 terminal node label은 upper depth 하나가 아니라 lower..upper의 모든 emitted endpoint에
+  적용된다는 점을 regression으로 확인했다. 따라서 이번 단계의 parser marker 제거는 exact finite range에만 유지하고,
+  variable range는 terminal acceptance filter와 expansion continuation을 분리하는 다음 구조 변경으로 넘겼다.
+- terminal property predicate extractor는 output key가 없는 경우에도 VLE terminal property access에서 predicate key를
+  읽을 수 있게 분리했다. 현재 path materialized shape의 terminal relation join predicate는 아직 VLE baserestrictinfo로
+  내려오지 않으므로, 다음 단계는 parser marker를 terminal-only endpoint constraint로 안전하게 분리하는 것이다.
+- bounded VLE에 terminal label marker를 무조건 일반화하는 시도는 중간 vertex에도 terminal property value를 요구해
+  path semantic을 깨뜨리는 것으로 확인했다. 이 시도는 코드에 남기지 않고, terminal-depth-aware cursor contract를
+  먼저 만든다.
+
+- payload feedback headroom 계산을 helper로 묶어 `adjacency-composite-value-posting` class가 유지된 cache entry도
+  같은 entry 안의 replay/cache seed evidence를 source profile decision에 반영하게 했다.
+- `tools/vle_benchmark.sql`에 `value-posting-replay-seed` / `value-posting-replay` shape를 추가했다. 같은
+  `ValuePostingEdge` label에 1-hop value-posting reject fixture와 3-hop hub replay fixture를 같이 두되, replay start
+  root는 `i=299`로 분리해 `age_adjacency` posting run append 한계를 넘지 않게 했다.
+- 256-edge smoke에서 `value-posting-replay`는 `payload_input_replay_runs=255`,
+  `payload_input_seed_runs=2`, `endpoint-headroom=0.18`, `empty-batch=257`을 출력했다. 깊이 있는 terminal
+  property query는 아직 value-posting과 replay가 같은 profile key로 동시에 묶이지 않아, 다음 과제는 planner
+  start/end handoff를 바꿔 이 조합을 같은 lifecycle로 만드는 것이다.
+
+- property source index OID와 predicate value image hash를 섞는 value identity 생성을
+  `age_adjacency_property_filter_id()` 공용 helper로 이동했다.
+- VLE payload cache와 fixed `AGE Adjacency Match` terminal property lookup이 같은 helper를 사용하고, fixed MATCH도
+  prefetch matched set을 composite request로 넘길 때 `property_filter_id`를 채운다.
+- fixed `AGE Adjacency Match` runtime EXPLAIN은 value-keyed request handoff를
+  `value-identity=present|none`으로 출력한다. 숫자 hash를 expected에 고정하지 않고, value identity request가 있는지
+  여부만 드러낸다.
+- 이 변경은 새로운 on-disk value posting summary는 아니지만, 다음 directory/block value summary key가 VLE와 fixed
+  MATCH에서 같은 identity를 소비할 수 있게 하는 contract 정리다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+- `age_adjacency` directory layout을 v16으로 올리고 homogeneous terminal label run의 48-bit compressed
+  `next_entry_id` vector를 directory entry에 추가했다.
+- exact graphid directory slot이 overflow된 run도 compressed directory vector가 property matched set과 교차하지 않으면
+  main block을 열지 않고 `set-directory-filter=.../compressed:N`으로 접는다.
+- `age_adjacency_debug_composite_probe()`는 `set_directory_compressed_filter`를 반환한다. wide bloom fixture는 같은
+  19 posting skip을 compressed directory summary, wide bloom, value-summary request evidence로 함께 고정한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+- block-level vertex-set pruning도 property value identity request 축을 별도 계측하게 했다.
+- range/exact/compressed/bloom/posting block summary가 skip을 만들면 기존 counter는 유지하고, composite request의
+  `property_filter_id`가 만든 value summary가 활성화된 경우 `set-block-filter=.../value-summary:N` suffix와
+  `age_adjacency_debug_composite_probe().set_block_value_filter`에도 같은 posting 수를 기록한다.
+- regression은 directory-only skip에서는 block value counter가 0이고, block range/compressed/posting skip에서는
+  각각 `20`, `19`, `199`가 value identity request skip으로 겹쳐 잡히는 것을 고정한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+- composite request의 `property_filter_id`가 있으면 `AgeAdjacencyVertexSetFilter`가 matched vertex id set의
+  request-side value summary bloom을 준비하게 했다.
+- `age_adjacency` directory pruning은 terminal label/range/label bloom 뒤 이 value summary를 64-bit/wide
+  next-vertex bloom과 교차하고, negative이면 main block을 열기 전에 접는다.
+- fixed `AGE Adjacency Match`와 `AGE VLE Stream` runtime output은 이 경계를
+  `set-directory-filter=.../value-summary:N` suffix로 출력한다. `age_adjacency_debug_composite_probe()`도
+  `set_directory_value_filter`를 반환해 wide bloom fixture에서 같은 19 posting skip을 value-summary evidence로
+  고정한다.
+- 이번 변경은 on-disk layout을 올리지 않고 request descriptor/value-summary handoff를 먼저 만든 단계다. 다음 단계는
+  같은 evidence surface를 terminal value identity별 directory posting summary 또는 block-local value posting vector로
+  승격하는 것이다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+  - `git diff --check`
+
+- `AgeAdjacencyCompositeTerminalFilter`를 visible payload scan target에 보존하고, directory begin-key /
+  known-empty 판단이 label/property mismatch를 같은 composite target helper에서 받도록 정리했다.
+- property source summary가 있는 composite request가 directory range pruning까지 내려가면
+  `composite-directory-filter=N`을 출력한다. 기존 `set-directory-filter=N`은 vertex-set range pruning 총량으로
+  유지하고, 새 counter는 label+property composite request가 directory boundary에서 소비된 경우만 세어 다음
+  value-summary index layout의 기준 evidence로 둔다.
+- directory entry와 property source matched count를 비교해 label 후보 폭의 value-summary 상한을
+  `composite=request:N/dir-estimate:N`으로 출력한다. 이는 `property-prefilter` candidate 폭을 덮어쓰지 않고,
+  ORCA식 index descriptor처럼 index가 제공할 수 있는 후보 폭 estimate를 별도 physical property로 올린 것이다.
+- composite request에서 발생한 block-level skip을 `composite=.../block-filter:N`으로 분리했다. 새
+  `age_adjacency_debug_composite_probe()` regression은 matched vertex id 하나가 있는 request에서 compact block 하나를
+  통째로 건너뛰고 `1:5:5:2:0:3:0:3:0:1` counter를 출력한다.
+- `age_adjacency` directory layout을 v8로 올리고 endpoint run의 `next_vertex_id` 64-bit bloom summary를 추가했다.
+  matched vertex set이 min/max range 안에 있어도 bloom에 없으면 main block을 열기 전에 safe-negative directory skip으로
+  접는다. regression은 absent vertex `_graphid(1, 13)`에서 `0:6:6:0:0:0:6:0:6:1`을 고정한다.
+- `age_adjacency` directory layout을 v9로 올리고 endpoint run 안의 작은 terminal label별
+  `next_vertex_id` bloom slot을 추가했다. global bloom이 다른 terminal label의 vertex 때문에 positive여도
+  request terminal label의 label-local bloom이 negative면 main block을 열지 않는다. regression은 label 1 request와
+  label 2 vertex `_graphid(2, 10)` 조합에서 같은 safe-negative directory skip을 고정한다.
+- `age_adjacency` directory layout을 v10으로 올리고 small-run exact `next_vertex_id` vector를 추가했다.
+  distinct terminal vertex가 slot 안에 들어오면 bloom false positive를 main/block scan 전에 확정 negative로 접는다.
+  regression은 global bloom이 positive가 될 수 있는 `_graphid(1, 87)` request를 directory skip counter로 고정한다.
+- `age_adjacency` main block layout을 v11로 올리고 block-level 256-bit `next_vertex_id` bloom을 추가했다.
+  property matched vertex set과 block summary가 교차하지 않으면 compact/full posting payload를 읽기 전에 block을 접는다.
+  `age_adjacency_debug_composite_probe()`는 `set_block_bloom_filter`를 출력해 bloom summary가 만든 block skip을
+  기존 `set_block_filter` 총량과 분리한다.
+- `age_adjacency` main block layout을 v12로 올리고 block-local exact `next_vertex_id` vector를 추가했다. distinct
+  terminal vertex가 slot 안에 들어오면 bloom보다 먼저 exact intersection으로 block을 접고, debug probe는
+  `set_block_exact_filter`와 `set_block_bloom_filter`를 나란히 출력한다.
+- `age_adjacency` main block layout을 v13으로 올리고 block-local `min/max next_vertex_id` range summary를 추가했다.
+  directory range가 넓어 통과한 request도 block range와 property matched set range가 겹치지 않으면 exact/bloom 전에
+  접는다. regression은 `set_block_range_filter=20`으로 이 boundary를 고정한다.
+- compact main block의 payload-order exact posting intersection을 별도 pruning boundary로 분리했다. range, exact,
+  bloom summary가 모두 통과한 뒤에도 sorted matched vertex set과 compact `next_entry_id`가 교차하지 않으면 cache fill
+  전에 block 전체를 접고, `age_adjacency_debug_composite_probe()`와 EXPLAIN runtime은
+  `set_block_posting_filter` 또는 `set-block-filter=.../posting:...`으로 이 residual exact skip을 드러낸다.
+  regression은 199개 compact postings 중 absent `_graphid(1, 100)` request가 range/bloom을 통과한 뒤
+  `set_block_posting_filter=199`로 접히는 케이스를 고정한다.
+- `age_adjacency` directory layout을 v14로 올리고 endpoint run의 256-bit wide `next_vertex_id` bloom을 추가했다.
+  기존 64-bit directory bloom이 false positive인 large run도 wide bloom이 negative면 main block을 열기 전에 접는다.
+  EXPLAIN runtime은 `set-directory-filter=.../wide-bloom:...` suffix를 선택적으로 출력하고, regression은
+  19개 posting run에서 `_graphid(1, 2)` request가 `set_directory_wide_bloom_filter=19`로 접히는 케이스를 고정한다.
+- `age_adjacency` main block layout을 v15로 올리고 compact block-local 48-bit `next_entry_id` exact vector를 추가했다.
+  graphid exact slot이 overflow된 block도 compressed entry vector가 negative면 bloom과 payload-order posting scan 전에
+  접는다. EXPLAIN runtime은 `set-block-filter=.../compressed:...` suffix를 출력하고, regression은 directory가 통과한
+  request에서 edge-label compact block 19개 posting이 `set_block_compressed_filter=19`로 접히는 케이스를 고정한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency cypher_match'`
+
+- VLE `age_adjacency` payload property prefilter runtime에 property source index가 만든 matched vertex set 폭을
+  `prefetch-matches=N`으로 추가했다. 이 값은 0이면 출력하지 않아 기존 runtime line 폭을 늘리지 않고, prefilter가
+  실제로 준비된 경우에만 `property-prefilter=runs/candidates/filtered`와 나란히 보인다.
+- `vle_index_probe` const/runtime-slot regression은 property source matched set 2개, terminal label candidate 7개,
+  filtered 6개를 같은 `VLE Payload Runtime` line에 고정한다. 이는 다음 label+value composite request가 adjacency
+  posting fetch 폭을 어디서 줄여야 하는지 raw EXPLAIN surface에 남기기 위한 evidence다.
+- VLE payload cache key에 terminal property filter identity를 포함했다. 같은 source vertex와 terminal label이라도
+  property predicate value가 다르면 filtered payload cache와 known-empty cache를 공유하지 않는다.
+- property source index prefetch 결과가 empty matched set이면 `age_adjacency` posting scan을 열지 않고 source를
+  empty completion으로 접는다. `vle_index_probe` no-match ANALYZE fixture는 `property-prefilter=1/7/0`,
+  `runs=scan:0`, `suppressed=out:age-adjacency`, `class-match=true`를 고정한다.
+- VLE payload runtime에 `cache-filter=total/label/property`를 추가했다. property-prefilter fixture는
+  `cache-filter=6/0/6`을 출력해 matched vertex set callback이 heap fetch 뒤 residual filter가 아니라
+  `age_adjacency` main cache fill 전에 payload cache 폭을 줄였다는 사실을 고정한다.
+- terminal property prefetch 결과를 callback ABI 대신 `AgeAdjacencyVertexSetFilter` descriptor로
+  `age_adjacency` visible payload scan에 넘긴다. VLE와 fixed `AGE Adjacency Match`는 같은 descriptor를 사용하며,
+  VLE runtime은 `vertex-set=1`로 prefetch set이 scan target에 직접 전달됐는지 출력한다.
+- `AgeAdjacencyVertexSetFilter`에 min/max vertex id range summary를 추가했다. `age_adjacency` scan은 hash lookup 전에
+  range miss를 먼저 버리고, VLE runtime은 `set-range-filter=N`을 출력한다. `vle_index_probe`는
+  `set-range-filter=6`으로 property matched set range가 main cache fill 단계에서 6개 후보를 hash lookup 없이 제거함을
+  고정한다.
+
+- fixed `AGE Adjacency Match`에도 VLE와 같은 composite policy vocabulary를 추가했다.
+  `Adjacency Composite Policy`는 planned class/recommendation을 출력하고, `EXPLAIN ANALYZE`에서는
+  runtime class/recommendation과 `class-match`를 함께 출력한다.
+- small terminal fanout에서 property source prefetch 대신 id cache를 쓰는 shape는
+  `class=adjacency-composite-id-cache recommendation=keep-id-cache`로 고정했다. property source를 실제 prefilter로
+  쓰는 VLE shape의 `adjacency-composite-prefilter`와 같은 class family를 공유하지만, 작은 fixed MATCH slice를
+  source-prefetch로 과대 해석하지 않는다.
+
+- VLE composite fanout을 source policy typed input으로 연결했다. planned prefilter가 있으면 endpoint fanout은 그대로
+  보여주되 `age_adjacency` payload source가 해결할 수 있는 `composite-work=planned(out:1,in:0)`을 별도 costing
+  evidence로 출력한다.
+- const/runtime-slot terminal property predicate regression은 이제 `reason=out:composite-prefilter`,
+  `class=adjacency-composite-prefilter`, `recommendation=keep-property-prefilter`를 고정한다.
+- runtime feedback도 `property-prefilter=1/7/6` counter를 보면 같은 class/recommendation으로 정규화한다. 따라서
+  `VLE Source Plan`은 `planned-class=adjacency-composite-prefilter class-match=true`를 출력한다.
+- `tools/vle_benchmark.sql` summary는 `composite_work`, `composite_work_out`, `composite_work_in`을 읽어
+  benchmark에서 property prefilter costing handoff를 따로 비교할 수 있다.
+- 참고 근거는 `RESEARCH.md`의 ORCA `CPhysicalIndexScan` residual predicate와 Neo4j relationship index seek의
+  index-compatible predicate/hidden selection 분리를 기준으로 삼았다.
+
+- VLE composite descriptor에 terminal label slice 기준 `candidate` fanout, prefilter 적용 뒤 `composite` fanout,
+  planner lifecycle인 `planned`를 추가했다.
+- `EXPLAIN (VERBOSE)`는 기존 `VLE Composite Source`를 더 길게 만들지 않고 `VLE Composite Fanout` line을 별도로
+  출력한다. `property-tuples`는 metadata relation 규모로만 남기고, value predicate가 있을 때만
+  `planned=property-prefilter`와 축소된 composite fanout을 보여준다.
+- `vle_index_probe` expected는 const/runtime-slot predicate에서 `candidate=7 composite=1 planned=property-prefilter`를
+  고정해 `age_adjacency` payload prefilter와 terminal label 후보 축소가 같은 descriptor vocabulary로 연결되는지
+  확인한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle'`
+
+- VLE terminal label marker 판정이 parser `vle_internal` argument layout을 stream slot enum과 혼동하던 부분을
+  정리했다. label-only marker가 붙은 고정 1-hop VLE terminal node를 `n` label table join으로 다시 풀지 않고,
+  hidden raw `edges` target을 통해 terminal property helper로 낮춘다.
+- `MATCH (s:N) ... MATCH (s)-[:R*1..1]->(n:N) RETURN n.i` regression은 이제 `N_pkey`로 terminal vertex를
+  refetch하지 않고 `age_vle_terminal_vertex_property_from_path(edges, "i")`를 출력한다. 익명 terminal label
+  count fixture도 terminal label join 없이 VLE stream 결과만 집계한다.
+- 이번 변경은 label candidate pruning과 terminal property projection의 refetch 제거까지 완료했다.
+- 같은 terminal marker 단위에서 fallback도 끝까지 정리했다. parser retarget은 label-only marker의 AGTYPE integer
+  label id를 terminal-label slot으로 옮기고, executor descriptor는 10-arg marker를 허용한다.
+  `MATCH (s:N) ... MATCH (s)-[:R*1..1]->(n:N) RETURN n.i`는 이제 `VLE Arguments: 10`,
+  `terminal-property=const, terminal-label=const`, `VLE Composite Source: status=eligible
+  reason=terminal-label-property`를 출력한다.
+- 아직 composite source metadata는 descriptor/evidence surface다. 다음 후보는 이 eligible descriptor를 실제
+  label+typed property composite seek나 adjacency payload pruning request로 소비해 frontier 후보 수를 더 줄이는 것이다.
+- terminal-property output descriptor가 알려진 key를 갖고 있으면 CustomScan qual의
+  `age_vle_terminal_vertex(edges).key` property access를 VLE output slot 직접 비교로 rewrite한다.
+  `MATCH ... (n:N) WHERE n.rare = true RETURN n.rare` regression은 CustomScan `Filter`를
+  `edges = true` 형태로 출력해 terminal vertex materialization 없이 predicate가 같은 scalar slot을 소비하는지
+  보여준다.
+- 이 변경은 filter/materialization handoff를 연결한 단계이며 아직 값 선택도 기반 frontier 축소는 아니다.
+  현재 property source 후보 수는 btree source relation 통계라 `rare=true` 같은 value predicate 선택도를 뜻하지
+  않는다. 다음 단계는 key+value predicate request를 VLE source policy나 adjacency payload pruning으로 넘길
+  value-selective metadata contract를 설계하는 것이다.
+- const terminal-property predicate는 `age_adjacency` payload scan prefilter로도 연결했다. fanout을 늘린
+  `vle_index_probe` regression은 `VLE Composite Source: ... predicate=const prefilter=eligible threshold=2`와
+  `VLE Payload Runtime: ... property-prefilter=1/7/6 tuples=scan:1`을 출력해 7개 terminal label 후보 중
+  6개가 property source prefilter에서 제거되고 1개만 VLE traversal 후보로 흘러가는지 보여준다.
+- runtime-slot terminal-property predicate도 같은 request 경로를 탄다. `n.rare = s.rare` regression은
+  descriptor를 plan 단계 `clauses`에서 다시 materialize해 `predicate=runtime-slot prefilter=eligible`을 출력하고,
+  VLE CustomScan `custom_exprs`에 runtime value expr을 싣는다. executor는 iterator 생성 직전에 outer slot의
+  value를 평가해 같은 `AgeAdjacencyMatchTerminalPropertyLookup` prefilter에 전달한다.
+- 이 과정에서 10-arg terminal-property+label marker를 담는 `AgeVLEInput.args` 배열 경계도 10으로 맞췄다.
+  header layout 변경 뒤 stale object가 섞여 memory context corruption이 재현되어 `make clean` 후 재빌드로
+  확인했다.
+- 추가 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency'`
+
+- `ag_graph_index` property metadata lookup을 parser 전용 static helper에서 공용 함수로 올려 fixed MATCH와 VLE가
+  같은 graph index registry를 읽게 했다.
+- `AGE VLE Stream` edge-source descriptor에 terminal property source label, provider, type, 후보 count를 싣고,
+  verbose EXPLAIN에 `VLE Terminal Property Source`로 출력한다.
+- VLE marker enum은 `terminal-property`와 `terminal-label`을 분리했다. 기존 label-only marker와 property-only marker는
+  유지하고, property retarget이 label-only marker를 만나면 10-arg marker로 바꿀 수 있는 구조를 만들었다.
+- `VLE Composite Source`는 property source metadata가 있는데 terminal label slot이 없으면
+  `status=ineligible reason=missing-terminal-label`을 출력한다. 이는 composite seek를 실행하지 말아야 하는
+  planner boundary를 raw EXPLAIN에 드러내기 위한 surface다.
+- `cypher_vle` fixture는 Neo4j식 `CREATE INDEX n_i_source FOR (n:N) ON (n.i)`를 사용해 VLE terminal-property
+  output이 graph metadata source를 보는지 고정한다.
+- 이 변경은 아직 property source로 frontier를 직접 줄이지 않는다. 다음 단계의 `label+property` composite source
+  request를 위한 planner-visible evidence surface다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency'`
+
+## 2026-06-05: VLE repeated empty threshold feedback
+
+- backend-local VLE source threshold cache가 반복 empty completion을 `root-empty-repeat-observed`와
+  `root-empty-repeat-saturated`로 승격하게 했다.
+- 첫 saturated feedback은 기존 headroom 35%를 유지하고, 반복 observed feedback은 headroom 30%, 반복 saturated feedback은
+  headroom 25%와 확장 batch를 후속 plan에 제공한다.
+- planner policy feedback이 `adjacency-empty-lifecycle` threshold input class를 직접 소비하게 해
+  `VLE Source Threshold Input`, `VLE Source Policy`, runtime class match vocabulary를 맞췄다.
+- `cypher_vle` regression은 같은 empty-cache fixture를 한 번 더 실행해 후속 `EXPLAIN`에
+  `observed=2 saturated=1 relaxed=1`, `reason=root-empty-repeat-observed`, `class=adjacency-empty-lifecycle`을
+  드러낸다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle'`
+  - `tools/vle_benchmark.sql` smoke (`label_fanout_labels=20`, `label_fanout_edges=8`, `replay_branches=4`,
+    `replay_leaves=4`)
+
+## 2026-06-05: VLE threshold feedback direction family
+
+- backend-local VLE source threshold cache lookup에 `out`/`in` directional family fallback을 추가했다.
+  이전에는 `active=both` 실행 결과를 `out`/`in` key로 투영했지만, 반대로 directed 실행에서 얻은
+  repeated empty completion evidence를 후속 undirected planning이 소비하지 못했다.
+- `active=both` request가 exact `both` cache를 찾지 못하면 같은 graph/label/edge-label/consumer의 `out`과
+  `in` feedback을 합쳐 endpoint headroom은 더 낮은 값, empty batch는 더 큰 값, source class는 더 강한
+  lifecycle class를 사용한다.
+- `vle_empty_cache_policy` regression에 후속 undirected `EXPLAIN`을 추가해
+  `VLE Source Threshold Input: source=runtime-cache ... direction=out`과
+  `VLE Source Policy: ... class=adjacency-empty-lifecycle`을 raw plan surface에 고정했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle'`
+
+## 2026-06-05: VLE benchmark directional family surface
+
+- `tools/vle_benchmark.sql`에 `800-label-fanout-family-path` shape를 추가했다. directed fan-out 실행이 만든
+  `out`/`in` threshold feedback을 먼저 남긴 뒤, undirected `EXPLAIN ANALYZE`가 exact `both` cache 없이
+  direction family input을 읽는지 확인한다.
+- planner summary와 planner/runtime join summary에 `threshold_directional_family` boolean column을 추가했다.
+  `active=both` plan이 `threshold_input_source=out|in|mixed`를 소비하면 true가 되어 mixed-direction feedback을
+  별도 threshold 보정 대상으로 볼 수 있다.
+- 검증:
+  - 임시 PostgreSQL instance `61959`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE mixed directional family headroom
+
+- exact `both` feedback이 아니라 directed `out`/`in` family feedback을 합친 undirected request는 endpoint
+  headroom을 최소 40%로 완화한다. repeated empty lifecycle class와 empty batch는 유지하되, 한쪽 방향의 empty
+  completion이 다른 방향의 productive expansion까지 과도하게 누르지 않게 하기 위한 policy boundary다.
+- `cypher_vle` regression은 directed exact `out` feedback이 30%를 유지하고, 후속 `active=both` family input만
+  `headroom=40 direction=out`으로 출력하는지 고정한다.
+- benchmark smoke의 `800-label-fanout-family-path`도 `threshold_directional_family=t`,
+  `threshold_input_source=mixed`, `threshold_input_headroom=40`을 출력한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle'`
+  - 임시 PostgreSQL instance `61959`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: VLE directional family ratio benchmark
+
+- `tools/vle_benchmark.sql` planner/runtime join summary에 direction-family 전용 계산 column을 추가했다.
+  `threshold_directional_family=true`인 shape는 `directional_family_productive_density`,
+  `directional_family_empty_completion_ratio`, `directional_family_empty_out_ratio`,
+  `directional_family_empty_in_ratio`를 함께 출력한다.
+- small smoke의 `800-label-fanout-family-path`는 `threshold_input_source=mixed`, productive density `1.60`,
+  empty completion ratio `0.6923`, out/in split `0.8889/0.1111`을 보여줬다. 다음 policy split은 이 값을 기준으로
+  mixed family를 방향별 partial policy로 나눌지 판단한다.
+- 검증:
+  - 임시 PostgreSQL instance `61959`에서 small profile `tools/vle_benchmark.sql` smoke 실행
+
+## 2026-06-05: Property projection reuse summary
+
+- `AGE Property Projection` verbose EXPLAIN에 `Cached Property Summary`를 추가했다.
+  summary는 slot 수, 실제 heap properties lookup 수, reused slot 수, final materialization weight 합계,
+  heap lookup을 수행하는 slot의 weight 합계, max final weight를 출력한다.
+- `MATCH (n:v) RETURN n.i::pg_bigint, n.i::pg_float8` regression은 같은 key path를 두 physical type으로
+  출력할 때 `slots=2 heap-lookups=1 reused=1 final-weight=2 heap-final-weight=1`을 raw plan에 고정한다.
+  이는 같은 property path의 raw lookup은 한 번만 하고, final materialization만 각 output type으로 나뉜다는
+  descriptor contract다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match'`
+
+## 2026-06-05: Aggregate property reuse descriptor
+
+- `CypherArrayAggPropertyHandoff` DEBUG descriptor에 `heap-lookups`, `reused`, `heap-final-weight`를 추가했다.
+- aggregate map/list argument vector는 output semantic 때문에 repeated slot을 유지하지만, 같은 container/key source를
+  공유하는 slot은 lower raw lookup 관점에서 하나로 볼 수 있게 했다.
+- row-scaled aggregate materialization credit은 `reuse-weight`를 `cost-weight`에 더해 repeated source lookup 제거
+  효과를 실제 cost 입력으로 소비한다. total final output weight는 semantic 때문에 유지하되, unique heap lookup
+  boundary를 별도 credit으로 반영한다.
+- slot-vector aggregate serialize format을 v4로 올리고 source group vector를 partial state header에 추가했다.
+  transition state는 `AggGetAggref()`의 value argument expression을 비교해 같은 expression을 같은 source group으로
+  묶는다. `cypher_match`는 `age_array_agg_list_slots_summary(i, i)`가 `source-groups=1 reused-slots=1`을 출력하는지
+  고정한다.
+
+## 2026-06-05: Adjacency composite source descriptor
+
+- fixed MATCH `AGE Adjacency Match` descriptor에 `composite-fanout`을 추가했다.
+- `Adjacency Composite Source` EXPLAIN line을 추가해 terminal label slice, property source eligibility, value source,
+  planned lifecycle, threshold reason을 별도 surface로 분리했다.
+- property-source prefetch가 label constraint와 함께 계획되면 cost candidate width는 terminal label fanout에 더 강한
+  composite selectivity를 적용한다. 작은 terminal slice는 `planned=id-cache-small`로 남겨 global property source prefetch를
+  피한다.
+
+## 2026-06-05: aggregate benchmark scan signal split
+
+- `tools/aggregate_index_benchmark.sql` summary에서 child relation scan 선택을 `child_uses_index`로, aggregate
+  slot-vector rewrite surface를 `aggregate_uses_slot_vector`로 분리했다.
+- threshold boundary column도 `last_natural_child_seqscan_rows`, `first_natural_child_index_rows`,
+  `first_forced_child_index_rows`로 바꿔 child `Index Scan` threshold와 aggregate index-domain width credit을
+  혼동하지 않게 했다.
+- `TODO.md`, `RESEARCH.md`, `VLE.md`에 같은 판단을 반영했다. 다음 cost 보정은 child scan boundary를 관찰값으로
+  쓰되, 실제 조정 대상이 aggregate payload width credit인지 base scan cost surface인지 먼저 나눠 진행한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `psql -p 61959 -d postgres -v graph=age_agg_threshold -v threshold_rows=20,100 -f tools/aggregate_index_benchmark.sql`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match'`
+  - `git diff --check`
+
+## 2026-06-05: aggregate index-domain width credit
+
+- `cypher_array_agg_property_materialization_credit()`의 index-domain credit을 matched slot count만 보지 않고,
+  slot당 payload/final/type-vector width weight를 반영하는 `index-width-weight` 기반으로 보정했다.
+- single-slot indexed aggregate는 기존보다 강한 row-scaled width credit을 받고, multi-slot aggregate는 matched slot
+  수에 비례해 평균 slot width만 소비하므로 일부 index-domain match에서 전체 aggregate weight를 과대 적용하지 않는다.
+- planner DEBUG2 handoff descriptor에 `index-width-weight`를 추가해 `index-matched`, payload/final/materialization
+  weight와 같은 vocabulary로 비용 입력을 볼 수 있게 했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `psql -p 61959 -d postgres -v graph=age_agg_threshold -v threshold_rows=20,100 -f tools/aggregate_index_benchmark.sql`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match'`
+
+## 2026-06-05: aggregate benchmark slot descriptor summary
+
+- `tools/aggregate_index_benchmark.sql`이 실제 `age_array_agg_slots_descriptor()` result를 shape별로 수집해
+  `slot_count`, typed/agtype slot count, payload/final/materialization weight, `slot_types`, `aggregate_rows`를 summary에
+  출력하게 했다.
+- `threshold_rows=20,100,250` smoke에서 natural child index boundary가 100과 250 사이로 다시 보였고, indexed single-slot
+  `agtype`과 typed two-slot `numeric,int8`이 모두 `materialization-weight=4`를 출력하는 것을 확인했다.
+- 다음 비용 보정은 단순 materialization weight 상수가 아니라 slot count/type mix와 aggregate input rows가 partial
+  aggregate state width에 주는 영향을 기준으로 진행한다.
+- 검증:
+  - `psql -p 61959 -d postgres -v graph=age_agg_threshold -v threshold_rows=20,100,250 -f tools/aggregate_index_benchmark.sql`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match'`
+  - `git diff --check`
+
+## 2026-06-05: aggregate slot serialized width evidence
+
+- `age_array_agg_*_slots_summary`와 `age_array_agg_slots_descriptor()` summary vocabulary에 `serialized-bytes`,
+  `null-bitmap-bytes`, `value-bytes`를 추가했다.
+- summary byte fields는 실제 serialize layout의 header, type vector, null bitmap, map key bytes, value payload bytes를
+  계산한다. descriptor는 rows=0 기준이라 byte fields를 0으로 둔다.
+- `cypher_match` parallel regression에서 scalar `agtype` 1-slot, typed 3-slot list/map, typed property 2-slot state의
+  byte width가 raw expected output에 드러난다. benchmark parser도 `slot_serialized_bytes`,
+  `slot_null_bitmap_bytes`, `slot_value_bytes`를 뽑는다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match'`
+  - `psql -p 61959 -d postgres -v graph=age_agg_threshold -v threshold_rows=20,100 -f tools/aggregate_index_benchmark.sql`
+
+## 2026-06-05: aggregate state width cost input
+
+- `CypherArrayAggPropertyHandoff`에 slot type별 estimated payload wire width를 누적하고, null bitmap overhead를 포함한
+  `state-width-weight`를 aggregate narrow path cost credit에 반영했다.
+- `index-domain` width credit도 materialization weight뿐 아니라 state width weight를 함께 소비한다.
+- planner DEBUG2 handoff descriptor에 `wire-width`와 `state-width-weight`를 추가했다. benchmark의 실제
+  `slot_value_bytes`와 비교해 estimate 보정 여지를 볼 수 있다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match'`
+  - `psql -p 61959 -d postgres -v graph=age_agg_threshold -v threshold_rows=20,100,250 -f tools/aggregate_index_benchmark.sql`
+
+## 2026-06-05: aggregate width estimate benchmark surface
+
+- `age_array_agg_slots_descriptor()`와 runtime summary aggregate가 planner-compatible
+  `estimated-wire-width`, `estimated-state-width-weight`를 출력하게 했다.
+- `tools/aggregate_index_benchmark.sql`은 이를 `slot_estimated_wire_width`,
+  `slot_estimated_state_width_weight`로 파싱해 실제 `slot_value_bytes` 옆에 둔다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match'`
+  - `psql -p 61959 -d postgres -v graph=age_agg_threshold -v threshold_rows=20,100 -f tools/aggregate_index_benchmark.sql`
+
+## 2026-06-05: aggregate benchmark slot-state ratio
+
+- `tools/aggregate_index_benchmark.sql`이 descriptor row와 별도로 label table direct slot-state summary를 수집한다.
+- summary는 `slot_state_value_bytes`, `slot_state_serialized_bytes`, `slot_state_value_bytes_per_row`,
+  `slot_value_estimate_ratio`를 출력한다.
+- `threshold_rows=20,100` smoke에서 single-slot `agtype`은 28 bytes/row 대 estimate 52, typed `numeric,int8`은
+  24 bytes/row 대 estimate 40으로 보였다.
+- 검증:
+  - `psql -p 61959 -d postgres -v graph=age_agg_threshold -v threshold_rows=20,100 -f tools/aggregate_index_benchmark.sql`
+
+## 2026-06-05: aggregate wire estimate calibration
+
+- benchmark slot-state ratio를 기준으로 planner-compatible wire estimate를 낮췄다.
+- `agtype` scalar slot은 28 bytes, `numeric`은 12 bytes, short `text`는 20 bytes를 기본값으로 둔다.
+- 같은 estimate를 planner handoff와 SQL descriptor summary 양쪽에 적용했다.
+- `threshold_rows=20,100` smoke에서 single-slot `agtype`과 typed `numeric,int8` 모두 `slot_value_estimate_ratio=1.00`으로
+  맞춰졌다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match'`
+  - `psql -p 61959 -d postgres -v graph=age_agg_threshold -v threshold_rows=20,100 -f tools/aggregate_index_benchmark.sql`
+
+## 2026-06-05: VLE source explain surface split
+
+- `AGE VLE Stream` verbose EXPLAIN에서 길어진 `VLE Edge Source` 한 줄을 source summary, `VLE Source Cost`,
+  `VLE Source Profile`, `VLE Source Threshold Input`, `VLE Source Payload Input`, `VLE Source Policy`로 분리했다.
+- planner/runtime feedback cache와 payload replay input은 더 이상 source summary line에 섞이지 않고 각각
+  threshold input과 payload input line에서 확인한다.
+- `tools/vle_benchmark.sql` parser도 새 property line을 shape별로 join하도록 바꿔 기존 benchmark summary column을
+  유지한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle cypher_match'`
+
+## 2026-06-05: adjacency pruning residual surface
+
+- `AGE Adjacency Match`의 `Adjacency Pruning` EXPLAIN에 `index-solved=N`과 `residual-count=N`을 추가했다.
+- ORCA `CPhysicalIndexScan::ResidualPredicateSize()`와 Neo4j relationship index seek의 index-compatible
+  predicate/hidden selection 분리를 참고했다.
+- label block pruning과 terminal property source prefetch가 source side에서 해결한 predicate 수와, join/heap
+  verification으로 남는 predicate 수가 raw regression output에 드러난다.
+- `cost_adjacency_match_custom_path()`도 같은 count를 소비해 residual-heavy path의 CPU verification weight와
+  source-pruned path의 credit을 분리한다.
+- `Adjacency Cost Input` EXPLAIN line을 추가해 fanout, residual/index-solved count, residual weight, index credit,
+  planned prefetch threshold/reason, payload mode를 plan surface에서 함께 확인한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency'`
+
+## 2026-06-05: aggregate slot state header evidence
+
+- `age_array_agg_map_slots_summary`와 `age_array_agg_list_slots_summary`를 추가해 slot-vector aggregate의
+  internal state header를 SQL-visible text summary로 확인할 수 있게 했다.
+- summary aggregate는 기존 map/list transition, combine, serialize, deserialize contract를 공유하고 final function만
+  summary surface로 바꾼다.
+- slot-vector state summary는 `shape`, `slots`, `rows`, `typed`, `agtype`, `payload-weight`, slot별 value type vector를
+  출력한다.
+- slot-vector state summary에 `final-weight`와 `materialization-weight`를 추가해 runtime aggregate state header가
+  planner의 cached-property final materialization weight와 같은 기준을 드러낸다.
+- varlena slot payload는 aggregate state에 보관할 때 flat detoast copy로 고정해 partial serialize 경계가 compressed
+  toast pointer에 의존하지 않게 했다.
+- `cypher_match` regression은 list/map partial aggregate state가 `int8,numeric,text` header를 보존하는지 출력한다.
+- 같은 graph property fixture에서 planner가 출력하는 typed property helper vector와
+  `age_array_agg_list_slots_summary` runtime state header의 `types=numeric,int8`를 나란히 고정해 cached-property
+  descriptor와 aggregate state header mismatch를 raw regression output에서 볼 수 있게 했다.
+- transition/combine 단계의 slot type mismatch error도 slot index, phase, expected/actual type name과 OID를
+  detail에 포함하도록 바꿔 partial aggregate state header drift를 generic error 없이 좁힐 수 있게 했다.
+- `age_array_agg_slots_descriptor(variadic any)`를 추가해 resolved aggregate argument type-vector도 runtime summary와
+  같은 vocabulary로 출력하게 했다. `cypher_match`는 descriptor와 runtime state header를 한 query output에 나란히
+  고정한다.
+- aggregate property handoff formatter를 추가해 planner DEBUG2에 index-matched slot count와 payload/final/materialization
+  weight를 출력하게 했다. index-backed aggregate regression은 descriptor call과 `Index Scan` lower target을 같은
+  `EXPLAIN VERBOSE` output에 고정한다.
+- index-domain matched aggregate slot count를 일반 materialization credit과 분리해 row-scaled width credit으로
+  cost에 반영했다.
+- `tools/aggregate_index_benchmark.sql`을 추가해 index-backed aggregate descriptor, child `Index Scan`, execution time을
+  함께 측정할 수 있게 했다. `rows=20` smoke에서 indexed selective aggregate가 expression index scan을 출력하는 것을
+  확인했다.
+- benchmark에 natural selective shape와 forced index shape를 분리해 추가했다. `rows=20` smoke에서 natural은 seq scan,
+  forced는 expression index scan을 출력해 threshold 보정 기준을 분리했다.
+- `rows=100/250/500` smoke를 실행해 natural selective aggregate가 100에서는 seq scan, 250과 500에서는 expression
+  index scan을 선택하는 것을 확인했다. benchmark summary에 `row_count`를 추가했다.
+- `threshold_rows` 옵션을 추가해 여러 row count graph를 한 번에 만들고 natural/forced/typed aggregate summary를
+  row count별로 출력하게 했다. `threshold_rows=20,100` smoke를 통과했다.
+- aggregate benchmark의 descriptor expression을 shape별로 받게 해 typed baseline이 `numeric,bigint` descriptor를
+  출력하게 했다. `threshold_rows=20,100` smoke로 확인했다.
+- threshold sweep summary에 `last_natural_seqscan_rows`, `first_natural_index_rows`, `first_forced_index_rows`를 추가했다.
+  `threshold_rows=20,100` smoke를 통과했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match'`
+
+## 2026-06-05: aggregate final materialization cost
+
+- typed collect와 `array_agg` property rewrite의 final materialization credit을 상수 slot count가 아니라
+  aggregate input row estimate와 final materialization weight를 함께 보는 cost로 바꿨다.
+- 작은 fixture에서는 기존 base weight credit을 유지하고, 큰 input row에서는 `cpu_operator_cost` 기반 row-scaled
+  credit이 커지게 했다. 이는 큰 hash aggregate/partial aggregate shape에서 lower typed slot 유지가 더 유리하다는
+  planner evidence를 만들기 위한 조정이다.
+- ORCA cost model이 aggregate/compute scalar 비용을 child/input cardinality와 결합하는 구조를 참고했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='expr cypher_match age_adjacency cypher_vle'`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck`
+  - `git diff --check`
+
+## 2026-06-05: typed aggregate slot-vector input
+
+- `age_array_agg_list_slots`/`age_array_agg_map_slots` transition state가 value slot을 항상 `agtype` Datum으로
+  보관한다는 contract를 명시하고, non-`agtype` scalar input은 transition 시점에 `agtype`으로 정규화하게 했다.
+- 기존 combine/serialize/final layout은 유지했다. typed Datum을 state에 직접 저장하지 않으므로 partial aggregate
+  serialize/deserial contract를 새 타입 배열로 넓히기 전에도 scalar slot input을 안전하게 받을 수 있다.
+- `cypher_match` regression에 `bigint`/`numeric`/`text` typed list slot fixture를 추가했다.
+- slot-vector aggregate state header에 slot별 original value type OID 배열을 추가하고 serialize format을 v3로 올렸다.
+  state value payload는 계속 `agtype` Datum으로 보관하지만, partial aggregate combine/serialize/deserial이 slot type
+  vector를 보존하고 mismatch를 검출한다.
+- `cypher_match` parallel regression에 `bigint`/`numeric`/`text` typed table slot aggregate를 추가해 value type header가
+  partial aggregate serialize/deserial path를 통과하는지 확인한다.
+- typed map/list property `array_agg`는 더 이상 early property aggregate rewrite에서 AGTYPE-only key array로 접지
+  않는다. original `array_agg` map/list expression에서 property signature를 읽어 `age_array_agg_*_slots` lower target을
+  직접 만들고, slot별 typed field helper를 보존한다.
+- `cypher_match` EXPLAIN regression은 `[n.payload.a::pg_numeric, n.payload.b::pg_bigint]`와
+  `{a: n.payload.a::pg_numeric, b: n.payload.b::pg_bigint, c: n.payload.c::pg_text}`가
+  `age_array_agg_*_slots` 안에서 typed field helper로 내려가는 것을 고정한다.
+- slot-vector aggregate payload도 AGTYPE-only 저장에서 typed Datum 저장으로 넓혔다. `int8`/`float8`는 fixed-width
+  Datum으로, `numeric`/`text`/`agtype`은 varlena Datum으로 aggregate context에 복사하고, final materializer는 slot별
+  value type을 `add_agtype()`에 넘긴다.
+- serialize/deserial도 value type별 payload를 보존한다. parallel typed slot regression과 typed list/map result
+  regression으로 partial aggregate와 final materialization 경로를 함께 확인한다.
+- typed 2-field map shape도 `map2` legacy intermediate aggregate로 접히지 않고 original `array_agg`에서
+  `age_array_agg_map_slots` typed helper target으로 내려가게 regression으로 고정했다.
+- typed property signature 판정은 공통 helper로 모아 map2/map/list early rewrite skip이 같은 기준을 쓰게 했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='expr cypher_match age_adjacency cypher_vle'`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck`
+  - `git diff --check`
+
+## 2026-06-05: VLE directional feedback cache projection
+
+- `age_adjacency` directory entry에 endpoint run의 terminal `next_label_id` min/max summary를 추가했다.
+  terminal label constraint가 summary range 밖이면 visible payload scan은 main run block을 열지 않고 run 전체를
+  label/cache filtered로 처리한다.
+- `AGE Adjacency Match`의 `Adjacency Payload Runtime`은 `directory-label=N`을 출력한다. `(:N {i:0})-[:R]->(:Z)`
+  regression은 `visible=0 directory-label=3`으로 directory-level pruning evidence를 raw EXPLAIN에 고정한다.
+- directory entry layout 변경을 `age_adjacency` v5로 올리고, `age_adjacency_debug_stats()`가 `index_version`을
+  반환하게 했다. smoke regression은 fresh index의 `index_version:directory_entries`를 `5:2`로 고정한다.
+- `age_adjacency_visible_payload_scan_key_known_empty()`도 directory label summary를 소비하게 했다. no-delta index에서
+  endpoint run은 있지만 terminal label range 밖이면 known-empty로 취급한다.
+- `age_adjacency_debug_key_known_empty()`를 추가해 label range hit/miss를 `false:true`로 고정했다. VLE frontier
+  empty queue는 queue 시점에 payload cache known-empty도 즉시 mark한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle'`
+
+- VLE runtime threshold feedback cache update를 helper로 분리하고, `active=both` 실행에서
+  관측한 `source=both` empty lifecycle evidence를 `out`/`in` directional cache key에도 투영하게 했다.
+- 이후 directed traversal은 undirected 실행에서 얻은 root-empty/payload cache evidence를
+  `threshold-input=runtime-cache ... source:out|in`으로 소비할 수 있다.
+- `cypher_vle`에 undirected 실행 후 directed EXPLAIN이 directional runtime cache를 읽는 fixture를 추가했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle'`
+
+## 2026-06-05: VLE materialized payload replay feedback
+
+- payload replay feedback을 exact consumer class에만 보관하지 않고 `path-materialized`와 `terminal-object`가
+  공유하는 materialized family cache에도 기록하게 했다.
+- planner는 shared replay ratio를 현재 consumer의 materialization weight에 맞춰 headroom/batch로 다시 해석한다.
+  path query에서 관측한 replay가 후속 terminal vertex/properties materialization plan에도 바로
+  `payload-input=runtime-cache ... class:adjacency-replay`로 들어간다.
+- materialized family cache도 `active=both` evidence를 `out`/`in` key로 투영하게 했고, benchmark summary는
+  `payload_input_class`를 별도 column으로 뽑아 shared replay feedback class를 직접 비교할 수 있게 했다.
+- benchmark final summary는 현재 split EXPLAIN line 구조에 맞춰 source runtime, plan, counters, payload,
+  empty evidence/lifecycle, runtime feedback line을 각각 파싱해 join하도록 고쳤다.
+- `cypher_vle` regression에 path replay 실행 뒤 `RETURN n` EXPLAIN이 shared payload feedback을 소비하는
+  fixture를 추가했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle'`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle'`
+  - `git diff --check`
+
+## 2026-06-05: Adjacency right-label block pruning
+
+- `age_adjacency` main run block의 `next_label_id` metadata를 payload scan contract가 직접 소비하게 했다.
+  right terminal label이 맞지 않는 block은 posting을 풀어 cache하기 전에 건너뛰고, delta/fallback path는
+  공통 terminal-label helper로 같은 runtime counter를 쌓는다.
+- `AGE Adjacency Match`는 `Adjacency Payload Runtime` line을 별도로 출력해 visible payload, label-filtered
+  posting, emitted row를 드러낸다. terminal property runtime과 payload pruning runtime을 섞지 않는다.
+- cost는 right-label constraint가 있는 adjacency custom path에서 terminal-label pruning selectivity를 반영한다.
+- `age_adjacency` regression은 같은 start vertex에서 `N`/`M` terminal label edge를 함께 만들어
+  `label-filtered=1`이 raw `EXPLAIN ANALYZE VERBOSE` surface에 보이게 했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency'`
+
+## 2026-06-05: Adjacency terminal property prefilter
+
+- metadata-backed terminal property index prefetch set을 executor-local post-filter로만 쓰지 않고
+  `age_adjacency` visible payload scan의 vertex filter callback으로 연결했다.
+- prefilter 가능한 `property-index-prefetch` 모드에서는 terminal vertex id가 matching set에 없으면 heap visibility
+  check와 edge properties fetch 전에 posting을 버린다. 비-prefetch 모드는 기존 id-btree/cache recheck를 유지한다.
+- `Adjacency Payload Runtime`은 `property-filtered=N`을 출력해 label pruning과 property prefilter를 분리해 보여준다.
+- `age_adjacency` regression은 같은 `N` label이지만 property가 다른 terminal edge를 추가해
+  `label-filtered=1 property-filtered=1`을 `EXPLAIN ANALYZE VERBOSE` surface로 고정했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle'`
+- 후속 descriptor 정리에서 `Adjacency Pruning`의 right property mode를 `source-prefetch`로 올리고 residual은
+  `join-verify`로 표기하게 했다. cost도 같은 prefetch eligibility helper를 사용해 row pruning과 residual
+  recheck cost를 계산한다.
+- terminal property value가 constant가 아니어도 `CustomScan.custom_exprs` value slot으로 넘겨 scan 시작 시점에
+  평가하게 했다. lookup은 value setter로 cache/prefetch set을 재구성하므로 `n:N {i: 1 + 0}` 같은 runtime
+  expression도 source prefilter를 탄다.
+
+## 2026-06-05: array aggregate duplicate property slot sharing
+
+- `array_agg` map/list property narrow path에서 같은 property expression이 반복되면 lower
+  target에 같은 slot expression을 여러 번 싣지 않고 기존 `sortgroupref`를 공유하게 했다.
+- aggregate argument 순서와 map/list 출력 semantic은 유지하고, base scan/projection boundary의
+  반복 property lookup 폭만 줄였다.
+- duplicate map/list property EXPLAIN을 `cypher_match` regression에 추가해 lower `Seq Scan`
+  output이 중복 property expression을 한 번만 출력하는 것을 raw plan surface로 고정했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match'`
+
+## 2026-06-05: Compact age_adjacency main postings
+
+- `INDEX.md`의 sorted adjacency/trie/compressed graph index 방향에 맞춰 `age_adjacency` payload layout을 v4로
+  올렸다.
+- bulk-built main posting은 directory run key와 중복되는 endpoint key를 저장하지 않고
+  `(heap_tid, edge_id, next_vertex_id)`만 보관한다. directory entry의 key/count가 main run scan boundary를
+  제공한다.
+- visible payload main page cache도 full posting으로 다시 확장하지 않고 compact main posting payload만 보관한다.
+  active key는 emission 직전에 stack-local posting으로 붙여 on-disk compaction과 runtime cache layout을 맞췄다.
+- main cache는 page 전체가 아니라 directory entry가 가리키는 active run window만 읽는다. 같은 page에 다른 endpoint
+  run이 함께 있어도 현재 key의 offset/count 범위만 cache해 CSR-like run boundary를 executor cache에도 반영했다.
+- `age_adjacency_debug_main_probe()`를 추가해 main run window offset, page offset, cached entry 수를
+  regression-visible하게 만들었다. window cache가 page 전체 cache보다 좁게 동작하는지 결과 assertion 밖에서 확인한다.
+- insert delta posting은 unordered delta page scan을 위해 기존 full key layout을 유지한다. fresh install 전용
+  정책에 따라 예전 on-disk layout compatibility decode는 추가하지 않았다.
+- delta page의 `min_key/max_key/posting_count` metadata를 payload scan cursor에 연결해, key range 밖 page와
+  빈 page는 tuple loop 전에 건너뛴다. v4 main compaction과 달리 on-disk tuple을 다시 바꾸지는 않지만, insert
+  delta가 여러 page로 커지는 fresh workload에서 full delta scan 압력을 줄이는 중간 단계다.
+- `age_adjacency_debug_delta_probe()`를 추가해 delta page visited/skipped와 실제 tuple scan 수를 확인할 수 있게
+  했다. 이 probe는 range skip이 결과 보존을 넘어 scan lifecycle을 줄였는지 regression-visible하게 보여준다.
+- planner cost hook은 first key equality qual이 graphid constant이면 같은 delta probe를 사용해 delta tuple CPU
+  cost를 `delta_postings` 전체가 아니라 key range가 실제로 scan할 posting 수로 계산한다. linked delta page의
+  header 확인 비용은 유지하고 tuple loop 비용만 낮춰 runtime contract와 맞췄다.
+- `age_adjacency_debug_delta_maintenance()`를 추가해 delta lifecycle을 `none`, `observe-delta`,
+  `range-skip-delta`, `reindex-delta` action으로 노출한다. threshold boolean을 숨은 stats로 두지 않고,
+  benchmark와 다음 maintenance policy가 직접 읽을 수 있는 action/reason surface로 올렸다.
+- `tools/age_adjacency_baseline.sql`은 index stats에 delta maintenance action/reason과 delta page capacity를
+  함께 저장한다. delta-heavy phase 뒤에는 이 action이 `reindex-delta`일 때만 `REINDEX INDEX`를 실행해 benchmark가
+  maintenance policy 입력을 실제 실행 흐름으로 소비한다.
+- `age_adjacency_reindex_if_needed()`를 추가해 DB 내부 maintenance entry point를 만들었다. 함수는
+  `age_adjacency_debug_delta_maintenance()`와 같은 action을 계산하고, `reindex-delta`일 때만 PostgreSQL
+  `reindex_index()`를 호출한 뒤 before/after delta posting 수를 반환한다. benchmark harness도 수동 `REINDEX`
+  대신 이 entry point를 호출한다.
+
+## 2026-06-05: VLE runtime EXPLAIN summary split
+
+- `VLE Source Runtime` 한 줄에 observed runtime, planned source, class match를 모두 싣던 방식을 줄였다.
+  runtime summary는 `dominant/class/pressure/action`만 남기고 planner/index 비교는 `VLE Source Plan`으로
+  분리했다.
+- `AGE Adjacency Match`는 metadata-backed terminal property index와 constant right property value가 있으면
+  endpoint vertex id lookup으로 right property residual을 tuple emission 전에 precheck한다.
+- adjacency descriptor에 graph oid와 right property value를 싣고 executor가 graph label relation을 직접 열 수
+  있게 했다. SQL join/recheck는 semantic safety를 위해 남기고, EXPLAIN은 `precheck=yes|no`를 출력한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - focused `installcheck REGRESS='age_adjacency cypher_vle cypher_match'`는 expected 갱신 전 출력 diff만 확인했다.
+
+## 2026-06-05: Adjacency terminal property lookup boundary
+
+- `AGE Adjacency Match` executor에서 terminal property relation/index/slot 처리를
+  `cypher_adjacency_match_terminal.c`로 분리했다.
+- terminal property lookup은 graph oid, label id, property key/value, metadata-backed 여부를 request descriptor로
+  받아 초기화한다. scan node 본체는 request 생성과 opaque lookup 호출만 담당한다.
+- repeated endpoint를 같은 execution 안에서 다시 확인하지 않도록 `vertex_id -> match` cache를 추가했다.
+  EXPLAIN은 기본 property line에 `mode=id-btree-cache`를 남기고, runtime counter는 ANALYZE 전용
+  `Adjacency Terminal Runtime` line으로 분리했다.
+- property source index oid도 descriptor/request에 싣고, AGTYPEOID expression index일 때는 executor begin 단계에서
+  property index를 한 번 스캔해 matching vertex id set을 채운다. 이 경우 EXPLAIN은
+  `mode=property-index-prefetch`를 출력한다.
+
+## 2026-06-05: Adjacency Match terminal property index request
+
+- `AGE Adjacency Match`가 terminal node property predicate의 첫 top-level key를 읽고,
+  `ag_catalog.ag_graph_index`의 NODE `PROPERTY` metadata와 맞춰 terminal property index 후보를 descriptor에 싣는다.
+- `Adjacency Terminal Property` EXPLAIN line을 추가했다. 예시는
+  `key=i index=graph-metadata:n_i_source provider=btree metadata=yes` 형태이며, adjacency source/pruning line을 다시
+  길게 만들지 않고 terminal property index handoff만 별도로 드러낸다.
+- cost는 right-property residual이 있을 때 deferred recheck penalty를 추가하고, metadata-backed property index 후보가
+  있으면 그 penalty를 낮춘다. CustomScan 자체가 vertex property lookup을 수행하는 것은 아직 아니므로 row estimate는
+  억지로 줄이지 않았다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_match'`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck`
+
+## 2026-06-05: Adjacency Match graph index descriptor
+
+- `AGE Adjacency Match` 후보 등록 API가 graph index metadata detail을 함께 넘기도록 확장했다. parser는
+  `ag_catalog.ag_graph_index`에서 `index_kind`, `provider`, `direction`, property count, metadata-backed 여부를
+  읽고 planner candidate에 싣는다.
+- CustomScan descriptor는 index OID/source뿐 아니라 metadata kind/provider/direction/properties를 보존한다.
+  executor EXPLAIN은 `Adjacency Index`, `Adjacency Index Descriptor`, `Adjacency Pruning`으로 나눠 출력한다.
+- runtime 비용이 같은 `age_adjacency` AM이면 metadata-backed 여부만으로 가짜 runtime cost discount를 주지 않았다.
+  대신 descriptor surface를 넓혀 다음 단계의 property/composite index handoff와 cost 분기가 같은 metadata를
+  소비할 수 있게 했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_match'`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck`
+
+## 2026-06-05: VLE replay lifecycle class 정규화
+
+- ORCA의 physical property/required column handoff를 다시 확인하고, VLE source feedback도 단순 문자열
+  class 비교가 아니라 planned lifecycle이 요구한 property를 runtime이 제공했는지로 해석하도록 정리했다.
+- `adjacency-replay` runtime feedback은 cache seed 가능한 `age_adjacency` empty lifecycle의 더 강한 provided
+  property로 보고, planned `adjacency-cache-seeded` class와 mismatch로 처리하지 않는다.
+- `VLE Source Runtime`은 해당 shape에서 `class-match=true`와
+  `pressure=adjacency-payload-replay action=keep-payload-replay`를 출력한다. 이는 rollback/tune-source-policy
+  후보가 아니라 payload replay contract를 유지해야 하는 신호다.
+- 너무 길어진 runtime evidence는 `VLE Source Runtime` summary, `VLE Source Counters`,
+  `VLE Payload Runtime`, `VLE Empty Evidence`, `VLE Empty Lifecycle`, `VLE Runtime Feedback`으로 나눴다.
+  index/source 선택 판단은 첫 줄에서 보고, counter와 lifecycle 세부값은 별도 줄에서 확인한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle'`
+
+## 2026-06-05: graph index metadata와 VLE CustomScan child explain
+
+- `AGE Adjacency Match`가 `ag_catalog.ag_graph_index` metadata에서 방향별 `age_adjacency` source index를
+  먼저 찾도록 바꿨다. metadata가 없거나 stale이면 기존 relcache scan으로 fallback한다.
+- adjacency descriptor와 EXPLAIN에 `source=graph-metadata:<index>` / `source=relcache-scan`을 싣는다.
+  parser DDL로 만든 graph index가 실제 planner source로 소비되는지 raw plan surface에서 확인할 수 있다.
+- `AGE VLE Stream` CustomPath가 marker `Values Scan` reference path를 `custom_paths`로 보존하고,
+  executor가 `custom_plans`를 `custom_ps`로 초기화한다. PostgreSQL `explain.c`의
+  `ExplainCustomChildren()` 경로가 그대로 동작해 `Custom Scan (AGE VLE Stream)` 아래에 child plan이 보인다.
+- 다른 AGE CustomScan도 확인했다. DML CustomScan은 `lefttree` child를 이미 사용하고, `AGE Property Projection`과
+  `AGE Adjacency Match`는 relation-backed scan이라 child plan을 붙일 대상이 아니다. VLE만 marker input path를
+  버리고 있던 구조적 누락이었다.
+- 전체 regression에서 `cypher_match_plan` graph가 `drop`까지 남던 cleanup 누락을 고쳤고,
+  VLE `EXPLAIN ANALYZE`는 source/runtime evidence에 불필요한 buffer hit drift를 피하도록 `BUFFERS OFF`를 명시했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle cypher_match'`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency index'`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck`
+
 ## 2026-06-05: VLE payload cache run evidence
 
 - `AGE Property Projection` slot descriptor에도 final materialization weight를 추가했다. typed scalar property
@@ -2925,6 +4014,683 @@
   - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
   - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle cypher_vle_followup age_global_graph age_adjacency'`
   - `git diff --check`
+
+## 2026-06-05: `AGE Adjacency Match` 기본 index path 채택
+
+- `age.enable_adjacency_match`와 `age.enable_adjacency_match_custom_path` GUC를 제거했다.
+  `age_adjacency` 인덱스가 있고 endpoint가 bound된 one-hop MATCH는 기본적으로 정상 edge RTE를 유지하면서
+  `AGE Adjacency Match` CustomPath 후보를 등록한다.
+- parser의 예전 SRF provider fallback과 dead helper를 제거했다.
+- edge variable projection, edge property predicate, right node property predicate가 있어도 CustomPath 후보를
+  배제하지 않도록 planner gate를 넓혔다. 필요한 edge payload column은 CustomScan tlist에서 수집하고 residual
+  predicate는 plan qual로 유지한다.
+- `AGE Adjacency Match` executor는 endpoint payload를 `List`에 모두 모으지 않고
+  `AgeAdjacencyVisiblePayloadScan` cursor에서 한 tuple씩 streaming한다.
+- regression은 disabled/enabled GUC assertion을 제거하고, 기본 CustomPath 채택 및 broadened edge
+  property/projection/right-property shape를 expected로 고정했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency'`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match'`
+
+## 2026-06-05: `AGE Adjacency Match` index descriptor surface
+
+- `AGE Adjacency Match` CustomPath private descriptor에 direction, endpoint key, estimated fanout,
+  edge variable/properties requirement, right label/property residual requirement를 실었다.
+- executor EXPLAIN hook을 추가해 `Adjacency Index`와 `Adjacency Payload Columns`를 출력한다. required payload
+  columns와 residual shape가 raw `EXPLAIN (VERBOSE, COSTS OFF)` expected에 직접 남는다.
+- `age_adjacency` regression에 descriptor surface smoke를 추가했다. edge property predicate, right label/property
+  requirement, endpoint fanout, payload column mode가 plan output에 보인다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_match'`
+
+## 2026-06-05: `AGE Adjacency Match` payload-aware cost
+
+- `AGE Adjacency Match` descriptor에 planned payload mode를 추가했다. `Adjacency Index` EXPLAIN은
+  `payload=id-only|edge-row`를 출력한다.
+- candidate 단계에서 edge variable projection 또는 edge property predicate가 있으면 `edge-row`로 보고,
+  heap recheck/cpu cost factor를 높인다. 그렇지 않은 endpoint id-only shape는 낮은 factor를 사용한다.
+- actual CustomScan tlist가 출력하는 required payload columns는 계속 `Adjacency Payload Columns`에 남긴다.
+  다음 단계는 이 actual column vector를 path cost 단계로 더 일찍 끌어올리는 것이다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_match'`
+
+## 2026-06-05: `age_adjacency` main run block 압축
+
+- `INDEX.md`의 sorted adjacency/CSR 방향을 기준으로 bulk-built main run을 posting별 page item에서 run-local
+  packed block item으로 바꿨다.
+- directory entry는 run key, 첫 block 위치, logical posting count를 유지하고, main block은
+  `(heap_tid, edge_id, next_vertex_id)` array만 저장한다. scan/cache는 active key를 emission 직전에 재구성한다.
+- bulk delete는 block 내부 posting을 compact하고, cost hook은 packed main block density를 main page estimate에
+  사용한다.
+- `age_adjacency_debug_main_probe()`는 packed block item 수를 출력해 logical posting 수 대비 page item 감소를
+  regression에서 확인한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+  - `git diff --check`
+  - `git diff --check`
+
+## 2026-06-05: `age_adjacency` main block graphid 압축
+
+- main run block 안의 edge/next label id가 같으면 label id를 block header에 저장하고 posting에는 48-bit entry id만
+  저장하게 했다.
+- bulk build는 label-homogeneous chunk를 만들어 compact block을 우선 사용하고, mixed label chunk는 full graphid
+  block으로 fallback한다.
+- scan/cache/bulk delete는 compact/full block을 같은 helper로 읽고, debug probe는 compact/full block count를 출력한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: `age_adjacency` delta page-local graphid 압축
+
+- delta page opaque에 key/edge/next label id triple을 저장하고, delta item은 세 48-bit entry id와 TID만 저장하게 했다.
+- insert label triple이 현재 delta page와 다르면 새 delta page를 시작해 page-local compact invariant를 유지한다.
+- payload scan, visible payload cursor, bulk delete, delta maintenance/cost estimate가 compact delta item layout을
+  사용한다.
+- regression은 `delta_tuples_per_page > 226`으로 full posting layout보다 page density가 늘어난 것을 확인한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: `AGE Adjacency Match` terminal property feedback
+
+- metadata-backed terminal property index 후보를 CustomPath row estimate와 recheck cost에 반영했다.
+- `Adjacency Terminal Runtime`은 property index prefetch match 수, payload 후보 수, terminal filter 수, emitted row 수,
+  cache hit, id index lookup 수를 출력한다.
+- `age_adjacency` regression에 `EXPLAIN ANALYZE` surface를 추가해 `property-index-prefetch`가 실제 runtime에서
+  후보 pruning evidence를 제공하는지 확인한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency'`
+
+## 2026-06-05: `AGE Adjacency Match` required payload vector
+
+- `AdjacencyMatchPayloadRequest`를 CustomPath 생성 전에 산정해 required edge columns를 cost와 descriptor가
+  직접 소비하게 했다.
+- anonymous edge id-only shape는 `required=start_id,end_id`와 낮은 payload cost를 사용하고, edge property
+  predicate shape는 `required=start_id,end_id,properties`와 edge-row cost를 사용한다.
+- `custom_scan_tlist`도 같은 request에서 생성한다. executor fetch 여부와 EXPLAIN의 planned descriptor가 같은
+  column vector를 기준으로 움직인다.
+- `age_adjacency` regression은 id-only descriptor와 edge-row descriptor를 모두 raw EXPLAIN으로 고정한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_match'`
+
+## 2026-06-05: `AGE Adjacency Match` right label pruning
+
+- right endpoint label id를 adjacency match candidate/descriptor에 추가했다.
+- `AgeAdjacencyVisiblePayloadScan`에 terminal label id setter를 추가하고, posting의 `next_vertex_id` label bits가
+  맞지 않으면 edge heap fetch 전에 제외한다.
+- EXPLAIN은 `right-prune=label:yes/props:deferred`를 출력한다. property residual은 아직 composite property
+  lookup request가 없어 deferred로 남긴다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_match'`
+
+## 2026-06-05: graph index parser surface
+
+- `INDEX.md` 조사 방향에 맞춰 graph index 생성 surface를 helper-only에서 Neo4j식 Cypher DDL로 올렸다.
+- `CREATE INDEX name FOR (n:Label) ON (n.prop)`와 relationship property index는 property source index를 만들고,
+  `CREATE INDEX name FOR ()-[r:TYPE]->() ON (ADJACENCY)`는 outgoing `age_adjacency(start_id,id,end_id)` source
+  index를 만든다. incoming 방향은 `<-` pattern으로 표현한다.
+- `DROP INDEX name`을 추가해 parser DDL이 create/drop 양쪽을 갖게 했다. drop은 graph schema의 실제 index와
+  `ag_catalog.ag_graph_index` metadata를 함께 제거한다.
+- `SHOW INDEXES`와 `ag_catalog.ag_graph_index` metadata table을 추가했다. graph-local index name, source kind,
+  entity kind, label/type, property vector, state, provider를 조회할 수 있다.
+- `age_adjacency` descriptor regression은 직접 DDL/helper 대신 `CREATE INDEX`, `SHOW INDEXES`, `DROP INDEX`
+  parser surface를 사용한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_match index'`
+
+## 2026-06-05: property index handoff catalog slot
+
+- `CypherPropertyIndexHandoff`에 matched index OID와 catalog index expression 기반 cached-property slot descriptor를
+  추가했다.
+- RTE 기반 property index surface rewrite가 relcache index expression을 직접 `ChangeVarNodes`로 변형하지 않고
+  복사본을 사용하게 했다.
+- DML/MERGE 중 generic mutator가 NULL context child를 방문할 때 property index rewrite context를 역참조하던 crash를
+  lldb로 확인하고 context 없는 호출은 traversal-only로 처리하게 했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - MERGE unique violation 재현 SQL이 backend crash 없이 원래 오류로 종료되는지 확인
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='index cypher_match'`
+
+## 2026-06-05: VLE source feedback class descriptor
+
+- runtime threshold feedback과 payload replay feedback을 reason 문자열만이 아니라
+  `threshold_input_class`, `payload_input_class` descriptor로 전달하도록 했다.
+- `VLE Edge Source` EXPLAIN은 runtime-cache 입력의 `reason`과 `class`를 함께 출력한다.
+- planner policy feedback은 payload replay와 root empty lifecycle 판단에서 reason 문자열보다 class를 우선 사용한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency'`
+
+## 2026-06-05: typed terminal property source prefetch
+
+- `AGE Adjacency Match` terminal property prefetch가 property source index의 실제 첫 key type을 기준으로
+  scan key를 만든다.
+- 지원 domain은 `agtype`, `int8`, `float8`, `numeric`, `text`이며, 변환할 수 없는 runtime value는 prefetch를
+  끄고 기존 id-btree-cache recheck 경로로 내려간다.
+- `agtype_to_int8/text` SQL cast 함수는 `fcinfo->flinfo`를 읽는 variadic fast path가 있어 executor에서
+  `DirectFunctionCall1`로 부르면 backend crash가 날 수 있었다. executor는 공개 agtype container API로 scalar를
+  읽고 PostgreSQL typed input/output function으로 scan key를 만든다.
+- planner의 `prefetch=eligible` 판정은 더 이상 `domain=agtype`에 고정되지 않는다. metadata-backed property
+  source index와 CustomScan 내부에서 평가 가능한 const/runtime-slot value가 있으면 typed prefetch 후보가 된다.
+- regression은 `M.i`의 `int8` property source index가
+  `Adjacency Terminal Property: ... domain=int8 ... prefetch=eligible ... mode=property-index-prefetch`로 실행되는
+  plan surface를 고정한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency'`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck`
+  - `git diff --check`
+
+## 2026-06-05: adjacency payload pruning counter split
+
+- `AGE Adjacency Match` payload runtime의 `cache-filtered` 합계를 유지하면서 `cache-label`과
+  `cache-property`를 추가했다.
+- main payload cache load 단계에서 terminal label block skip과 terminal property prefetch set pruning을 구분해
+  기록한다. 같은 endpoint fan-out에서 label-first pruning이 큰지, property-source prefetch가 큰지 raw EXPLAIN
+  surface로 확인할 수 있다.
+- `M.i` typed property source regression은 `cache-label=2 cache-property=0`으로, `N.i` source prefetch regression은
+  `cache-label=1 cache-property=1`로 드러난다. 다음 label+property composite seek 설계는 이 분리된 runtime
+  evidence를 기준으로 진행한다.
+
+## 2026-06-05: adjacency terminal source strategy descriptor
+
+- `AGE Adjacency Match` CustomPath descriptor에 terminal pruning strategy를 싣고 EXPLAIN의
+  `Adjacency Pruning`에 `terminal-source=...`로 출력한다.
+- label-only pruning은 `label-block`, label+property prefetch는 `label-block+property-source`, property index가
+  없으면 `property-recheck`로 표현한다.
+- 이 값은 executor가 주변 상태에서 다시 추론하는 문자열이 아니라 planner descriptor에서 전달되는 field다. 다음
+  composite seek와 cost 보정은 이 strategy와 `cache-label`/`cache-property` runtime evidence를 함께 본다.
+
+## 2026-06-05: key-bound terminal property prefetch
+
+- terminal property source prefetch를 value 설정 시점이 아니라 endpoint key binding 이후로 늦췄다.
+- `age_adjacency_visible_payload_scan_begin_key()`가 directory run을 열면 active posting count를 볼 수 있고,
+  terminal lookup은 이 candidate count를 기준으로 `property-index-prefetch`를 준비한다.
+- non-ANALYZE EXPLAIN은 아직 key/run이 없으므로 `mode=deferred-prefetch`를 출력하고, ANALYZE 실행에서는 같은
+  plan이 endpoint run을 연 뒤 `mode=property-index-prefetch`로 전환된다.
+- 작은 endpoint run은 property index 전체 prefetch 대신 id-btree-cache recheck 경로로 내려갈 수 있는 lifecycle
+  boundary가 생겼다. 다음 cost 보정은 이 threshold와 `cache-label`/`cache-property` evidence를 함께 사용한다.
+
+## 2026-06-05: terminal prefetch gate runtime evidence
+
+- `Adjacency Terminal Prefetch` EXPLAIN ANALYZE line을 추가해 `candidate-count`, `threshold`,
+  `skipped-small`을 출력한다.
+- 작은 endpoint run fixture를 추가했다. fanout 1에서는 property source prefetch를 건너뛰고
+  `mode=id-btree-cache`, `index-lookups=1`, `skipped-small=1`로 실행된다.
+- 이 과정에서 기존 vertex-cache recheck가 `agtype_object_field_equals`를 `DirectFunctionCall3`로 호출하면
+  `fcinfo->flinfo` cache 접근 때문에 crash할 수 있음을 확인했다. terminal recheck는 local agtype object field
+  equality helper로 바꿔 fmgr expression cache에 의존하지 않는다.
+
+## 2026-06-05: array aggregate property slot vector
+
+- `CypherArrayAggPropertyHandoff`에 cached-property slot vector, slot count, final materialization weight를
+  보관하게 했다.
+- `array_agg` map/list/single property rewrite가 property path expr를 만들 때 slot descriptor를 함께 누적한다.
+- narrow aggregate path 비용 보정은 고정값 대신 aggregate handoff의 final materialization weight를 사용한다.
+- typed collect narrow path도 cached-property slot의 final materialization weight를 비용 보정에 반영한다.
+- aggregate materialization credit 계산은 `cypher_paths.c`에서 직접 handoff 내부를 해석하지 않고
+  `cypher_property_paths` descriptor helper가 소유하도록 이동했다.
+- `age_array_agg_map_slots`/`age_array_agg_list_slots` parallel serialization은 slot마다 null byte를 쓰지 않고
+  null bitmap을 먼저 보낸 뒤 non-null payload만 직렬화한다. deserialize/copy는 state row 수에 맞는 capacity를
+  처음부터 잡아 큰 partial aggregate state의 즉시 repalloc을 피한다.
+- parallel worker 검증 중 NULL partial state와 combine 단계의 잘못된 memory context copy가 확인되어 함께 수정했다.
+  slot value는 항상 aggregate context에 detoast-copy하고, serialize/deserialize는 NULL state를 그대로 반환한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_match'`
+
+## 2026-06-05: aggregate payload domain cost descriptor
+
+- `CypherArrayAggPropertyHandoff`에 typed/agtype payload slot count와 payload materialization weight를 추가했다.
+- `array_agg` property/map/list narrow path cost credit이 final output materialization뿐 아니라 transition payload
+  domain도 읽도록 했다. typed original map/list aggregate는 scalar payload 유지 이득을 더 직접 반영하고, legacy
+  agtype property aggregate는 agtype payload로 구분된다.
+- handoff에 slot별 `payload_value_types` vector를 추가하고, narrow path 후보 검증과 cost 계산이 이 vector를
+  직접 소비하게 했다. aggregate state header의 value type vector와 planner descriptor가 같은 slot cardinality
+  contract를 갖는다.
+- aggregate cached slot도 `CypherPropertyHandoffDescriptor`를 보존하고, 확정된 slots aggregate OID를 descriptor에
+  stamp한다. narrow path 후보는 cached slot, payload type vector, property descriptor count가 모두 같은 경우에만
+  생성되어 이후 property/index metadata join이 expression 재파싱 없이 같은 slot descriptor에서 출발할 수 있다.
+- property index handoff는 query cached slot과 index cached slot의 physical signature 일치 여부를
+  `index_domain_matches_cached_slot`으로 보존한다. 일치할 때만 query slot에 index expression을 연결해 typed
+  property source index와 aggregate/property descriptor가 같은 domain contract를 유지한다.
+- `array_agg` property handoff refresh가 aggregate cached slot을 base rel expression index metadata와 조인한다.
+  domain-matched property index가 있으면 aggregate input expression을 catalog index expression surface로 바꾸고,
+  `index_domain_match_slot_count`를 row-sensitive materialization credit에 반영한다.
+- `cypher_match` regression은 `payload.a` property source index 위에서 `array_agg(n.payload.a)` EXPLAIN이
+  `agtype_access_operator(VARIADIC ARRAY[...])` catalog index expression surface를 lower aggregate input으로 쓰는지
+  드러낸다.
+- header 변경 뒤 stale optimizer object가 남으면 handoff struct 크기 차이로 planner stack이 깨질 수 있음을 lldb와
+  focused regression crash로 확인했다. clean rebuild 후 같은 focused regression과 full regression은 통과했다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='expr cypher_match age_adjacency cypher_vle'`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck`
+
+## 2026-06-05: aggregate wide text benchmark
+
+- `tools/aggregate_index_benchmark.sql`에 `wide_text_width` 입력과 `typed-wide-text-aggregate` shape를 추가했다.
+- benchmark data의 `payload.d`는 configurable text width를 사용하고, summary는 `numeric,text` slot-vector descriptor와
+  direct slot-state value bytes를 함께 출력한다.
+- `threshold_rows=20,100`, `wide_text_width=64` smoke에서 `typed-wide-text-aggregate`는 row당 value bytes 84,
+  estimate 32, `slot_value_estimate_ratio=2.63`을 출력했다.
+- 결론: short text 기준 static estimate를 바로 키우지 않고, typmod/statistics/sample-aware width descriptor 또는
+  benchmark-driven workload scaling을 다음 비용 모델 후보로 둔다.
+- 검증:
+  - `tools/aggregate_index_benchmark.sql` smoke (`threshold_rows=20,100`, `wide_text_width=64`)
+
+## 2026-06-05: directory-backed adjacency fanout cost
+
+- const-bound `AGE Adjacency Match` planner가 `age_adjacency` directory entry를 읽어 endpoint run fanout,
+  terminal label fanout, terminal label group count를 descriptor와 cost input에 싣도록 했다.
+- `Adjacency Index`와 `Adjacency Cost Input`은 `label-groups=N fanout-source=directory|statistics`를 출력한다.
+- regression은 dynamic endpoint의 statistics fallback과 const endpoint의 `fanout-source=directory` 케이스를 함께
+  고정한다.
+- 검증:
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency'`
+
+## 2026-06-05: VLE directory-backed source fanout
+
+- VLE stream source descriptor가 start/end const graphid와 base vertex `id = const` restriction을 source cost
+  evidence로 소비하게 했다.
+- `age_adjacency` out/in directory entry에서 endpoint run posting 수를 읽어 VLE fanout estimate를 보정하고,
+  `VLE Source Cost`는 `source=start:directory/end:statistics`처럼 evidence source를 출력한다.
+- terminal label descriptor가 있으면 directory run 전체가 아니라 terminal label posting 수를 사용하고
+  `source=start:directory-label`을 출력한다.
+- `cypher_vle` regression에 `WHERE id(s) = ... MATCH (s)-[:R*]->...` 케이스를 추가해 directory-backed VLE source
+  fanout을 고정했고, mixed terminal label fixture로 run fanout 2가 terminal label fanout 1로 줄어드는 케이스를
+  고정했다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency'`
+
+## 2026-06-05: `age_adjacency` terminal label grouping
+
+- `age_adjacency` bulk build ordering을 endpoint key 다음 terminal label/edge label 기준으로 바꿨다.
+- terminal label constraint가 있는 visible payload scan은 compact main run block descriptor가 label mismatch를
+  증명할 때 block 전체를 건너뛴다. full block은 per-posting filter로 유지한다.
+- 같은 endpoint에 terminal label이 섞인 regression fixture를 추가해 6개 posting이 label별 2개 compact block으로
+  묶이는지 확인한다.
+- terminal property prefetch set도 main cache load 단계에서 소비하게 했다. `Adjacency Payload Runtime`은
+  `cache-filtered=N`을 출력해 label/property source pruning이 cache 폭을 줄였는지 보여준다.
+- terminal property descriptor에 `value=const|runtime-slot|none`과 `prefetch=eligible|ineligible`을 추가했다.
+  const가 아닌 runtime expression도 현재 CustomScan required outer 안에서 평가 가능하면 property source prefetch
+  후보로 유지한다.
+- property source index metadata에 `property_type`을 기록하고, `Adjacency Terminal Property`가 `domain=...`을
+  출력하게 했다. typed property index는 domain을 보존하되 AGTYPE prefetch scan key와 섞지 않는다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle'`
+
+## 2026-06-05: endpoint run-size-aware terminal prefetch
+
+- `age_adjacency` directory layout을 v6로 올리고 endpoint run의 terminal label distinct count를 summary에 추가했다.
+- terminal label constraint가 있으면 terminal property prefetch threshold의 candidate count를 전체 endpoint fanout이
+  아니라 label-aware estimate로 계산한다.
+- 작은 mixed-label endpoint run은 `property-index-prefetch` 대신 `id-btree-cache`를 사용해 global property source
+  prefetch 비용을 피한다.
+- `Adjacency Terminal Prefetch`는 전체 endpoint `run-count`와 label-aware `candidate-count`를 함께 출력한다.
+- `age_adjacency_debug_main_probe()`는 `main_label_groups`를 반환해 directory label summary가 regression surface에
+  드러난다.
+- `AGE Adjacency Match` planner descriptor와 EXPLAIN은 planned `terminal-fanout`을 출력하고, row estimate와 terminal
+  prefetch threshold는 terminal label fanout을 기준으로 계산한다.
+- `Adjacency Terminal Prefetch`는 threshold `reason`을 출력해 작은 terminal slice, 큰 terminal fanout, edge payload
+  requirement, non-indexable shape를 구분한다.
+- `Adjacency Terminal Runtime`은 `outcome`과 `action`을 출력해 threshold reason이 property source prefetch, id-cache
+  유지, runtime value 대기 중 어느 lifecycle로 실행됐는지 드러낸다.
+- planner cost는 planned terminal prefetch lifecycle을 기준으로 selectivity/recheck credit을 적용한다.
+  `planned=id-cache-small`이면 property-source prefetch credit을 주지 않는다.
+- `Adjacency Terminal Runtime`은 `lifecycle-match=true|false`를 출력해 planned terminal lifecycle과 actual outcome의
+  일치 여부를 보여준다.
+- 검증:
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle'`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck`
+  - `git diff --check`
+
+## 2026-06-05: directory range known-empty precheck
+
+- `age_adjacency_visible_payload_scan_key_known_empty()`가 terminal label range뿐 아니라 active vertex-set range
+  filter도 소비하게 했다.
+- prefilter candidate range와 endpoint run range가 겹치지 않는 no-delta key는 scan open 전에 known-empty로
+  판정할 수 있다.
+- `age_adjacency_debug_key_known_empty_range()`를 추가해 label hit/range hit은 `false`, label hit/range miss는
+  `true`인 경로를 regression에 고정했다.
+- 이 변경은 VLE frontier empty queue가 property prefilter descriptor를 가진 payload scan에서도 directory range miss를
+  source completion evidence로 올릴 수 있게 하는 기반이다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency'`
+  - `git diff --check`
+
+## 2026-06-05: directory range summary for VLE prefilter sets
+
+- `age_adjacency` directory entry에 endpoint run의 `min_next_vertex_id`/`max_next_vertex_id`를 추가하고 index
+  layout version을 v7로 올렸다.
+- property source prefetch가 만든 vertex id range와 endpoint run range가 겹치지 않으면 main run을 열지 않고
+  directory 단계에서 접는다.
+- VLE는 `begin_key()`로 run count를 먼저 읽은 뒤 prefilter set을 붙이므로, vertex-set filter setter에서도 active
+  directory entry를 재평가해 이미 열린 main run을 cache fill 전에 닫는다.
+- `VLE Payload Runtime`/`Adjacency Payload Runtime`은 directory range reject가 발생하면
+  `set-directory-filter=N`을 출력한다.
+- `vle_index_probe` regression은 시작 vertex 자신만 `isolated=true`이고 direct neighbor에는 없는 property source
+  match를 사용해 `set-directory-filter=7` 경로를 고정한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency'`
+  - `git diff --check`
+
+## 2026-06-05: compact block precheck for VLE prefilter sets
+
+- sorted vertex id descriptor를 `age_adjacency` compact main block precheck까지 올렸다.
+- compact block의 homogeneous terminal label과 packed next entry id를 사용해 property prefetch matched set과
+  교차하지 않는 block은 posting cache materialization 전에 건너뛴다.
+- VLE와 fixed `AGE Adjacency Match` payload runtime은 block 단위 reject가 발생하면 `set-block-filter=N`을
+  출력한다.
+- 작은 regression fixture에서는 기존 range/sorted posting filter가 먼저 드러나지만, 큰 fan-out에서 compact block
+  전체가 property matched set과 교차하지 않는 경우 cache fill과 per-posting filter loop를 줄이는 구조다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency'`
+
+## 2026-06-05: VLE prefilter set sorted descriptor
+
+- `AgeAdjacencyVertexSetFilter`가 property source prefetch 결과를 hash set뿐 아니라 sorted vertex id vector로도
+  전달하게 했다.
+- `age_adjacency` payload scan은 range reject 뒤 sorted membership을 먼저 확인해 hash lookup 없이 in-range
+  non-match 후보를 제거한다.
+- VLE와 fixed `AGE Adjacency Match` payload runtime은 sorted membership reject가 발생하면
+  `set-sorted-filter=N`을 출력한다.
+- `vle_index_probe` fixture는 property matched set의 min/max range 안에 있지만 sorted set에는 없는 direct
+  neighbor를 포함해 `set-range-filter=5 set-sorted-filter=1` 경로를 regression surface에 고정한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency'`
+  - `git diff --check`
+
+## 2026-06-05: VLE directory-filter empty evidence 정규화
+
+- VLE `age_adjacency` source가 0 candidate를 반환했더라도 terminal property prefetch set과 adjacency directory range가
+  교차하지 않아 닫힌 경우는 일반 `empty-scan`으로 세지 않도록 분리했다.
+- `AgeVLESourceStats`에 directory-filtered empty scan counter를 추가하고, candidate source가 payload end 이후
+  `set-directory-filter` 증가분을 확인해 `evidence=directory-filter`로 정규화한다.
+- `VLE Empty Evidence` line은 불필요한 `directory-filter=0` field를 추가하지 않고, 실제 directory pruning 케이스만
+  evidence vocabulary를 바꾼다. 이로써 runtime line 길이를 늘리지 않으면서 composite property prefilter와
+  adjacency directory가 연계되어 후보를 없앤 사실을 드러낸다.
+- 첫 focused regression에서 segfault가 발생했는데, `AgeVLESourceStats` layout 변경 뒤 증분 빌드가 일부 참조
+  object를 갱신하지 않은 stale object 문제였다. clean build/install 후 crash는 사라졌고 regression diff는 의도한
+  EXPLAIN evidence 변경으로 수렴했다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency'`
+
+## 2026-06-05: VLE composite prefilter feedback 입력
+
+- `adjacency-composite-prefilter` source policy에서 payload scan이 terminal property prefilter를 실행하면 backend-local
+  runtime feedback cache에 payload evidence를 기록하게 했다.
+- directory range miss가 source를 0 candidate로 닫은 경우는 `payload-directory-filter-observed` /
+  `adjacency-composite-prefilter` class로 기록한다. 일반 property prefilter scan은
+  `payload-composite-prefilter-observed` class로 기록한다.
+- 다음 같은 VLE composite plan은 `VLE Source Payload Input: source=runtime-cache ... class=adjacency-composite-prefilter`
+  를 출력하므로, directory-filter evidence가 EXPLAIN surface에서 끝나지 않고 다음 planning descriptor 입력으로
+  소비되는 것을 확인할 수 있다.
+- composite payload feedback은 `composite_prefilter_planned` profile에서만 읽도록 제한해 terminal-scalar family cache가
+  terminal label/property predicate가 없는 VLE shape로 번지지 않게 했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency'`
+
+## 2026-06-05: adjacency composite terminal filter request
+
+- `age_adjacency` payload scan에 `AgeAdjacencyCompositeTerminalFilter` request를 추가해 terminal label, property source
+  vertex set, callback fallback을 하나의 scan contract로 전달하게 했다.
+- 기존 `set_terminal_label`, `set_terminal_vertex_filter`, `set_terminal_vertex_set_filter` API는 compatibility wrapper로
+  남기고 내부에서 composite request를 호출한다.
+- fixed `AGE Adjacency Match`와 VLE payload source는 label+property prefetch를 더 이상 label setter와 property
+  setter의 순서 의존 조합으로 넘기지 않고, `label-property-prefetch|label-property-callback` source를 가진 composite
+  request로 전달한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency cypher_match'`
+
+## 2026-06-05: composite request property summary evidence
+
+- `AgeAdjacencyCompositeTerminalFilter`에 property source index OID, VLE property filter id, prefetched match count를 담는
+  property summary field를 추가했다.
+- VLE와 fixed `AGE Adjacency Match`는 property prefilter handoff 때 이 summary를 request에 싣는다. label-only request는
+  summary로 세지 않으므로 runtime output이 불필요하게 길어지지 않는다.
+- `age_adjacency` payload runtime은 property summary가 실린 composite request를 받으면 counter를 증가시키고,
+  VLE `VLE Payload Runtime`은 `composite-request=N`으로 이를 출력한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='cypher_vle age_adjacency cypher_match'`
+
+## 2026-06-05: directory pruning reason runtime 정리
+
+- `age_adjacency` directory-level vertex-set pruning 총량을 range, exact graphid summary, terminal-label bloom,
+  compressed entry vector, request-side value summary, wide bloom reason으로 분리했다.
+- fixed `AGE Adjacency Match`와 `AGE VLE Stream` runtime formatter가 모두
+  `set-directory-filter=N/range:N/exact:N/label-bloom:N/compressed:N/value-summary:N/wide-bloom:N` suffix vocabulary를
+  공유한다.
+- `age_adjacency_debug_composite_probe()`는 `set_directory_range_filter`, `set_directory_exact_filter`,
+  `set_directory_label_bloom_filter` column을 추가로 반환해 regression에서 generic directory miss와 value identity
+  miss를 구분한다.
+- `cypher_vle` composite prefilter regression은 0-candidate directory skip이 `range` reason임을 raw EXPLAIN에
+  드러낸다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: value-posting bloom summary 추가
+
+- `age_adjacency` storage version을 17로 올리고 directory entry와 main run block에 request-gated
+  `value_posting_bloom` summary를 추가했다.
+- property value 자체는 adjacency index에 없으므로 index tuple에 저장하지 않는다. 대신 property prefetch가 만든
+  matched vertex set summary와 index-side endpoint posting bloom을 `property_filter_id`가 있는 request에서만 교차
+  확인한다.
+- runtime/debug output은 기존 value identity request 총량인 `/value-summary:N`과 실제 새 on-disk summary reject인
+  `/value-posting:N`을 분리한다.
+- directory-level value-posting은 우선 homogeneous terminal label run에만 적용해 mixed-label directory run에서
+  block-level pruning evidence를 과도하게 가리지 않게 했다.
+- `age_adjacency_value_posting` regression fixture는 기존 64/256-bit value summary false positive를 통과한 뒤
+  새 directory value-posting bloom이 34 postings를 접는 경로를 고정한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: label-slice value-posting summary 연결
+
+- `age_adjacency` storage version을 18로 올리고 directory terminal-label slot마다
+  `next_vertex_label_value_posting_bloom`을 추가했다.
+- mixed-label directory run에서도 request terminal label이 directory label slot에 있으면 전역 run bloom이 아니라
+  label-slice value-posting bloom을 소비한다. slot이 없는 label은 safe fallback으로 기존 residual path를 유지한다.
+- fixed `AGE Adjacency Match` planner/explain descriptor는 directory fanout evidence와 함께
+  `value-posting=label-slice|run|none`을 출력한다.
+- `age_adjacency_label_value_posting` regression fixture는 label 1/2가 섞인 run에서 label 1 request가
+  directory `/value-posting` skip을 만드는지 고정한다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: VLE value-posting source evidence 연결
+
+- `AGE VLE Stream` descriptor에 start/end `value-posting` source field를 추가해 directory fanout evidence와 함께
+  `label-slice|run|none` source를 executor까지 전달한다.
+- `VLE Source Cost`는 `value-posting=start:.../end:...`를 출력하고, composite property prefilter가 planned된
+  경우 `VLE Source Policy`도 `value-posting=out:.../in:...`를 출력한다.
+- value-posting source availability만으로 planned class를 승격하지 않도록 정리했다. 실제
+  `/value-posting:N` runtime counter가 발생한 실행만 runtime pressure/action에서
+  `adjacency-composite-value-posting` / `keep-value-posting`으로 드러낸다.
+- `tools/vle_benchmark.sql` summary에 `value_posting_source` column을 추가해 planned source evidence와 runtime
+  counter를 같은 row에서 비교할 수 있게 했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: VLE value-posting feedback cache 연결
+
+- `VLE Source Payload Input`에 `value-posting=SOURCE/observed:N`을 추가해 backend-local feedback cache가 실제
+  value-posting skip 수와 source class를 후속 plan에 전달한다.
+- `derive_vle_source_runtime_payload_feedback()`은 `/value-posting:N` runtime counter가 있는 composite prefilter
+  실행을 `payload-value-posting-observed` reason과 `adjacency-composite-value-posting` class로 기록한다.
+- planner policy는 runtime cache에서 관측된 value-posting success가 있을 때만 `recommendation=keep-value-posting`으로
+  승격한다. source descriptor에 `label-slice|run`이 존재한다는 이유만으로 planned class를 올리지는 않는다.
+- `vle_value_posting_feedback` regression fixture를 추가해 첫 `EXPLAIN ANALYZE`가
+  `set-directory-filter=38/value-posting:38`을 만들고, 이어지는 plain `EXPLAIN`이
+  `class=adjacency-composite-value-posting recommendation=keep-value-posting`을 소비하는 경로를 고정했다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: VLE value-posting feedback identity key 세분화
+
+- VLE source feedback cache key에 terminal label id, property source index OID, `property_filter_id`,
+  value-posting source class를 추가했다.
+- planner descriptor는 const terminal property predicate에서 같은 `age_adjacency_property_filter_id()`를 계산해
+  lookup key에 싣고, executor descriptor는 runtime feedback record가 같은 identity를 쓰도록 terminal label/property
+  filter field를 전달한다.
+- composite prefilter가 아닌 empty/replay feedback은 broad key를 유지하고, terminal property prefilter가 있는
+  value-posting/composite payload feedback만 identity discriminator를 채운다.
+- `vle_value_posting_feedback` regression은 `n.i = 59`가 만든 value-posting success를 같은 predicate 후속 plan만
+  소비하고, `n.i = 1` 후속 plan은 `source=none`으로 남아 false promotion이 없음을 고정한다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config COPT=-Werror`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: VLE benchmark value-posting decision table 확장
+
+- `tools/vle_benchmark.sql` planner summary에 `payload_input_value_posting_source`,
+  `payload_input_value_posting_observed`, `value_posting_decision`을 추가했다.
+- runtime summary는 `VLE Payload Runtime`의 `/value-posting:N` counter를
+  `payload_value_posting_filtered`로 파싱한다.
+- final decision table은 `value_posting_identity_cache_hit`, `value_posting_runtime_hit`,
+  `value_posting_runtime_decision`을 출력해 source availability, predicate-safe cache hit, 현재 실행의 runtime hit을
+  같은 row에서 비교한다.
+- 검증:
+  - 임시 PostgreSQL 18 instance `/tmp/age_vle_bench_smoke_pg`, port 55432
+  - `psql -p 55432 -d postgres -v graph=age_vle_bench_smoke -v sparse_nodes=8 -v dense_nodes=4 -v label_fanout_labels=4 -v label_fanout_edges=4 -v replay_branches=4 -v replay_leaves=4 -v run_standard_cases=0 -v preserve_graph=0 -f tools/vle_benchmark.sql`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: VLE benchmark value-posting fixture 추가
+
+- `tools/vle_benchmark.sql`에 `value_posting_edges` profile 변수를 추가하고,
+  `ValuePostingNode`/`ValuePostingOther`/`ValuePostingEdge` fixture를 직접 graphid 기반으로 생성한다.
+- fixture는 `ValuePostingNode.i` property source index와 `ValuePostingEdge` `age_adjacency` index를 함께 만들고,
+  `value-posting-reject-seed`, `value-posting-reject`, `value-posting-endpoint-control` EXPLAIN ANALYZE shape를
+  실행한다.
+- `value-posting-reject`는 property source 후보가 실제 endpoint가 아닌 case라
+  `set-directory-filter=42/value-summary:42/wide-bloom:42`를 만들고, summary는 이를
+  `payload_value_posting_filtered=42`, `value_posting_runtime_hit=true`,
+  `value_posting_runtime_decision=runtime-hit`으로 읽는다.
+- endpoint-control은 같은 start/edge/index에서 `n.i = 1` 실제 endpoint를 조회해 runtime hit가 false로 남는다.
+  따라서 benchmark table에서 negative pruning과 endpoint hit control을 한 번에 비교할 수 있다.
+- 검증:
+  - 임시 PostgreSQL 18 instance `/tmp/age_vle_bench_value_pg`, port 55434
+  - `psql -p 55434 -d postgres -v graph=age_vle_bench_value_smoke -v sparse_nodes=8 -v dense_nodes=4 -v label_fanout_labels=4 -v label_fanout_edges=8 -v value_posting_edges=38 -v replay_branches=4 -v replay_leaves=4 -v run_standard_cases=0 -v preserve_graph=0 -f tools/vle_benchmark.sql`
+  - `git diff --check`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: VLE value identity pruning feedback 승격
+
+- VLE runtime payload feedback이 on-disk `/value-posting:N`만 보지 않고 request-side value identity 기반
+  `value-summary` block/directory pruning도 같은 composite value pruning evidence로 소비한다.
+- `VLE Source Payload Input`은 큰 value-posting fixture에서
+  `reason=payload-value-posting-observed class=adjacency-composite-value-posting`으로 후속 plan에 전달되고,
+  `VLE Source Policy`와 runtime pressure/action도 `keep-value-posting`으로 맞춰진다.
+- `tools/vle_benchmark.sql`의 `value_posting_edges` fixture는 per-root posting run을 256개 이하로 나눠
+  `age_adjacency` per-run posting append 한계를 피한다. final summary는 `value_posting_root_count`,
+  `value_posting_edges_per_root`를 출력한다.
+- 1024-edge benchmark는 `value_posting_root_count=4`, `value_posting_edges_per_root=256`으로 실행되고,
+  `value-posting-reject`에서 `payload_input_value_posting_observed=1024`,
+  `class=adjacency-composite-value-posting`, `recommendation=keep-value-posting`을 확인했다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - 임시 PostgreSQL 18 instance `/tmp/age_vle_bench_policy_pg`, port 55435
+  - `psql -p 55435 -d postgres -v graph=age_vle_bench_policy_256 -v sparse_nodes=16 -v dense_nodes=8 -v label_fanout_labels=64 -v label_fanout_edges=64 -v value_posting_edges=256 -v replay_branches=32 -v replay_leaves=16 -v run_standard_cases=0 -v preserve_graph=0 -f tools/vle_benchmark.sql`
+  - `psql -p 55435 -d postgres -v graph=age_vle_bench_policy_1024 -v sparse_nodes=16 -v dense_nodes=8 -v label_fanout_labels=128 -v label_fanout_edges=128 -v value_posting_edges=1024 -v replay_branches=64 -v replay_leaves=16 -v run_standard_cases=0 -v preserve_graph=0 -f tools/vle_benchmark.sql`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: VLE payload feedback cache merge 강화
+
+- ORCA `CPhysical::CReqdColsRequest`가 required column set과 child/scalar child index를 함께 key로 쓰는 구조를
+  다시 확인했다. AGE VLE feedback cache도 request boundary를 key로 삼고 entry payload lifecycle을 merge해야 한다.
+- VLE source threshold cache payload update를 공통 helper로 묶고, replay/cache seed/value identity pruning count를
+  누적하면서 `payload_class`/`payload_reason`은 더 강한 payload class rank를 보존하게 했다.
+- 이 변경으로 같은 source request family 안에서 일반 composite prefilter나 cache seed 관측이 나중에 들어와도
+  `adjacency-composite-value-posting` evidence를 약한 class로 덮어쓰지 않는다.
+- 검증:
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `git diff --check`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle cypher_match'`
+
+## 2026-06-05: typed value stats 기반 composite fanout
+
+- VLE와 fixed `AGE Adjacency Match`가 property source index expression의 `pg_statistic.stadistinct`를 읽는 공통
+  selectivity helper를 사용하게 했다.
+- const predicate는 MCV slot을 먼저 보고, matching frequency가 기존 fallback보다 더 선택적이면 `typed-mcv`를
+  composite fanout에 사용한다. MCV가 fallback보다 넓으면 `fallback-mcv-ceiling`으로 fanout 확대를 막는다.
+- MCV가 없으면 통계 기반 `1 / ndistinct`가 기존 fallback보다 더 선택적일 때만 composite fanout을 낮춘다. 작은
+  fixture나 통계 부재 상황에서는 기존 fallback을 유지해 작은 데이터 regression 안정성을 보존한다.
+- `VLE Composite Fanout`은 property-prefilter가 planned인 경우 `selectivity=... selectivity-source=...`를 출력해
+  source policy가 fallback인지 typed 통계인지 확인할 수 있게 했다.
+- `vle_typed_selectivity` regression fixture를 추가해 `ANALYZE`된 property source index에서
+  `selectivity-source=typed-mcv`가 출력되는 경로를 고정했다.
+- fixed adjacency descriptor에도 같은 selectivity ppm/source field를 추가해 다음 fixed MATCH EXPLAIN 확장과 cost
+  feedback이 같은 vocabulary를 쓰게 했다.
+- 검증:
+  - `make clean -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config`
+  - `make -j16 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config install`
+  - `make PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18bin/bin/pg_config installcheck REGRESS='age_adjacency cypher_vle'`
 
 ## 2026-06-03: VLE boundary property direct helper
 

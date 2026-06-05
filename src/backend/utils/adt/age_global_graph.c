@@ -268,6 +268,9 @@ static void load_edge_hashtable(GRAPH_global_context *ggctx,
                                 bool load_edge_property_metadata,
                                 Oid edge_label_oid,
                                 HTAB *edge_endpoint_ids);
+static void get_edge_label_age_adjacency_indexes(Oid edge_label_oid,
+                                                 Oid *out_index_oid,
+                                                 Oid *in_index_oid);
 static bool edge_label_has_age_adjacency_indexes(Oid edge_label_oid);
 static bool age_adjacency_index_matches(Relation index_rel, bool outgoing);
 static void link_edge_hashtable_to_vertices(GRAPH_global_context *ggctx);
@@ -1491,27 +1494,32 @@ static void load_GRAPH_global_hashtables(GRAPH_global_context *ggctx,
 
 static bool edge_label_has_age_adjacency_indexes(Oid edge_label_oid)
 {
+    Oid out_index_oid;
+    Oid in_index_oid;
+
+    get_edge_label_age_adjacency_indexes(edge_label_oid, &out_index_oid,
+                                         &in_index_oid);
+    return OidIsValid(out_index_oid) && OidIsValid(in_index_oid);
+}
+
+static void get_edge_label_age_adjacency_indexes(Oid edge_label_oid,
+                                                 Oid *out_index_oid,
+                                                 Oid *in_index_oid)
+{
     static Oid age_adjacency_am_oid = InvalidOid;
-    static Oid cached_edge_label_oid = InvalidOid;
-    static uint64 cached_label_generation = 0;
-    static bool cached_has_indexes = false;
-    uint64 current_label_generation;
     Relation edge_rel;
     List *index_list;
     ListCell *lc;
-    bool has_outgoing = false;
-    bool has_incoming = false;
+
+    Assert(out_index_oid != NULL);
+    Assert(in_index_oid != NULL);
+
+    *out_index_oid = InvalidOid;
+    *in_index_oid = InvalidOid;
 
     if (!OidIsValid(edge_label_oid))
     {
-        return false;
-    }
-
-    current_label_generation = get_label_cache_generation();
-    if (cached_edge_label_oid == edge_label_oid &&
-        cached_label_generation == current_label_generation)
-    {
-        return cached_has_indexes;
+        return;
     }
 
     if (!OidIsValid(age_adjacency_am_oid))
@@ -1519,10 +1527,7 @@ static bool edge_label_has_age_adjacency_indexes(Oid edge_label_oid)
         age_adjacency_am_oid = get_index_am_oid("age_adjacency", true);
         if (!OidIsValid(age_adjacency_am_oid))
         {
-            cached_edge_label_oid = edge_label_oid;
-            cached_label_generation = current_label_generation;
-            cached_has_indexes = false;
-            return false;
+            return;
         }
     }
 
@@ -1542,15 +1547,15 @@ static bool edge_label_has_age_adjacency_indexes(Oid edge_label_oid)
         {
             if (age_adjacency_index_matches(index_rel, true))
             {
-                has_outgoing = true;
+                *out_index_oid = index_oid;
             }
             if (age_adjacency_index_matches(index_rel, false))
             {
-                has_incoming = true;
+                *in_index_oid = index_oid;
             }
         }
         index_close(index_rel, AccessShareLock);
-        if (has_outgoing && has_incoming)
+        if (OidIsValid(*out_index_oid) && OidIsValid(*in_index_oid))
         {
             break;
         }
@@ -1558,12 +1563,6 @@ static bool edge_label_has_age_adjacency_indexes(Oid edge_label_oid)
 
     list_free(index_list);
     relation_close(edge_rel, AccessShareLock);
-
-    cached_edge_label_oid = edge_label_oid;
-    cached_label_generation = current_label_generation;
-    cached_has_indexes = has_outgoing && has_incoming;
-
-    return cached_has_indexes;
 }
 
 static bool age_adjacency_index_matches(Relation index_rel, bool outgoing)
@@ -2618,6 +2617,145 @@ int64 get_graph_num_loaded_edges(GRAPH_global_context *ggctx)
 bool graph_global_context_has_edge_metadata(GRAPH_global_context *ggctx)
 {
     return ggctx->edge_metadata_loaded;
+}
+
+bool graph_edge_labels_have_age_adjacency_indexes(
+    Oid graph_oid, bool require_outgoing, bool require_incoming)
+{
+    Snapshot snapshot = GetActiveSnapshot();
+    Relation ag_label;
+    TupleDesc tupdesc;
+    SysScanDesc scan_desc;
+    ScanKeyData scan_key;
+    HeapTuple tuple;
+    bool saw_edge_label = false;
+    bool covered = true;
+
+    ag_label = table_open(ag_label_relation_id(), AccessShareLock);
+    tupdesc = RelationGetDescr(ag_label);
+
+    ScanKeyInit(&scan_key, Anum_ag_label_graph, BTEqualStrategyNumber,
+                F_OIDEQ, ObjectIdGetDatum(graph_oid));
+    scan_desc = systable_beginscan(ag_label, ag_label_graph_oid_index_id(),
+                                   true, snapshot, 1, &scan_key);
+
+    while ((tuple = systable_getnext(scan_desc)) != NULL)
+    {
+        Datum datum;
+        bool is_null;
+        Oid edge_label_oid;
+        Oid out_index_oid;
+        Oid in_index_oid;
+
+        datum = heap_getattr(tuple, Anum_ag_label_kind, tupdesc, &is_null);
+        if (is_null || DatumGetChar(datum) != LABEL_KIND_EDGE)
+        {
+            continue;
+        }
+
+        datum = heap_getattr(tuple, Anum_ag_label_relation, tupdesc,
+                             &is_null);
+        if (is_null)
+        {
+            covered = false;
+            break;
+        }
+
+        edge_label_oid = DatumGetObjectId(datum);
+        get_edge_label_age_adjacency_indexes(edge_label_oid, &out_index_oid,
+                                             &in_index_oid);
+        saw_edge_label = true;
+        if ((require_outgoing && !OidIsValid(out_index_oid)) ||
+            (require_incoming && !OidIsValid(in_index_oid)))
+        {
+            covered = false;
+            break;
+        }
+    }
+
+    systable_endscan(scan_desc);
+    table_close(ag_label, AccessShareLock);
+
+    return saw_edge_label && covered;
+}
+
+int32 get_graph_edge_label_id(GRAPH_global_context *ggctx,
+                              Oid edge_label_oid)
+{
+    int i;
+
+    Assert(ggctx != NULL);
+
+    if (!OidIsValid(edge_label_oid))
+    {
+        return INVALID_LABEL_ID;
+    }
+
+    for (i = 0; i < ggctx->edge_labels.count; i++)
+    {
+        graph_label_entry *label = &ggctx->edge_labels.entries[i];
+
+        if (label->relation == edge_label_oid)
+        {
+            return label->label_id;
+        }
+    }
+
+    return INVALID_LABEL_ID;
+}
+
+int get_graph_edge_label_source_candidates(
+    GRAPH_global_context *ggctx, GraphEdgeLabelSourceCandidate **candidates)
+{
+    GraphEdgeLabelSourceCandidate *result;
+    int count = 0;
+    int i;
+
+    Assert(ggctx != NULL);
+    Assert(candidates != NULL);
+
+    *candidates = NULL;
+    if (ggctx->edge_labels.count <= 0)
+    {
+        return 0;
+    }
+
+    result = palloc0(sizeof(*result) * ggctx->edge_labels.count);
+    for (i = 0; i < ggctx->edge_labels.count; i++)
+    {
+        graph_label_entry *label;
+        Oid out_index_oid;
+        Oid in_index_oid;
+
+        label = &ggctx->edge_labels.entries[i];
+        if (IS_DEFAULT_LABEL_EDGE(NameStr(label->name)))
+        {
+            continue;
+        }
+        get_edge_label_age_adjacency_indexes(label->relation,
+                                             &out_index_oid,
+                                             &in_index_oid);
+        if (!OidIsValid(out_index_oid) && !OidIsValid(in_index_oid))
+        {
+            continue;
+        }
+
+        result[count].label_name = NameStr(label->name);
+        result[count].edge_label_oid = label->relation;
+        result[count].label_id = label->label_id;
+        result[count].age_adjacency_out_index_oid = out_index_oid;
+        result[count].age_adjacency_in_index_oid = in_index_oid;
+        count++;
+    }
+
+    if (count == 0)
+    {
+        pfree(result);
+        return 0;
+    }
+
+    *candidates = result;
+    return count;
 }
 
 /* vertex_entry accessor functions */

@@ -83,11 +83,15 @@ typedef struct CypherTypedCollectArgPlan
 typedef struct CypherPropertyIndexHandoff
 {
     Node *query_expr;
+    Oid index_oid;
     Node *index_expr;
     bool has_property_descriptor;
     CypherPropertyHandoffDescriptor property_descriptor;
     bool has_cached_property_slot;
     CypherCachedPropertySlotDescriptor cached_property_slot;
+    bool has_index_cached_property_slot;
+    CypherCachedPropertySlotDescriptor index_cached_property_slot;
+    bool index_domain_matches_cached_slot;
 } CypherPropertyIndexHandoff;
 
 typedef struct CypherArrayAggPropertyHandoff
@@ -98,6 +102,16 @@ typedef struct CypherArrayAggPropertyHandoff
     Oid agg_func_oid;
     List *arg_exprs;
     List *arg_types;
+    List *cached_property_slots;
+    List *payload_value_types;
+    int cached_property_slot_count;
+    int typed_payload_slot_count;
+    int agtype_payload_slot_count;
+    int property_descriptor_slot_count;
+    int index_domain_match_slot_count;
+    int payload_materialization_weight;
+    int final_materialization_weight;
+    int payload_wire_width;
 } CypherArrayAggPropertyHandoff;
 
 typedef struct CypherArrayAggPropertyArgPlan
@@ -117,6 +131,8 @@ bool cypher_find_matching_property_index_handoff_for_rte(
     CypherPropertyIndexHandoff *handoff);
 Node *cypher_make_property_index_handoff_expr(
     CypherPropertyIndexHandoff *handoff);
+void cypher_refresh_array_agg_property_index_domains(
+    PlannerInfo *root, CypherArrayAggPropertyHandoff *handoff);
 Node *cypher_replace_property_index_side(OpExpr *op, bool replace_left,
                                          Node *index_expr);
 bool cypher_rewrite_property_equals_restrictions(
@@ -147,6 +163,8 @@ bool cypher_add_aggregate_group_exprs_to_target(PathTarget *target,
                                                 AggPath *agg_path);
 PathTarget *cypher_build_typed_collect_agg_target(
     PlannerInfo *root, PathTarget *target, List *arg_plans);
+double cypher_typed_collect_materialization_credit(List *arg_plans,
+                                                   double input_rows);
 bool cypher_find_array_agg_property_handoff(
     PathTarget *target, CypherArrayAggPropertyHandoff *handoff);
 List *cypher_build_array_agg_property_arg_plans(
@@ -156,6 +174,13 @@ bool cypher_add_array_agg_property_arg_plans_to_target(PathTarget *target,
 PathTarget *cypher_build_array_agg_property_target(
     PlannerInfo *root, PathTarget *target,
     CypherArrayAggPropertyHandoff *handoff, List *arg_plans);
+double cypher_array_agg_property_materialization_credit(
+    CypherArrayAggPropertyHandoff *handoff, double input_rows);
+void cypher_array_agg_property_materialization_credits(
+    CypherArrayAggPropertyHandoff *handoff, double input_rows,
+    double *type_vector_credit, double *index_domain_credit);
+char *cypher_format_array_agg_property_handoff(
+    CypherArrayAggPropertyHandoff *handoff);
 bool cypher_extract_typed_property_sort_args(Node *node, Node **properties,
                                              Node **key);
 Node *cypher_make_ctid_property_field_agtype_expr(Oid relid, Node *ctid,

@@ -78,7 +78,7 @@ CREATE FUNCTION ag_catalog.age_adjacency_candidate_edge_rows(index_oid regclass,
 AS 'MODULE_PATHNAME';
 
 COMMENT ON FUNCTION ag_catalog.age_adjacency_candidate_edge_rows(regclass, graphid, boolean)
-IS 'Internal age_adjacency fixed-MATCH candidate provider; only considered when age.enable_adjacency_match is on and guarded one-hop/index/bound-endpoint conditions hold.';
+IS 'Internal age_adjacency fixed-MATCH candidate provider for guarded one-hop/index/bound-endpoint diagnostics; planner CustomPath is the default execution path.';
 
 --
 -- agtype - mathematical operators (+, -, *, /, %, ^)

@@ -30,6 +30,8 @@ typedef bool (*VLETerminalOutputMaterializePath) (void *state);
 
 extern bool age_vle_terminal_output_uses_direct_dfs(
     const VLETerminalOutputPolicy *policy);
+extern bool age_vle_terminal_output_path_matches_predicate(
+    VLE_local_context *vlelctx, const VLETraversalStep *step);
 extern void age_vle_terminal_output_cache_result(
     VLE_local_context *vlelctx, const VLETerminalOutputPolicy *policy,
     const VLETraversalStep *step);

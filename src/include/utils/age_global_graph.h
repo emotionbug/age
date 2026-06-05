@@ -58,6 +58,15 @@ typedef struct GraphEdgeAdjList
     int64 capacity;
 } GraphEdgeAdjList;
 
+typedef struct GraphEdgeLabelSourceCandidate
+{
+    const char *label_name;
+    Oid edge_label_oid;
+    int32 label_id;
+    Oid age_adjacency_out_index_oid;
+    Oid age_adjacency_in_index_oid;
+} GraphEdgeLabelSourceCandidate;
+
 /* vertex entry for the vertex_hashtable */
 struct vertex_entry
 {
@@ -121,6 +130,12 @@ bool is_ggctx_invalid(GRAPH_global_context *ggctx);
 ListGraphId *get_graph_vertices(GRAPH_global_context *ggctx);
 int64 get_graph_num_loaded_edges(GRAPH_global_context *ggctx);
 bool graph_global_context_has_edge_metadata(GRAPH_global_context *ggctx);
+bool graph_edge_labels_have_age_adjacency_indexes(
+    Oid graph_oid, bool require_outgoing, bool require_incoming);
+int32 get_graph_edge_label_id(GRAPH_global_context *ggctx,
+                              Oid edge_label_oid);
+int get_graph_edge_label_source_candidates(
+    GRAPH_global_context *ggctx, GraphEdgeLabelSourceCandidate **candidates);
 vertex_entry *get_vertex_entry(GRAPH_global_context *ggctx,
                                graphid vertex_id);
 vertex_entry *ensure_vertex_entry_skeleton(GRAPH_global_context *ggctx,

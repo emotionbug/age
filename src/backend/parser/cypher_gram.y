@@ -88,19 +88,19 @@
 %token NOT_EQ LT_EQ GT_EQ DOT_DOT TYPECAST PLUS_EQ
 
 /* keywords in alphabetical order */
-%token <keyword> ALL ANALYZE AND ANY_P AS ASC ASCENDING
+%token <keyword> ADJACENCY ALL ANALYZE AND ANY_P AS ASC ASCENDING
                  BY
                  CALL CASE COALESCE CONTAINS COUNT CREATE
-                 DELETE DESC DESCENDING DETACH DISTINCT
+                 DELETE DESC DESCENDING DETACH DISTINCT DROP
                  ELSE END_P ENDS EXISTS EXPLAIN
-                 FALSE_P
-                 IN IS
+                 FALSE_P FOR
+                 IN INDEX INDEXES IS
                  LIMIT
                  MATCH MERGE
                  NONE NOT NULL_P
                  ON OPERATOR OPTIONAL OR ORDER
                  REMOVE RETURN
-                 SET SINGLE SKIP STARTS
+                 SET SHOW SINGLE SKIP STARTS
                  THEN TRUE_P
                  UNION UNWIND
                  VERBOSE
@@ -131,6 +131,9 @@
 
 /* CREATE clause */
 %type <node> create
+%type <node> graph_index_stmt create_index_stmt drop_index_stmt
+             show_indexes_stmt graph_index_pattern
+%type <string> graph_index_on
 
 /* UNWIND clause */
 %type <node> unwind
@@ -333,6 +336,16 @@ stmt:
             }
 
             extra->result = $1;
+            extra->extra = NULL;
+        }
+    | graph_index_stmt semicolon_opt
+        {
+            if (yychar != YYEOF)
+            {
+                yyerror(&yylloc, scanner, extra, "syntax error");
+            }
+
+            extra->result = list_make1($1);
             extra->extra = NULL;
         }
     | EXPLAIN cypher_stmt semicolon_opt
@@ -1018,6 +1031,118 @@ create:
 
             n = make_ag_node(cypher_create);
             n->pattern = $2;
+
+            $$ = (Node *)n;
+        }
+    | create_index_stmt
+        {
+            $$ = $1;
+        }
+    ;
+
+graph_index_stmt:
+    drop_index_stmt
+    | show_indexes_stmt
+    ;
+
+create_index_stmt:
+    CREATE INDEX symbolic_name FOR graph_index_pattern ON '(' graph_index_on ')'
+        {
+            cypher_create_index *n = (cypher_create_index *)$5;
+
+            n->index_name = $3;
+            if (pg_strcasecmp($8, "adjacency") == 0)
+            {
+                n->adjacency = true;
+                n->property_name = NULL;
+            }
+            else
+            {
+                n->adjacency = false;
+                n->property_name = $8;
+            }
+            n->location = @1;
+
+            $$ = (Node *)n;
+        }
+    ;
+
+graph_index_pattern:
+    '(' var_name ':' label_name ')'
+        {
+            cypher_create_index *n = make_ag_node(cypher_create_index);
+
+            n->label_name = $4;
+            n->for_relationship = false;
+            n->outgoing = true;
+            n->location = @1;
+
+            $$ = (Node *)n;
+        }
+    | '(' ')' '-' '[' var_name ':' label_name ']' '-' '(' ')'
+        {
+            cypher_create_index *n = make_ag_node(cypher_create_index);
+
+            n->label_name = $7;
+            n->for_relationship = true;
+            n->outgoing = true;
+            n->location = @1;
+
+            $$ = (Node *)n;
+        }
+    | '(' ')' '-' '[' var_name ':' label_name ']' '-' '>' '(' ')'
+        {
+            cypher_create_index *n = make_ag_node(cypher_create_index);
+
+            n->label_name = $7;
+            n->for_relationship = true;
+            n->outgoing = true;
+            n->location = @1;
+
+            $$ = (Node *)n;
+        }
+    | '(' ')' '<' '-' '[' var_name ':' label_name ']' '-' '(' ')'
+        {
+            cypher_create_index *n = make_ag_node(cypher_create_index);
+
+            n->label_name = $8;
+            n->for_relationship = true;
+            n->outgoing = false;
+            n->location = @1;
+
+            $$ = (Node *)n;
+        }
+    ;
+
+graph_index_on:
+    var_name '.' property_key_name
+        {
+            $$ = $3;
+        }
+    | ADJACENCY
+        {
+            $$ = "adjacency";
+        }
+    ;
+
+drop_index_stmt:
+    DROP INDEX symbolic_name
+        {
+            cypher_drop_index *n = make_ag_node(cypher_drop_index);
+
+            n->index_name = $3;
+            n->location = @1;
+
+            $$ = (Node *)n;
+        }
+    ;
+
+show_indexes_stmt:
+    SHOW INDEXES
+        {
+            cypher_show_indexes *n = make_ag_node(cypher_show_indexes);
+
+            n->location = @1;
 
             $$ = (Node *)n;
         }
@@ -2496,7 +2621,8 @@ qual_op:
  */
 
 safe_keywords:
-    ALL          { $$ = KEYWORD_STRDUP($1); }
+    ADJACENCY   { $$ = KEYWORD_STRDUP($1); }
+    | ALL        { $$ = KEYWORD_STRDUP($1); }
     | ANALYZE    { $$ = KEYWORD_STRDUP($1); }
     | AND        { $$ = KEYWORD_STRDUP($1); }
     | ANY_P      { $$ = KEYWORD_STRDUP($1); }
@@ -2515,11 +2641,15 @@ safe_keywords:
     | DESCENDING { $$ = KEYWORD_STRDUP($1); }
     | DETACH     { $$ = KEYWORD_STRDUP($1); }
     | DISTINCT   { $$ = KEYWORD_STRDUP($1); }
+    | DROP       { $$ = KEYWORD_STRDUP($1); }
     | ELSE       { $$ = KEYWORD_STRDUP($1); }
     | ENDS       { $$ = KEYWORD_STRDUP($1); }
     | EXISTS     { $$ = KEYWORD_STRDUP($1); }
     | EXPLAIN    { $$ = KEYWORD_STRDUP($1); }
+    | FOR        { $$ = KEYWORD_STRDUP($1); }
     | IN         { $$ = KEYWORD_STRDUP($1); }
+    | INDEX      { $$ = KEYWORD_STRDUP($1); }
+    | INDEXES    { $$ = KEYWORD_STRDUP($1); }
     | IS         { $$ = KEYWORD_STRDUP($1); }
     | LIMIT      { $$ = KEYWORD_STRDUP($1); }
     | MATCH      { $$ = KEYWORD_STRDUP($1); }
@@ -2534,6 +2664,7 @@ safe_keywords:
     | REMOVE     { $$ = KEYWORD_STRDUP($1); }
     | RETURN     { $$ = KEYWORD_STRDUP($1); }
     | SET        { $$ = KEYWORD_STRDUP($1); }
+    | SHOW       { $$ = KEYWORD_STRDUP($1); }
     | SINGLE     { $$ = KEYWORD_STRDUP($1); }
     | SKIP       { $$ = KEYWORD_STRDUP($1); }
     | STARTS     { $$ = KEYWORD_STRDUP($1); }

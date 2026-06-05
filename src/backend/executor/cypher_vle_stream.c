@@ -34,6 +34,7 @@ typedef struct AgeVLEStreamScanState
 {
     CustomScanState css;
     ExprState *argstates[AGE_VLE_STREAM_ARG_COUNT];
+    ExprState *terminal_property_predicate_state;
     Datum const_arg_values[AGE_VLE_STREAM_ARG_COUNT];
     bool const_arg_nulls[AGE_VLE_STREAM_ARG_COUNT];
     bool const_arg_valid[AGE_VLE_STREAM_ARG_COUNT];
@@ -67,6 +68,14 @@ static void rescan_age_vle_stream_scan(CustomScanState *node);
 static void explain_age_vle_stream_scan(CustomScanState *node,
                                         List *ancestors,
                                         ExplainState *es);
+static char *format_age_vle_stream_join_order(
+    AgeVLEStreamScanState *state);
+static const char *age_vle_stream_join_order_connector(
+    AgeVLEStreamScanState *state);
+static const char *age_vle_stream_join_order_property(
+    AgeVLEStreamScanState *state);
+static bool age_vle_stream_has_bound_endpoints(
+    AgeVLEStreamScanState *state);
 static void initialize_age_vle_stream_descriptor(AgeVLEStreamScanState *state,
                                                 CustomScan *cscan,
                                                 PlanState *parent);
@@ -80,6 +89,8 @@ static void evaluate_age_vle_stream_args(AgeVLEStreamScanState *state,
                                          ExprContext *econtext);
 static void evaluate_age_vle_stream_endpoint_args(
     AgeVLEStreamScanState *state);
+static void evaluate_age_vle_stream_terminal_property_predicate(
+    AgeVLEStreamScanState *state, ExprContext *econtext);
 static void evaluate_age_vle_stream_endpoint_arg(AgeVLEStreamScanState *state,
                                                 int argno,
                                                 const char *type_error_msg);
@@ -127,9 +138,15 @@ static void begin_age_vle_stream_scan(CustomScanState *node, EState *estate,
     AgeVLEStreamScanState *state = (AgeVLEStreamScanState *)node;
     CustomScan *cscan = (CustomScan *)node->ss.ps.plan;
     Integer *nargs_value;
+    ListCell *lc;
 
-    (void) estate;
-    (void) eflags;
+    foreach(lc, cscan->custom_plans)
+    {
+        Plan *subplan = (Plan *)lfirst(lc);
+
+        node->custom_ps = lappend(node->custom_ps,
+                                  ExecInitNode(subplan, estate, eflags));
+    }
 
     Assert(list_length(cscan->custom_private) ==
            AGE_VLE_STREAM_PRIVATE_COUNT);
@@ -197,6 +214,33 @@ static void initialize_age_vle_stream_input_descriptor(
     state->input.terminal_property_key_char =
         state->output.terminal_key_is_char ?
         state->output.terminal_key_value[0] : '\0';
+    state->input.terminal_label_known = state->output.terminal_label_known;
+    state->input.terminal_label_id = state->output.terminal_label_id;
+    state->input.terminal_label_mode = state->output.terminal_label_mode;
+    state->input.terminal_property_predicate_known =
+        state->edge_source.terminal_property_predicate_known;
+    state->input.terminal_property_predicate_key_known =
+        state->edge_source.terminal_property_predicate_key != NULL;
+    state->input.terminal_property_predicate_key_value =
+        state->edge_source.terminal_property_predicate_key;
+    state->input.terminal_property_predicate_key_len =
+        state->edge_source.terminal_property_predicate_key != NULL ?
+        strlen(state->edge_source.terminal_property_predicate_key) : 0;
+    state->input.terminal_property_predicate_key_is_char =
+        state->input.terminal_property_predicate_key_len == 1;
+    state->input.terminal_property_predicate_key_char =
+        state->input.terminal_property_predicate_key_is_char ?
+        state->edge_source.terminal_property_predicate_key[0] : '\0';
+    state->input.terminal_property_predicate_null =
+        state->edge_source.terminal_property_predicate_null;
+    state->input.terminal_property_predicate_value =
+        state->edge_source.terminal_property_predicate_value;
+    state->input.terminal_property_prefilter_eligible =
+        state->edge_source.terminal_property_prefilter_eligible;
+    state->input.terminal_property_index_oid =
+        state->edge_source.terminal_property_index_oid;
+    state->input.terminal_property_prefetch_threshold =
+        state->edge_source.terminal_property_prefetch_threshold;
     state->input.source_policy_known =
         state->edge_source.kind ==
         AGE_VLE_STREAM_EDGE_SOURCE_LOCAL_INDEX_CANDIDATE &&
@@ -241,8 +285,10 @@ static void initialize_age_vle_stream_descriptor(AgeVLEStreamScanState *state,
     int argno;
 
     Assert(state->nargs == AGE_VLE_STREAM_ARG_GRAMMAR_NODE + 1 ||
-           state->nargs == AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 1);
-    Assert(list_length(cscan->custom_exprs) == state->nargs);
+           state->nargs == AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 1 ||
+           state->nargs == AGE_VLE_STREAM_ARG_TERMINAL_LABEL + 1);
+    Assert(list_length(cscan->custom_exprs) == state->nargs ||
+           list_length(cscan->custom_exprs) == state->nargs + 1);
     Assert(list_length(list_nth_node(List, cscan->custom_private,
                                      AGE_VLE_STREAM_PRIVATE_CONST_FLAGS)) ==
            state->nargs);
@@ -270,6 +316,13 @@ static void initialize_age_vle_stream_descriptor(AgeVLEStreamScanState *state,
         {
             state->argstates[argno] = ExecInitExpr(arg, parent);
         }
+    }
+    if (list_length(cscan->custom_exprs) > state->nargs)
+    {
+        Expr *predicate_expr = list_nth(cscan->custom_exprs, state->nargs);
+
+        state->terminal_property_predicate_state =
+            ExecInitExpr(predicate_expr, parent);
     }
 }
 
@@ -325,6 +378,10 @@ static bool recheck_age_vle_stream_scan(ScanState *node, TupleTableSlot *slot)
 static void end_age_vle_stream_scan(CustomScanState *node)
 {
     AgeVLEStreamScanState *state = (AgeVLEStreamScanState *)node;
+    ListCell *lc;
+
+    foreach(lc, node->custom_ps)
+        ExecEndNode((PlanState *)lfirst(lc));
 
     ReScanExprContext(node->ss.ps.ps_ExprContext);
     reset_age_vle_stream_iterator(state);
@@ -333,6 +390,10 @@ static void end_age_vle_stream_scan(CustomScanState *node)
 static void rescan_age_vle_stream_scan(CustomScanState *node)
 {
     AgeVLEStreamScanState *state = (AgeVLEStreamScanState *)node;
+    ListCell *lc;
+
+    foreach(lc, node->custom_ps)
+        ExecReScan((PlanState *)lfirst(lc));
 
     ReScanExprContext(node->ss.ps.ps_ExprContext);
     reset_age_vle_stream_iterator(state);
@@ -371,6 +432,48 @@ static void explain_age_vle_stream_scan(CustomScanState *node,
                         format_vle_stream_edge_source_evidence(
                             &state->edge_source),
                         es);
+    if (state->edge_source.cost_policy != NULL)
+    {
+        ExplainPropertyText("VLE Source Cost",
+                            format_vle_stream_edge_source_cost(
+                                &state->edge_source),
+                            es);
+        ExplainPropertyText("VLE Join Order",
+                            format_age_vle_stream_join_order(state),
+                            es);
+        if (state->edge_source.terminal_property_source_known)
+            ExplainPropertyText("VLE Terminal Property Source",
+                                format_vle_stream_edge_terminal_property_source(
+                                    &state->edge_source),
+                                es);
+        if (state->edge_source.composite_source_known)
+        {
+            ExplainPropertyText("VLE Composite Source",
+                                format_vle_stream_edge_composite_source(
+                                    &state->edge_source),
+                                es);
+            ExplainPropertyText("VLE Composite Fanout",
+                                format_vle_stream_edge_composite_fanout(
+                                    &state->edge_source),
+                                es);
+        }
+        ExplainPropertyText("VLE Source Profile",
+                            format_vle_stream_edge_source_profile(
+                                &state->edge_source),
+                            es);
+        ExplainPropertyText("VLE Source Threshold Input",
+                            format_vle_stream_edge_source_threshold_input(
+                                &state->edge_source),
+                            es);
+        ExplainPropertyText("VLE Source Payload Input",
+                            format_vle_stream_edge_source_payload_input(
+                                &state->edge_source),
+                            es);
+        ExplainPropertyText("VLE Source Policy",
+                            format_vle_stream_edge_source_policy(
+                                &state->edge_source),
+                            es);
+    }
     ExplainPropertyText("VLE Endpoints",
                         format_age_vle_stream_endpoints(cscan),
                         es);
@@ -388,7 +491,10 @@ static void explain_age_vle_stream_scan(CustomScanState *node,
                         format_age_vle_stream_materialization(
                             &state->output, &state->edge_source),
                         es);
-    if (nargs > AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY)
+    if (state->output.requirement ==
+            AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY ||
+        state->output.requirement ==
+            AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES)
     {
         ExplainPropertyText("VLE Terminal Output Slot",
                             format_age_vle_stream_terminal_slot(
@@ -401,7 +507,119 @@ static void explain_age_vle_stream_scan(CustomScanState *node,
                             format_vle_source_runtime_evidence(
                                 &state->source_stats, &state->edge_source),
                             es);
+        ExplainPropertyText("VLE Source Plan",
+                            format_vle_source_runtime_plan(
+                                &state->source_stats, &state->edge_source),
+                            es);
+        ExplainPropertyText("VLE Source Counters",
+                            format_vle_source_runtime_counters(
+                                &state->source_stats, &state->edge_source),
+                            es);
+        ExplainPropertyText("VLE Payload Runtime",
+                            format_vle_source_runtime_payload(
+                                &state->source_stats, &state->edge_source),
+                            es);
+        ExplainPropertyText("VLE Empty Evidence",
+                            format_vle_source_runtime_empty_evidence(
+                                &state->source_stats, &state->edge_source),
+                            es);
+        ExplainPropertyText("VLE Empty Lifecycle",
+                            format_vle_source_runtime_empty_lifecycle(
+                                &state->source_stats, &state->edge_source),
+                            es);
+        ExplainPropertyText("VLE Runtime Feedback",
+                            format_vle_source_runtime_feedback(
+                                &state->source_stats, &state->edge_source),
+                            es);
     }
+}
+
+static char *format_age_vle_stream_join_order(
+    AgeVLEStreamScanState *state)
+{
+    AgeVLEStreamEdgeSource *source = &state->edge_source;
+
+    return psprintf("component=vle connector=%s bound=%s property=%s "
+                    "rows=%ld fanout=start:%ld/end:%ld "
+                    "consumer=%s class=%s",
+                    age_vle_stream_join_order_connector(state),
+                    source->policy_active_direction != NULL ?
+                    source->policy_active_direction : "unknown",
+                    age_vle_stream_join_order_property(state),
+                    (long)state->css.ss.ps.plan->plan_rows,
+                    (long)source->start_fanout,
+                    (long)source->end_fanout,
+                    source->policy_consumer != NULL ?
+                    source->policy_consumer : "unknown",
+                    source->policy_consumer_class != NULL ?
+                    source->policy_consumer_class : "unknown");
+}
+
+static const char *age_vle_stream_join_order_connector(
+    AgeVLEStreamScanState *state)
+{
+    AgeVLEStreamEdgeSource *source = &state->edge_source;
+
+    if (source->composite_source_known &&
+        source->composite_source_planned != NULL &&
+        strcmp(source->composite_source_planned, "property-prefilter") == 0)
+    {
+        if (age_vle_stream_has_bound_endpoints(state))
+            return "vle-composite-expand-into";
+        return "vle-composite-expand";
+    }
+
+    if (age_vle_stream_has_bound_endpoints(state))
+        return "vle-expand-into";
+
+    if (source->policy_active_direction != NULL &&
+        strcmp(source->policy_active_direction, "both") == 0)
+        return "vle-bidirectional-expand";
+
+    return "vle-expand";
+}
+
+static const char *age_vle_stream_join_order_property(
+    AgeVLEStreamScanState *state)
+{
+    AgeVLEStreamEdgeSource *source = &state->edge_source;
+
+    if (source->composite_source_known &&
+        source->composite_source_planned != NULL &&
+        strcmp(source->composite_source_planned, "property-prefilter") == 0)
+        return "index-anchored";
+
+    if ((source->start_fanout_source != NULL &&
+         strcmp(source->start_fanout_source, "directory-label") == 0) ||
+        (source->end_fanout_source != NULL &&
+         strcmp(source->end_fanout_source, "directory-label") == 0))
+        return "vle-frontier-anchored";
+
+    if (source->cache_seed_eligible ||
+        source->empty_lifecycle_eligible ||
+        source->payload_input_known)
+        return "vle-frontier-anchored";
+
+    if (age_vle_stream_has_bound_endpoints(state))
+        return "expand-into-verification";
+
+    return "query-order";
+}
+
+static bool age_vle_stream_has_bound_endpoints(
+    AgeVLEStreamScanState *state)
+{
+    if (state->nargs <= AGE_VLE_STREAM_ARG_END)
+        return false;
+
+    if (state->const_arg_valid[AGE_VLE_STREAM_ARG_START] &&
+        state->const_arg_nulls[AGE_VLE_STREAM_ARG_START])
+        return false;
+    if (state->const_arg_valid[AGE_VLE_STREAM_ARG_END] &&
+        state->const_arg_nulls[AGE_VLE_STREAM_ARG_END])
+        return false;
+
+    return true;
 }
 
 static void initialize_age_vle_stream_iterator(AgeVLEStreamScanState *state,
@@ -445,6 +663,18 @@ static void evaluate_age_vle_stream_args(AgeVLEStreamScanState *state,
                          &state->input.args[argno].isnull);
     }
     evaluate_age_vle_stream_endpoint_args(state);
+    evaluate_age_vle_stream_terminal_property_predicate(state, econtext);
+}
+
+static void evaluate_age_vle_stream_terminal_property_predicate(
+    AgeVLEStreamScanState *state, ExprContext *econtext)
+{
+    if (state->terminal_property_predicate_state == NULL)
+        return;
+
+    state->input.terminal_property_predicate_value =
+        ExecEvalExpr(state->terminal_property_predicate_state, econtext,
+                     &state->input.terminal_property_predicate_null);
 }
 
 static void evaluate_age_vle_stream_endpoint_args(
@@ -593,6 +823,8 @@ static void accumulate_age_vle_stream_source_stats(
     total->age_adjacency_candidates += current->age_adjacency_candidates;
     total->age_adjacency_empty_scans +=
         current->age_adjacency_empty_scans;
+    total->age_adjacency_directory_filtered_empty_scans +=
+        current->age_adjacency_directory_filtered_empty_scans;
     total->age_adjacency_empty_source_skips +=
         current->age_adjacency_empty_source_skips;
     total->age_adjacency_empty_source_skip_out +=
@@ -630,6 +862,61 @@ static void accumulate_age_vle_stream_source_stats(
         current->age_adjacency_empty_source_run_skip_in;
     total->age_adjacency_payload_scan_runs +=
         current->age_adjacency_payload_scan_runs;
+    total->age_adjacency_payload_property_prefilter_runs +=
+        current->age_adjacency_payload_property_prefilter_runs;
+    total->age_adjacency_payload_property_prefilter_candidates +=
+        current->age_adjacency_payload_property_prefilter_candidates;
+    total->age_adjacency_payload_property_vertex_set_runs +=
+        current->age_adjacency_payload_property_vertex_set_runs;
+    total->age_adjacency_payload_composite_requests +=
+        current->age_adjacency_payload_composite_requests;
+    total->age_adjacency_payload_composite_block_filtered +=
+        current->age_adjacency_payload_composite_block_filtered;
+    total->age_adjacency_payload_composite_directory_filtered +=
+        current->age_adjacency_payload_composite_directory_filtered;
+    total->age_adjacency_payload_composite_directory_estimated +=
+        current->age_adjacency_payload_composite_directory_estimated;
+    total->age_adjacency_payload_property_filtered +=
+        current->age_adjacency_payload_property_filtered;
+    total->age_adjacency_payload_property_prefetch_matches =
+        Max(total->age_adjacency_payload_property_prefetch_matches,
+            current->age_adjacency_payload_property_prefetch_matches);
+    total->age_adjacency_payload_cache_filtered +=
+        current->age_adjacency_payload_cache_filtered;
+    total->age_adjacency_payload_cache_label_filtered +=
+        current->age_adjacency_payload_cache_label_filtered;
+    total->age_adjacency_payload_cache_property_filtered +=
+        current->age_adjacency_payload_cache_property_filtered;
+    total->age_adjacency_payload_vertex_set_range_filtered +=
+        current->age_adjacency_payload_vertex_set_range_filtered;
+    total->age_adjacency_payload_vertex_set_sorted_filtered +=
+        current->age_adjacency_payload_vertex_set_sorted_filtered;
+    total->age_adjacency_payload_vertex_set_block_filtered +=
+        current->age_adjacency_payload_vertex_set_block_filtered;
+    total->age_adjacency_payload_vertex_set_block_value_filtered +=
+        current->age_adjacency_payload_vertex_set_block_value_filtered;
+    total->age_adjacency_payload_vertex_set_block_value_posting_filtered +=
+        current->age_adjacency_payload_vertex_set_block_value_posting_filtered;
+    total->age_adjacency_payload_vertex_set_block_compressed_filtered +=
+        current->age_adjacency_payload_vertex_set_block_compressed_filtered;
+    total->age_adjacency_payload_vertex_set_block_posting_filtered +=
+        current->age_adjacency_payload_vertex_set_block_posting_filtered;
+    total->age_adjacency_payload_vertex_set_directory_filtered +=
+        current->age_adjacency_payload_vertex_set_directory_filtered;
+    total->age_adjacency_payload_vertex_set_directory_range_filtered +=
+        current->age_adjacency_payload_vertex_set_directory_range_filtered;
+    total->age_adjacency_payload_vertex_set_directory_exact_filtered +=
+        current->age_adjacency_payload_vertex_set_directory_exact_filtered;
+    total->age_adjacency_payload_vertex_set_directory_label_bloom_filtered +=
+        current->age_adjacency_payload_vertex_set_directory_label_bloom_filtered;
+    total->age_adjacency_payload_vertex_set_directory_compressed_filtered +=
+        current->age_adjacency_payload_vertex_set_directory_compressed_filtered;
+    total->age_adjacency_payload_vertex_set_directory_wide_bloom_filtered +=
+        current->age_adjacency_payload_vertex_set_directory_wide_bloom_filtered;
+    total->age_adjacency_payload_vertex_set_directory_value_filtered +=
+        current->age_adjacency_payload_vertex_set_directory_value_filtered;
+    total->age_adjacency_payload_vertex_set_directory_value_posting_filtered +=
+        current->age_adjacency_payload_vertex_set_directory_value_posting_filtered;
     total->age_adjacency_payload_replay_runs +=
         current->age_adjacency_payload_replay_runs;
     total->age_adjacency_payload_cache_seed_runs +=

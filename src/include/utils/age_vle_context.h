@@ -23,6 +23,7 @@
 #include "postgres.h"
 
 #include "access/age_adjacency.h"
+#include "executor/cypher_adjacency_match_terminal.h"
 #include "utils/age_global_graph.h"
 #include "utils/age_vle.h"
 #include "utils/age_vle_adjacency_cache.h"
@@ -69,6 +70,16 @@ typedef struct VLEContextTraversalRootState
     bool reverse_output_path;      /* reverse traversal result before return */
     GraphIdNode *next_vertex;      /* for VLE_FUNCTION_PATHS_TO */
     VLETraversalEmptyCompletionSummary empty_completion;
+    AgeAdjacencyMatchTerminalPropertyLookup *terminal_property_lookup;
+    bool terminal_property_prefilter_eligible;
+    Oid terminal_property_index_oid;
+    bool terminal_property_predicate_known;
+    agtype_value terminal_property_predicate_key;
+    bool terminal_property_predicate_key_is_char;
+    char terminal_property_predicate_key_char;
+    Datum terminal_property_predicate_value;
+    bool terminal_property_predicate_null;
+    int64 terminal_property_prefetch_threshold;
 } VLEContextTraversalRootState;
 
 typedef struct VLEContextSourceCursor
@@ -77,6 +88,9 @@ typedef struct VLEContextSourceCursor
     VLETraversalSourceKind source_kind;
     Oid index_oid;
     Oid edge_label_oid;
+    int32 edge_label_id;
+    int32 terminal_label_id;
+    int64 target_path_length;
     bool outgoing;
     bool skip_self_loops;
     bool has_property_constraints;
@@ -85,6 +99,7 @@ typedef struct VLEContextSourceCursor
 typedef struct VLEContextExpansionSourceRun
 {
     graphid source_vertex_id;
+    int64 source_path_length;
     bool used_out_source;
     bool used_in_source;
     bool missing_vertex_fallback;
@@ -163,6 +178,8 @@ typedef struct VLE_local_context
     GRAPH_global_context *ggctx;   /* global graph context pointer */
     char *edge_label_name;         /* edge label name for match */
     Oid edge_label_name_oid;       /* edge label name oid for match */
+    int32 terminal_label_id;       /* terminal vertex label id constraint */
+    int32 terminal_endpoint_label_id; /* final endpoint label constraint */
     agtype *edge_property_constraint; /* edge property constraint as agtype */
     int num_edge_property_constraints; /* number of edge property constraints */
     Datum edge_property_constraint_datum; /* edge property constraint as Datum */
@@ -210,6 +227,8 @@ typedef struct VLETraversalContextApply
     agtype *edge_property_constraint;
     int edge_property_constraint_count;
     Oid edge_label_oid;
+    int32 terminal_label_id;
+    int32 terminal_endpoint_label_id;
     VLETraversalSourceIndexes source_indexes;
     bool source_policy_known;
     VLETraversalSourceKind source_policy_outgoing_kind;
@@ -222,6 +241,17 @@ typedef struct VLETraversalContextApply
     int64 upper;
     bool upper_infinite;
     int64 terminal_property_prefetch_budget;
+    bool terminal_property_prefilter_eligible;
+    Oid terminal_property_index_oid;
+    bool terminal_property_predicate_known;
+    bool terminal_property_predicate_key_known;
+    const char *terminal_property_predicate_key_value;
+    int terminal_property_predicate_key_len;
+    bool terminal_property_predicate_key_is_char;
+    char terminal_property_predicate_key_char;
+    Datum terminal_property_predicate_value;
+    bool terminal_property_predicate_null;
+    int64 terminal_property_source_prefetch_threshold;
 } VLETraversalContextApply;
 
 typedef struct VLETraversalOutputApply
@@ -234,6 +264,9 @@ typedef struct VLETraversalOutputApply
     agtype_value terminal_property_key;
     bool terminal_property_key_is_char;
     char terminal_property_key_char;
+    bool terminal_label_known;
+    int32 terminal_label_id;
+    AgeVLETerminalLabelMode terminal_label_mode;
 } VLETraversalOutputApply;
 
 typedef struct VLETraversalEdgeStateApply
@@ -313,6 +346,10 @@ extern void age_vle_context_record_source_candidate(
     VLE_local_context *vlelctx, VLEContextSourceStatsKind kind);
 extern void age_vle_context_record_source_empty_scan(
     VLE_local_context *vlelctx, VLEContextSourceStatsKind kind);
+extern void age_vle_context_record_age_adjacency_directory_filtered_empty_scan(
+    VLE_local_context *vlelctx);
+extern int64 age_vle_context_age_adjacency_directory_filtered(
+    VLE_local_context *vlelctx);
 extern void age_vle_context_record_age_adjacency_empty_source_skip(
     VLE_local_context *vlelctx, bool outgoing);
 extern void age_vle_context_record_age_adjacency_empty_source_cache_hit(

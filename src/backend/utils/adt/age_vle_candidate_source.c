@@ -40,6 +40,7 @@ typedef struct VLEAgeAdjacencyCandidateValidation
     VLECandidateGraphAccess graph_access;
     VLECandidateSourceIdentity source_identity;
     Oid edge_label_oid;
+    int32 edge_label_id;
     bool use_local_edge_state;
     const VLEEdgePropertyMatchContext *match_context;
 } VLEAgeAdjacencyCandidateValidation;
@@ -179,6 +180,9 @@ static bool init_packed_adjacency_candidate(
 static bool push_candidates_from_source_cursor(
     VLE_local_context *vlelctx, const VLEContextSourceCursor *source_cursor,
     const VLEEdgePropertyMatchContext *match_context);
+static bool push_candidates_from_edge_label_source_candidates(
+    VLE_local_context *vlelctx, VLEContextExpansionSourceRun *run,
+    bool outgoing, const VLEEdgePropertyMatchContext *match_context);
 static bool push_candidates_from_expansion_context_source(
     VLE_local_context *vlelctx, VLEContextExpansionSourceRun *run,
     bool outgoing, const VLEEdgePropertyMatchContext *match_context);
@@ -227,6 +231,7 @@ void age_vle_push_candidates_from_vertex_entry(
     age_vle_context_init_edge_property_match(vlelctx, &match_context);
     source_vertex_id = get_vertex_entry_id(entry);
     age_vle_context_init_expansion_source_run(&source_run, source_vertex_id);
+    source_run.source_path_length = vlelctx->traversal.path_depth;
 
     (void) push_candidates_from_expansion_context_source(
         vlelctx, &source_run, true, &match_context);
@@ -274,6 +279,14 @@ static bool push_candidates_from_expansion_context_source(
     if (!age_vle_context_init_expansion_source_cursor(
             vlelctx, run, &source_cursor, outgoing))
     {
+        used_source = push_candidates_from_edge_label_source_candidates(
+            vlelctx, run, outgoing, match_context);
+        if (used_source)
+        {
+            age_vle_context_record_expansion_source_result(run, outgoing,
+                                                           true);
+            return true;
+        }
         age_vle_context_record_expansion_source_result(run, outgoing, false);
         return false;
     }
@@ -289,6 +302,95 @@ static bool push_candidates_from_expansion_context_source(
         vlelctx, &source_cursor, match_context);
     age_vle_context_record_expansion_source_result(run, outgoing,
                                                    used_source);
+    return used_source;
+}
+
+static bool push_candidates_from_edge_label_source_candidates(
+    VLE_local_context *vlelctx, VLEContextExpansionSourceRun *run,
+    bool outgoing, const VLEEdgePropertyMatchContext *match_context)
+{
+    GraphEdgeLabelSourceCandidate *candidates;
+    int candidate_count;
+    int i;
+    bool used_source = false;
+    bool skip_self_loops;
+    cypher_rel_dir direction;
+
+    Assert(vlelctx != NULL);
+    Assert(run != NULL);
+    Assert(match_context != NULL);
+
+    direction = age_vle_context_edge_direction(vlelctx);
+    if ((outgoing && direction == CYPHER_REL_DIR_LEFT) ||
+        (!outgoing && direction == CYPHER_REL_DIR_RIGHT))
+    {
+        return false;
+    }
+
+    if (!age_vle_context_expansion_source_run_is_eligible(run) ||
+        !age_vle_context_uses_local_edge_state(vlelctx) ||
+        age_vle_context_has_edge_label(vlelctx) ||
+        age_vle_context_has_edge_property_constraints(vlelctx) ||
+        vlelctx->root.uidx_infinite ||
+        vlelctx->root.uidx > 1)
+    {
+        return false;
+    }
+
+    candidate_count = get_graph_edge_label_source_candidates(vlelctx->ggctx,
+                                                             &candidates);
+    if (candidate_count <= 0)
+    {
+        return false;
+    }
+
+    if (run->missing_vertex_fallback)
+    {
+        skip_self_loops = !outgoing &&
+            age_vle_context_edge_direction(vlelctx) == CYPHER_REL_DIR_NONE;
+    }
+    else
+    {
+        skip_self_loops = !outgoing && run->used_out_source;
+    }
+
+    for (i = 0; i < candidate_count; i++)
+    {
+        VLEContextSourceCursor source_cursor;
+        Oid index_oid;
+
+        index_oid = outgoing ?
+            candidates[i].age_adjacency_out_index_oid :
+            candidates[i].age_adjacency_in_index_oid;
+        if (!OidIsValid(index_oid))
+        {
+            continue;
+        }
+
+        memset(&source_cursor, 0, sizeof(source_cursor));
+        source_cursor.source_vertex_id = run->source_vertex_id;
+        source_cursor.source_kind = VLE_TRAVERSAL_SOURCE_AGE_ADJACENCY;
+        source_cursor.index_oid = index_oid;
+        source_cursor.edge_label_oid = candidates[i].edge_label_oid;
+        source_cursor.edge_label_id = candidates[i].label_id;
+        source_cursor.terminal_label_id = INVALID_LABEL_ID;
+        source_cursor.target_path_length = run->source_path_length + 1;
+        source_cursor.outgoing = outgoing;
+        source_cursor.skip_self_loops = skip_self_loops;
+        source_cursor.has_property_constraints = false;
+
+        if (age_vle_context_expansion_source_cursor_known_empty(
+                vlelctx, &source_cursor))
+        {
+            used_source = true;
+            continue;
+        }
+
+        used_source = push_candidates_from_source_cursor(
+            vlelctx, &source_cursor, match_context) || used_source;
+    }
+
+    pfree(candidates);
     return used_source;
 }
 
@@ -377,6 +479,9 @@ static bool add_valid_vertex_edges_from_age_adjacency(
 {
     VLEAgeAdjacencySourceScan source_scan;
     VLECandidateSource source;
+    int64 before_directory_filtered;
+    int64 after_directory_filtered;
+    int64 yielded;
 
     Assert(source_cursor != NULL);
     Assert(match_context != NULL);
@@ -400,10 +505,23 @@ static bool add_valid_vertex_edges_from_age_adjacency(
                           VLE_CONTEXT_SOURCE_STATS_AGE_ADJACENCY);
     age_vle_context_record_source_scan(
         vlelctx, VLE_CONTEXT_SOURCE_STATS_AGE_ADJACENCY);
-    if (push_candidates_from_source(vlelctx, &source) == 0)
+    before_directory_filtered =
+        age_vle_context_age_adjacency_directory_filtered(vlelctx);
+    yielded = push_candidates_from_source(vlelctx, &source);
+    if (yielded == 0)
     {
-        age_vle_context_record_source_empty_scan(
-            vlelctx, VLE_CONTEXT_SOURCE_STATS_AGE_ADJACENCY);
+        after_directory_filtered =
+            age_vle_context_age_adjacency_directory_filtered(vlelctx);
+        if (after_directory_filtered > before_directory_filtered)
+        {
+            age_vle_context_record_age_adjacency_directory_filtered_empty_scan(
+                vlelctx);
+        }
+        else
+        {
+            age_vle_context_record_source_empty_scan(
+                vlelctx, VLE_CONTEXT_SOURCE_STATS_AGE_ADJACENCY);
+        }
     }
 
     return true;
@@ -847,6 +965,7 @@ static void init_age_adjacency_candidate_validation(
     init_candidate_source_identity(&validation->source_identity,
                                    source_cursor);
     validation->edge_label_oid = source_cursor->edge_label_oid;
+    validation->edge_label_id = source_cursor->edge_label_id;
     validation->use_local_edge_state =
         age_vle_context_uses_local_edge_state(vlelctx);
     validation->match_context = match_context;
@@ -884,12 +1003,17 @@ static bool init_age_adjacency_payload_candidate(
         {
             return false;
         }
+        if (label_id_is_valid(validation->edge_label_id) &&
+            get_graphid_label_id(edge_id) != validation->edge_label_id)
+        {
+            return false;
+        }
         edge_index = age_vle_context_get_or_create_local_edge_index(
             vlelctx, edge_id);
         next_vertex_entry =
             validation->graph_access.carry_frame_vertex_entry ?
-            candidate_graph_get_vertex_entry(&validation->graph_access,
-                                             next_vertex_id) : NULL;
+            candidate_graph_ensure_vertex_entry_skeleton(
+                &validation->graph_access, next_vertex_id) : NULL;
     }
     else
     {

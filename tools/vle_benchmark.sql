@@ -9,6 +9,7 @@
 --   psql -d postgres -v graph=age_vle_bench \
 --        -v sparse_nodes=128 -v dense_nodes=24 \
 --        -v label_fanout_labels=800 -v label_fanout_edges=64 \
+--        -v value_posting_edges=38 \
 --        -v replay_branches=0 -v replay_leaves=0 \
 --        -v run_standard_cases=1 \
 --        -f tools/vle_benchmark.sql
@@ -34,6 +35,10 @@
 \if :{?label_fanout_edges}
 \else
     \set label_fanout_edges 64
+\endif
+\if :{?value_posting_edges}
+\else
+    \set value_posting_edges 38
 \endif
 \if :{?replay_branches}
 \else
@@ -65,6 +70,7 @@ WITH input AS (
            :dense_nodes::int AS dense_nodes,
            :label_fanout_labels::int AS label_fanout_labels,
            :label_fanout_edges::int AS label_fanout_edges,
+           :value_posting_edges::int AS value_posting_edges,
            :replay_branches::int AS replay_branches_input,
            :replay_leaves::int AS replay_leaves_input
 )
@@ -73,6 +79,13 @@ SELECT graph_name,
        dense_nodes,
        label_fanout_labels,
        label_fanout_edges,
+       value_posting_edges,
+       GREATEST((GREATEST(value_posting_edges, 2) + 255) / 256, 1)
+           AS value_posting_root_count,
+       (GREATEST(value_posting_edges, 2) +
+        GREATEST((GREATEST(value_posting_edges, 2) + 255) / 256, 1) - 1) /
+        GREATEST((GREATEST(value_posting_edges, 2) + 255) / 256, 1)
+           AS value_posting_edges_per_root,
        replay_branches_input,
        replay_leaves_input,
        CASE WHEN replay_branches_input > 0
@@ -114,15 +127,22 @@ DECLARE
     sparse_nodes int;
     dense_nodes int;
     label_fanout_edges int;
+    value_posting_edges int;
+    value_posting_root_count int;
+    value_posting_edges_per_root int;
     replay_branches int;
     replay_leaves int;
     i int;
     j int;
 BEGIN
     SELECT c.graph_name, c.sparse_nodes, c.dense_nodes,
-           c.label_fanout_edges, c.replay_branches, c.replay_leaves
+           c.label_fanout_edges, c.value_posting_edges,
+           c.value_posting_root_count, c.value_posting_edges_per_root,
+           c.replay_branches, c.replay_leaves
     INTO graph_name, sparse_nodes, dense_nodes,
-         label_fanout_edges, replay_branches, replay_leaves
+         label_fanout_edges, value_posting_edges,
+         value_posting_root_count, value_posting_edges_per_root,
+         replay_branches, replay_leaves
     FROM vle_benchmark_config c;
 
     FOR i IN 0..sparse_nodes - 1 LOOP
@@ -214,6 +234,200 @@ BEGIN
                 i % 8, i));
     END LOOP;
 
+    PERFORM ag_catalog.create_vlabel(graph_name::cstring,
+                                     'ValuePostingNode'::cstring);
+    PERFORM ag_catalog.create_vlabel(graph_name::cstring,
+                                     'ValuePostingOther'::cstring);
+    PERFORM ag_catalog.create_elabel(graph_name::cstring,
+                                     'ValuePostingEdge'::cstring);
+
+    EXECUTE format(
+        'INSERT INTO %I.%I(id, properties)
+         WITH roots AS (
+             SELECT generate_series(0, %s - 1) AS root
+         ),
+         endpoints AS (
+             SELECT 0 AS root, 1 AS g
+             UNION ALL
+             SELECT r.root, 220 + r.root * %s + endpoint_offset AS g
+             FROM roots r,
+                  generate_series(
+                      0,
+                      %s - CASE WHEN r.root = 0 THEN 2 ELSE 1 END
+                  ) AS endpoint_offset
+         )
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L),
+                                    199000 + r.root),
+                (''{"i": 199, "role": "vp_start", "bucket": '' ||
+                 r.root || ''}'')::ag_catalog.agtype
+         FROM roots r
+         UNION ALL
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L), 62),
+                ''{"i": 59, "role": "vp_candidate"}''::ag_catalog.agtype
+         UNION ALL
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L), e.g),
+                (''{"i": '' || e.g || '', "role": "vp_endpoint"}'')::ag_catalog.agtype
+         FROM endpoints e',
+        graph_name, 'ValuePostingNode',
+        value_posting_root_count,
+        value_posting_edges_per_root,
+        value_posting_edges_per_root,
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingNode');
+
+    EXECUTE format(
+        'INSERT INTO %I.%I(id, properties)
+         WITH roots AS (
+             SELECT generate_series(0, %s - 1) AS root
+         ),
+         mids AS (
+             SELECT r.root,
+                    500000 + r.root * %s + mid_offset AS g
+             FROM roots r,
+                  generate_series(0, %s - 1) AS mid_offset
+         ),
+         leaves AS (
+             SELECT 800000 + leaf_offset AS g
+             FROM generate_series(0, %s - 1) AS leaf_offset
+         )
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L), m.g),
+                (''{"i": '' || m.g || '', "role": "vp_replay_mid"}'')::ag_catalog.agtype
+         FROM mids m
+         UNION ALL
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L),
+                                    299000 + r.root),
+                (''{"i": 299, "role": "vp_replay_start", "bucket": '' ||
+                 r.root || ''}'')::ag_catalog.agtype
+         FROM roots r
+         UNION ALL
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L), 700000),
+                ''{"i": 700000, "role": "vp_replay_hub"}''::ag_catalog.agtype
+         UNION ALL
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L), l.g),
+                (''{"i": '' || l.g || '', "role": "vp_replay_leaf"}'')::ag_catalog.agtype
+         FROM leaves l',
+        graph_name, 'ValuePostingNode',
+        value_posting_root_count,
+        value_posting_edges_per_root,
+        value_posting_edges_per_root,
+        value_posting_edges_per_root,
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingNode');
+
+    EXECUTE format(
+        'INSERT INTO %I.%I(id, properties)
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L),
+                                    r.root * 1000 + g),
+                ''{}''::ag_catalog.agtype
+         FROM generate_series(0, %s - 1) r(root),
+              generate_series(1, GREATEST(%s / 8, 4)) g',
+        graph_name, 'ValuePostingOther',
+        graph_name, 'ValuePostingOther',
+        value_posting_root_count,
+        value_posting_edges_per_root);
+
+    EXECUTE format(
+        'INSERT INTO %I.%I(id, start_id, end_id, properties)
+         WITH roots AS (
+             SELECT generate_series(0, %s - 1) AS root
+         ),
+         endpoints AS (
+             SELECT 0 AS root, 1 AS g
+             UNION ALL
+             SELECT r.root, 220 + r.root * %s + endpoint_offset AS g
+             FROM roots r,
+                  generate_series(
+                      0,
+                      %s - CASE WHEN r.root = 0 THEN 2 ELSE 1 END
+                  ) AS endpoint_offset
+         )
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L),
+                                    e.root * 1000000 + e.g),
+                ag_catalog._graphid(ag_catalog._label_id(%L, %L),
+                                    199000 + e.root),
+                ag_catalog._graphid(ag_catalog._label_id(%L, %L), e.g),
+                ''{}''::ag_catalog.agtype
+         FROM endpoints e
+         UNION ALL
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L),
+                                    r.root * 1000000 + 500000 + g),
+                ag_catalog._graphid(ag_catalog._label_id(%L, %L),
+                                    199000 + r.root),
+                ag_catalog._graphid(ag_catalog._label_id(%L, %L),
+                                    r.root * 1000 + g),
+                ''{}''::ag_catalog.agtype
+         FROM roots r,
+              generate_series(1, GREATEST(%s / 8, 4)) g',
+        graph_name, 'ValuePostingEdge',
+        value_posting_root_count,
+        value_posting_edges_per_root,
+        value_posting_edges_per_root,
+        graph_name, 'ValuePostingEdge',
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingEdge',
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingOther',
+        value_posting_edges_per_root);
+
+    EXECUTE format(
+        'INSERT INTO %I.%I(id, start_id, end_id, properties)
+         WITH roots AS (
+             SELECT generate_series(0, %s - 1) AS root
+         ),
+         mids AS (
+             SELECT r.root,
+                    500000 + r.root * %s + mid_offset AS g,
+                    mid_offset
+             FROM roots r,
+                  generate_series(0, %s - 1) AS mid_offset
+         ),
+         leaves AS (
+             SELECT 800000 + leaf_offset AS g,
+                    leaf_offset
+             FROM generate_series(0, %s - 1) AS leaf_offset
+         )
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L),
+                                    2000000000 + m.root * %s + m.mid_offset),
+                ag_catalog._graphid(ag_catalog._label_id(%L, %L),
+                                    299000 + m.root),
+                ag_catalog._graphid(ag_catalog._label_id(%L, %L), m.g),
+                ''{}''::ag_catalog.agtype
+         FROM mids m
+         UNION ALL
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L),
+                                    2100000000 + m.root * %s + m.mid_offset),
+                ag_catalog._graphid(ag_catalog._label_id(%L, %L), m.g),
+                ag_catalog._graphid(ag_catalog._label_id(%L, %L), 700000),
+                ''{}''::ag_catalog.agtype
+         FROM mids m
+         UNION ALL
+         SELECT ag_catalog._graphid(ag_catalog._label_id(%L, %L),
+                                    2200000000 + l.leaf_offset),
+                ag_catalog._graphid(ag_catalog._label_id(%L, %L), 700000),
+                ag_catalog._graphid(ag_catalog._label_id(%L, %L), l.g),
+                ''{}''::ag_catalog.agtype
+         FROM leaves l',
+        graph_name, 'ValuePostingEdge',
+        value_posting_root_count,
+        value_posting_edges_per_root,
+        value_posting_edges_per_root,
+        value_posting_edges_per_root,
+        graph_name, 'ValuePostingEdge',
+        value_posting_edges_per_root,
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingEdge',
+        value_posting_edges_per_root,
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingEdge',
+        graph_name, 'ValuePostingNode',
+        graph_name, 'ValuePostingNode');
+
 END
 $$;
 
@@ -286,12 +500,28 @@ BEGIN
         'CREATE INDEX %I ON %I.%I USING age_adjacency (end_id, id, start_id)',
         graph_name || '_replay_edge_end_adj_idx',
         graph_name, 'ReplayEdge');
+    EXECUTE format(
+        'SELECT * FROM ag_catalog.cypher(%L, $vle_bench$
+         CREATE INDEX value_posting_node_i_source FOR (n:ValuePostingNode) ON (n.i)
+         $vle_bench$) AS (create_index text)',
+        graph_name);
+    EXECUTE format(
+        'CREATE INDEX %I ON %I.%I USING age_adjacency (start_id, id, end_id)',
+        graph_name || '_value_posting_edge_start_adj_idx',
+        graph_name, 'ValuePostingEdge');
+    EXECUTE format(
+        'CREATE INDEX %I ON %I.%I USING age_adjacency (end_id, id, start_id)',
+        graph_name || '_value_posting_edge_end_adj_idx',
+        graph_name, 'ValuePostingEdge');
     EXECUTE format('ANALYZE %I.%I', graph_name, 'FanoutStart');
     EXECUTE format('ANALYZE %I.%I', graph_name, 'FanoutEnd');
     EXECUTE format('ANALYZE %I.%I', graph_name, 'FanoutEdge');
     EXECUTE format('ANALYZE %I.%I', graph_name, 'ReplayStart');
     EXECUTE format('ANALYZE %I.%I', graph_name, 'ReplayHub');
     EXECUTE format('ANALYZE %I.%I', graph_name, 'ReplayEdge');
+    EXECUTE format('ANALYZE %I.%I', graph_name, 'ValuePostingNode');
+    EXECUTE format('ANALYZE %I.%I', graph_name, 'ValuePostingOther');
+    EXECUTE format('ANALYZE %I.%I', graph_name, 'ValuePostingEdge');
 END
 $$;
 
@@ -469,6 +699,15 @@ SELECT public.capture_vle_benchmark_explain(graph_name,
 FROM vle_benchmark_config;
 
 SELECT public.capture_vle_benchmark_explain(graph_name,
+    '800-label-fanout-family-path',
+    'MATCH p=(:FanoutStart {i: 0})-[:FanoutEdge*1..2]-(n) RETURN p')
+FROM vle_benchmark_config;
+
+SELECT public.run_vle_benchmark_case(graph_name, '800-label-fanout-family-path',
+    'MATCH p=(:FanoutStart {i: 0})-[:FanoutEdge*1..2]-(n) RETURN p')
+FROM vle_benchmark_config;
+
+SELECT public.capture_vle_benchmark_explain(graph_name,
     'payload-replay-path',
     'MATCH p=(:ReplayStart {i: 0})-[:ReplayEdge*1..3]->(n) RETURN p')
 FROM vle_benchmark_config;
@@ -488,6 +727,41 @@ SELECT public.capture_vle_benchmark_explain(graph_name,
     'MATCH (:ReplayStart {i: 0})-[:ReplayEdge*1..3]->(n) RETURN properties(n)')
 FROM vle_benchmark_config;
 
+SELECT public.capture_vle_benchmark_explain(graph_name,
+    'value-posting-reject-seed',
+    'MATCH (:ValuePostingNode {i: 199})-[:ValuePostingEdge*1..1]->(n:ValuePostingNode)
+     WHERE n.i = 59
+     RETURN n.i')
+FROM vle_benchmark_config;
+
+SELECT public.capture_vle_benchmark_explain(graph_name,
+    'value-posting-reject',
+    'MATCH (:ValuePostingNode {i: 199})-[:ValuePostingEdge*1..1]->(n:ValuePostingNode)
+     WHERE n.i = 59
+     RETURN n.i')
+FROM vle_benchmark_config;
+
+SELECT public.capture_vle_benchmark_explain(graph_name,
+    'value-posting-endpoint-control',
+    'MATCH (:ValuePostingNode {i: 199})-[:ValuePostingEdge*1..1]->(n:ValuePostingNode)
+     WHERE n.i = 1
+     RETURN n.i')
+FROM vle_benchmark_config;
+
+SELECT public.capture_vle_benchmark_explain(graph_name,
+    'value-posting-replay-seed',
+    'MATCH (:ValuePostingNode {i: 299})-[:ValuePostingEdge*1..3]->(n:ValuePostingNode)
+     WHERE n.i = 59
+     RETURN n.i')
+FROM vle_benchmark_config;
+
+SELECT public.capture_vle_benchmark_explain(graph_name,
+    'value-posting-replay',
+    'MATCH (:ValuePostingNode {i: 299})-[:ValuePostingEdge*1..3]->(n:ValuePostingNode)
+     WHERE n.i = 59
+     RETURN n.i')
+FROM vle_benchmark_config;
+
 TABLE vle_benchmark_results ORDER BY shape;
 
 SELECT shape, line_no, plan_line
@@ -497,229 +771,443 @@ WHERE plan_line LIKE '%VLE%'
 ORDER BY shape, line_no;
 
 SELECT shape,
-       substring(plan_line FROM 'feedback=dominant=([^ ]+)') AS dominant_source,
-       substring(plan_line FROM 'planned=([^ ]+)') AS planned_source,
-       substring(plan_line FROM 'source-match=([^ ]+)') AS runtime_source_match,
+       substring(plan_line FROM 'dominant=([^ ]+)') AS dominant_source,
        substring(plan_line FROM ' class=([^ ]+)') AS source_class,
-       substring(plan_line FROM 'planned-class=([^ ]+)') AS planned_class,
-       substring(plan_line FROM 'class-match=([^ ]+)') AS runtime_class_match,
-       substring(plan_line FROM ' recommendation=([^ ]+)') AS recommendation,
-       substring(plan_line FROM 'planned-recommendation=([^ ]+)') AS planned_recommendation,
-       substring(plan_line FROM 'empty=age_adjacency:([^/]+)') AS age_adjacency_empty_scans,
-       substring(plan_line FROM 'endpoint-btree:([^,]+), empty-suppressed') AS endpoint_btree_empty_scans,
-       substring(plan_line FROM 'empty-suppressed=age_adjacency:([^/]+)') AS age_adjacency_empty_source_skips,
-       substring(plan_line FROM '/out:([^/]+)') AS age_adjacency_empty_source_skip_out,
-       substring(plan_line FROM '/in:([^,]+), empty-cache') AS age_adjacency_empty_source_skip_in,
-       substring(plan_line FROM 'empty-cache=age_adjacency:([^/]+)') AS age_adjacency_empty_source_cache_hits,
-       substring(plan_line FROM 'empty-cache=age_adjacency:[^/]+/out:([^/]+)') AS age_adjacency_empty_source_cache_hit_out,
-       substring(plan_line FROM 'empty-cache=age_adjacency:[^/]+/out:[^/]+/in:([^,]+)') AS age_adjacency_empty_source_cache_hit_in,
-       substring(plan_line FROM 'empty-frontier=age_adjacency:([^/]+)') AS age_adjacency_empty_source_frontier_marks,
-       substring(plan_line FROM 'empty-frontier=age_adjacency:[^/]+/out:([^/]+)') AS age_adjacency_empty_source_frontier_mark_out,
-       substring(plan_line FROM 'empty-frontier=age_adjacency:[^/]+/out:[^/]+/in:([^,]+)') AS age_adjacency_empty_source_frontier_mark_in,
-       substring(plan_line FROM 'empty-frontier-batch=flushes:([^/]+)') AS empty_frontier_batch_flushes,
-       substring(plan_line FROM 'empty-frontier-batch=[^/]+/out:([^/]+)') AS empty_frontier_batch_out,
-       substring(plan_line FROM 'empty-frontier-batch=[^/]+/out:[^/]+/in:([^/]+)') AS empty_frontier_batch_in,
-       substring(plan_line FROM 'empty-frontier-batch=[^/]+/out:[^/]+/in:[^/]+/keys:([^/]+)') AS empty_frontier_batch_keys,
-       substring(plan_line FROM 'empty-frontier-batch=[^/]+/out:[^/]+/in:[^/]+/keys:[^/]+/max:([^,]+)') AS empty_frontier_batch_max,
-       substring(plan_line FROM 'empty-run=age_adjacency:([^/]+)') AS age_adjacency_empty_source_run_skips,
-       substring(plan_line FROM 'empty-run=age_adjacency:[^/]+/out:([^/]+)') AS age_adjacency_empty_source_run_skip_out,
-       substring(plan_line FROM 'empty-run=age_adjacency:[^/]+/out:[^/]+/in:([^,]+)') AS age_adjacency_empty_source_run_skip_in,
-       substring(plan_line FROM 'payload-cache=runs:scan:([^/]+)') AS payload_scan_runs,
-       substring(plan_line FROM 'payload-cache=[^/]+/replay:([^/]+)') AS payload_replay_runs,
-       substring(plan_line FROM 'payload-cache=[^/]+/replay:[^/]+/seed:([^/]+)') AS payload_seed_runs,
-       substring(plan_line FROM 'payload-cache=[^/]+/replay:[^/]+/seed:[^/]+/tuples:scan:([^/]+)') AS payload_scan_tuples,
-       substring(plan_line FROM 'payload-cache=[^/]+/replay:[^/]+/seed:[^/]+/tuples:scan:[^/]+/replay:([^/]+)') AS payload_replay_tuples,
-       substring(plan_line FROM 'payload-cache=[^/]+/replay:[^/]+/seed:[^/]+/tuples:scan:[^/]+/replay:[^/]+/seeds:([^,]+)') AS payload_seed_events,
-       substring(plan_line FROM 'empty-plan=([^/]+)') AS empty_plan,
-       substring(plan_line FROM 'empty-plan=[^/]+/depth:([^ ]+)') AS empty_plan_depth,
-       substring(plan_line FROM 'empty-plan=[^ ]+ match=([^,]+)') AS runtime_empty_plan_match,
-       substring(plan_line FROM 'empty-context=([^/]+)') AS empty_context,
-       substring(plan_line FROM 'empty-context=[^/]+/depth:([^/]+)') AS empty_context_depth,
-       substring(plan_line FROM 'empty-context=[^ ]+ match=([^,]+)') AS runtime_empty_context_match,
-       substring(plan_line FROM 'empty-batch=([^/]+)') AS empty_batch,
-       substring(plan_line FROM 'empty-batch=[^/]+/size:([^/]+)') AS empty_batch_size,
-       substring(plan_line FROM 'empty-batch=[^/]+/size:[^/]+/capacity:([^ ]+)') AS empty_batch_capacity,
-       substring(plan_line FROM 'empty-batch=[^ ]+ match=([^,]+)') AS runtime_empty_batch_match,
-       substring(plan_line FROM 'empty-summary=completion:([^/]+)') AS empty_completion_count,
-       substring(plan_line FROM 'empty-summary=[^/]+/batch:([^/]+)') AS empty_summary_batch,
-       substring(plan_line FROM 'empty-summary=[^/]+/batch:[^/]+/saturated:([^,]+)') AS empty_batch_saturated,
-       substring(plan_line FROM 'root-empty=completion:([^/]+)') AS root_empty_completion_count,
-       substring(plan_line FROM 'root-empty=[^/]+/out:([^/]+)') AS root_empty_completion_out,
-       substring(plan_line FROM 'root-empty=[^/]+/out:[^/]+/in:([^/]+)') AS root_empty_completion_in,
-       substring(plan_line FROM 'root-empty=[^/]+/out:[^/]+/in:[^/]+/batch:([^/]+)') AS root_empty_batch_capacity,
-       substring(plan_line FROM 'root-empty=[^/]+/out:[^/]+/in:[^/]+/batch:[^/]+/saturated-roots:([^,]+)') AS root_empty_saturated_count,
-       substring(plan_line FROM 'threshold-feedback=([^/]+)') AS threshold_feedback,
-       substring(plan_line FROM 'threshold-feedback=[^/]+/headroom:([^/]+)') AS threshold_feedback_headroom,
-       substring(plan_line FROM 'threshold-feedback=[^/]+/headroom:[^/]+/batch:([^/]+)') AS threshold_feedback_batch,
-       substring(plan_line FROM 'threshold-feedback=[^/]+/headroom:[^/]+/batch:[^/]+/source:([^/]+)') AS threshold_feedback_source,
-       substring(plan_line FROM 'threshold-feedback=[^/]+/headroom:[^/]+/batch:[^/]+/source:[^/]+/reason:([^,]+)') AS threshold_feedback_reason,
-       substring(plan_line FROM 'empty-evidence=([^,]+)') AS empty_evidence,
-       substring(plan_line FROM 'suppressed-source=([^ ]+)') AS suppressed_source,
-       substring(plan_line FROM 'suppression-match=([^,]+)') AS suppression_match,
        substring(plan_line FROM 'pressure=([^ ]+)') AS runtime_pressure,
        substring(plan_line FROM 'action=([^ ]+)') AS runtime_action
 FROM vle_benchmark_explain
 WHERE plan_line LIKE '%VLE Source Runtime%'
 ORDER BY shape, line_no;
 
-SELECT shape,
-       substring(plan_line FROM 'profile=consumer:([^/]+)') AS consumer,
-       substring(plan_line FROM 'profile=[^ ]*/class:([^/]+)') AS consumer_class,
-       substring(plan_line FROM 'profile=[^ ]*/active:([^/]+)') AS active_direction,
-       substring(plan_line FROM 'profile=[^ ]*/budget:([^/ ]+)') AS fanout_budget,
-       substring(plan_line FROM 'profile=[^ ]*/weight:([^ ]+)') AS materialization_weight,
-       substring(plan_line FROM 'policy=([^ ]+)') AS planner_policy,
-       substring(plan_line FROM ' reason=([^ ]+)') AS policy_reason,
-       substring(plan_line FROM 'combined-work=([^ ]+)') AS combined_work,
-       substring(plan_line FROM 'cache-seed=([^ ]+)') AS cache_seed,
-       substring(plan_line FROM 'endpoint-headroom=([^ ]+)') AS endpoint_headroom,
-       substring(plan_line FROM 'empty-lifecycle=([^/]+)') AS empty_lifecycle,
-       substring(plan_line FROM 'empty-lifecycle=[^/]+/depth:([^ ]+)') AS empty_lifecycle_depth,
-       substring(plan_line FROM 'empty-batch=([^/]+)') AS empty_batch,
-       substring(plan_line FROM 'empty-batch=[^/]+/size:([^ ]+)') AS empty_batch_size,
-       substring(plan_line FROM 'threshold-input=([^/]+)') AS threshold_input,
-       substring(plan_line FROM 'threshold-input=[^/]+/headroom:([^/]+)') AS threshold_input_headroom,
-       substring(plan_line FROM 'threshold-input=[^/]+/headroom:[^/]+/batch:([^/]+)') AS threshold_input_batch,
-       substring(plan_line FROM 'threshold-input=[^/]+/headroom:[^/]+/batch:[^/]+/source:([^/]+)') AS threshold_input_source,
-       substring(plan_line FROM 'threshold-input=[^/]+/headroom:[^/]+/batch:[^/]+/source:[^/]+/reason:([^ ]+)') AS threshold_input_reason,
-       substring(plan_line FROM 'threshold-cache=observed:([^/]+)') AS threshold_cache_observed,
-       substring(plan_line FROM 'threshold-cache=[^/]+/saturated:([^/]+)') AS threshold_cache_saturated,
-       substring(plan_line FROM 'threshold-cache=[^/]+/saturated:[^/]+/relaxed:([^ ]+)') AS threshold_cache_relaxed,
-       substring(plan_line FROM 'payload-input=([^/]+)') AS payload_input,
-       substring(plan_line FROM 'payload-input=[^/]+/headroom:([^/]+)') AS payload_input_headroom,
-       substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:([^/]+)') AS payload_input_scan_runs,
-       substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:[^/]+/replay-runs:([^/]+)') AS payload_input_replay_runs,
-       substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:[^/]+/replay-runs:[^/]+/seed-runs:([^/]+)') AS payload_input_seed_runs,
-       substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:[^/]+/replay-runs:[^/]+/seed-runs:[^/]+/replay-percent:([^/]+)') AS payload_input_replay_percent,
-       substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:[^/]+/replay-runs:[^/]+/seed-runs:[^/]+/replay-percent:[^/]+/seed-percent:([^/]+)') AS payload_input_seed_percent,
-       substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:[^/]+/replay-runs:[^/]+/seed-runs:[^/]+/replay-percent:[^/]+/seed-percent:[^/]+/observed:([^/]+)') AS payload_input_observed,
-       substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:[^/]+/replay-runs:[^/]+/seed-runs:[^/]+/replay-percent:[^/]+/seed-percent:[^/]+/observed:[^/]+/reason:([^ ]+)') AS payload_input_reason,
-       substring(plan_line FROM ' class=([^ ]+)') AS policy_class,
-       substring(plan_line FROM ' recommendation=([^ ]+)') AS recommendation
-FROM vle_benchmark_explain
-WHERE plan_line LIKE '%VLE Edge Source:%'
-  AND plan_line LIKE '%policy=%'
-ORDER BY shape, line_no;
-
-WITH planner AS (
-    SELECT DISTINCT ON (shape)
-           shape,
-           substring(plan_line FROM 'profile=consumer:([^/]+)') AS consumer,
-           substring(plan_line FROM 'profile=[^ ]*/class:([^/]+)') AS consumer_class,
-           substring(plan_line FROM 'profile=[^ ]*/active:([^/]+)') AS active_direction,
-           substring(plan_line FROM 'profile=[^ ]*/budget:([^/ ]+)') AS fanout_budget,
-           substring(plan_line FROM 'profile=[^ ]*/weight:([^ ]+)') AS materialization_weight,
-           substring(plan_line FROM 'policy=([^ ]+)') AS planner_policy,
-           substring(plan_line FROM 'policy=out=([^/ ]+)') AS planner_out_source,
-           substring(plan_line FROM 'policy=[^ ]+/in=([^ ]+)') AS planner_in_source,
-           substring(plan_line FROM 'cache-seed=([^ ]+)') AS cache_seed,
-           substring(plan_line FROM 'endpoint-headroom=([^ ]+)') AS endpoint_headroom,
-           substring(plan_line FROM 'empty-lifecycle=([^/]+)') AS empty_lifecycle,
-           substring(plan_line FROM 'empty-lifecycle=[^/]+/depth:([^ ]+)') AS empty_lifecycle_depth,
-           substring(plan_line FROM 'empty-batch=([^/]+)') AS empty_batch,
-           substring(plan_line FROM 'empty-batch=[^/]+/size:([^ ]+)') AS empty_batch_size,
-           substring(plan_line FROM 'threshold-input=([^/]+)') AS threshold_input,
-           substring(plan_line FROM 'threshold-input=[^/]+/headroom:([^/]+)') AS threshold_input_headroom,
-           substring(plan_line FROM 'threshold-input=[^/]+/headroom:[^/]+/batch:([^/]+)') AS threshold_input_batch,
-           substring(plan_line FROM 'threshold-input=[^/]+/headroom:[^/]+/batch:[^/]+/source:([^/]+)') AS threshold_input_source,
-           substring(plan_line FROM 'threshold-input=[^/]+/headroom:[^/]+/batch:[^/]+/source:[^/]+/reason:([^ ]+)') AS threshold_input_reason,
-           substring(plan_line FROM 'threshold-cache=observed:([^/]+)') AS threshold_cache_observed,
-           substring(plan_line FROM 'threshold-cache=[^/]+/saturated:([^/]+)') AS threshold_cache_saturated,
-           substring(plan_line FROM 'threshold-cache=[^/]+/saturated:[^/]+/relaxed:([^ ]+)') AS threshold_cache_relaxed,
-           substring(plan_line FROM 'payload-input=([^/]+)') AS payload_input,
-           substring(plan_line FROM 'payload-input=[^/]+/headroom:([^/]+)') AS payload_input_headroom,
-           substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:([^/]+)') AS payload_input_scan_runs,
-           substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:[^/]+/replay-runs:([^/]+)') AS payload_input_replay_runs,
-           substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:[^/]+/replay-runs:[^/]+/seed-runs:([^/]+)') AS payload_input_seed_runs,
-           substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:[^/]+/replay-runs:[^/]+/seed-runs:[^/]+/replay-percent:([^/]+)') AS payload_input_replay_percent,
-           substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:[^/]+/replay-runs:[^/]+/seed-runs:[^/]+/replay-percent:[^/]+/seed-percent:([^/]+)') AS payload_input_seed_percent,
-           substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:[^/]+/replay-runs:[^/]+/seed-runs:[^/]+/replay-percent:[^/]+/seed-percent:[^/]+/observed:([^/]+)') AS payload_input_observed,
-           substring(plan_line FROM 'payload-input=[^/]+/headroom:[^/]+/scan-runs:[^/]+/replay-runs:[^/]+/seed-runs:[^/]+/replay-percent:[^/]+/seed-percent:[^/]+/observed:[^/]+/reason:([^ ]+)') AS payload_input_reason,
-           substring(plan_line FROM ' class=([^ ]+)') AS planner_class,
-           substring(plan_line FROM ' recommendation=([^ ]+)') AS planner_recommendation
+WITH planner_profile AS (
+    SELECT DISTINCT ON (shape) shape, plan_line
     FROM vle_benchmark_explain
-    WHERE plan_line LIKE '%VLE Edge Source:%'
-      AND plan_line LIKE '%policy=%'
+    WHERE plan_line LIKE '%VLE Source Profile:%'
     ORDER BY shape, line_no
 ),
-runtime AS (
+planner_threshold AS (
+    SELECT DISTINCT ON (shape) shape, plan_line
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Source Threshold Input:%'
+    ORDER BY shape, line_no
+),
+planner_payload AS (
+    SELECT DISTINCT ON (shape) shape, plan_line
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Source Payload Input:%'
+    ORDER BY shape, line_no
+),
+planner_policy AS (
+    SELECT DISTINCT ON (shape) shape, plan_line
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Source Policy:%'
+    ORDER BY shape, line_no
+)
+SELECT p.shape,
+       substring(p.plan_line FROM 'consumer=([^ ]+)') AS consumer,
+       substring(p.plan_line FROM ' class=([^ ]+)') AS consumer_class,
+       substring(p.plan_line FROM 'active=([^ ]+)') AS active_direction,
+       substring(p.plan_line FROM 'budget=([^ ]+)') AS fanout_budget,
+       substring(p.plan_line FROM 'weight=([^ ]+)') AS materialization_weight,
+       substring(pol.plan_line FROM 'VLE Source Policy: ([^ ]+)') AS planner_policy,
+       substring(pol.plan_line FROM ' reason=([^ ]+)') AS policy_reason,
+       substring(pol.plan_line FROM 'combined-work=([^ ]+)') AS combined_work,
+       substring(pol.plan_line FROM 'value-posting=([^ ]+)') AS value_posting_source,
+       substring(p.plan_line FROM 'cache-seed=([^ ]+)') AS cache_seed,
+       substring(p.plan_line FROM 'endpoint-headroom=([^ ]+)') AS endpoint_headroom,
+       substring(p.plan_line FROM 'empty-lifecycle=([^/]+)') AS empty_lifecycle,
+       substring(p.plan_line FROM 'empty-lifecycle=[^/]+/depth:([^ ]+)') AS empty_lifecycle_depth,
+       substring(p.plan_line FROM 'empty-batch=([^/]+)') AS empty_batch,
+       substring(p.plan_line FROM 'empty-batch=[^/]+/size:([^ ]+)') AS empty_batch_size,
+       substring(t.plan_line FROM 'source=([^ ]+)') AS threshold_input,
+       substring(t.plan_line FROM 'headroom=([^ ]+)') AS threshold_input_headroom,
+       substring(t.plan_line FROM 'batch=([^ ]+)') AS threshold_input_batch,
+       substring(t.plan_line FROM 'direction=([^ ]+)') AS threshold_input_source,
+       COALESCE(substring(p.plan_line FROM 'active=([^ ]+)') = 'both' AND
+           substring(t.plan_line FROM 'direction=([^ ]+)') IN ('out', 'in', 'mixed'),
+           false) AS threshold_directional_family,
+       substring(t.plan_line FROM 'reason=([^ ]+)') AS threshold_input_reason,
+       substring(t.plan_line FROM 'observed=([^ ]+)') AS threshold_cache_observed,
+       substring(t.plan_line FROM 'saturated=([^ ]+)') AS threshold_cache_saturated,
+       substring(t.plan_line FROM 'relaxed=([^ ]+)') AS threshold_cache_relaxed,
+       substring(pay.plan_line FROM 'source=([^ ]+)') AS payload_input,
+       substring(pay.plan_line FROM 'headroom=([^ ]+)') AS payload_input_headroom,
+       substring(pay.plan_line FROM 'scan-runs=([^ ]+)') AS payload_input_scan_runs,
+       substring(pay.plan_line FROM 'replay-runs=([^ ]+)') AS payload_input_replay_runs,
+       substring(pay.plan_line FROM 'seed-runs=([^ ]+)') AS payload_input_seed_runs,
+       substring(pay.plan_line FROM 'replay-percent=([^ ]+)') AS payload_input_replay_percent,
+       substring(pay.plan_line FROM 'seed-percent=([^ ]+)') AS payload_input_seed_percent,
+       substring(pay.plan_line FROM 'observed=([^ ]+)') AS payload_input_observed,
+       substring(pay.plan_line FROM 'value-posting=([^/]+)') AS payload_input_value_posting_source,
+       substring(pay.plan_line FROM 'value-posting=[^/]+/observed:([^ ]+)') AS payload_input_value_posting_observed,
+       substring(pay.plan_line FROM 'reason=([^ ]+)') AS payload_input_reason,
+       substring(pay.plan_line FROM ' class=([^ ]+)') AS payload_input_class,
+       CASE
+           WHEN substring(pay.plan_line FROM ' class=([^ ]+)') =
+                'adjacency-composite-value-posting'
+            AND COALESCE(NULLIF(substring(pay.plan_line FROM
+                         'value-posting=[^/]+/observed:([^ ]+)'), '')::numeric,
+                         0) > 0
+           THEN 'identity-cache-hit'
+           WHEN substring(pol.plan_line FROM 'value-posting=([^ ]+)') IS NOT NULL
+            AND substring(pol.plan_line FROM 'value-posting=([^ ]+)') <> 'out:none/in:none'
+           THEN 'source-available'
+           ELSE 'none'
+       END AS value_posting_decision,
+       CASE
+           WHEN substring(pol.plan_line FROM 'reason=[^ ]*composite-value-posting') IS NOT NULL
+           THEN 'policy-value-posting'
+           WHEN substring(pol.plan_line FROM 'value-posting=([^ ]+)') IS NOT NULL
+            AND substring(pol.plan_line FROM 'value-posting=([^ ]+)') <> 'out:none/in:none'
+           THEN 'source-available'
+           ELSE 'none'
+       END AS value_posting_policy_decision,
+       CASE
+           WHEN substring(pay.plan_line FROM ' class=([^ ]+)') =
+                'adjacency-composite-value-posting'
+           THEN CASE COALESCE(NULLIF(substring(p.plan_line FROM
+                            'weight=([^ ]+)'), '')::numeric, 0)
+                    WHEN 3 THEN 18
+                    WHEN 2 THEN 20
+                    ELSE 25
+                END
+           ELSE NULL::integer
+       END AS value_posting_headroom_expected,
+       CASE
+           WHEN substring(pay.plan_line FROM ' class=([^ ]+)') =
+                'adjacency-composite-value-posting'
+           THEN COALESCE(NULLIF(substring(pay.plan_line FROM
+                            'headroom=([^ ]+)'), '')::numeric, 0) =
+                CASE COALESCE(NULLIF(substring(p.plan_line FROM
+                                'weight=([^ ]+)'), '')::numeric, 0)
+                    WHEN 3 THEN 18
+                    WHEN 2 THEN 20
+                    ELSE 25
+                END
+           ELSE false
+       END AS value_posting_headroom_applied,
+       substring(pol.plan_line FROM ' class=([^ ]+)') AS policy_class,
+       substring(pol.plan_line FROM ' recommendation=([^ ]+)') AS recommendation
+FROM planner_profile p
+LEFT JOIN planner_threshold t USING (shape)
+LEFT JOIN planner_payload pay USING (shape)
+LEFT JOIN planner_policy pol USING (shape)
+ORDER BY p.shape;
+
+WITH planner_profile AS (
+    SELECT DISTINCT ON (shape) shape, plan_line
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Source Profile:%'
+    ORDER BY shape, line_no
+),
+planner_threshold AS (
+    SELECT DISTINCT ON (shape) shape, plan_line
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Source Threshold Input:%'
+    ORDER BY shape, line_no
+),
+planner_payload AS (
+    SELECT DISTINCT ON (shape) shape, plan_line
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Source Payload Input:%'
+    ORDER BY shape, line_no
+),
+planner_policy AS (
+    SELECT DISTINCT ON (shape) shape, plan_line
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Source Policy:%'
+    ORDER BY shape, line_no
+),
+planner AS (
+    SELECT p.shape,
+           substring(p.plan_line FROM 'consumer=([^ ]+)') AS consumer,
+           substring(p.plan_line FROM ' class=([^ ]+)') AS consumer_class,
+           substring(p.plan_line FROM 'active=([^ ]+)') AS active_direction,
+           substring(p.plan_line FROM 'budget=([^ ]+)') AS fanout_budget,
+           substring(p.plan_line FROM 'weight=([^ ]+)') AS materialization_weight,
+           substring(pol.plan_line FROM 'VLE Source Policy: ([^ ]+)') AS planner_policy,
+           substring(pol.plan_line FROM 'VLE Source Policy: out=([^/ ]+)') AS planner_out_source,
+           substring(pol.plan_line FROM 'VLE Source Policy: [^ ]+/in=([^ ]+)') AS planner_in_source,
+           substring(pol.plan_line FROM ' reason=([^ ]+)') AS policy_reason,
+           substring(pol.plan_line FROM 'composite-work=([^ ]+)') AS composite_work,
+           substring(pol.plan_line FROM 'composite-work=[^(]+\(out:([^,]+)') AS composite_work_out,
+           substring(pol.plan_line FROM 'composite-work=[^(]+\(out:[^,]+,in:([^\)]+)') AS composite_work_in,
+           substring(pol.plan_line FROM 'value-posting=([^ ]+)') AS value_posting_source,
+           substring(p.plan_line FROM 'cache-seed=([^ ]+)') AS cache_seed,
+           substring(p.plan_line FROM 'endpoint-headroom=([^ ]+)') AS endpoint_headroom,
+           substring(p.plan_line FROM 'empty-lifecycle=([^/]+)') AS empty_lifecycle,
+           substring(p.plan_line FROM 'empty-lifecycle=[^/]+/depth:([^ ]+)') AS empty_lifecycle_depth,
+           substring(p.plan_line FROM 'empty-batch=([^/]+)') AS empty_batch,
+           substring(p.plan_line FROM 'empty-batch=[^/]+/size:([^ ]+)') AS empty_batch_size,
+           substring(t.plan_line FROM 'source=([^ ]+)') AS threshold_input,
+           substring(t.plan_line FROM 'headroom=([^ ]+)') AS threshold_input_headroom,
+           substring(t.plan_line FROM 'batch=([^ ]+)') AS threshold_input_batch,
+           substring(t.plan_line FROM 'direction=([^ ]+)') AS threshold_input_source,
+           COALESCE(substring(p.plan_line FROM 'active=([^ ]+)') = 'both' AND
+               substring(t.plan_line FROM 'direction=([^ ]+)') IN ('out', 'in', 'mixed'),
+               false) AS threshold_directional_family,
+           substring(t.plan_line FROM 'reason=([^ ]+)') AS threshold_input_reason,
+           substring(t.plan_line FROM 'observed=([^ ]+)') AS threshold_cache_observed,
+           substring(t.plan_line FROM 'saturated=([^ ]+)') AS threshold_cache_saturated,
+           substring(t.plan_line FROM 'relaxed=([^ ]+)') AS threshold_cache_relaxed,
+           substring(pay.plan_line FROM 'source=([^ ]+)') AS payload_input,
+           substring(pay.plan_line FROM 'headroom=([^ ]+)') AS payload_input_headroom,
+           substring(pay.plan_line FROM 'scan-runs=([^ ]+)') AS payload_input_scan_runs,
+           substring(pay.plan_line FROM 'replay-runs=([^ ]+)') AS payload_input_replay_runs,
+           substring(pay.plan_line FROM 'seed-runs=([^ ]+)') AS payload_input_seed_runs,
+           substring(pay.plan_line FROM 'replay-percent=([^ ]+)') AS payload_input_replay_percent,
+           substring(pay.plan_line FROM 'seed-percent=([^ ]+)') AS payload_input_seed_percent,
+           substring(pay.plan_line FROM 'observed=([^ ]+)') AS payload_input_observed,
+           substring(pay.plan_line FROM 'value-posting=([^/]+)') AS payload_input_value_posting_source,
+           substring(pay.plan_line FROM 'value-posting=[^/]+/observed:([^ ]+)') AS payload_input_value_posting_observed,
+           substring(pay.plan_line FROM 'reason=([^ ]+)') AS payload_input_reason,
+           substring(pay.plan_line FROM ' class=([^ ]+)') AS payload_input_class,
+           CASE
+               WHEN substring(pay.plan_line FROM ' class=([^ ]+)') =
+                    'adjacency-composite-value-posting'
+                AND COALESCE(NULLIF(substring(pay.plan_line FROM
+                             'value-posting=[^/]+/observed:([^ ]+)'), '')::numeric,
+                             0) > 0
+               THEN 'identity-cache-hit'
+               WHEN substring(pol.plan_line FROM 'value-posting=([^ ]+)') IS NOT NULL
+                AND substring(pol.plan_line FROM 'value-posting=([^ ]+)') <> 'out:none/in:none'
+               THEN 'source-available'
+               ELSE 'none'
+           END AS value_posting_decision,
+           CASE
+               WHEN substring(pol.plan_line FROM 'reason=[^ ]*composite-value-posting') IS NOT NULL
+               THEN 'policy-value-posting'
+               WHEN substring(pol.plan_line FROM 'value-posting=([^ ]+)') IS NOT NULL
+                AND substring(pol.plan_line FROM 'value-posting=([^ ]+)') <> 'out:none/in:none'
+               THEN 'source-available'
+               ELSE 'none'
+           END AS value_posting_policy_decision,
+           CASE
+               WHEN substring(pay.plan_line FROM ' class=([^ ]+)') =
+                    'adjacency-composite-value-posting'
+               THEN CASE COALESCE(NULLIF(substring(p.plan_line FROM
+                                'weight=([^ ]+)'), '')::numeric, 0)
+                        WHEN 3 THEN 18
+                        WHEN 2 THEN 20
+                        ELSE 25
+                    END
+               ELSE NULL::integer
+           END AS value_posting_headroom_expected,
+           CASE
+               WHEN substring(pay.plan_line FROM ' class=([^ ]+)') =
+                    'adjacency-composite-value-posting'
+               THEN COALESCE(NULLIF(substring(pay.plan_line FROM
+                                'headroom=([^ ]+)'), '')::numeric, 0) =
+                    CASE COALESCE(NULLIF(substring(p.plan_line FROM
+                                    'weight=([^ ]+)'), '')::numeric, 0)
+                        WHEN 3 THEN 18
+                        WHEN 2 THEN 20
+                        ELSE 25
+                    END
+               ELSE false
+           END AS value_posting_headroom_applied,
+           substring(pol.plan_line FROM ' class=([^ ]+)') AS planner_class,
+           substring(pol.plan_line FROM ' recommendation=([^ ]+)') AS planner_recommendation
+    FROM planner_profile p
+    LEFT JOIN planner_threshold t USING (shape)
+    LEFT JOIN planner_payload pay USING (shape)
+    LEFT JOIN planner_policy pol USING (shape)
+),
+runtime_summary AS (
     SELECT DISTINCT ON (shape)
            shape,
-           substring(plan_line FROM 'feedback=dominant=([^ ]+)') AS dominant_source,
-           substring(plan_line FROM 'planned=([^ ]+)') AS planned_source,
-           substring(plan_line FROM 'planned=out:([^/ ]+)') AS planned_out_source,
-           substring(plan_line FROM 'planned=[^ ]+/in:([^ ]+)') AS planned_in_source,
-           substring(plan_line FROM 'source-match=([^ ]+)') AS runtime_source_match,
+           substring(plan_line FROM 'dominant=([^ ]+)') AS dominant_source,
            substring(plan_line FROM ' class=([^ ]+)') AS runtime_class,
-           substring(plan_line FROM 'planned-class=([^ ]+)') AS planned_class,
-           substring(plan_line FROM 'class-match=([^ ]+)') AS runtime_class_match,
-           substring(plan_line FROM ' recommendation=([^ ]+)') AS runtime_recommendation,
-           substring(plan_line FROM 'planned-recommendation=([^ ]+)') AS planned_recommendation,
-           substring(plan_line FROM 'density=age_adjacency:([^,]+)') AS age_adjacency_density,
-           substring(plan_line FROM
-                     'density=age_adjacency:[^,]+,endpoint-btree:([^,]+)') AS endpoint_btree_density,
-           substring(plan_line FROM 'packed:([^ ]+)') AS packed_density,
-           substring(plan_line FROM 'empty=age_adjacency:([^/]+)') AS age_adjacency_empty_scans,
-           substring(plan_line FROM 'endpoint-btree:([^,]+), empty-suppressed') AS endpoint_btree_empty_scans,
-           substring(plan_line FROM 'empty-suppressed=age_adjacency:([^/]+)') AS age_adjacency_empty_source_skips,
-           substring(plan_line FROM '/out:([^/]+)') AS age_adjacency_empty_source_skip_out,
-           substring(plan_line FROM '/in:([^,]+), empty-cache') AS age_adjacency_empty_source_skip_in,
-           substring(plan_line FROM 'empty-cache=age_adjacency:([^/]+)') AS age_adjacency_empty_source_cache_hits,
-           substring(plan_line FROM 'empty-cache=age_adjacency:[^/]+/out:([^/]+)') AS age_adjacency_empty_source_cache_hit_out,
-           substring(plan_line FROM 'empty-cache=age_adjacency:[^/]+/out:[^/]+/in:([^,]+)') AS age_adjacency_empty_source_cache_hit_in,
-           substring(plan_line FROM 'empty-frontier=age_adjacency:([^/]+)') AS age_adjacency_empty_source_frontier_marks,
-           substring(plan_line FROM 'empty-frontier=age_adjacency:[^/]+/out:([^/]+)') AS age_adjacency_empty_source_frontier_mark_out,
-           substring(plan_line FROM 'empty-frontier=age_adjacency:[^/]+/out:[^/]+/in:([^,]+)') AS age_adjacency_empty_source_frontier_mark_in,
-           substring(plan_line FROM 'empty-frontier-batch=flushes:([^/]+)') AS empty_frontier_batch_flushes,
-           substring(plan_line FROM 'empty-frontier-batch=[^/]+/out:([^/]+)') AS empty_frontier_batch_out,
-           substring(plan_line FROM 'empty-frontier-batch=[^/]+/out:[^/]+/in:([^/]+)') AS empty_frontier_batch_in,
-           substring(plan_line FROM 'empty-frontier-batch=[^/]+/out:[^/]+/in:[^/]+/keys:([^/]+)') AS empty_frontier_batch_keys,
-           substring(plan_line FROM 'empty-frontier-batch=[^/]+/out:[^/]+/in:[^/]+/keys:[^/]+/max:([^,]+)') AS empty_frontier_batch_max,
-           substring(plan_line FROM 'empty-run=age_adjacency:([^/]+)') AS age_adjacency_empty_source_run_skips,
-           substring(plan_line FROM 'empty-run=age_adjacency:[^/]+/out:([^/]+)') AS age_adjacency_empty_source_run_skip_out,
-           substring(plan_line FROM 'empty-run=age_adjacency:[^/]+/out:[^/]+/in:([^,]+)') AS age_adjacency_empty_source_run_skip_in,
-           substring(plan_line FROM 'payload-cache=runs:scan:([^/]+)') AS payload_scan_runs,
-           substring(plan_line FROM 'payload-cache=[^/]+/replay:([^/]+)') AS payload_replay_runs,
-           substring(plan_line FROM 'payload-cache=[^/]+/replay:[^/]+/seed:([^/]+)') AS payload_seed_runs,
-           substring(plan_line FROM 'payload-cache=[^/]+/replay:[^/]+/seed:[^/]+/tuples:scan:([^/]+)') AS payload_scan_tuples,
-           substring(plan_line FROM 'payload-cache=[^/]+/replay:[^/]+/seed:[^/]+/tuples:scan:[^/]+/replay:([^/]+)') AS payload_replay_tuples,
-           substring(plan_line FROM 'payload-cache=[^/]+/replay:[^/]+/seed:[^/]+/tuples:scan:[^/]+/replay:[^/]+/seeds:([^,]+)') AS payload_seed_events,
-           substring(plan_line FROM 'empty-plan=([^/]+)') AS empty_plan,
-           substring(plan_line FROM 'empty-plan=[^/]+/depth:([^ ]+)') AS empty_plan_depth,
-           substring(plan_line FROM 'empty-plan=[^ ]+ match=([^,]+)') AS runtime_empty_plan_match,
-           substring(plan_line FROM 'empty-context=([^/]+)') AS empty_context,
-           substring(plan_line FROM 'empty-context=[^/]+/depth:([^/]+)') AS empty_context_depth,
-           substring(plan_line FROM 'empty-context=[^ ]+ match=([^,]+)') AS runtime_empty_context_match,
-           substring(plan_line FROM 'empty-batch=([^/]+)') AS empty_batch,
-           substring(plan_line FROM 'empty-batch=[^/]+/size:([^/]+)') AS empty_batch_size,
-           substring(plan_line FROM 'empty-batch=[^/]+/size:[^/]+/capacity:([^ ]+)') AS empty_batch_capacity,
-           substring(plan_line FROM 'empty-batch=[^ ]+ match=([^,]+)') AS runtime_empty_batch_match,
-           substring(plan_line FROM 'empty-summary=completion:([^/]+)') AS empty_completion_count,
-           substring(plan_line FROM 'empty-summary=[^/]+/batch:([^/]+)') AS empty_summary_batch,
-           substring(plan_line FROM 'empty-summary=[^/]+/batch:[^/]+/saturated:([^,]+)') AS empty_batch_saturated,
-           substring(plan_line FROM 'root-empty=completion:([^/]+)') AS root_empty_completion_count,
-           substring(plan_line FROM 'root-empty=[^/]+/out:([^/]+)') AS root_empty_completion_out,
-           substring(plan_line FROM 'root-empty=[^/]+/out:[^/]+/in:([^/]+)') AS root_empty_completion_in,
-           substring(plan_line FROM 'root-empty=[^/]+/out:[^/]+/in:[^/]+/batch:([^/]+)') AS root_empty_batch_capacity,
-           substring(plan_line FROM 'root-empty=[^/]+/out:[^/]+/in:[^/]+/batch:[^/]+/saturated-roots:([^,]+)') AS root_empty_saturated_count,
-           substring(plan_line FROM 'threshold-feedback=([^/]+)') AS threshold_feedback,
-           substring(plan_line FROM 'threshold-feedback=[^/]+/headroom:([^/]+)') AS threshold_feedback_headroom,
-           substring(plan_line FROM 'threshold-feedback=[^/]+/headroom:[^/]+/batch:([^/]+)') AS threshold_feedback_batch,
-           substring(plan_line FROM 'threshold-feedback=[^/]+/headroom:[^/]+/batch:[^/]+/source:([^/]+)') AS threshold_feedback_source,
-           substring(plan_line FROM 'threshold-feedback=[^/]+/headroom:[^/]+/batch:[^/]+/source:[^/]+/reason:([^,]+)') AS threshold_feedback_reason,
-           substring(plan_line FROM 'empty-evidence=([^,]+)') AS empty_evidence,
-           substring(plan_line FROM 'suppressed-source=([^ ]+)') AS suppressed_source,
-           substring(plan_line FROM 'suppression-match=([^,]+)') AS suppression_match,
            substring(plan_line FROM 'pressure=([^ ]+)') AS runtime_pressure,
            substring(plan_line FROM 'action=([^ ]+)') AS runtime_action
     FROM vle_benchmark_explain
     WHERE plan_line LIKE '%VLE Source Runtime%'
     ORDER BY shape, line_no
+),
+runtime_plan AS (
+    SELECT DISTINCT ON (shape)
+           shape,
+           substring(plan_line FROM 'planned=([^ ]+)') AS planned_source,
+           substring(plan_line FROM 'planned=out:([^/ ]+)') AS planned_out_source,
+           substring(plan_line FROM 'planned=[^ ]+/in:([^ ]+)') AS planned_in_source,
+           substring(plan_line FROM 'source-match=([^ ]+)') AS runtime_source_match,
+           substring(plan_line FROM 'planned-class=([^ ]+)') AS planned_class,
+           substring(plan_line FROM 'class-match=([^ ]+)') AS runtime_class_match
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Source Plan%'
+    ORDER BY shape, line_no
+),
+runtime_counters AS (
+    SELECT DISTINCT ON (shape)
+           shape,
+           substring(plan_line FROM 'density=age_adjacency:([^/]+)') AS age_adjacency_density,
+           substring(plan_line FROM 'endpoint-btree:([^/]+)') AS endpoint_btree_density,
+           substring(plan_line FROM 'packed:([^ ]+)') AS packed_density
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Source Counters%'
+    ORDER BY shape, line_no
+),
+runtime_payload AS (
+    SELECT DISTINCT ON (shape)
+           shape,
+           substring(plan_line FROM 'runs=scan:([^/]+)') AS payload_scan_runs,
+           substring(plan_line FROM 'runs=scan:[^/]+/replay:([^/]+)') AS payload_replay_runs,
+           substring(plan_line FROM 'runs=scan:[^/]+/replay:[^/]+/seed:([^ ]+)') AS payload_seed_runs,
+           COALESCE(substring(plan_line FROM 'value-posting:([0-9]+)'),
+                    substring(plan_line FROM 'value-summary:([0-9]+)'),
+                    substring(plan_line FROM 'wide-bloom:([0-9]+)'))
+               AS payload_value_posting_filtered,
+           substring(plan_line FROM 'tuples=scan:([^/]+)') AS payload_scan_tuples,
+           substring(plan_line FROM 'tuples=scan:[^/]+/replay:([^/]+)') AS payload_replay_tuples,
+           substring(plan_line FROM 'tuples=scan:[^/]+/replay:[^/]+/seeds:([^ ]+)') AS payload_seed_events
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Payload Runtime%'
+    ORDER BY shape, line_no
+),
+runtime_empty AS (
+    SELECT DISTINCT ON (shape)
+           shape,
+           substring(plan_line FROM 'scans=age_adjacency:([^/]+)') AS age_adjacency_empty_scans,
+           substring(plan_line FROM 'endpoint-btree:([^ ]+)') AS endpoint_btree_empty_scans,
+           substring(plan_line FROM 'evidence=([^ ]+)') AS empty_evidence,
+           substring(plan_line FROM 'suppressed=([^ ]+)') AS suppressed_source,
+           substring(plan_line FROM 'match=([^ ]+)') AS suppression_match,
+           substring(plan_line FROM 'cache=([^/]+)') AS age_adjacency_empty_source_cache_hits,
+           substring(plan_line FROM 'cache=[^/]+/([^/]+)') AS age_adjacency_empty_source_cache_hit_out,
+           substring(plan_line FROM 'cache=[^/]+/[^/]+/([^ ]+)') AS age_adjacency_empty_source_cache_hit_in,
+           substring(plan_line FROM 'frontier=([^/]+)') AS age_adjacency_empty_source_frontier_marks,
+           substring(plan_line FROM 'frontier=[^/]+/([^/]+)') AS age_adjacency_empty_source_frontier_mark_out,
+           substring(plan_line FROM 'frontier=[^/]+/[^/]+/([^ ]+)') AS age_adjacency_empty_source_frontier_mark_in,
+           substring(plan_line FROM 'run=([^/]+)') AS age_adjacency_empty_source_run_skips,
+           substring(plan_line FROM 'run=[^/]+/([^/]+)') AS age_adjacency_empty_source_run_skip_out,
+           substring(plan_line FROM 'run=[^/]+/[^/]+/([^ ]+)') AS age_adjacency_empty_source_run_skip_in
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Empty Evidence%'
+    ORDER BY shape, line_no
+),
+runtime_lifecycle AS (
+    SELECT DISTINCT ON (shape)
+           shape,
+           substring(plan_line FROM 'plan=([^/]+)') AS empty_plan,
+           substring(plan_line FROM 'plan=[^/]+/depth:([^ ]+)') AS empty_plan_depth,
+           substring(plan_line FROM 'plan=[^ ]+ match=([^ ]+)') AS runtime_empty_plan_match,
+           substring(plan_line FROM 'context=([^/]+)') AS empty_context,
+           substring(plan_line FROM 'context=[^/]+/depth:([^/]+)') AS empty_context_depth,
+           substring(plan_line FROM 'context=[^ ]+ match=([^ ]+)') AS runtime_empty_context_match,
+           substring(plan_line FROM 'batch=([^/]+)') AS empty_batch,
+           substring(plan_line FROM 'batch=[^/]+/size:([^/]+)') AS empty_batch_size,
+           substring(plan_line FROM 'batch=[^/]+/size:[^/]+/capacity:([^ ]+)') AS empty_batch_capacity,
+           substring(plan_line FROM 'batch=[^ ]+ match=([^ ]+)') AS runtime_empty_batch_match,
+           substring(plan_line FROM 'frontier-batch=flushes:([^/]+)') AS empty_frontier_batch_flushes,
+           substring(plan_line FROM 'frontier-batch=[^/]+/keys:([^/]+)') AS empty_frontier_batch_keys,
+           substring(plan_line FROM 'frontier-batch=[^/]+/keys:[^/]+/max:([^ ]+)') AS empty_frontier_batch_max
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Empty Lifecycle%'
+    ORDER BY shape, line_no
+),
+runtime_feedback AS (
+    SELECT DISTINCT ON (shape)
+           shape,
+           substring(plan_line FROM 'recommendation=([^ ]+)') AS runtime_recommendation,
+           substring(plan_line FROM 'planned=([^ ]+)') AS planned_recommendation,
+           substring(plan_line FROM 'root-empty=completion:([^/]+)') AS root_empty_completion_count,
+           substring(plan_line FROM 'root-empty=[^/]+/out:([^/]+)') AS root_empty_completion_out,
+           substring(plan_line FROM 'root-empty=[^/]+/out:[^/]+/in:([^/]+)') AS root_empty_completion_in,
+           substring(plan_line FROM 'root-empty=[^/]+/out:[^/]+/in:[^/]+/batch:([^/]+)') AS root_empty_batch_capacity,
+           substring(plan_line FROM 'root-empty=[^/]+/out:[^/]+/in:[^/]+/batch:[^/]+/saturated-roots:([^ ]+)') AS root_empty_saturated_count,
+           substring(plan_line FROM 'threshold=([^/]+)') AS threshold_feedback,
+           substring(plan_line FROM 'threshold=[^/]+/headroom:([^/]+)') AS threshold_feedback_headroom,
+           substring(plan_line FROM 'threshold=[^/]+/headroom:[^/]+/batch:([^/]+)') AS threshold_feedback_batch,
+           substring(plan_line FROM 'threshold=[^/]+/headroom:[^/]+/batch:[^/]+/source:([^/]+)') AS threshold_feedback_source,
+           substring(plan_line FROM 'threshold=[^/]+/headroom:[^/]+/batch:[^/]+/source:[^/]+/reason:([^ ]+)') AS threshold_feedback_reason
+    FROM vle_benchmark_explain
+    WHERE plan_line LIKE '%VLE Runtime Feedback%'
+    ORDER BY shape, line_no
+),
+runtime AS (
+    SELECT s.shape,
+           s.dominant_source,
+           p.planned_source,
+           p.planned_out_source,
+           p.planned_in_source,
+           p.runtime_source_match,
+           s.runtime_class,
+           p.planned_class,
+           p.runtime_class_match,
+           f.runtime_recommendation,
+           f.planned_recommendation,
+           c.age_adjacency_density,
+           c.endpoint_btree_density,
+           c.packed_density,
+           e.age_adjacency_empty_scans,
+           e.endpoint_btree_empty_scans,
+           NULL::text AS age_adjacency_empty_source_skips,
+           NULL::text AS age_adjacency_empty_source_skip_out,
+           NULL::text AS age_adjacency_empty_source_skip_in,
+           e.age_adjacency_empty_source_cache_hits,
+           e.age_adjacency_empty_source_cache_hit_out,
+           e.age_adjacency_empty_source_cache_hit_in,
+           e.age_adjacency_empty_source_frontier_marks,
+           e.age_adjacency_empty_source_frontier_mark_out,
+           e.age_adjacency_empty_source_frontier_mark_in,
+           l.empty_frontier_batch_flushes,
+           NULL::text AS empty_frontier_batch_out,
+           NULL::text AS empty_frontier_batch_in,
+           l.empty_frontier_batch_keys,
+           l.empty_frontier_batch_max,
+           e.age_adjacency_empty_source_run_skips,
+           e.age_adjacency_empty_source_run_skip_out,
+           e.age_adjacency_empty_source_run_skip_in,
+           py.payload_scan_runs,
+           py.payload_replay_runs,
+           py.payload_seed_runs,
+           py.payload_value_posting_filtered,
+           py.payload_scan_tuples,
+           py.payload_replay_tuples,
+           py.payload_seed_events,
+           l.empty_plan,
+           l.empty_plan_depth,
+           l.runtime_empty_plan_match,
+           l.empty_context,
+           l.empty_context_depth,
+           l.runtime_empty_context_match,
+           l.empty_batch,
+           l.empty_batch_size,
+           l.empty_batch_capacity,
+           l.runtime_empty_batch_match,
+           f.root_empty_completion_count AS empty_completion_count,
+           f.root_empty_batch_capacity AS empty_summary_batch,
+           f.root_empty_saturated_count AS empty_batch_saturated,
+           f.root_empty_completion_count,
+           f.root_empty_completion_out,
+           f.root_empty_completion_in,
+           f.root_empty_batch_capacity,
+           f.root_empty_saturated_count,
+           f.threshold_feedback,
+           f.threshold_feedback_headroom,
+           f.threshold_feedback_batch,
+           f.threshold_feedback_source,
+           f.threshold_feedback_reason,
+           e.empty_evidence,
+           e.suppressed_source,
+           e.suppression_match,
+           s.runtime_pressure,
+           s.runtime_action
+    FROM runtime_summary s
+    LEFT JOIN runtime_plan p USING (shape)
+    LEFT JOIN runtime_counters c USING (shape)
+    LEFT JOIN runtime_payload py USING (shape)
+    LEFT JOIN runtime_empty e USING (shape)
+    LEFT JOIN runtime_lifecycle l USING (shape)
+    LEFT JOIN runtime_feedback f USING (shape)
 )
 SELECT p.shape,
        b.rows_returned,
        b.elapsed_ms,
        c.label_fanout_edges,
+       c.value_posting_edges,
+       c.value_posting_root_count,
+       c.value_posting_edges_per_root,
        c.replay_branches_input,
        c.replay_leaves_input,
        c.replay_branches,
@@ -739,6 +1227,27 @@ SELECT p.shape,
        p.threshold_input_headroom,
        p.threshold_input_batch,
        p.threshold_input_source,
+       p.threshold_directional_family,
+       CASE WHEN p.threshold_directional_family
+            THEN r.age_adjacency_density::numeric
+            ELSE NULL::numeric
+       END AS directional_family_productive_density,
+       CASE WHEN p.threshold_directional_family
+            THEN round(r.root_empty_completion_count::numeric /
+                       NULLIF(r.root_empty_completion_count::numeric +
+                              b.rows_returned::numeric, 0), 4)
+            ELSE NULL::numeric
+       END AS directional_family_empty_completion_ratio,
+       CASE WHEN p.threshold_directional_family
+            THEN round(r.root_empty_completion_out::numeric /
+                       NULLIF(r.root_empty_completion_count::numeric, 0), 4)
+            ELSE NULL::numeric
+       END AS directional_family_empty_out_ratio,
+       CASE WHEN p.threshold_directional_family
+            THEN round(r.root_empty_completion_in::numeric /
+                       NULLIF(r.root_empty_completion_count::numeric, 0), 4)
+            ELSE NULL::numeric
+       END AS directional_family_empty_in_ratio,
        p.threshold_input_reason,
        p.threshold_cache_observed,
        p.threshold_cache_saturated,
@@ -751,7 +1260,19 @@ SELECT p.shape,
        p.payload_input_replay_percent,
        p.payload_input_seed_percent,
        p.payload_input_observed,
+       p.payload_input_value_posting_source,
+       p.payload_input_value_posting_observed,
        p.payload_input_reason,
+       p.payload_input_class,
+       p.value_posting_decision,
+       p.value_posting_policy_decision,
+       p.value_posting_headroom_expected,
+       p.value_posting_headroom_applied,
+       p.composite_work,
+       p.composite_work_out,
+       p.composite_work_in,
+       p.value_posting_source,
+       p.policy_reason,
        p.planner_policy,
        CASE p.active_direction
            WHEN 'out' THEN p.planner_out_source
@@ -782,6 +1303,58 @@ SELECT p.shape,
        r.runtime_source_match,
        p.planner_class = r.runtime_class AS class_match,
        r.runtime_class_match,
+       CASE
+           WHEN COALESCE(r.runtime_source_match, 'false') <> 'true'
+           THEN 'source-mismatch'
+           WHEN COALESCE(r.runtime_class_match, 'false') <> 'true'
+           THEN 'class-mismatch'
+           WHEN p.value_posting_policy_decision = 'policy-value-posting' AND
+                p.value_posting_headroom_applied
+           THEN 'value-posting-headroom-applied'
+           WHEN COALESCE(NULLIF(r.payload_value_posting_filtered, '')::numeric,
+                         0) > 0
+           THEN 'promote-value-posting-headroom'
+           WHEN p.threshold_directional_family AND
+                p.policy_reason LIKE '%directional-family-productive%'
+           THEN 'directional-family-split-applied'
+           WHEN p.threshold_directional_family AND
+                COALESCE(r.root_empty_completion_count::numeric /
+                         NULLIF(r.root_empty_completion_count::numeric +
+                                b.rows_returned::numeric, 0), 0) >= 0.50
+           THEN 'review-directional-family'
+           WHEN r.runtime_pressure IN ('adjacency-empty-frontier',
+                                       'adjacency-empty-run')
+           THEN 'keep-empty-lifecycle'
+           WHEN r.runtime_pressure = 'adjacency-payload-replay'
+           THEN 'keep-payload-replay'
+           ELSE 'keep-policy'
+       END AS source_policy_outcome,
+       CASE
+           WHEN COALESCE(r.runtime_source_match, 'false') <> 'true'
+           THEN 'inspect-source-handoff'
+           WHEN COALESCE(r.runtime_class_match, 'false') <> 'true'
+           THEN 'tune-source-policy'
+           WHEN p.value_posting_policy_decision = 'policy-value-posting' AND
+                p.value_posting_headroom_applied
+           THEN 'keep-value-posting-headroom'
+           WHEN COALESCE(NULLIF(r.payload_value_posting_filtered, '')::numeric,
+                         0) > 0
+           THEN 'promote-value-posting-headroom'
+           WHEN p.threshold_directional_family AND
+                p.policy_reason LIKE '%directional-family-productive%'
+           THEN 'keep-directional-split'
+           WHEN p.threshold_directional_family AND
+                COALESCE(r.root_empty_completion_count::numeric /
+                         NULLIF(r.root_empty_completion_count::numeric +
+                                b.rows_returned::numeric, 0), 0) >= 0.50
+           THEN 'measure-directional-split'
+           WHEN r.runtime_pressure IN ('adjacency-empty-frontier',
+                                       'adjacency-empty-run')
+           THEN 'keep-empty-batch'
+           WHEN r.runtime_pressure = 'adjacency-payload-replay'
+           THEN 'keep-replay-headroom'
+           ELSE COALESCE(r.runtime_recommendation, p.planner_recommendation)
+       END AS source_policy_next_action,
        r.age_adjacency_density,
        r.endpoint_btree_density,
        r.packed_density,
@@ -807,6 +1380,21 @@ SELECT p.shape,
        r.payload_scan_runs,
        r.payload_replay_runs,
        r.payload_seed_runs,
+       r.payload_value_posting_filtered,
+       COALESCE(NULLIF(p.payload_input_value_posting_observed, '')::numeric, 0) > 0
+           AS value_posting_identity_cache_hit,
+       COALESCE(NULLIF(r.payload_value_posting_filtered, '')::numeric, 0) > 0
+           AS value_posting_runtime_hit,
+       CASE
+           WHEN COALESCE(NULLIF(p.payload_input_value_posting_observed, '')::numeric, 0) > 0
+           THEN 'identity-cache-hit'
+           WHEN COALESCE(NULLIF(r.payload_value_posting_filtered, '')::numeric, 0) > 0
+           THEN 'runtime-hit'
+           WHEN p.value_posting_source IS NOT NULL
+            AND p.value_posting_source <> 'out:none/in:none'
+           THEN 'source-available'
+           ELSE 'none'
+       END AS value_posting_runtime_decision,
        r.payload_scan_tuples,
        r.payload_replay_tuples,
        r.payload_seed_events,

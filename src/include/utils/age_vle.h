@@ -33,7 +33,7 @@
 typedef struct VLE_path_container VLE_path_container;
 typedef struct AgeVLEIterator AgeVLEIterator;
 
-#define AGE_VLE_MAX_ARGS 9
+#define AGE_VLE_MAX_ARGS 10
 
 typedef enum AgeVLEOutputRequirement
 {
@@ -43,6 +43,13 @@ typedef enum AgeVLEOutputRequirement
     AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTIES,
     AGE_VLE_OUTPUT_REQUIREMENT_TERMINAL_PROPERTY
 } AgeVLEOutputRequirement;
+
+typedef enum AgeVLETerminalLabelMode
+{
+    AGE_VLE_TERMINAL_LABEL_NONE = 0,
+    AGE_VLE_TERMINAL_LABEL_ALL_DEPTH,
+    AGE_VLE_TERMINAL_LABEL_ENDPOINT_ONLY
+} AgeVLETerminalLabelMode;
 
 typedef struct AgeVLEInput
 {
@@ -85,6 +92,20 @@ typedef struct AgeVLEInput
     int terminal_property_key_len;
     bool terminal_property_key_is_char;
     char terminal_property_key_char;
+    bool terminal_label_known;
+    int32 terminal_label_id;
+    AgeVLETerminalLabelMode terminal_label_mode;
+    bool terminal_property_predicate_known;
+    bool terminal_property_predicate_key_known;
+    const char *terminal_property_predicate_key_value;
+    int terminal_property_predicate_key_len;
+    bool terminal_property_predicate_key_is_char;
+    char terminal_property_predicate_key_char;
+    bool terminal_property_predicate_null;
+    Datum terminal_property_predicate_value;
+    bool terminal_property_prefilter_eligible;
+    Oid terminal_property_index_oid;
+    int64 terminal_property_prefetch_threshold;
     bool source_policy_known;
     int source_policy_outgoing_kind;
     int source_policy_incoming_kind;
@@ -110,6 +131,7 @@ typedef struct AgeVLESourceStats
     int64 age_adjacency_scans;
     int64 age_adjacency_candidates;
     int64 age_adjacency_empty_scans;
+    int64 age_adjacency_directory_filtered_empty_scans;
     int64 age_adjacency_empty_source_skips;
     int64 age_adjacency_empty_source_skip_out;
     int64 age_adjacency_empty_source_skip_in;
@@ -128,6 +150,33 @@ typedef struct AgeVLESourceStats
     int64 age_adjacency_empty_source_run_skip_out;
     int64 age_adjacency_empty_source_run_skip_in;
     int64 age_adjacency_payload_scan_runs;
+    int64 age_adjacency_payload_property_prefilter_runs;
+    int64 age_adjacency_payload_property_prefilter_candidates;
+    int64 age_adjacency_payload_property_vertex_set_runs;
+    int64 age_adjacency_payload_composite_requests;
+    int64 age_adjacency_payload_composite_block_filtered;
+    int64 age_adjacency_payload_composite_directory_filtered;
+    int64 age_adjacency_payload_composite_directory_estimated;
+    int64 age_adjacency_payload_property_filtered;
+    int64 age_adjacency_payload_property_prefetch_matches;
+    int64 age_adjacency_payload_cache_filtered;
+    int64 age_adjacency_payload_cache_label_filtered;
+    int64 age_adjacency_payload_cache_property_filtered;
+    int64 age_adjacency_payload_vertex_set_range_filtered;
+    int64 age_adjacency_payload_vertex_set_sorted_filtered;
+    int64 age_adjacency_payload_vertex_set_block_filtered;
+    int64 age_adjacency_payload_vertex_set_block_value_filtered;
+    int64 age_adjacency_payload_vertex_set_block_value_posting_filtered;
+    int64 age_adjacency_payload_vertex_set_block_compressed_filtered;
+    int64 age_adjacency_payload_vertex_set_block_posting_filtered;
+    int64 age_adjacency_payload_vertex_set_directory_filtered;
+    int64 age_adjacency_payload_vertex_set_directory_range_filtered;
+    int64 age_adjacency_payload_vertex_set_directory_exact_filtered;
+    int64 age_adjacency_payload_vertex_set_directory_label_bloom_filtered;
+    int64 age_adjacency_payload_vertex_set_directory_compressed_filtered;
+    int64 age_adjacency_payload_vertex_set_directory_wide_bloom_filtered;
+    int64 age_adjacency_payload_vertex_set_directory_value_filtered;
+    int64 age_adjacency_payload_vertex_set_directory_value_posting_filtered;
     int64 age_adjacency_payload_replay_runs;
     int64 age_adjacency_payload_cache_seed_runs;
     int64 age_adjacency_payload_scans;

@@ -199,6 +199,7 @@ static Node *transform_cypher_bool_const(cypher_parsestate *cpstate,
 static Node *transform_cypher_integer_const(cypher_parsestate *cpstate,
                                             cypher_integer_const *ic);
 static Const *make_agtype_integer_const(int64 value, int location);
+static bool get_agtype_integer_const_value(Const *c, int64 *value);
 static Node *make_null_agtype_const(void);
 static Node *transform_or_null_agtype(cypher_parsestate *cpstate, Node *node);
 static void transform_slice_bounds_or_null(cypher_parsestate *cpstate,
@@ -957,6 +958,8 @@ static bool retarget_vle_terminal_property_output(cypher_parsestate *cpstate,
                                                   Const *key_const);
 static bool retarget_vle_terminal_properties_output(
     cypher_parsestate *cpstate, Node *raw_properties);
+static Node *try_transform_vle_terminal_properties_property_access(
+    cypher_parsestate *cpstate, Node *properties_expr, List *indirections);
 static FuncExpr *make_vle_index_properties_expr(cypher_parsestate *cpstate,
                                                 A_Indirection *indexed_arg,
                                                 int location);
@@ -4214,6 +4217,45 @@ static Const *make_agtype_integer_const(int64 value, int location)
     return c;
 }
 
+static bool get_agtype_integer_const_value(Const *c, int64 *value)
+{
+    agtype *agt;
+    agtentry entry;
+    char *base;
+    uint32 type_header;
+
+    if (value != NULL)
+        *value = 0;
+
+    if (c == NULL || value == NULL ||
+        c->constisnull || c->consttype != AGTYPEOID)
+    {
+        return false;
+    }
+
+    agt = DATUM_GET_AGTYPE_P(c->constvalue);
+    if (!AGT_ROOT_IS_SCALAR(agt) || AGT_ROOT_COUNT(agt) != 1)
+    {
+        return false;
+    }
+
+    entry = agt->root.children[0];
+    if (!AGTE_IS_AGTYPE(entry))
+    {
+        return false;
+    }
+
+    base = (char *)&agt->root.children[1];
+    type_header = *((uint32 *)base);
+    if (type_header != AGT_HEADER_INTEGER)
+    {
+        return false;
+    }
+
+    *value = *((int64 *)(base + sizeof(uint32)));
+    return true;
+}
+
 static Node *make_null_agtype_const(void)
 {
     return (Node *)makeNullConst(AGTYPEOID, -1, InvalidOid);
@@ -4944,6 +4986,10 @@ static Node *transform_A_Indirection(cypher_parsestate *cpstate,
         ColumnRef *cr = (ColumnRef *)a_ind->arg;
 
         ind_arg_expr = transform_column_ref_for_indirection(cpstate, cr);
+        fast_expr = try_transform_vle_terminal_properties_property_access(
+            cpstate, ind_arg_expr, a_ind->indirection);
+        if (fast_expr != NULL)
+            return fast_expr;
     }
 
     /*
@@ -13701,28 +13747,62 @@ static bool retarget_vle_terminal_property_output(cypher_parsestate *cpstate,
     }
 
     outer_rte = rt_fetch(outer_var->varno, pstate->p_rtable);
-    if (outer_rte == NULL || outer_rte->rtekind != RTE_SUBQUERY ||
-        outer_rte->subquery == NULL)
+    if (outer_rte != NULL && outer_rte->rtekind == RTE_VALUES)
     {
-        return false;
+        vle_rte = outer_rte;
     }
-
-    subquery = outer_rte->subquery;
-    sub_te = get_tle_by_resno(subquery->targetList, outer_var->varattno);
-    if (sub_te == NULL || sub_te->expr == NULL || !IsA(sub_te->expr, Var))
+    else if (outer_rte != NULL && outer_rte->rtekind == RTE_JOIN)
     {
-        return false;
-    }
+        Node *alias_expr;
 
-    inner_var = castNode(Var, sub_te->expr);
-    if (inner_var->varlevelsup != 0 ||
-        inner_var->varno <= 0 ||
-        inner_var->varno > list_length(subquery->rtable))
+        if (outer_rte->joinaliasvars == NIL ||
+            outer_var->varattno <= 0 ||
+            outer_var->varattno > list_length(outer_rte->joinaliasvars))
+        {
+            return false;
+        }
+
+        alias_expr = list_nth(outer_rte->joinaliasvars,
+                              outer_var->varattno - 1);
+        if (alias_expr == NULL || !IsA(alias_expr, Var))
+            return false;
+
+        inner_var = castNode(Var, alias_expr);
+        if (inner_var->varlevelsup != 0 ||
+            inner_var->varno <= 0 ||
+            inner_var->varno > list_length(pstate->p_rtable))
+        {
+            return false;
+        }
+
+        vle_rte = rt_fetch(inner_var->varno, pstate->p_rtable);
+    }
+    else
     {
-        return false;
-    }
+        if (outer_rte == NULL || outer_rte->rtekind != RTE_SUBQUERY ||
+            outer_rte->subquery == NULL)
+        {
+            return false;
+        }
 
-    vle_rte = rt_fetch(inner_var->varno, subquery->rtable);
+        subquery = outer_rte->subquery;
+        sub_te = get_tle_by_resno(subquery->targetList, outer_var->varattno);
+        if (sub_te == NULL || sub_te->expr == NULL ||
+            !IsA(sub_te->expr, Var))
+        {
+            return false;
+        }
+
+        inner_var = castNode(Var, sub_te->expr);
+        if (inner_var->varlevelsup != 0 ||
+            inner_var->varno <= 0 ||
+            inner_var->varno > list_length(subquery->rtable))
+        {
+            return false;
+        }
+
+        vle_rte = rt_fetch(inner_var->varno, subquery->rtable);
+    }
     if (vle_rte == NULL ||
         vle_rte->rtekind != RTE_VALUES ||
         list_length(vle_rte->values_lists) != 1 ||
@@ -13737,8 +13817,89 @@ static bool retarget_vle_terminal_property_output(cypher_parsestate *cpstate,
     {
         Const *existing_key = list_nth_node(
             Const, row, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
+        int64 terminal_label_id;
 
-        return !existing_key->constisnull && equal(existing_key, key_const);
+        if (!existing_key->constisnull &&
+            existing_key->consttype == AGTYPEOID &&
+            equal(existing_key, key_const))
+        {
+            return true;
+        }
+        if (get_agtype_integer_const_value(existing_key,
+                                           &terminal_label_id))
+        {
+            ListCell *type_cell;
+
+            row = list_truncate(row, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
+            row = lappend(row, copyObject(key_const));
+            row = lappend(row, copyObject(existing_key));
+            vle_rte->values_lists = list_make1(row);
+            type_cell = list_nth_cell(
+                vle_rte->coltypes,
+                AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
+            lfirst_oid(type_cell) = AGTYPEOID;
+            vle_rte->coltypes =
+                lappend_oid(vle_rte->coltypes, AGTYPEOID);
+            vle_rte->coltypmods =
+                lappend_int(vle_rte->coltypmods, -1);
+            vle_rte->colcollations =
+                lappend_oid(vle_rte->colcollations, InvalidOid);
+            vle_rte->eref->colnames =
+                lappend(vle_rte->eref->colnames,
+                        makeString("__age_vle_terminal_label"));
+            if (vle_rte->alias != NULL && vle_rte->alias != vle_rte->eref)
+            {
+                vle_rte->alias->colnames =
+                    lappend(vle_rte->alias->colnames,
+                            makeString("__age_vle_terminal_label"));
+            }
+            return true;
+        }
+        if (!existing_key->constisnull &&
+            existing_key->consttype == INT8OID)
+        {
+            Const *label_const;
+            ListCell *type_cell;
+
+            terminal_label_id = DatumGetInt64(existing_key->constvalue);
+            label_const = make_agtype_integer_const(terminal_label_id,
+                                                    existing_key->location);
+            row = list_truncate(row, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
+            row = lappend(row, copyObject(key_const));
+            row = lappend(row, label_const);
+            vle_rte->values_lists = list_make1(row);
+            type_cell = list_nth_cell(
+                vle_rte->coltypes,
+                AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
+            lfirst_oid(type_cell) = AGTYPEOID;
+            vle_rte->coltypes =
+                lappend_oid(vle_rte->coltypes, AGTYPEOID);
+            vle_rte->coltypmods =
+                lappend_int(vle_rte->coltypmods, -1);
+            vle_rte->colcollations =
+                lappend_oid(vle_rte->colcollations, InvalidOid);
+            vle_rte->eref->colnames =
+                lappend(vle_rte->eref->colnames,
+                        makeString("__age_vle_terminal_label"));
+            if (vle_rte->alias != NULL && vle_rte->alias != vle_rte->eref)
+            {
+                vle_rte->alias->colnames =
+                    lappend(vle_rte->alias->colnames,
+                            makeString("__age_vle_terminal_label"));
+            }
+            return true;
+        }
+
+        return false;
+    }
+    if (list_length(row) == AGE_VLE_STREAM_ARG_TERMINAL_LABEL + 3)
+    {
+        Const *existing_key = list_nth_node(
+            Const, row, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
+
+        return !existing_key->constisnull &&
+            existing_key->consttype == AGTYPEOID &&
+            equal(existing_key, key_const);
     }
     if (list_length(row) != AGE_VLE_STREAM_ARG_GRAMMAR_NODE + 3 ||
         !IsA(lsecond(row), Const))
@@ -13846,11 +14007,80 @@ static bool retarget_vle_terminal_properties_output(
     {
         Const *existing_key = list_nth_node(
             Const, row, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
+        int64 terminal_label_id;
+
+        if (!existing_key->constisnull &&
+            existing_key->consttype == AGTYPEOID)
+        {
+            if (!get_agtype_integer_const_value(existing_key,
+                                                &terminal_label_id))
+                return false;
+
+            row = list_truncate(row, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
+            row = lappend(row, make_null_agtype_const());
+            row = lappend(row, copyObject(existing_key));
+            vle_rte->values_lists = list_make1(row);
+            vle_rte->coltypes =
+                lappend_oid(vle_rte->coltypes, AGTYPEOID);
+            vle_rte->coltypmods =
+                lappend_int(vle_rte->coltypmods, -1);
+            vle_rte->colcollations =
+                lappend_oid(vle_rte->colcollations, InvalidOid);
+            vle_rte->eref->colnames =
+                lappend(vle_rte->eref->colnames,
+                        makeString("__age_vle_terminal_label"));
+            if (vle_rte->alias != NULL && vle_rte->alias != vle_rte->eref)
+            {
+                vle_rte->alias->colnames =
+                    lappend(vle_rte->alias->colnames,
+                            makeString("__age_vle_terminal_label"));
+            }
+            sub_te->expr = (Expr *)copyObject(inner_var);
+            return true;
+        }
+        if (!existing_key->constisnull &&
+            existing_key->consttype == INT8OID)
+        {
+            Const *label_const;
+            ListCell *type_cell;
+
+            terminal_label_id = DatumGetInt64(existing_key->constvalue);
+            label_const = make_agtype_integer_const(terminal_label_id,
+                                                    existing_key->location);
+            row = list_truncate(row, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
+            row = lappend(row, make_null_agtype_const());
+            row = lappend(row, label_const);
+            vle_rte->values_lists = list_make1(row);
+            type_cell = list_nth_cell(
+                vle_rte->coltypes,
+                AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
+            lfirst_oid(type_cell) = AGTYPEOID;
+            vle_rte->coltypes =
+                lappend_oid(vle_rte->coltypes, AGTYPEOID);
+            vle_rte->coltypmods =
+                lappend_int(vle_rte->coltypmods, -1);
+            vle_rte->colcollations =
+                lappend_oid(vle_rte->colcollations, InvalidOid);
+            vle_rte->eref->colnames =
+                lappend(vle_rte->eref->colnames,
+                        makeString("__age_vle_terminal_label"));
+            if (vle_rte->alias != NULL && vle_rte->alias != vle_rte->eref)
+            {
+                vle_rte->alias->colnames =
+                    lappend(vle_rte->alias->colnames,
+                            makeString("__age_vle_terminal_label"));
+            }
+        }
+        sub_te->expr = (Expr *)copyObject(inner_var);
+        return true;
+    }
+    if (list_length(row) == AGE_VLE_STREAM_ARG_TERMINAL_LABEL + 3)
+    {
+        Const *existing_key = list_nth_node(
+            Const, row, AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY + 2);
 
         if (!existing_key->constisnull)
-        {
             return false;
-        }
         sub_te->expr = (Expr *)copyObject(inner_var);
         return true;
     }
@@ -13907,17 +14137,19 @@ static Node *try_transform_vle_terminal_vertex_property_access(
     }
 
     entity = find_variable(cpstate, var_name);
-    if (entity == NULL || entity->type != ENT_VERTEX ||
-        entity->expr == NULL || !IsA(entity->expr, FuncExpr))
+    if (entity == NULL || entity->type != ENT_VERTEX)
     {
         return NULL;
     }
 
-    terminal_expr = castNode(FuncExpr, entity->expr);
-    if (terminal_expr->funcid != get_age_vle_terminal_vertex_oid() ||
-        list_length(terminal_expr->args) != 1)
+    if (entity->expr != NULL && IsA(entity->expr, FuncExpr))
     {
-        return NULL;
+        terminal_expr = castNode(FuncExpr, entity->expr);
+        if (terminal_expr->funcid != get_age_vle_terminal_vertex_oid() ||
+            list_length(terminal_expr->args) != 1)
+        {
+            terminal_expr = NULL;
+        }
     }
 
     properties = make_raw_attr_var(&cpstate->pstate, var_name,
@@ -13945,6 +14177,9 @@ static Node *try_transform_vle_terminal_vertex_property_access(
             InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
     }
 
+    if (terminal_expr == NULL)
+        return NULL;
+
     if (IsA(properties, FuncExpr))
     {
         FuncExpr *properties_expr = castNode(FuncExpr, properties);
@@ -13966,6 +14201,40 @@ static Node *try_transform_vle_terminal_vertex_property_access(
                                 AGTYPEOID, list_make2(properties, key_const),
                                 InvalidOid, InvalidOid,
                                 COERCE_EXPLICIT_CALL);
+}
+
+static Node *try_transform_vle_terminal_properties_property_access(
+    cypher_parsestate *cpstate, Node *properties_expr, List *indirections)
+{
+    FuncExpr *func;
+    Node *vle_path;
+    char *field_name;
+    Const *key_const;
+
+    if (properties_expr == NULL || !IsA(properties_expr, FuncExpr) ||
+        list_length(indirections) != 1 ||
+        !IsA(linitial(indirections), String))
+    {
+        return NULL;
+    }
+
+    func = castNode(FuncExpr, properties_expr);
+    if (func->funcid != get_age_vle_terminal_vertex_properties_oid() ||
+        list_length(func->args) != 1)
+    {
+        return NULL;
+    }
+
+    vle_path = linitial(func->args);
+    field_name = strVal(linitial(indirections));
+    key_const = make_agtype_string_key_const((Node *)makeString(field_name));
+    if (retarget_vle_terminal_property_output(cpstate, vle_path, key_const))
+        return copyObject(vle_path);
+
+    return (Node *)makeFuncExpr(
+        get_age_vle_terminal_vertex_property_from_path_oid(),
+        AGTYPEOID, list_make2(copyObject(vle_path), key_const),
+        InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
 }
 
 static Node *try_transform_vle_boundary_direct_property_access(

@@ -21,6 +21,18 @@ executor에 더 가깝게 낮춰 성능 병목을 줄이는 실험 브랜치다.
 
 ## 핵심 방향
 
+### Graph Join Order
+
+- Cypher MATCH pattern을 PostgreSQL FROM 순서 또는 parser 순서에만 맡기지 않는다.
+- node/property index seek, fixed `AGE Adjacency Match`, VLE stream, ExpandInto 검증 후보를
+  graph component/connector 단위로 비교한다.
+- ORCA의 NAry join/order property와 Neo4j의 IDP query graph solver를 참고해 `query-order`,
+  `min-card`, `index-anchored`, `adjacency-anchored`, `vle-frontier-anchored` 같은 planner
+  property를 EXPLAIN/benchmark에서 볼 수 있게 한다.
+- 다음 구조는 `AGEGraphJoinComponent`와 `AGEGraphJoinConnector` 후보 테이블이다. 같은 component 안에서
+  adjacency expand, VLE ExpandAll, VLE ExpandInto, node/property value join, cartesian/apply를 property별
+  row/cost로 보존한 뒤 선택된 physical connector를 EXPLAIN에 드러낸다.
+
 ### PostgreSQL 표준 구조 재사용
 
 - Cypher parsing 결과를 PostgreSQL planner가 이해할 수 있는 Query/Path/TargetEntry

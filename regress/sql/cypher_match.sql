@@ -30,6 +30,67 @@ WHERE p.proname IN ('age_array_agg_map_slots',
                     'age_array_agg_list_slots')
 ORDER BY p.proname;
 
+BEGIN;
+SET LOCAL max_parallel_workers_per_gather = 4;
+SET LOCAL min_parallel_table_scan_size = 0;
+SET LOCAL parallel_setup_cost = 0;
+SET LOCAL parallel_tuple_cost = 0;
+
+CREATE TABLE age_slots_parallel_scalar AS
+SELECT CASE WHEN i % 3 = 0 THEN NULL::agtype ELSE '1'::agtype END AS v
+FROM generate_series(1, 20000) AS g(i);
+
+CREATE TABLE age_slots_parallel_object AS
+SELECT '{"a": 1}'::agtype AS v
+FROM generate_series(1, 20000) AS g(i);
+
+CREATE TABLE age_slots_parallel_typed AS
+SELECT i::bigint AS i, (i + 0.5)::numeric AS n, ('slot-' || i)::text AS t
+FROM generate_series(1, 20000) AS g(i);
+
+ALTER TABLE age_slots_parallel_scalar SET (parallel_workers = 4);
+ALTER TABLE age_slots_parallel_object SET (parallel_workers = 4);
+ALTER TABLE age_slots_parallel_typed SET (parallel_workers = 4);
+
+EXPLAIN (COSTS OFF)
+SELECT array_length(age_array_agg_list_slots(v), 1)
+FROM age_slots_parallel_scalar;
+
+SELECT array_length(age_array_agg_list_slots(v), 1) AS scalar_slots,
+       count(*) AS scalar_rows
+FROM age_slots_parallel_scalar;
+
+SELECT age_array_agg_list_slots_summary(v) AS scalar_slot_state
+FROM age_slots_parallel_scalar;
+
+SELECT array_length(age_array_agg_list_slots(v), 1) AS object_slots,
+       count(*) AS object_rows
+FROM age_slots_parallel_object;
+
+EXPLAIN (COSTS OFF)
+SELECT array_length(age_array_agg_list_slots(i, n, t), 1)
+FROM age_slots_parallel_typed;
+
+SELECT array_length(age_array_agg_list_slots(i, n, t), 1) AS typed_slots,
+       count(*) AS typed_rows
+FROM age_slots_parallel_typed;
+
+SELECT age_array_agg_list_slots(1::bigint, 2.5::numeric, 'slot'::text)
+       AS typed_list_slots;
+
+SELECT age_array_agg_list_slots_summary(i, n, t) AS typed_list_slot_state
+FROM age_slots_parallel_typed;
+
+SELECT age_array_agg_list_slots_summary(i, i) AS repeated_source_slot_state
+FROM age_slots_parallel_typed;
+
+SELECT age_array_agg_map_slots_summary('i'::text, i, 'n'::text, n,
+                                       't'::text, 'slot'::text)
+       AS typed_map_slot_state
+FROM age_slots_parallel_typed;
+
+ROLLBACK;
+
 SELECT create_graph('cypher_match');
 
 SELECT * FROM cypher('cypher_match', $$CREATE (:v)$$) AS (a agtype);
@@ -227,6 +288,64 @@ FROM cypher('cypher_match_numeric_path',
             $$MATCH (n:NumericPath) RETURN [n.payload.a, n.payload.b]$$)
      AS (l agtype);
 
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(l), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN [n.payload.a::pg_numeric, n.payload.b::pg_bigint]$$)
+     AS (l agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT age_array_agg_list_slots_summary(a, b) AS typed_property_slot_state
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.a::pg_numeric, n.payload.b::pg_bigint$$)
+     AS (a numeric, b bigint);
+
+SELECT age_array_agg_list_slots_summary(a, b) AS typed_property_slot_state
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.a::pg_numeric, n.payload.b::pg_bigint$$)
+     AS (a numeric, b bigint);
+
+SELECT age_array_agg_slots_descriptor(NULL::numeric, NULL::bigint)
+       AS typed_property_slot_descriptor,
+       age_array_agg_list_slots_summary(a, b) AS typed_property_slot_state
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN n.payload.a::pg_numeric, n.payload.b::pg_bigint$$)
+     AS (a numeric, b bigint);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(m), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN {a: n.payload.a::pg_numeric,
+                      b: n.payload.b::pg_bigint}$$)
+     AS (m agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(m), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN {a: n.payload.a::pg_numeric,
+                      b: n.payload.b::pg_bigint,
+                      c: n.payload.c::pg_text}$$)
+     AS (m agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(m), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN {a: n.payload.a, again: n.payload.a}$$)
+     AS (m agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(l), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath) RETURN [n.payload.a, n.payload.a]$$)
+     AS (l agtype);
+
 DROP FUNCTION cypher_match_normalized_explain(text, text);
 
 SELECT * FROM cypher('cypher_match_numeric_path', $$
@@ -265,6 +384,27 @@ SELECT array_agg(l)
 FROM cypher('cypher_match_numeric_path',
             $$MATCH (n:NumericPath) RETURN [n.payload.a, n.payload.b]$$)
      AS (l agtype);
+
+SELECT array_agg(l)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN [n.payload.a::pg_numeric, n.payload.b::pg_bigint]$$)
+     AS (l agtype);
+
+SELECT array_agg(m)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN {a: n.payload.a::pg_numeric,
+                      b: n.payload.b::pg_bigint}$$)
+     AS (m agtype);
+
+SELECT array_agg(m)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN {a: n.payload.a::pg_numeric,
+                      b: n.payload.b::pg_bigint,
+                      c: n.payload.c::pg_text}$$)
+     AS (m agtype);
 
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT *
@@ -1214,6 +1354,14 @@ EXPLAIN (VERBOSE, COSTS OFF)
 SELECT *
 FROM cypher('cypher_match',
             $$MATCH (n:v) WHERE n.payload.a = 1 RETURN n.payload.a$$) AS (i agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT age_array_agg_slots_descriptor(NULL::agtype)
+       AS index_backed_slot_descriptor,
+       array_length(array_agg(v), 1)
+FROM cypher('cypher_match',
+            $$MATCH (n:v) WHERE n.payload.a = 1 RETURN [n.payload.a]$$)
+     AS (v agtype);
 
 SET enable_seqscan = on;
 
@@ -2984,10 +3132,20 @@ BEGIN
 END
 $fixed_path_variadic_payload_smoke$;
 
+SELECT create_property_source_index_named(
+    'cypher_match_numeric_path', 'NumericPath', 'payload.a',
+    'numeric_path_payload_a_source', 'agtype');
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT array_length(array_agg(v), 1)
+FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath) RETURN n.payload.a$$) AS (v agtype);
+
 --
 -- Clean up
 --
 SELECT drop_graph('cypher_match', true);
+SELECT drop_graph('cypher_match_plan', true);
 SELECT drop_graph('cypher_match_numeric_path', true);
 SELECT drop_graph('test_retrieve_var', true);
 SELECT drop_graph('test_enable_containment', true);

@@ -22,36 +22,13 @@
 #include "utils/guc.h"
 #include "utils/ag_guc.h"
 
-bool age_enable_adjacency_match = false;
-bool age_enable_adjacency_match_custom_path = false;
-
 /*
  * Defines AGE's custom configuration parameters.
  *
  * The name of the parameter must be `age.*`. This name is used for setting
- * value to the parameter. For example, `SET age.enable_adjacency_match = on;`.
+ * value to the parameter.
  */
 void define_config_params(void)
 {
-    DefineCustomBoolVariable("age.enable_adjacency_match",
-                             "Enable experimental age_adjacency candidate providers for guarded fixed-length MATCH shapes.",
-                             "This opt-in path is off by default while its cost and cardinality policy is evaluated.",
-                             &age_enable_adjacency_match,
-                             false,
-                             PGC_SUSET,
-                             0,
-                             NULL,
-                             NULL,
-                             NULL);
-    DefineCustomBoolVariable("age.enable_adjacency_match_custom_path",
-                             "Enable experimental planner CustomPath candidates for guarded age_adjacency fixed-length MATCH shapes.",
-                             "This developer opt-in keeps the normal edge RTE and adds a provider path candidate.",
-                             &age_enable_adjacency_match_custom_path,
-                             false,
-                             PGC_SUSET,
-                             0,
-                             NULL,
-                             NULL,
-                             NULL);
     EmitWarningsOnPlaceholders("age");
 }

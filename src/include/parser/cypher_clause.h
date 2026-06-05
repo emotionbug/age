@@ -39,4 +39,14 @@ Query *cypher_parse_sub_analyze(Node *parseTree,
                                 CommonTableExpr *parentCTE,
                                 bool locked_from_parent,
                                 bool resolve_unknowns);
+
+bool get_age_graph_property_index_metadata(Oid graph_oid,
+                                           const char *label_name,
+                                           const char *property_name,
+                                           Oid *result_index_oid,
+                                           char **matched_label_name,
+                                           char **index_source,
+                                           char **index_provider,
+                                           char **property_type,
+                                           int32 *match_count);
 #endif

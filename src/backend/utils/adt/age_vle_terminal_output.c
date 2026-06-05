@@ -20,6 +20,8 @@
 #include "postgres.h"
 
 #include "utils/age_global_graph.h"
+#include "utils/ag_func.h"
+#include "utils/agtype.h"
 #include "utils/age_vle_terminal_output.h"
 #include "utils/hsearch.h"
 
@@ -50,12 +52,17 @@ static void cache_direct_terminal_property_result_for_entry(
 static Datum get_terminal_property_for_entry(
     VLE_local_context *vlelctx, const VLETerminalPropertyLookup *lookup,
     vertex_entry *ve, bool *is_null);
+static void init_terminal_predicate_lookup(
+    VLE_local_context *vlelctx, VLETerminalPropertyLookup *lookup);
+static vertex_entry *get_terminal_predicate_vertex_entry(
+    VLE_local_context *vlelctx, const VLETraversalStep *step);
 static bool cache_terminal_property_char_hit_for_entry(
     VLE_local_context *vlelctx, const VLETerminalPropertyLookup *lookup,
     vertex_entry *ve);
 static bool get_cached_terminal_property_result(
     const VLETerminalPropertyLookup *lookup, vertex_entry *ve,
     Datum *property);
+static Oid get_terminal_predicate_agtype_eq_oid(void);
 static bool is_terminal_property_block_prefetched(
     const VLETerminalPropertyLookup *lookup, Oid relid, BlockNumber blockno);
 static void mark_terminal_property_block_prefetched(
@@ -67,6 +74,38 @@ bool age_vle_terminal_output_uses_direct_dfs(
     Assert(policy != NULL);
 
     return policy->direct_property;
+}
+
+bool age_vle_terminal_output_path_matches_predicate(
+    VLE_local_context *vlelctx, const VLETraversalStep *step)
+{
+    VLETerminalPropertyLookup lookup;
+    vertex_entry *ve;
+    Datum property = (Datum) 0;
+    bool property_is_null = true;
+
+    Assert(vlelctx != NULL);
+
+    if (!vlelctx->root.terminal_property_predicate_known)
+        return true;
+    if (vlelctx->root.terminal_property_predicate_null)
+        return false;
+    if (vlelctx->root.terminal_property_predicate_key.type != AGTV_STRING)
+        return true;
+
+    ve = get_terminal_predicate_vertex_entry(vlelctx, step);
+    if (ve == NULL)
+        return false;
+
+    init_terminal_predicate_lookup(vlelctx, &lookup);
+    property = get_terminal_property_for_entry(vlelctx, &lookup, ve,
+                                               &property_is_null);
+    if (property_is_null)
+        return false;
+
+    return DatumGetBool(OidFunctionCall2(
+        get_terminal_predicate_agtype_eq_oid(), property,
+        vlelctx->root.terminal_property_predicate_value));
 }
 
 void age_vle_terminal_output_cache_result(
@@ -406,6 +445,49 @@ static Datum get_terminal_property_for_entry(
     return property;
 }
 
+static void init_terminal_predicate_lookup(
+    VLE_local_context *vlelctx, VLETerminalPropertyLookup *lookup)
+{
+    Assert(vlelctx != NULL);
+    Assert(lookup != NULL);
+    Assert(vlelctx->root.terminal_property_predicate_key.type == AGTV_STRING);
+
+    lookup->ggctx = vlelctx->ggctx;
+    lookup->key_desc.key = &vlelctx->root.terminal_property_predicate_key;
+    lookup->key_desc.is_char =
+        vlelctx->root.terminal_property_predicate_key_is_char;
+    lookup->key_desc.key_char =
+        vlelctx->root.terminal_property_predicate_key_char;
+    lookup->relation_cache = &vlelctx->edge_property_relation_cache;
+    lookup->relation_cache_name = "VLE terminal predicate relation cache";
+    lookup->prefetched_blocks =
+        &vlelctx->output.terminal_property_prefetched_blocks;
+    lookup->prefetch_budget =
+        &vlelctx->output.terminal_property_prefetch_budget;
+    lookup->allow_block_prefetch =
+        age_vle_context_should_prefetch_terminal_property_block(vlelctx);
+}
+
+static vertex_entry *get_terminal_predicate_vertex_entry(
+    VLE_local_context *vlelctx, const VLETraversalStep *step)
+{
+    graphid terminal_id;
+    vertex_entry *ve;
+
+    Assert(vlelctx != NULL);
+    Assert(step != NULL);
+
+    if (step->vertex_entry != NULL)
+        return step->vertex_entry;
+
+    terminal_id = step->vertex_id;
+    ve = age_vle_context_get_cached_vertex_entry(vlelctx, terminal_id);
+    if (ve == NULL)
+        ve = get_vertex_entry(vlelctx->ggctx, terminal_id);
+
+    return ve;
+}
+
 static bool cache_terminal_property_char_hit_for_entry(
     VLE_local_context *vlelctx, const VLETerminalPropertyLookup *lookup,
     vertex_entry *ve)
@@ -450,6 +532,16 @@ static bool get_cached_terminal_property_result(
     key_len = lookup->key_desc.key->val.string.len;
 
     return get_vertex_entry_cached_property_str(ve, key, key_len, property);
+}
+
+static Oid get_terminal_predicate_agtype_eq_oid(void)
+{
+    static Oid agtype_eq_oid = InvalidOid;
+
+    if (!OidIsValid(agtype_eq_oid))
+        agtype_eq_oid = get_ag_func_oid("agtype_eq", 2, AGTYPEOID, AGTYPEOID);
+
+    return agtype_eq_oid;
 }
 
 static bool is_terminal_property_block_prefetched(

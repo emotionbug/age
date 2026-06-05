@@ -947,3 +947,44 @@ CREATE FUNCTION ag_catalog.age_adjacency_debug_directory_probe(index_oid regclas
     STABLE
     STRICT
 AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_debug_main_probe(index_oid regclass,
+                                                          key graphid)
+    RETURNS TABLE(found boolean, main_pages_visited bigint,
+                  main_window_offsets bigint, main_page_offsets bigint,
+                  main_entries_cached bigint)
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_debug_delta_probe(index_oid regclass,
+                                                           key graphid)
+    RETURNS TABLE(delta_pages_visited bigint,
+                  delta_pages_skipped bigint,
+                  delta_entries_scanned bigint)
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_debug_delta_maintenance(index_oid regclass)
+    RETURNS TABLE(action text, reason text,
+                  delta_postings bigint, delta_pages bigint,
+                  delta_tuples_per_page bigint,
+                  delta_reindex_threshold bigint,
+                  delta_reindex_recommended boolean)
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_reindex_if_needed(index_oid regclass)
+    RETURNS TABLE(reindexed boolean, action text, reason text,
+                  before_delta_postings bigint,
+                  after_delta_postings bigint,
+                  after_postings bigint)
+    LANGUAGE c
+    VOLATILE
+    STRICT
+AS 'MODULE_PATHNAME';

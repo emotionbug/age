@@ -414,7 +414,11 @@ CREATE TEMP TABLE age_adjacency_index_stats
     directory_entries bigint NOT NULL,
     delta_postings bigint NOT NULL,
     delta_reindex_threshold bigint NOT NULL,
-    delta_reindex_recommended boolean NOT NULL
+    delta_reindex_recommended boolean NOT NULL,
+    delta_maintenance_action text NOT NULL,
+    delta_maintenance_reason text NOT NULL,
+    delta_pages bigint NOT NULL,
+    delta_tuples_per_page bigint NOT NULL
 );
 
 CREATE TEMP TABLE age_adjacency_label_stats
@@ -689,13 +693,19 @@ BEGIN
     INSERT INTO age_adjacency_index_stats
     SELECT phase,
            index_name,
-           num_pages,
-           postings,
-           directory_entries,
-           delta_postings,
-           delta_reindex_threshold,
-           delta_reindex_recommended
-    FROM ag_catalog.age_adjacency_debug_stats(index_regclass::regclass);
+           s.num_pages,
+           s.postings,
+           s.directory_entries,
+           s.delta_postings,
+           s.delta_reindex_threshold,
+           s.delta_reindex_recommended,
+           m.action,
+           m.reason,
+           m.delta_pages,
+           m.delta_tuples_per_page
+    FROM ag_catalog.age_adjacency_debug_stats(index_regclass::regclass) AS s
+    CROSS JOIN ag_catalog.age_adjacency_debug_delta_maintenance(
+        index_regclass::regclass) AS m;
 END
 $$;
 
@@ -1770,8 +1780,10 @@ BEGIN
     SELECT c.graph_name INTO graph_name
     FROM age_adjacency_baseline_config c;
 
-    EXECUTE format('REINDEX INDEX %I.%I',
-                   graph_name, 'Noise_age_adjacency_start_payload_idx');
+    PERFORM *
+    FROM ag_catalog.age_adjacency_reindex_if_needed(
+        format('%I.%I', graph_name,
+               'Noise_age_adjacency_start_payload_idx')::regclass);
 END
 $$;
 

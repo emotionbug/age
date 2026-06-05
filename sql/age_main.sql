@@ -110,6 +110,65 @@ CREATE FUNCTION ag_catalog.create_elabel(graph_name cstring, label_name cstring)
     LANGUAGE c
     AS 'MODULE_PATHNAME';
 
+CREATE TABLE ag_catalog.ag_graph_index (
+    graph_oid oid NOT NULL,
+    graph_name name NOT NULL,
+    label_name name NOT NULL,
+    label_kind "char" NOT NULL,
+    index_name name NOT NULL,
+    index_oid oid NOT NULL,
+    index_kind text NOT NULL,
+    direction text,
+    property_names name[] NOT NULL DEFAULT ARRAY[]::name[],
+    provider text NOT NULL,
+    options jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX ag_graph_index_graph_index_name_idx
+ON ag_catalog.ag_graph_index (graph_oid, index_name);
+
+CREATE FUNCTION ag_catalog.show_indexes()
+    RETURNS TABLE(name name, type text, entity_type text,
+                  labels_or_types name[], properties name[], state text,
+                  provider text, options jsonb)
+    LANGUAGE sql
+    STABLE
+AS $$
+    SELECT gi.index_name,
+           gi.index_kind,
+           CASE gi.label_kind WHEN 'v' THEN 'NODE' ELSE 'RELATIONSHIP' END,
+           ARRAY[gi.label_name]::name[],
+           gi.property_names,
+           CASE WHEN c.oid IS NULL THEN 'DROPPED' ELSE 'ONLINE' END,
+           gi.provider,
+           gi.options
+    FROM ag_catalog.ag_graph_index gi
+    LEFT JOIN pg_catalog.pg_class c ON c.oid = gi.index_oid
+    ORDER BY gi.graph_name, gi.label_name, gi.index_name
+$$;
+
+CREATE FUNCTION ag_catalog.show_indexes(graph_name name)
+    RETURNS TABLE(name name, type text, entity_type text,
+                  labels_or_types name[], properties name[], state text,
+                  provider text, options jsonb)
+    LANGUAGE sql
+    STABLE
+AS $$
+    SELECT gi.index_name,
+           gi.index_kind,
+           CASE gi.label_kind WHEN 'v' THEN 'NODE' ELSE 'RELATIONSHIP' END,
+           ARRAY[gi.label_name]::name[],
+           gi.property_names,
+           CASE WHEN c.oid IS NULL THEN 'DROPPED' ELSE 'ONLINE' END,
+           gi.provider,
+           gi.options
+    FROM ag_catalog.ag_graph_index gi
+    LEFT JOIN pg_catalog.pg_class c ON c.oid = gi.index_oid
+    WHERE gi.graph_name = $1
+    ORDER BY gi.label_name, gi.index_name
+$$;
+
 CREATE FUNCTION ag_catalog.create_property_index(graph_name cstring,
                                                  label_name cstring,
                                                  property_name cstring)
@@ -124,6 +183,87 @@ CREATE FUNCTION ag_catalog.create_property_index(graph_name cstring,
     RETURNS void
     LANGUAGE c
     AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.create_property_source_index(graph_name cstring,
+                                                        label_name cstring,
+                                                        property_name cstring)
+    RETURNS void
+    LANGUAGE c
+    AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.create_property_source_index(graph_name cstring,
+                                                        label_name cstring,
+                                                        property_name cstring,
+                                                        property_type cstring)
+    RETURNS void
+    LANGUAGE c
+    AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.create_property_source_index_named(graph_name cstring,
+                                                              label_name cstring,
+                                                              property_name cstring,
+                                                              index_name cstring)
+    RETURNS text
+    LANGUAGE c
+    AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.create_property_source_index_named(graph_name cstring,
+                                                              label_name cstring,
+                                                              property_name cstring,
+                                                              index_name cstring,
+                                                              property_type cstring)
+    RETURNS text
+    LANGUAGE c
+    AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.create_adjacency_index(graph_name cstring,
+                                                  edge_label_name cstring,
+                                                  direction cstring)
+    RETURNS void
+    LANGUAGE c
+    AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.create_adjacency_indexes(graph_name cstring,
+                                                    edge_label_name cstring)
+    RETURNS void
+    LANGUAGE c
+    AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.create_adjacency_index_named(graph_name cstring,
+                                                        edge_label_name cstring,
+                                                        direction cstring,
+                                                        index_name cstring)
+    RETURNS text
+    LANGUAGE c
+    AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.create_adjacency_indexes_named(graph_name cstring,
+                                                         edge_label_name cstring,
+                                                         index_name cstring)
+    RETURNS text
+    LANGUAGE c
+    AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.drop_graph_index(graph_name cstring,
+                                            index_name cstring)
+    RETURNS text
+    LANGUAGE c
+    AS 'MODULE_PATHNAME';
+
+COMMENT ON FUNCTION ag_catalog.create_property_source_index(cstring, cstring, cstring)
+IS 'Create a property source index for graph pattern candidate lookup.';
+
+COMMENT ON FUNCTION ag_catalog.create_property_source_index(cstring, cstring, cstring, cstring)
+IS 'Create a typed property source index for graph pattern candidate lookup.';
+
+COMMENT ON FUNCTION ag_catalog.create_adjacency_index(cstring, cstring, cstring)
+IS 'Create one directional age_adjacency source index for an edge label.';
+
+COMMENT ON FUNCTION ag_catalog.create_adjacency_indexes(cstring, cstring)
+IS 'Create outgoing and incoming age_adjacency source indexes for an edge label.';
+
+COMMENT ON FUNCTION ag_catalog.drop_graph_index(cstring, cstring)
+IS 'Drop a helper-managed graph index and remove its metadata.';
 
 CREATE FUNCTION ag_catalog.alter_graph(graph_name name, operation cstring,
                                        new_value name)
@@ -411,7 +551,7 @@ COMMENT ON FUNCTION ag_catalog.age_adjacency_candidate_edges(regclass, graphid)
 IS 'Internal age_adjacency candidate provider for bound-endpoint adjacency scans; used only by opt-in experimental planner/parser paths.';
 
 CREATE FUNCTION ag_catalog.age_adjacency_debug_stats(index_oid regclass)
-    RETURNS TABLE(num_pages bigint, postings bigint,
+    RETURNS TABLE(index_version int, num_pages bigint, postings bigint,
                   directory_entries bigint, delta_postings bigint,
                   delta_reindex_threshold bigint,
                   delta_reindex_recommended boolean)
@@ -426,6 +566,101 @@ CREATE FUNCTION ag_catalog.age_adjacency_debug_directory_probe(index_oid regclas
                   directory_entries_scanned bigint)
     LANGUAGE c
     STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_debug_key_known_empty(index_oid regclass,
+                                                               key graphid,
+                                                               terminal_label_id int)
+    RETURNS boolean
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_debug_key_known_empty_range(index_oid regclass,
+                                                                     key graphid,
+                                                                     terminal_label_id int,
+                                                                     min_vertex_id graphid,
+                                                                     max_vertex_id graphid)
+    RETURNS boolean
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_debug_composite_probe(index_oid regclass,
+                                                               key graphid,
+                                                               terminal_label_id int,
+                                                               matched_vertex_id graphid,
+                                                               property_match_count bigint)
+    RETURNS TABLE(emitted bigint, cache_filtered bigint,
+                  cache_property bigint, set_range_filter bigint,
+                  set_sorted_filter bigint, set_block_filter bigint,
+                  set_block_value_filter bigint,
+                  set_block_value_posting_filter bigint,
+                  set_directory_filter bigint, composite_block_filter bigint,
+                  composite_directory_filter bigint,
+                  composite_directory_estimate bigint,
+                  set_block_range_filter bigint,
+                  set_block_exact_filter bigint,
+                  set_block_compressed_filter bigint,
+                  set_block_bloom_filter bigint,
+                  set_block_posting_filter bigint,
+                  set_directory_range_filter bigint,
+                  set_directory_exact_filter bigint,
+                  set_directory_label_bloom_filter bigint,
+                  set_directory_compressed_filter bigint,
+                  set_directory_wide_bloom_filter bigint,
+                  set_directory_value_filter bigint,
+                  set_directory_value_posting_filter bigint)
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_debug_main_probe(index_oid regclass,
+                                                          key graphid)
+    RETURNS TABLE(found boolean, main_pages_visited bigint,
+                  main_window_offsets bigint, main_page_offsets bigint,
+                  main_block_items bigint,
+                  main_compact_block_items bigint,
+                  main_full_block_items bigint,
+                  main_entries_cached bigint,
+                  main_label_groups bigint)
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_debug_delta_probe(index_oid regclass,
+                                                           key graphid)
+    RETURNS TABLE(delta_pages_visited bigint,
+                  delta_pages_skipped bigint,
+                  delta_entries_scanned bigint)
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_debug_delta_maintenance(index_oid regclass)
+    RETURNS TABLE(action text, reason text,
+                  delta_postings bigint, delta_pages bigint,
+                  delta_tuples_per_page bigint,
+                  delta_reindex_threshold bigint,
+                  delta_reindex_recommended boolean)
+    LANGUAGE c
+    STABLE
+    STRICT
+AS 'MODULE_PATHNAME';
+
+CREATE FUNCTION ag_catalog.age_adjacency_reindex_if_needed(index_oid regclass)
+    RETURNS TABLE(reindexed boolean, action text, reason text,
+                  before_delta_postings bigint,
+                  after_delta_postings bigint,
+                  after_postings bigint)
+    LANGUAGE c
+    VOLATILE
     STRICT
 AS 'MODULE_PATHNAME';
 

@@ -24,10 +24,12 @@
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class_d.h"
+#include "catalog/pg_type_d.h"
 #include "commands/defrem.h"
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
 #include "catalog/pg_trigger.h"
+#include "executor/spi.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -89,9 +91,13 @@ static void create_index_on_column(char *schema_name,
                                    char *rel_name,
                                    char *colname,
                                    bool unique);
-static void create_index_on_property(char *schema_name, char *rel_name,
-                                     char *property_name,
-                                     char *property_type);
+static char *create_index_on_property(char *schema_name, char *rel_name,
+                                      char *property_name,
+                                      char *property_type,
+                                      char *index_name);
+static char *create_index_on_adjacency(char *schema_name, char *rel_name,
+                                       bool outgoing, char *index_name);
+static IndexElem *make_graphid_index_elem(char *colname, char *opclass_name);
 static Node *build_property_index_expr(char *property_name);
 static Node *build_typed_property_index_expr(char *property_name,
                                              char *property_type);
@@ -102,6 +108,19 @@ static Node *build_property_key_const(char *property_name);
 static List *build_property_path_index_args(char *property_name);
 static char *make_property_index_name(char *rel_name, char *property_name,
                                       char *property_type);
+static char *make_adjacency_index_name(char *rel_name, bool outgoing);
+static label_cache_data *lookup_label_for_index_helper(char *graph_name,
+                                                       char *label_name,
+                                                       char required_kind);
+static void record_graph_index_metadata(char *graph_name,
+                                        label_cache_data *label_cache,
+                                        char *index_name,
+                                        char *index_kind,
+                                        char *direction,
+                                        char *property_name,
+                                        char *provider,
+                                        char *property_type);
+static void delete_graph_index_metadata(char *graph_name, char *index_name);
 static Oid create_label_with_graph_cache(char *graph_name, char *label_name,
                                          char label_type, List *parents,
                                          graph_cache_data *cache_data);
@@ -328,6 +347,13 @@ Datum create_elabel(PG_FUNCTION_ARGS)
 }
 
 PG_FUNCTION_INFO_V1(create_property_index);
+PG_FUNCTION_INFO_V1(create_property_source_index);
+PG_FUNCTION_INFO_V1(create_property_source_index_named);
+PG_FUNCTION_INFO_V1(create_adjacency_index);
+PG_FUNCTION_INFO_V1(create_adjacency_index_named);
+PG_FUNCTION_INFO_V1(create_adjacency_indexes);
+PG_FUNCTION_INFO_V1(create_adjacency_indexes_named);
+PG_FUNCTION_INFO_V1(drop_graph_index);
 
 Datum create_property_index(PG_FUNCTION_ARGS)
 {
@@ -336,7 +362,8 @@ Datum create_property_index(PG_FUNCTION_ARGS)
     char *property_name;
     char *property_type = NULL;
     graph_cache_data *graph_cache;
-    char *rel_name;
+    label_cache_data *label_cache;
+    char *index_name;
 
     if (PG_ARGISNULL(0))
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -376,16 +403,255 @@ Datum create_property_index(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_UNDEFINED_SCHEMA),
                  errmsg("graph \"%s\" does not exist.", graph_name)));
 
-    rel_name = get_label_relation_name(label_name, graph_cache->oid);
-    if (rel_name == NULL)
+    label_cache = search_label_name_graph_cache_cached(label_name,
+                                                       graph_cache->oid);
+    if (label_cache == NULL)
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_SCHEMA),
                  errmsg("label \"%s\" does not exist", label_name)));
 
-    create_index_on_property(graph_name, rel_name, property_name,
-                             property_type);
+    index_name = create_index_on_property(
+        graph_name, (char *)get_label_cache_relation_name(label_cache),
+        property_name, property_type, NULL);
+    record_graph_index_metadata(graph_name, label_cache, index_name,
+                                "PROPERTY", NULL, property_name, "btree",
+                                property_type);
 
     PG_RETURN_VOID();
+}
+
+Datum create_property_source_index(PG_FUNCTION_ARGS)
+{
+    return create_property_index(fcinfo);
+}
+
+Datum create_property_source_index_named(PG_FUNCTION_ARGS)
+{
+    char *graph_name;
+    char *label_name;
+    char *property_name;
+    char *index_name;
+    char *property_type = NULL;
+    label_cache_data *label_cache;
+    char *created_index_name;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
+        PG_ARGISNULL(3))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph, label, property, and index name are required")));
+
+    graph_name = PG_GETARG_CSTRING(0);
+    label_name = PG_GETARG_CSTRING(1);
+    property_name = PG_GETARG_CSTRING(2);
+    index_name = PG_GETARG_CSTRING(3);
+    if (PG_NARGS() > 4 && !PG_ARGISNULL(4))
+        property_type = PG_GETARG_CSTRING(4);
+
+    if (index_name[0] == '\0')
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("index name must not be empty")));
+
+    label_cache = lookup_label_for_index_helper(graph_name, label_name, '\0');
+    created_index_name = create_index_on_property(
+        graph_name, (char *)get_label_cache_relation_name(label_cache),
+        property_name, property_type, index_name);
+    record_graph_index_metadata(graph_name, label_cache, created_index_name,
+                                "PROPERTY", NULL, property_name, "btree",
+                                property_type);
+
+    PG_RETURN_TEXT_P(cstring_to_text(created_index_name));
+}
+
+Datum create_adjacency_index(PG_FUNCTION_ARGS)
+{
+    char *graph_name;
+    char *label_name;
+    char *direction;
+    label_cache_data *label_cache;
+    bool outgoing;
+    char *index_name;
+
+    if (PG_ARGISNULL(0))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph name must not be NULL")));
+    if (PG_ARGISNULL(1))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("label name must not be NULL")));
+    if (PG_ARGISNULL(2))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("direction must not be NULL")));
+
+    graph_name = PG_GETARG_CSTRING(0);
+    label_name = PG_GETARG_CSTRING(1);
+    direction = PG_GETARG_CSTRING(2);
+
+    if (pg_strcasecmp(direction, "out") == 0 ||
+        pg_strcasecmp(direction, "outgoing") == 0)
+        outgoing = true;
+    else if (pg_strcasecmp(direction, "in") == 0 ||
+             pg_strcasecmp(direction, "incoming") == 0)
+        outgoing = false;
+    else
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("direction must be 'out' or 'in'")));
+
+    label_cache = lookup_label_for_index_helper(graph_name, label_name,
+                                                LABEL_TYPE_EDGE);
+    index_name = create_index_on_adjacency(
+        graph_name, (char *)get_label_cache_relation_name(label_cache),
+        outgoing, NULL);
+    record_graph_index_metadata(graph_name, label_cache, index_name,
+                                "ADJACENCY", outgoing ? "out" : "in",
+                                NULL, "age_adjacency", NULL);
+
+    PG_RETURN_VOID();
+}
+
+Datum create_adjacency_index_named(PG_FUNCTION_ARGS)
+{
+    char *graph_name;
+    char *label_name;
+    char *direction;
+    char *index_name;
+    label_cache_data *label_cache;
+    bool outgoing;
+    char *created_index_name;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) ||
+        PG_ARGISNULL(3))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph, label, direction, and index name are required")));
+
+    graph_name = PG_GETARG_CSTRING(0);
+    label_name = PG_GETARG_CSTRING(1);
+    direction = PG_GETARG_CSTRING(2);
+    index_name = PG_GETARG_CSTRING(3);
+
+    if (pg_strcasecmp(direction, "out") == 0 ||
+        pg_strcasecmp(direction, "outgoing") == 0)
+        outgoing = true;
+    else if (pg_strcasecmp(direction, "in") == 0 ||
+             pg_strcasecmp(direction, "incoming") == 0)
+        outgoing = false;
+    else
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("direction must be 'out' or 'in'")));
+
+    label_cache = lookup_label_for_index_helper(graph_name, label_name,
+                                                LABEL_TYPE_EDGE);
+    created_index_name = create_index_on_adjacency(
+        graph_name, (char *)get_label_cache_relation_name(label_cache),
+        outgoing, index_name);
+    record_graph_index_metadata(graph_name, label_cache, created_index_name,
+                                "ADJACENCY", outgoing ? "out" : "in",
+                                NULL, "age_adjacency", NULL);
+
+    PG_RETURN_TEXT_P(cstring_to_text(created_index_name));
+}
+
+Datum create_adjacency_indexes(PG_FUNCTION_ARGS)
+{
+    char *graph_name;
+    char *label_name;
+    label_cache_data *label_cache;
+    char *index_name;
+
+    if (PG_ARGISNULL(0))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph name must not be NULL")));
+    if (PG_ARGISNULL(1))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("label name must not be NULL")));
+
+    graph_name = PG_GETARG_CSTRING(0);
+    label_name = PG_GETARG_CSTRING(1);
+    label_cache = lookup_label_for_index_helper(graph_name, label_name,
+                                                LABEL_TYPE_EDGE);
+    index_name = create_index_on_adjacency(
+        graph_name, (char *)get_label_cache_relation_name(label_cache),
+        true, NULL);
+    record_graph_index_metadata(graph_name, label_cache, index_name,
+                                "ADJACENCY", "out", NULL,
+                                "age_adjacency", NULL);
+    index_name = create_index_on_adjacency(
+        graph_name, (char *)get_label_cache_relation_name(label_cache),
+        false, NULL);
+    record_graph_index_metadata(graph_name, label_cache, index_name,
+                                "ADJACENCY", "in", NULL,
+                                "age_adjacency", NULL);
+
+    PG_RETURN_VOID();
+}
+
+Datum create_adjacency_indexes_named(PG_FUNCTION_ARGS)
+{
+    char *graph_name;
+    char *label_name;
+    char *index_name;
+    label_cache_data *label_cache;
+    char *created_index_name;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph, label, and index name are required")));
+
+    graph_name = PG_GETARG_CSTRING(0);
+    label_name = PG_GETARG_CSTRING(1);
+    index_name = PG_GETARG_CSTRING(2);
+    label_cache = lookup_label_for_index_helper(graph_name, label_name,
+                                                LABEL_TYPE_EDGE);
+    created_index_name = create_index_on_adjacency(
+        graph_name, (char *)get_label_cache_relation_name(label_cache),
+        true, psprintf("%s_out", index_name));
+    record_graph_index_metadata(graph_name, label_cache, created_index_name,
+                                "ADJACENCY", "out", NULL,
+                                "age_adjacency", NULL);
+    created_index_name = create_index_on_adjacency(
+        graph_name, (char *)get_label_cache_relation_name(label_cache),
+        false, psprintf("%s_in", index_name));
+    record_graph_index_metadata(graph_name, label_cache, created_index_name,
+                                "ADJACENCY", "in", NULL,
+                                "age_adjacency", NULL);
+
+    PG_RETURN_TEXT_P(cstring_to_text(index_name));
+}
+
+Datum drop_graph_index(PG_FUNCTION_ARGS)
+{
+    char *graph_name;
+    char *index_name;
+    Oid schema_oid;
+    Oid index_oid;
+    char *drop_sql;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph and index name are required")));
+
+    graph_name = PG_GETARG_CSTRING(0);
+    index_name = PG_GETARG_CSTRING(1);
+    if (index_name[0] == '\0')
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("index name must not be empty")));
+
+    schema_oid = get_namespace_oid(graph_name, false);
+    index_oid = get_relname_relid(index_name, schema_oid);
+    if (OidIsValid(index_oid))
+    {
+        drop_sql = psprintf("DROP INDEX %s.%s",
+                            quote_identifier(graph_name),
+                            quote_identifier(index_name));
+        if (SPI_connect() != SPI_OK_CONNECT)
+            elog(ERROR, "SPI_connect failed");
+        if (SPI_execute(drop_sql, false, 0) != SPI_OK_UTILITY)
+            elog(ERROR, "failed to drop graph index \"%s\"", index_name);
+        if (SPI_finish() != SPI_OK_FINISH)
+            elog(ERROR, "SPI_finish failed");
+    }
+
+    delete_graph_index_metadata(graph_name, index_name);
+
+    PG_RETURN_TEXT_P(cstring_to_text(index_name));
 }
 
 /*
@@ -678,9 +944,10 @@ static void create_index_on_column(char *schema_name,
                    NULL);
 }
 
-static void create_index_on_property(char *schema_name, char *rel_name,
-                                     char *property_name,
-                                     char *property_type)
+static char *create_index_on_property(char *schema_name, char *rel_name,
+                                      char *property_name,
+                                      char *property_type,
+                                      char *index_name)
 {
     IndexStmt *index_stmt;
     IndexElem *index_expr;
@@ -699,8 +966,10 @@ static void create_index_on_property(char *schema_name, char *rel_name,
     index_expr->ordering = SORTBY_DEFAULT;
     index_expr->nulls_ordering = SORTBY_NULLS_DEFAULT;
 
-    index_stmt->idxname = make_property_index_name(rel_name, property_name,
-                                                   property_type);
+    if (index_name == NULL)
+        index_name = make_property_index_name(rel_name, property_name,
+                                              property_type);
+    index_stmt->idxname = index_name;
     index_stmt->relation = makeRangeVar(schema_name, rel_name, -1);
     index_stmt->accessMethod = "btree";
     index_stmt->tableSpace = NULL;
@@ -732,6 +1001,83 @@ static void create_index_on_property(char *schema_name, char *rel_name,
                    false, PROCESS_UTILITY_SUBCOMMAND, NULL, NULL,
                    None_Receiver, NULL);
     CommandCounterIncrement();
+
+    return index_name;
+}
+
+static char *create_index_on_adjacency(char *schema_name, char *rel_name,
+                                       bool outgoing, char *index_name)
+{
+    IndexStmt *index_stmt;
+    IndexElem *endpoint_col;
+    IndexElem *id_col;
+    IndexElem *next_col;
+    PlannedStmt *index_wrapper;
+
+    endpoint_col = make_graphid_index_elem(
+        outgoing ? AG_EDGE_COLNAME_START_ID : AG_EDGE_COLNAME_END_ID,
+        "graphid_age_adjacency_ops");
+    id_col = make_graphid_index_elem(AG_EDGE_COLNAME_ID,
+                                     "graphid_age_adjacency_ops");
+    next_col = make_graphid_index_elem(
+        outgoing ? AG_EDGE_COLNAME_END_ID : AG_EDGE_COLNAME_START_ID,
+        "graphid_age_adjacency_ops");
+
+    index_stmt = makeNode(IndexStmt);
+    if (index_name == NULL)
+        index_name = make_adjacency_index_name(rel_name, outgoing);
+    index_stmt->idxname = index_name;
+    index_stmt->relation = makeRangeVar(schema_name, rel_name, -1);
+    index_stmt->accessMethod = "age_adjacency";
+    index_stmt->tableSpace = NULL;
+    index_stmt->indexParams = list_make3(endpoint_col, id_col, next_col);
+    index_stmt->options = NIL;
+    index_stmt->whereClause = NULL;
+    index_stmt->excludeOpNames = NIL;
+    index_stmt->idxcomment = NULL;
+    index_stmt->indexOid = InvalidOid;
+    index_stmt->unique = false;
+    index_stmt->nulls_not_distinct = false;
+    index_stmt->primary = false;
+    index_stmt->isconstraint = false;
+    index_stmt->deferrable = false;
+    index_stmt->initdeferred = false;
+    index_stmt->transformed = false;
+    index_stmt->concurrent = false;
+    index_stmt->if_not_exists = true;
+    index_stmt->reset_default_tblspc = false;
+
+    index_wrapper = makeNode(PlannedStmt);
+    index_wrapper->commandType = CMD_UTILITY;
+    index_wrapper->canSetTag = false;
+    index_wrapper->utilityStmt = (Node *)index_stmt;
+    index_wrapper->stmt_location = -1;
+    index_wrapper->stmt_len = 0;
+
+    ProcessUtility(index_wrapper, "(generated CREATE ADJACENCY INDEX command)",
+                   false, PROCESS_UTILITY_SUBCOMMAND, NULL, NULL,
+                   None_Receiver, NULL);
+    CommandCounterIncrement();
+
+    return index_name;
+}
+
+static IndexElem *make_graphid_index_elem(char *colname, char *opclass_name)
+{
+    IndexElem *index_col;
+
+    index_col = makeNode(IndexElem);
+    index_col->name = colname;
+    index_col->expr = NULL;
+    index_col->indexcolname = NULL;
+    index_col->collation = NIL;
+    index_col->opclass = opclass_name != NULL ?
+        list_make1(makeString(opclass_name)) : NIL;
+    index_col->opclassopts = NIL;
+    index_col->ordering = SORTBY_DEFAULT;
+    index_col->nulls_ordering = SORTBY_NULLS_DEFAULT;
+
+    return index_col;
 }
 
 static Node *build_property_index_expr(char *property_name)
@@ -951,6 +1297,181 @@ static char *make_property_index_name(char *rel_name, char *property_name,
     }
 
     return raw_name;
+}
+
+static char *make_adjacency_index_name(char *rel_name, bool outgoing)
+{
+    char *raw_name;
+    int i;
+
+    raw_name = psprintf("%s_%s_adjacency_idx", rel_name,
+                        outgoing ? "out" : "in");
+
+    for (i = 0; raw_name[i] != '\0'; i++)
+    {
+        if (!isalnum((unsigned char)raw_name[i]) && raw_name[i] != '_')
+            raw_name[i] = '_';
+    }
+
+    return raw_name;
+}
+
+static label_cache_data *lookup_label_for_index_helper(char *graph_name,
+                                                       char *label_name,
+                                                       char required_kind)
+{
+    graph_cache_data *graph_cache;
+    label_cache_data *label_cache;
+
+    if (is_valid_graph_name(graph_name) == 0)
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("graph name is invalid")));
+    if (is_valid_label_name(label_name, 0) == 0)
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("label name is invalid")));
+
+    graph_cache = search_graph_name_cache_cached(graph_name);
+    if (graph_cache == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_SCHEMA),
+                 errmsg("graph \"%s\" does not exist.", graph_name)));
+
+    label_cache = search_label_name_graph_cache_cached(label_name,
+                                                       graph_cache->oid);
+    if (label_cache == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_SCHEMA),
+                 errmsg("label \"%s\" does not exist", label_name)));
+
+    if (required_kind != '\0' && label_cache->kind != required_kind)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("label \"%s\" is not an edge label", label_name)));
+
+    return label_cache;
+}
+
+static void record_graph_index_metadata(char *graph_name,
+                                        label_cache_data *label_cache,
+                                        char *index_name,
+                                        char *index_kind,
+                                        char *direction,
+                                        char *property_name,
+                                        char *provider,
+                                        char *property_type)
+{
+    Oid schema_oid;
+    Oid index_oid;
+    Oid argtypes[11] = {
+        OIDOID, TEXTOID, TEXTOID, CHAROID, TEXTOID,
+        OIDOID, TEXTOID, TEXTOID, TEXTOID, TEXTOID,
+        TEXTOID
+    };
+    Datum values[11];
+    char nulls[11] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', 'n', 'n', ' ', 'n'};
+    int ret;
+
+    schema_oid = get_namespace_oid(graph_name, false);
+    index_oid = get_relname_relid(index_name, schema_oid);
+    if (!OidIsValid(index_oid))
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_OBJECT),
+                 errmsg("index \"%s\" was not created", index_name)));
+
+    values[0] = ObjectIdGetDatum(label_cache->graph);
+    values[1] = CStringGetTextDatum(graph_name);
+    values[2] = CStringGetTextDatum(NameStr(label_cache->name));
+    values[3] = CharGetDatum(label_cache->kind);
+    values[4] = CStringGetTextDatum(index_name);
+    values[5] = ObjectIdGetDatum(index_oid);
+    values[6] = CStringGetTextDatum(index_kind);
+    if (direction != NULL)
+    {
+        values[7] = CStringGetTextDatum(direction);
+        nulls[7] = ' ';
+    }
+    else
+        values[7] = (Datum)0;
+    if (property_name != NULL)
+    {
+        values[8] = CStringGetTextDatum(property_name);
+        nulls[8] = ' ';
+    }
+    else
+        values[8] = (Datum)0;
+    values[9] = CStringGetTextDatum(provider);
+    if (property_type != NULL)
+    {
+        values[10] = CStringGetTextDatum(property_type);
+        nulls[10] = ' ';
+    }
+    else
+        values[10] = (Datum)0;
+
+    if (SPI_connect() != SPI_OK_CONNECT)
+        elog(ERROR, "SPI_connect failed");
+
+    ret = SPI_execute_with_args(
+        "INSERT INTO ag_catalog.ag_graph_index "
+        "(graph_oid, graph_name, label_name, label_kind, index_name, "
+        " index_oid, index_kind, direction, property_names, provider, options) "
+        "VALUES ($1, $2::text::name, $3::text::name, $4, $5::text::name, "
+        " $6, $7, $8, "
+        " CASE WHEN $9 IS NULL THEN ARRAY[]::name[] "
+        "      ELSE ARRAY[$9::text::name] END, "
+        " $10, "
+        " jsonb_strip_nulls(jsonb_build_object("
+        "     'direction', $8, "
+        "     'property_type', "
+        "     CASE WHEN $9 IS NULL THEN NULL "
+        "          ELSE COALESCE($11::text, 'agtype') END)) "
+        ") "
+        "ON CONFLICT (graph_oid, index_name) DO UPDATE SET "
+        " index_oid = EXCLUDED.index_oid, "
+        " index_kind = EXCLUDED.index_kind, "
+        " direction = EXCLUDED.direction, "
+        " property_names = EXCLUDED.property_names, "
+        " provider = EXCLUDED.provider, "
+        " options = EXCLUDED.options",
+        11, argtypes, values, nulls, false, 0);
+
+    if (ret != SPI_OK_INSERT)
+        elog(ERROR, "failed to record graph index metadata");
+
+    if (SPI_finish() != SPI_OK_FINISH)
+        elog(ERROR, "SPI_finish failed");
+}
+
+static void delete_graph_index_metadata(char *graph_name, char *index_name)
+{
+    Oid graph_oid;
+    Oid argtypes[2] = {OIDOID, TEXTOID};
+    Datum values[2];
+    char nulls[2] = {' ', ' '};
+    int ret;
+
+    graph_oid = get_graph_oid(graph_name);
+    if (!OidIsValid(graph_oid))
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_SCHEMA),
+                 errmsg("graph \"%s\" does not exist.", graph_name)));
+
+    values[0] = ObjectIdGetDatum(graph_oid);
+    values[1] = CStringGetTextDatum(index_name);
+
+    if (SPI_connect() != SPI_OK_CONNECT)
+        elog(ERROR, "SPI_connect failed");
+
+    ret = SPI_execute_with_args(
+        "DELETE FROM ag_catalog.ag_graph_index "
+        "WHERE graph_oid = $1 AND index_name = $2::text::name",
+        2, argtypes, values, nulls, false, 0);
+
+    if (ret != SPI_OK_DELETE)
+        elog(ERROR, "failed to delete graph index metadata");
+
+    if (SPI_finish() != SPI_OK_FINISH)
+        elog(ERROR, "SPI_finish failed");
 }
 
 /* 

@@ -48,6 +48,8 @@ void age_vle_acceptance_init(VLETraversalAcceptance *acceptance,
     acceptance->upper_unbounded = upper_unbounded;
     acceptance->require_terminal = false;
     acceptance->terminal_id = 0;
+    acceptance->require_terminal_label = false;
+    acceptance->terminal_label_id = -1;
 }
 
 void age_vle_acceptance_require_terminal(
@@ -57,6 +59,15 @@ void age_vle_acceptance_require_terminal(
 
     acceptance->require_terminal = true;
     acceptance->terminal_id = terminal_id;
+}
+
+void age_vle_acceptance_require_terminal_label(
+    VLETraversalAcceptance *acceptance, int32 terminal_label_id)
+{
+    Assert(acceptance != NULL);
+
+    acceptance->require_terminal_label = true;
+    acceptance->terminal_label_id = terminal_label_id;
 }
 
 static bool age_vle_path_length_in_acceptance_range(
@@ -76,6 +87,11 @@ bool age_vle_accepts_path(const VLETraversalAcceptance *acceptance,
 
     if (acceptance->require_terminal &&
         terminal_id != acceptance->terminal_id)
+    {
+        return false;
+    }
+    if (acceptance->require_terminal_label &&
+        get_graphid_label_id(terminal_id) != acceptance->terminal_label_id)
     {
         return false;
     }

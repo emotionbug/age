@@ -181,7 +181,7 @@ static void init_vle_traversal_load_policy(
         !policy->load_edge_property_metadata &&
         OidIsValid(setup->graph_load.edge_label_oid) &&
         (shape->initial_start_valid || shape->initial_end_valid) &&
-        input->nargs == 8)
+        (input->nargs == 8 || input->terminal_label_known))
     {
         policy->load_vertex_metadata = false;
     }
@@ -201,6 +201,27 @@ static void init_vle_traversal_load_policy(
             (shape->direction == CYPHER_REL_DIR_LEFT && has_in_source) ||
             (shape->direction == CYPHER_REL_DIR_NONE &&
              has_out_source && has_in_source))
+        {
+            policy->load_edge_metadata = false;
+        }
+    }
+    else if (!policy->load_edge_property_metadata &&
+             !OidIsValid(setup->graph_load.edge_label_oid) &&
+             (shape->initial_start_valid || shape->initial_end_valid) &&
+             input->nargs == 8 &&
+             !shape->upper_infinite &&
+             shape->upper <= 1)
+    {
+        bool require_outgoing =
+            shape->direction == CYPHER_REL_DIR_RIGHT ||
+            shape->direction == CYPHER_REL_DIR_NONE;
+        bool require_incoming =
+            shape->direction == CYPHER_REL_DIR_LEFT ||
+            shape->direction == CYPHER_REL_DIR_NONE;
+
+        if (graph_edge_labels_have_age_adjacency_indexes(
+                setup->graph_load.graph_oid, require_outgoing,
+                require_incoming))
         {
             policy->load_edge_metadata = false;
         }

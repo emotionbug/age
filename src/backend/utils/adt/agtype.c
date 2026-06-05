@@ -52,6 +52,7 @@
 #include "utils/arrayaccess.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
+#include "utils/datum.h"
 #include "executor/cypher_utils.h"
 #include "utils/float.h"
 #include "utils/hsearch.h"
@@ -121,13 +122,17 @@ typedef struct age_array_agg_slots_state
     int nslots;
     int nkeys;
     agtype_value *keys;
+    Oid *value_types;
+    int *source_groups;
+    int source_group_count;
+    bool source_groups_initialized;
     int nelems;
     int capacity;
     Datum *values;
     bool *nulls;
 } age_array_agg_slots_state;
 
-#define AGE_ARRAY_AGG_SLOTS_SERIAL_VERSION 1
+#define AGE_ARRAY_AGG_SLOTS_SERIAL_VERSION 4
 
 static int agtype_sortsupport_cmp(Datum x, Datum y, SortSupport ssup);
 static bool agtype_scalar_integer_value(agtype *agt, int64 *int_value);
@@ -15120,7 +15125,7 @@ static bool agtype_datum_is_null_value(Datum value)
 }
 
 static age_array_agg_slots_state *init_array_agg_slots_state(
-    MemoryContext aggcontext, bool is_map, int nslots)
+    MemoryContext aggcontext, bool is_map, int nslots, int capacity)
 {
     age_array_agg_slots_state *state;
 
@@ -15129,7 +15134,7 @@ static age_array_agg_slots_state *init_array_agg_slots_state(
     state->is_map = is_map;
     state->nslots = nslots;
     state->nkeys = is_map ? nslots : 0;
-    state->capacity = 64;
+    state->capacity = Max(64, capacity);
     state->values = MemoryContextAllocZero(aggcontext,
                                            sizeof(Datum) * state->capacity *
                                            nslots);
@@ -15141,8 +15146,389 @@ static age_array_agg_slots_state *init_array_agg_slots_state(
         state->keys = MemoryContextAllocZero(aggcontext,
                                              sizeof(agtype_value) * nslots);
     }
+    state->value_types = MemoryContextAllocZero(aggcontext,
+                                                sizeof(Oid) * nslots);
+    state->source_groups = MemoryContextAllocZero(aggcontext,
+                                                  sizeof(int) * nslots);
 
     return state;
+}
+
+static age_array_agg_slots_state *init_array_agg_slots_state_default(
+    MemoryContext aggcontext, bool is_map, int nslots)
+{
+    return init_array_agg_slots_state(aggcontext, is_map, nslots, 64);
+}
+
+static Size array_agg_slots_null_bitmap_size(int total_slots)
+{
+    return ((Size)total_slots + 7) / 8;
+}
+
+static void set_array_agg_slots_null_bit(char *bitmap, int index)
+{
+    bitmap[index / 8] |= (1 << (index % 8));
+}
+
+static bool get_array_agg_slots_null_bit(const char *bitmap, int index)
+{
+    return (bitmap[index / 8] & (1 << (index % 8))) != 0;
+}
+
+static bool array_agg_slots_type_is_supported(Oid value_type)
+{
+    return value_type == AGTYPEOID ||
+        value_type == INT8OID ||
+        value_type == FLOAT8OID ||
+        value_type == NUMERICOID ||
+        value_type == TEXTOID;
+}
+
+static const char *array_agg_slots_value_type_name(Oid value_type)
+{
+    if (value_type == AGTYPEOID)
+        return "agtype";
+    if (value_type == INT8OID)
+        return "int8";
+    if (value_type == FLOAT8OID)
+        return "float8";
+    if (value_type == NUMERICOID)
+        return "numeric";
+    if (value_type == TEXTOID)
+        return "text";
+    if (!OidIsValid(value_type))
+        return "invalid";
+    return "unknown";
+}
+
+static void ereport_array_agg_slots_type_mismatch(const char *phase,
+                                                  int slot_index,
+                                                  Oid expected_type,
+                                                  Oid actual_type)
+{
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("age_array_agg_slots value type mismatch at slot %d",
+                    slot_index),
+             errdetail("phase=%s expected=%s(%u) actual=%s(%u)",
+                       phase,
+                       array_agg_slots_value_type_name(expected_type),
+                       expected_type,
+                       array_agg_slots_value_type_name(actual_type),
+                       actual_type)));
+}
+
+static int array_agg_slots_payload_materialization_weight(Oid value_type)
+{
+    if (value_type == AGTYPEOID)
+        return 2;
+
+    if (OidIsValid(value_type))
+        return 1;
+
+    return 0;
+}
+
+static int estimated_array_agg_slots_wire_width(Oid value_type)
+{
+    if (value_type == INT8OID || value_type == FLOAT8OID)
+        return sizeof(int32) + sizeof(int64);
+
+    if (value_type == NUMERICOID)
+        return sizeof(int32) + 8;
+
+    if (value_type == TEXTOID)
+        return sizeof(int32) + 16;
+
+    if (value_type == AGTYPEOID)
+        return sizeof(int32) + 24;
+
+    if (OidIsValid(value_type))
+        return sizeof(int32) + sizeof(Datum);
+
+    return 0;
+}
+
+static int array_agg_slots_estimated_wire_width(List *value_types)
+{
+    int estimated_wire_width = 0;
+    ListCell *lc;
+
+    foreach(lc, value_types)
+        estimated_wire_width +=
+            estimated_array_agg_slots_wire_width(lfirst_oid(lc));
+
+    return estimated_wire_width;
+}
+
+static int array_agg_slots_estimated_state_width_weight(int nslots,
+                                                        int wire_width)
+{
+    wire_width += (nslots + 7) / 8;
+
+    return Max(1, (wire_width + (int)sizeof(Datum) - 1) /
+               (int)sizeof(Datum));
+}
+
+static Size array_agg_slots_value_wire_size(Datum value, Oid value_type)
+{
+    if (value_type == INT8OID || value_type == FLOAT8OID)
+        return sizeof(int32) + sizeof(int64);
+
+    if (value_type == AGTYPEOID ||
+        value_type == NUMERICOID ||
+        value_type == TEXTOID)
+    {
+        struct varlena *varlena_value = (struct varlena *)DatumGetPointer(value);
+
+        return sizeof(int32) + VARSIZE_ANY(varlena_value);
+    }
+
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("unsupported age_array_agg_slots value type %u",
+                    value_type)));
+    return 0;
+}
+
+static Size array_agg_slots_value_bytes(age_array_agg_slots_state *state)
+{
+    Size value_bytes = 0;
+    int total_slots;
+    int i;
+
+    if (state == NULL)
+        return 0;
+
+    total_slots = state->nelems * state->nslots;
+    for (i = 0; i < total_slots; i++)
+    {
+        if (!state->nulls[i])
+            value_bytes += array_agg_slots_value_wire_size(
+                state->values[i], state->value_types[i % state->nslots]);
+    }
+
+    return value_bytes;
+}
+
+static Size array_agg_slots_key_bytes(age_array_agg_slots_state *state)
+{
+    Size key_bytes = 0;
+    int i;
+
+    if (state == NULL || !state->is_map)
+        return 0;
+
+    for (i = 0; i < state->nkeys; i++)
+        key_bytes += sizeof(int32) + state->keys[i].val.string.len;
+
+    return key_bytes;
+}
+
+static Size array_agg_slots_serialized_bytes(age_array_agg_slots_state *state,
+                                             Size null_bitmap_size,
+                                             Size value_bytes)
+{
+    Size bytes;
+
+    if (state == NULL)
+        return 0;
+
+    bytes = VARHDRSZ;
+    bytes += sizeof(uint8);
+    bytes += sizeof(uint8);
+    bytes += sizeof(int32);
+    bytes += sizeof(int32);
+    bytes += sizeof(int32) * state->nslots;
+    bytes += sizeof(int32);
+    bytes += sizeof(int32) * state->nslots;
+    bytes += sizeof(int32);
+    bytes += null_bitmap_size;
+    bytes += array_agg_slots_key_bytes(state);
+    bytes += value_bytes;
+
+    return bytes;
+}
+
+static void append_array_agg_slots_type_vector_summary(StringInfo buf,
+                                                       const char *shape,
+                                                       int nslots,
+                                                       int nelems,
+                                                       List *value_types,
+                                                       int source_group_count,
+                                                       Size serialized_bytes,
+                                                       Size null_bitmap_bytes,
+                                                       Size value_bytes)
+{
+    int typed_count = 0;
+    int agtype_count = 0;
+    int payload_weight = 0;
+    int final_weight = 0;
+    int estimated_wire_width;
+    int estimated_state_width_weight;
+    int index = 0;
+    ListCell *lc;
+
+    foreach(lc, value_types)
+    {
+        Oid value_type = lfirst_oid(lc);
+
+        if (value_type == AGTYPEOID)
+            agtype_count++;
+        else if (OidIsValid(value_type))
+            typed_count++;
+        payload_weight +=
+            array_agg_slots_payload_materialization_weight(value_type);
+        final_weight +=
+            array_agg_slots_payload_materialization_weight(value_type);
+    }
+    estimated_wire_width =
+        array_agg_slots_estimated_wire_width(value_types);
+    estimated_state_width_weight =
+        array_agg_slots_estimated_state_width_weight(nslots,
+                                                     estimated_wire_width);
+
+    appendStringInfo(buf,
+                     "shape=%s slots=%d rows=%d typed=%d agtype=%d "
+                     "source-groups=%d reused-slots=%d "
+                     "payload-weight=%d final-weight=%d "
+                     "materialization-weight=%d serialized-bytes=%zu "
+                     "null-bitmap-bytes=%zu value-bytes=%zu "
+                     "estimated-wire-width=%d "
+                     "estimated-state-width-weight=%d types=",
+                     shape, nslots, nelems, typed_count, agtype_count,
+                     source_group_count, nslots - source_group_count,
+                     payload_weight, final_weight,
+                     payload_weight + final_weight,
+                     serialized_bytes, null_bitmap_bytes, value_bytes,
+                     estimated_wire_width, estimated_state_width_weight);
+
+    foreach(lc, value_types)
+    {
+        if (index > 0)
+            appendStringInfoChar(buf, ',');
+        appendStringInfoString(buf,
+                               array_agg_slots_value_type_name(
+                                   lfirst_oid(lc)));
+        index++;
+    }
+}
+
+static Datum copy_array_agg_slots_value(MemoryContext aggcontext, Datum value,
+                                        Oid value_type)
+{
+    Datum copy;
+    MemoryContext old_context;
+    int16 typlen;
+    bool typbyval;
+    char typalign;
+
+    if (!array_agg_slots_type_is_supported(value_type))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("unsupported age_array_agg_slots value type %u",
+                        value_type)));
+
+    get_typlenbyvalalign(value_type, &typlen, &typbyval, &typalign);
+    old_context = MemoryContextSwitchTo(aggcontext);
+    if (value_type == AGTYPEOID ||
+        value_type == NUMERICOID ||
+        value_type == TEXTOID)
+    {
+        copy = PointerGetDatum(PG_DETOAST_DATUM_COPY(value));
+    }
+    else
+    {
+        copy = datumCopy(value, typbyval, typlen);
+    }
+    MemoryContextSwitchTo(old_context);
+
+    return copy;
+}
+
+static void send_array_agg_slots_value(StringInfo buf, Datum value,
+                                       Oid value_type)
+{
+    if (value_type == INT8OID)
+    {
+        pq_sendint32(buf, sizeof(int64));
+        pq_sendint64(buf, (uint64)DatumGetInt64(value));
+        return;
+    }
+
+    if (value_type == FLOAT8OID)
+    {
+        pq_sendint32(buf, sizeof(float8));
+        pq_sendfloat8(buf, DatumGetFloat8(value));
+        return;
+    }
+
+    if (value_type == AGTYPEOID ||
+        value_type == NUMERICOID ||
+        value_type == TEXTOID)
+    {
+        struct varlena *varlena_value = (struct varlena *)DatumGetPointer(value);
+        int value_len = VARSIZE_ANY(varlena_value);
+
+        pq_sendint32(buf, value_len);
+        pq_sendbytes(buf, (char *)varlena_value, value_len);
+        return;
+    }
+
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("unsupported age_array_agg_slots value type %u",
+                    value_type)));
+}
+
+static Datum receive_array_agg_slots_value(StringInfo buf,
+                                           MemoryContext aggcontext,
+                                           Oid value_type)
+{
+    int value_len;
+
+    value_len = pq_getmsgint(buf, 4);
+    if (value_type == INT8OID)
+    {
+        if (value_len != (int)sizeof(int64))
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("invalid age_array_agg_slots int8 value length")));
+        return Int64GetDatum((int64)pq_getmsgint64(buf));
+    }
+
+    if (value_type == FLOAT8OID)
+    {
+        if (value_len != (int)sizeof(float8))
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("invalid age_array_agg_slots float8 value length")));
+        return Float8GetDatum(pq_getmsgfloat8(buf));
+    }
+
+    if (value_type == AGTYPEOID ||
+        value_type == NUMERICOID ||
+        value_type == TEXTOID)
+    {
+        const char *value_data;
+        struct varlena *value;
+
+        if (value_len < (int)VARHDRSZ)
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("invalid age_array_agg_slots value length")));
+
+        value_data = pq_getmsgbytes(buf, value_len);
+        value = MemoryContextAlloc(aggcontext, value_len);
+        memcpy(value, value_data, value_len);
+        return PointerGetDatum(value);
+    }
+
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("unsupported age_array_agg_slots value type %u",
+                    value_type)));
+    return (Datum)0;
 }
 
 static void ensure_array_agg_slots_capacity(age_array_agg_slots_state *state,
@@ -15192,6 +15578,171 @@ static void copy_array_agg_slots_keys(age_array_agg_slots_state *dst,
     }
 }
 
+static void copy_array_agg_slots_value_types(age_array_agg_slots_state *dst,
+                                             age_array_agg_slots_state *src)
+{
+    int i;
+
+    for (i = 0; i < src->nslots; i++)
+        dst->value_types[i] = src->value_types[i];
+}
+
+static void init_array_agg_slots_identity_source_groups(
+    age_array_agg_slots_state *state)
+{
+    int i;
+
+    if (state->source_groups_initialized)
+        return;
+
+    for (i = 0; i < state->nslots; i++)
+        state->source_groups[i] = i;
+    state->source_group_count = state->nslots;
+    state->source_groups_initialized = true;
+}
+
+static Node *array_agg_slots_aggref_arg(Aggref *aggref, int arg_index)
+{
+    TargetEntry *tle;
+
+    if (aggref == NULL || arg_index < 0 ||
+        arg_index >= list_length(aggref->args))
+    {
+        return NULL;
+    }
+
+    tle = list_nth_node(TargetEntry, aggref->args, arg_index);
+    return (Node *)tle->expr;
+}
+
+static void init_array_agg_slots_source_groups_from_aggref(
+    age_array_agg_slots_state *state, FunctionCallInfo fcinfo,
+    int first_value_arg_index, int value_arg_step)
+{
+    Aggref *aggref;
+    int group_count = 0;
+    int slot_index;
+
+    if (state->source_groups_initialized)
+        return;
+
+    init_array_agg_slots_identity_source_groups(state);
+
+    aggref = AggGetAggref(fcinfo);
+    if (aggref == NULL)
+        return;
+
+    for (slot_index = 0; slot_index < state->nslots; slot_index++)
+    {
+        int arg_index = first_value_arg_index + slot_index * value_arg_step;
+        Node *arg = array_agg_slots_aggref_arg(aggref, arg_index);
+        int prior_index;
+        bool reused = false;
+
+        for (prior_index = 0; prior_index < slot_index; prior_index++)
+        {
+            int prior_arg_index = first_value_arg_index +
+                prior_index * value_arg_step;
+            Node *prior_arg = array_agg_slots_aggref_arg(aggref,
+                                                         prior_arg_index);
+
+            if (arg != NULL && prior_arg != NULL && equal(arg, prior_arg))
+            {
+                state->source_groups[slot_index] =
+                    state->source_groups[prior_index];
+                reused = true;
+                break;
+            }
+        }
+
+        if (!reused)
+            state->source_groups[slot_index] = group_count++;
+    }
+
+    state->source_group_count = group_count;
+}
+
+static void copy_array_agg_slots_source_groups(
+    age_array_agg_slots_state *dst, age_array_agg_slots_state *src)
+{
+    int i;
+
+    init_array_agg_slots_identity_source_groups(src);
+    for (i = 0; i < src->nslots; i++)
+        dst->source_groups[i] = src->source_groups[i];
+    dst->source_group_count = src->source_group_count;
+    dst->source_groups_initialized = true;
+}
+
+static void set_array_agg_slots_value_type(age_array_agg_slots_state *state,
+                                           int slot_index, Oid value_type)
+{
+    Oid old_type;
+
+    old_type = state->value_types[slot_index];
+    if (!OidIsValid(old_type))
+    {
+        state->value_types[slot_index] = value_type;
+        return;
+    }
+
+    if (old_type != value_type)
+        ereport_array_agg_slots_type_mismatch("transition", slot_index,
+                                              old_type, value_type);
+}
+
+static void validate_array_agg_slots_value_types(
+    age_array_agg_slots_state *left, age_array_agg_slots_state *right)
+{
+    int i;
+
+    for (i = 0; i < left->nslots; i++)
+    {
+        Oid left_type = left->value_types[i];
+        Oid right_type = right->value_types[i];
+
+        if (!OidIsValid(left_type))
+        {
+            left->value_types[i] = right_type;
+            continue;
+        }
+
+        if (!OidIsValid(right_type))
+            continue;
+
+        if (left_type != right_type)
+            ereport_array_agg_slots_type_mismatch("combine", i,
+                                                  left_type, right_type);
+    }
+}
+
+static void validate_array_agg_slots_source_groups(
+    age_array_agg_slots_state *left, age_array_agg_slots_state *right)
+{
+    int i;
+
+    init_array_agg_slots_identity_source_groups(left);
+    init_array_agg_slots_identity_source_groups(right);
+    if (left->source_group_count != right->source_group_count)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_array_agg_slots source group layout changed"),
+                 errdetail("phase=combine expected-groups=%d actual-groups=%d",
+                           left->source_group_count,
+                           right->source_group_count)));
+
+    for (i = 0; i < left->nslots; i++)
+    {
+        if (left->source_groups[i] != right->source_groups[i])
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("age_array_agg_slots source group layout changed"),
+                     errdetail("phase=combine slot=%d expected-group=%d actual-group=%d",
+                               i, left->source_groups[i],
+                               right->source_groups[i])));
+    }
+}
+
 static age_array_agg_slots_state *copy_array_agg_slots_state(
     MemoryContext aggcontext, age_array_agg_slots_state *src)
 {
@@ -15199,17 +15750,19 @@ static age_array_agg_slots_state *copy_array_agg_slots_state(
     int total_slots;
     int i;
 
-    dst = init_array_agg_slots_state(aggcontext, src->is_map, src->nslots);
-    ensure_array_agg_slots_capacity(dst, src->nelems);
+    dst = init_array_agg_slots_state(aggcontext, src->is_map, src->nslots,
+                                     src->nelems);
     copy_array_agg_slots_keys(dst, src);
+    copy_array_agg_slots_value_types(dst, src);
+    copy_array_agg_slots_source_groups(dst, src);
 
     total_slots = src->nelems * src->nslots;
     for (i = 0; i < total_slots; i++)
     {
         dst->nulls[i] = src->nulls[i];
         if (!src->nulls[i])
-            dst->values[i] =
-                PointerGetDatum(PG_DETOAST_DATUM_COPY(src->values[i]));
+            dst->values[i] = copy_array_agg_slots_value(
+                aggcontext, src->values[i], src->value_types[i % src->nslots]);
     }
     dst->nelems = src->nelems;
 
@@ -15229,6 +15782,8 @@ static void append_array_agg_slots_state(age_array_agg_slots_state *dst,
                  errmsg("cannot combine array aggregate slot states with different layouts")));
 
     copy_array_agg_slots_keys(dst, src);
+    validate_array_agg_slots_value_types(dst, src);
+    validate_array_agg_slots_source_groups(dst, src);
     ensure_array_agg_slots_capacity(dst, dst->nelems + src->nelems);
 
     dst_offset = dst->nelems * dst->nslots;
@@ -15237,8 +15792,9 @@ static void append_array_agg_slots_state(age_array_agg_slots_state *dst,
     {
         dst->nulls[dst_offset + i] = src->nulls[i];
         if (!src->nulls[i])
-            dst->values[dst_offset + i] =
-                PointerGetDatum(PG_DETOAST_DATUM_COPY(src->values[i]));
+            dst->values[dst_offset + i] = copy_array_agg_slots_value(
+                dst->aggcontext, src->values[i],
+                src->value_types[i % src->nslots]);
     }
 
     dst->nelems += src->nelems;
@@ -15262,13 +15818,13 @@ static void init_array_agg_map_slot_keys(age_array_agg_slots_state *state,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                      errmsg("age_array_agg_map_slots requires non-null keys")));
 
-        key_text = PG_GETARG_TEXT_PP(argno);
+        key_text = PG_GETARG_TEXT_P(argno);
         state->keys[key_index].type = AGTV_STRING;
-        state->keys[key_index].val.string.len = VARSIZE_ANY_EXHDR(key_text);
+        state->keys[key_index].val.string.len = VARSIZE(key_text) - VARHDRSZ;
         state->keys[key_index].val.string.val =
             MemoryContextAlloc(state->aggcontext,
                                state->keys[key_index].val.string.len);
-        memcpy(state->keys[key_index].val.string.val, VARDATA_ANY(key_text),
+        memcpy(state->keys[key_index].val.string.val, VARDATA(key_text),
                state->keys[key_index].val.string.len);
         PG_FREE_IF_COPY(key_text, argno);
         key_index++;
@@ -15276,16 +15832,17 @@ static void init_array_agg_map_slot_keys(age_array_agg_slots_state *state,
 }
 
 static void append_array_agg_slots_value(age_array_agg_slots_state *state,
-                                         int slot_index, bool is_null,
-                                         Datum value)
+                                         int slot_index, Oid value_type,
+                                         bool is_null, Datum value)
 {
     int index;
 
     index = state->nelems * state->nslots + slot_index;
+    set_array_agg_slots_value_type(state, slot_index, value_type);
     state->nulls[index] = is_null;
     if (!is_null)
-        state->values[index] =
-            PointerGetDatum(PG_DETOAST_DATUM_COPY(value));
+        state->values[index] = copy_array_agg_slots_value(state->aggcontext,
+                                                          value, value_type);
 }
 
 static agtype *build_array_agg_map_slots_element(
@@ -15303,15 +15860,16 @@ static agtype *build_array_agg_map_slots_element(
         int value_index = row * state->nslots + slot_index;
 
         if (state->nulls[value_index] ||
-            agtype_datum_is_null_value(state->values[value_index]))
+            (state->value_types[slot_index] == AGTYPEOID &&
+             agtype_datum_is_null_value(state->values[value_index])))
         {
             continue;
         }
 
         result.res = push_agtype_value(&result.parse_state, WAGT_KEY,
                                        &state->keys[slot_index]);
-        add_agtype(state->values[value_index], false, &result, AGTYPEOID,
-                   false);
+        add_agtype(state->values[value_index], false, &result,
+                   state->value_types[slot_index], false);
     }
 
     result.res = push_agtype_value(&result.parse_state, WAGT_END_OBJECT, NULL);
@@ -15334,7 +15892,7 @@ static agtype *build_array_agg_list_slots_element(
         int value_index = row * state->nslots + slot_index;
 
         add_agtype(state->values[value_index], state->nulls[value_index],
-                   &result, AGTYPEOID, false);
+                   &result, state->value_types[slot_index], false);
     }
 
     result.res = push_agtype_value(&result.parse_state, WAGT_END_ARRAY, NULL);
@@ -15365,7 +15923,7 @@ Datum age_array_agg_map_slots_transfn(PG_FUNCTION_ARGS)
 
     nslots = (PG_NARGS() - 1) / 2;
     if (PG_ARGISNULL(0))
-        state = init_array_agg_slots_state(aggcontext, true, nslots);
+        state = init_array_agg_slots_state_default(aggcontext, true, nslots);
     else
         state = (age_array_agg_slots_state *)PG_GETARG_POINTER(0);
 
@@ -15374,11 +15932,15 @@ Datum age_array_agg_map_slots_transfn(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("age_array_agg_map_slots argument layout changed")));
 
+    init_array_agg_slots_source_groups_from_aggref(state, fcinfo, 1, 2);
     init_array_agg_map_slot_keys(state, fcinfo);
     ensure_array_agg_slots_capacity(state, state->nelems + 1);
 
     for (argno = 2; argno < PG_NARGS(); argno += 2)
-        append_array_agg_slots_value(state, slot_index++, PG_ARGISNULL(argno),
+        append_array_agg_slots_value(state, slot_index++,
+                                     get_fn_expr_argtype(fcinfo->flinfo,
+                                                         argno),
+                                     PG_ARGISNULL(argno),
                                      PG_ARGISNULL(argno) ? (Datum)0 :
                                      PG_GETARG_DATUM(argno));
     state->nelems++;
@@ -15406,7 +15968,7 @@ Datum age_array_agg_list_slots_transfn(PG_FUNCTION_ARGS)
 
     nslots = PG_NARGS() - 1;
     if (PG_ARGISNULL(0))
-        state = init_array_agg_slots_state(aggcontext, false, nslots);
+        state = init_array_agg_slots_state_default(aggcontext, false, nslots);
     else
         state = (age_array_agg_slots_state *)PG_GETARG_POINTER(0);
 
@@ -15415,9 +15977,13 @@ Datum age_array_agg_list_slots_transfn(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("age_array_agg_list_slots argument layout changed")));
 
+    init_array_agg_slots_source_groups_from_aggref(state, fcinfo, 0, 1);
     ensure_array_agg_slots_capacity(state, state->nelems + 1);
     for (argno = 1; argno < PG_NARGS(); argno++)
-        append_array_agg_slots_value(state, slot_index++, PG_ARGISNULL(argno),
+        append_array_agg_slots_value(state, slot_index++,
+                                     get_fn_expr_argtype(fcinfo->flinfo,
+                                                         argno),
+                                     PG_ARGISNULL(argno),
                                      PG_ARGISNULL(argno) ? (Datum)0 :
                                      PG_GETARG_DATUM(argno));
     state->nelems++;
@@ -15468,6 +16034,78 @@ Datum age_array_agg_slots_finalfn(PG_FUNCTION_ARGS)
     PG_RETURN_DATUM(result);
 }
 
+PG_FUNCTION_INFO_V1(age_array_agg_slots_summary_finalfn);
+
+Datum age_array_agg_slots_summary_finalfn(PG_FUNCTION_ARGS)
+{
+    age_array_agg_slots_state *state;
+    StringInfoData buf;
+    text *result;
+    List *value_types = NIL;
+    Size null_bitmap_size;
+    Size serialized_bytes;
+    Size value_bytes;
+    int i;
+
+    Assert(AggCheckCallContext(fcinfo, NULL));
+
+    state = PG_ARGISNULL(0) ? NULL :
+        (age_array_agg_slots_state *)PG_GETARG_POINTER(0);
+    if (state == NULL)
+        PG_RETURN_NULL();
+
+    for (i = 0; i < state->nslots; i++)
+        value_types = lappend_oid(value_types, state->value_types[i]);
+
+    null_bitmap_size =
+        array_agg_slots_null_bitmap_size(state->nelems * state->nslots);
+    value_bytes = array_agg_slots_value_bytes(state);
+    serialized_bytes = array_agg_slots_serialized_bytes(state,
+                                                        null_bitmap_size,
+                                                        value_bytes);
+
+    initStringInfo(&buf);
+    append_array_agg_slots_type_vector_summary(&buf,
+                                               state->is_map ? "map" : "list",
+                                               state->nslots,
+                                               state->nelems,
+                                               value_types,
+                                               state->source_group_count,
+                                               serialized_bytes,
+                                               null_bitmap_size,
+                                               value_bytes);
+
+    result = cstring_to_text(buf.data);
+    pfree(buf.data);
+
+    PG_RETURN_TEXT_P(result);
+}
+
+PG_FUNCTION_INFO_V1(age_array_agg_slots_descriptor);
+
+Datum age_array_agg_slots_descriptor(PG_FUNCTION_ARGS)
+{
+    StringInfoData buf;
+    List *value_types = NIL;
+    int i;
+
+    for (i = 0; i < PG_NARGS(); i++)
+    {
+        Oid value_type;
+
+        value_type = get_fn_expr_argtype(fcinfo->flinfo, i);
+        value_types = lappend_oid(value_types, value_type);
+    }
+
+    initStringInfo(&buf);
+    append_array_agg_slots_type_vector_summary(&buf, "descriptor",
+                                               PG_NARGS(), 0,
+                                               value_types, PG_NARGS(),
+                                               0, 0, 0);
+
+    PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+}
+
 PG_FUNCTION_INFO_V1(age_array_agg_slots_combine);
 
 Datum age_array_agg_slots_combine(PG_FUNCTION_ARGS)
@@ -15508,10 +16146,15 @@ Datum age_array_agg_slots_serialize(PG_FUNCTION_ARGS)
     StringInfoData buf;
     bytea *result;
     int total_slots;
+    Size null_bitmap_size;
+    char *null_bitmap;
     int i;
 
     if (!AggCheckCallContext(fcinfo, NULL))
         elog(ERROR, "age_array_agg_slots_serialize called in non-aggregate context");
+
+    if (PG_ARGISNULL(0))
+        PG_RETURN_NULL();
 
     state = (age_array_agg_slots_state *)PG_GETARG_POINTER(0);
 
@@ -15520,6 +16163,24 @@ Datum age_array_agg_slots_serialize(PG_FUNCTION_ARGS)
     pq_sendint8(&buf, state->is_map ? 1 : 0);
     pq_sendint32(&buf, state->nslots);
     pq_sendint32(&buf, state->nelems);
+    for (i = 0; i < state->nslots; i++)
+        pq_sendint32(&buf, (int)state->value_types[i]);
+    init_array_agg_slots_identity_source_groups(state);
+    pq_sendint32(&buf, state->source_group_count);
+    for (i = 0; i < state->nslots; i++)
+        pq_sendint32(&buf, state->source_groups[i]);
+
+    total_slots = state->nelems * state->nslots;
+    null_bitmap_size = array_agg_slots_null_bitmap_size(total_slots);
+    null_bitmap = null_bitmap_size > 0 ? palloc0(null_bitmap_size) : NULL;
+    for (i = 0; i < total_slots; i++)
+    {
+        if (state->nulls[i])
+            set_array_agg_slots_null_bit(null_bitmap, i);
+    }
+    pq_sendint32(&buf, (int)null_bitmap_size);
+    if (null_bitmap_size > 0)
+        pq_sendbytes(&buf, null_bitmap, null_bitmap_size);
 
     if (state->is_map)
     {
@@ -15531,18 +16192,11 @@ Datum age_array_agg_slots_serialize(PG_FUNCTION_ARGS)
         }
     }
 
-    total_slots = state->nelems * state->nslots;
     for (i = 0; i < total_slots; i++)
     {
-        pq_sendint8(&buf, state->nulls[i] ? 1 : 0);
         if (!state->nulls[i])
-        {
-            agtype *value = DATUM_GET_AGTYPE_P(state->values[i]);
-            int value_len = VARSIZE_ANY(value);
-
-            pq_sendint32(&buf, value_len);
-            pq_sendbytes(&buf, (char *)value, value_len);
-        }
+            send_array_agg_slots_value(&buf, state->values[i],
+                                       state->value_types[i % state->nslots]);
     }
 
     result = pq_endtypsend(&buf);
@@ -15562,10 +16216,15 @@ Datum age_array_agg_slots_deserialize(PG_FUNCTION_ARGS)
     int nslots;
     int nelems;
     int total_slots;
+    int null_bitmap_len;
+    const char *null_bitmap;
     int i;
 
     if (!AggCheckCallContext(fcinfo, &aggcontext))
         elog(ERROR, "age_array_agg_slots_deserialize called in non-aggregate context");
+
+    if (PG_ARGISNULL(0))
+        PG_RETURN_NULL();
 
     serialized = PG_GETARG_BYTEA_PP(0);
     initReadOnlyStringInfo(&buf, VARDATA_ANY(serialized),
@@ -15586,8 +16245,38 @@ Datum age_array_agg_slots_deserialize(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("invalid age_array_agg_slots serialized layout")));
 
-    state = init_array_agg_slots_state(aggcontext, is_map, nslots);
-    ensure_array_agg_slots_capacity(state, nelems);
+    state = init_array_agg_slots_state(aggcontext, is_map, nslots, nelems);
+    for (i = 0; i < state->nslots; i++)
+        state->value_types[i] = (Oid)pq_getmsgint(&buf, 4);
+    state->source_group_count = pq_getmsgint(&buf, 4);
+    if (state->source_group_count <= 0 ||
+        state->source_group_count > state->nslots)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("invalid age_array_agg_slots source group layout")));
+    }
+    for (i = 0; i < state->nslots; i++)
+    {
+        state->source_groups[i] = pq_getmsgint(&buf, 4);
+        if (state->source_groups[i] < 0 ||
+            state->source_groups[i] >= state->source_group_count)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("invalid age_array_agg_slots source group layout")));
+        }
+    }
+    state->source_groups_initialized = true;
+
+    total_slots = nelems * nslots;
+    null_bitmap_len = pq_getmsgint(&buf, 4);
+    if (null_bitmap_len != (int)array_agg_slots_null_bitmap_size(total_slots))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("invalid age_array_agg_slots null bitmap length")));
+    null_bitmap = null_bitmap_len > 0 ?
+        pq_getmsgbytes(&buf, null_bitmap_len) : NULL;
 
     if (is_map)
     {
@@ -15610,26 +16299,13 @@ Datum age_array_agg_slots_deserialize(PG_FUNCTION_ARGS)
         }
     }
 
-    total_slots = nelems * nslots;
     for (i = 0; i < total_slots; i++)
     {
-        state->nulls[i] = pq_getmsgbyte(&buf) != 0;
+        state->nulls[i] = get_array_agg_slots_null_bit(null_bitmap, i);
         if (!state->nulls[i])
-        {
-            int value_len = pq_getmsgint(&buf, 4);
-            const char *value_data;
-            agtype *value;
-
-            if (value_len < (int)VARHDRSZ)
-                ereport(ERROR,
-                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                         errmsg("invalid age_array_agg_slots value length")));
-
-            value_data = pq_getmsgbytes(&buf, value_len);
-            value = MemoryContextAlloc(aggcontext, value_len);
-            memcpy(value, value_data, value_len);
-            state->values[i] = PointerGetDatum(value);
-        }
+            state->values[i] =
+                receive_array_agg_slots_value(&buf, aggcontext,
+                                              state->value_types[i % nslots]);
     }
 
     pq_getmsgend(&buf);
