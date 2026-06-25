@@ -1,0 +1,5 @@
+SELECT *
+FROM ag_catalog.cypher(
+    'hidden_age_perf_regression',
+    E'MATCH (a\x3aN)-[\x3aNoise]->(\x3aSink {needle\x3a 1}) RETURN count(*)')
+AS (result ag_catalog.agtype);

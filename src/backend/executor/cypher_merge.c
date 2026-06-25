@@ -570,7 +570,8 @@ static path_entry **prebuild_path(CustomScanState *node)
             /* Convert to an agtype value */
             vertex_found = get_ith_agtype_value_from_container_no_copy(
                 &agt->root, 0, &agtv_vertex, &vertex_needs_free);
-            Assert(vertex_found);
+            if (!vertex_found)
+                elog(ERROR, "failed to read existing MERGE vertex value");
 
             if (agtv_vertex.type != AGTV_VERTEX)
             {
@@ -1619,7 +1620,8 @@ static Datum merge_vertex(cypher_merge_custom_scan_state *css,
         /* Convert to an agtype value */
         v_found = get_ith_agtype_value_from_container_no_copy(&a->root, 0, &v,
                                                               &v_needs_free);
-        Assert(v_found);
+        if (!v_found)
+            elog(ERROR, "failed to read existing MERGE vertex value");
 
         if (v.type != AGTV_VERTEX)
         {

@@ -2757,7 +2757,7 @@ static Node *make_age_keys_expr(Node *properties_expr, int location)
 static FuncExpr *make_agtype_access_expr(List *access_args, int location,
                                          bool expand_variadic)
 {
-    FuncExpr *access_expr;
+    FuncExpr *access_expr = NULL;
     Node *access_arg;
     ListCell *lc;
     bool first_arg = true;
@@ -13776,8 +13776,8 @@ static bool retarget_vle_terminal_property_output(cypher_parsestate *cpstate,
     RangeTblEntry *vle_rte;
     TargetEntry *sub_te;
     Var *outer_var;
-    Var *inner_var;
-    Query *subquery;
+    Var *inner_var = NULL;
+    Query *subquery = NULL;
     List *row;
     Const *marker;
 

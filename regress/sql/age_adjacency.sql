@@ -1084,11 +1084,18 @@ SELECT * FROM cypher('age_adj_reverse', $$
     CREATE (:A {n: 1})-[:E]->(:B {name: 'x'}),
            (:A {n: 2})-[:E]->(:B {name: 'y'})
 $$) AS (z agtype);
+-- Make name sparse and the forward scan non-trivial so the cost-based choice is
+-- stable: only the two seed terminals own name, while 32 noise paths do not.
+SELECT * FROM cypher('age_adj_reverse', $$
+    UNWIND range(1, 32) AS i
+    CREATE (:A {n: i + 10})-[:E]->(:B {n: i})
+$$) AS (z agtype);
 SELECT * FROM cypher('age_adj_reverse', $$
     CREATE INDEX e_out FOR ()-[r:E]->() ON (ADJACENCY)
 $$) AS (c text);
 CREATE INDEX e_in ON age_adj_reverse."E"
     USING age_adjacency (end_id, id, start_id);
+SELECT create_property_source_index('age_adj_reverse', 'B', 'name');
 ANALYZE age_adj_reverse."A"; ANALYZE age_adj_reverse."B";
 ANALYZE age_adj_reverse."E";
 -- Correct result: only the :A whose edge reaches :B {name:'x'}.
@@ -1121,11 +1128,18 @@ SELECT * FROM cypher('age_adj_reverse2', $$
     CREATE (:A {n: 1})-[:E1]->(:B {n: 2})-[:E2]->(:C {name: 'x'}),
            (:A {n: 3})-[:E1]->(:B {n: 4})-[:E2]->(:C {name: 'y'})
 $$) AS (z agtype);
+-- Keep the terminal property sparse and make a forward two-hop drive
+-- materially more expensive than the one-row reverse property source.
+SELECT * FROM cypher('age_adj_reverse2', $$
+    UNWIND range(1, 512) AS i
+    CREATE (:A {n: i + 10})-[:E1]->(:B {n: i + 100})-[:E2]->(:C {n: i})
+$$) AS (z agtype);
 SELECT * FROM cypher('age_adj_reverse2', $$
     CREATE INDEX e2_out FOR ()-[r:E2]->() ON (ADJACENCY)
 $$) AS (c text);
 CREATE INDEX e2_in ON age_adj_reverse2."E2"
     USING age_adjacency (end_id, id, start_id);
+SELECT create_property_source_index('age_adj_reverse2', 'C', 'name');
 ANALYZE age_adj_reverse2."A"; ANALYZE age_adj_reverse2."B";
 ANALYZE age_adj_reverse2."C";
 ANALYZE age_adj_reverse2."E1"; ANALYZE age_adj_reverse2."E2";
@@ -1137,9 +1151,11 @@ $$) AS (n agtype);
 SELECT n FROM cypher('age_adj_reverse2', $$
     MATCH (a:A)-[:E1]->(b:B)-[:E2]->(c:C {name: 'y'}) RETURN a.n
 $$) AS (n agtype);
--- Without a terminal filter both rows match (forward/reverse agree).
+-- Without a terminal filter the two seed paths still agree; exclude the
+-- cost-shaping noise paths from this semantic check.
 SELECT n FROM cypher('age_adj_reverse2', $$
-    MATCH (a:A)-[:E1]->(b:B)-[:E2]->(c:C) RETURN a.n
+    MATCH (a:A)-[:E1]->(b:B)-[:E2]->(c:C)
+    WHERE a.n < 10 RETURN a.n
 $$) AS (n agtype) ORDER BY n;
 -- The chosen plan drives the incoming (reverse) expansion off the selective :C.
 SELECT * FROM cypher('age_adj_reverse2', $$

@@ -57,6 +57,7 @@ struct AgeAdjacencyMatchTerminalPropertyLookup
     MemoryContext context;
     Relation vertex_rel;
     Relation vertex_id_index_rel;
+    IndexScanDesc vertex_id_scan_desc;
     TupleTableSlot *slot;
     Datum property_key;
     Datum property_value;
@@ -65,6 +66,8 @@ struct AgeAdjacencyMatchTerminalPropertyLookup
     graphid *property_index_vertex_ids;
     int64 property_index_vertex_count;
     int64 property_index_vertex_capacity;
+    int64 estimated_property_match_count;
+    bool property_index_vertex_ids_sorted;
     bool property_index_prefetched;
     bool property_index_available;
     bool property_index_prefetch_attempted;
@@ -119,6 +122,9 @@ static void terminal_property_cache_store(
     bool matches);
 static void terminal_property_prefetch_append_vertex(
     AgeAdjacencyMatchTerminalPropertyLookup *lookup, graphid vertex_id);
+static bool terminal_property_prefetch_contains(
+    const AgeAdjacencyMatchTerminalPropertyLookup *lookup,
+    graphid vertex_id);
 static int terminal_property_vertex_id_cmp(const void *left,
                                            const void *right);
 static Oid get_terminal_property_agtype_eq_oid(void);
@@ -168,6 +174,8 @@ age_adjacency_match_terminal_property_begin(
     lookup->property_key = AGTYPE_P_GET_DATUM(key_agtype);
     lookup->property_value = (Datum)0;
     lookup->property_value_isnull = true;
+    lookup->estimated_property_match_count = request->estimated_match_count;
+    lookup->property_index_vertex_ids_sorted = true;
     lookup->match_cache = create_terminal_property_match_cache(context);
     lookup->active = true;
     MemoryContextSwitchTo(oldcontext);
@@ -181,6 +189,11 @@ void age_adjacency_match_terminal_property_end(
     if (lookup == NULL)
         return;
 
+    if (lookup->vertex_id_scan_desc != NULL)
+    {
+        index_endscan(lookup->vertex_id_scan_desc);
+        lookup->vertex_id_scan_desc = NULL;
+    }
     if (lookup->slot != NULL)
     {
         ExecDropSingleTupleTableSlot(lookup->slot);
@@ -239,6 +252,7 @@ void age_adjacency_match_terminal_property_set_value(
     lookup->property_index_vertex_ids = NULL;
     lookup->property_index_vertex_count = 0;
     lookup->property_index_vertex_capacity = 0;
+    lookup->property_index_vertex_ids_sorted = true;
     lookup->property_index_prefetched = false;
     lookup->property_index_available = false;
     lookup->property_index_prefetch_attempted = false;
@@ -307,10 +321,10 @@ bool age_adjacency_match_terminal_property_matches(
 
     if (lookup->property_value_isnull)
         return false;
+    if (lookup->property_index_prefetched)
+        return terminal_property_prefetch_contains(lookup, vertex_id);
     if (terminal_property_cache_lookup(lookup, vertex_id, &matches))
         return matches;
-    if (lookup->property_index_prefetched)
-        return false;
 
     matches = terminal_property_index_lookup(lookup, vertex_id);
     terminal_property_cache_store(lookup, vertex_id, matches);
@@ -329,14 +343,10 @@ bool age_adjacency_match_terminal_property_prefilter_matches(
     graphid vertex_id, void *callback_state)
 {
     AgeAdjacencyMatchTerminalPropertyLookup *lookup = callback_state;
-    bool matches = false;
 
     Assert(age_adjacency_match_terminal_property_prefilter_active(lookup));
 
-    if (terminal_property_cache_lookup(lookup, vertex_id, &matches))
-        return matches;
-
-    return false;
+    return terminal_property_prefetch_contains(lookup, vertex_id);
 }
 
 bool age_adjacency_match_terminal_property_prefilter_set(
@@ -346,8 +356,7 @@ bool age_adjacency_match_terminal_property_prefilter_set(
     if (filter == NULL)
         return false;
     memset(filter, 0, sizeof(*filter));
-    if (!age_adjacency_match_terminal_property_prefilter_active(lookup) ||
-        lookup->match_cache == NULL)
+    if (!age_adjacency_match_terminal_property_prefilter_active(lookup))
     {
         return false;
     }
@@ -749,6 +758,7 @@ static bool prefetch_terminal_property_index_matches(
     AgeAdjacencyMatchTerminalPropertyScanKey property_scan_key;
     ScanKeyData scan_key;
     IndexScanDesc scan_desc;
+    MemoryContext oldcontext;
 
     if (!OidIsValid(lookup->property_index_oid) ||
         !SearchSysCacheExists1(RELOID,
@@ -781,6 +791,20 @@ static bool prefetch_terminal_property_index_matches(
     scan_desc = index_beginscan(lookup->vertex_rel, property_index_rel,
                                 GetActiveSnapshot(), NULL, 1, 0);
     index_rescan(scan_desc, &scan_key, 1, NULL, 0);
+
+    if (lookup->property_index_vertex_ids == NULL &&
+        lookup->estimated_property_match_count > 0)
+    {
+        int64 initial_capacity = Min(
+            Max(lookup->estimated_property_match_count, 16), 65536);
+
+        oldcontext = MemoryContextSwitchTo(lookup->context);
+        lookup->property_index_vertex_ids =
+            palloc(sizeof(graphid) * initial_capacity);
+        MemoryContextSwitchTo(oldcontext);
+        lookup->property_index_vertex_capacity = initial_capacity;
+    }
+
     while (index_getnext_slot(scan_desc, ForwardScanDirection, lookup->slot))
     {
         Datum id;
@@ -793,7 +817,6 @@ static bool prefetch_terminal_property_index_matches(
             graphid vertex_id;
 
             vertex_id = DATUM_GET_GRAPHID(id);
-            terminal_property_cache_store(lookup, vertex_id, true);
             terminal_property_prefetch_append_vertex(lookup, vertex_id);
             if (!lookup->property_index_has_vertex_range)
             {
@@ -815,7 +838,8 @@ static bool prefetch_terminal_property_index_matches(
     index_endscan(scan_desc);
     index_close(property_index_rel, AccessShareLock);
     ExecClearTuple(lookup->slot);
-    if (lookup->property_index_vertex_count > 1)
+    if (lookup->property_index_vertex_count > 1 &&
+        !lookup->property_index_vertex_ids_sorted)
         qsort(lookup->property_index_vertex_ids,
               lookup->property_index_vertex_count, sizeof(graphid),
               terminal_property_vertex_id_cmp);
@@ -828,7 +852,7 @@ static bool terminal_property_index_lookup(
     AgeAdjacencyMatchTerminalPropertyLookup *lookup, graphid vertex_id)
 {
     ScanKeyData scan_key;
-    IndexScanDesc scan_desc;
+    MemoryContext oldcontext;
     Datum properties;
     bool isnull;
     bool found;
@@ -843,12 +867,24 @@ static bool terminal_property_index_lookup(
     ScanKeyInit(&scan_key, Anum_ag_label_vertex_table_id,
                 BTEqualStrategyNumber, F_GRAPHIDEQ,
                 GRAPHID_GET_DATUM(vertex_id));
-    scan_desc = index_beginscan(lookup->vertex_rel,
-                                lookup->vertex_id_index_rel,
-                                GetActiveSnapshot(), NULL, 1, 0);
-    index_rescan(scan_desc, &scan_key, 1, NULL, 0);
-    found = index_getnext_slot(scan_desc, ForwardScanDirection,
-                               lookup->slot);
+    /*
+     * Index AM scan descriptors and rescan-private state are allocated in the
+     * current memory context.  This lookup is called from tuple execution,
+     * where that context may be reset before the next candidate or nested-loop
+     * rescan.  Keep all reusable scan state in the lookup's plan-lifetime
+     * context instead of retaining a dangling per-tuple allocation.
+     */
+    oldcontext = MemoryContextSwitchTo(lookup->context);
+    if (lookup->vertex_id_scan_desc == NULL)
+    {
+        lookup->vertex_id_scan_desc = index_beginscan(
+            lookup->vertex_rel, lookup->vertex_id_index_rel,
+            GetActiveSnapshot(), NULL, 1, 0);
+    }
+    index_rescan(lookup->vertex_id_scan_desc, &scan_key, 1, NULL, 0);
+    MemoryContextSwitchTo(oldcontext);
+    found = index_getnext_slot(lookup->vertex_id_scan_desc,
+                               ForwardScanDirection, lookup->slot);
     if (found)
     {
         properties = slot_getattr(lookup->slot,
@@ -860,7 +896,6 @@ static bool terminal_property_index_lookup(
                 properties, lookup->property_key, lookup->property_value);
         }
     }
-    index_endscan(scan_desc);
     ExecClearTuple(lookup->slot);
 
     return matches;
@@ -993,6 +1028,13 @@ terminal_property_prefetch_append_vertex(
 {
     MemoryContext oldcontext;
 
+    if (lookup->property_index_vertex_count > 0 &&
+        lookup->property_index_vertex_ids[
+            lookup->property_index_vertex_count - 1] > vertex_id)
+    {
+        lookup->property_index_vertex_ids_sorted = false;
+    }
+
     if (lookup->property_index_vertex_count >=
         lookup->property_index_vertex_capacity)
     {
@@ -1027,6 +1069,45 @@ terminal_property_vertex_id_cmp(const void *left, const void *right)
     if (left_id > right_id)
         return 1;
     return 0;
+}
+
+static bool
+terminal_property_prefetch_contains(
+    const AgeAdjacencyMatchTerminalPropertyLookup *lookup,
+    graphid vertex_id)
+{
+    int64 low = 0;
+    int64 high;
+
+    if (lookup == NULL || !lookup->property_index_prefetched ||
+        lookup->property_index_vertex_count <= 0 ||
+        lookup->property_index_vertex_ids == NULL)
+    {
+        return false;
+    }
+
+    if (lookup->property_index_has_vertex_range &&
+        (vertex_id < lookup->property_index_min_vertex_id ||
+         vertex_id > lookup->property_index_max_vertex_id))
+    {
+        return false;
+    }
+
+    high = lookup->property_index_vertex_count - 1;
+    while (low <= high)
+    {
+        int64 middle = low + ((high - low) / 2);
+        graphid candidate = lookup->property_index_vertex_ids[middle];
+
+        if (candidate == vertex_id)
+            return true;
+        if (candidate < vertex_id)
+            low = middle + 1;
+        else
+            high = middle - 1;
+    }
+
+    return false;
 }
 
 static Oid get_terminal_property_agtype_eq_oid(void)

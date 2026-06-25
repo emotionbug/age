@@ -17,6 +17,8 @@
  * under the License.
  */
 
+#include <math.h>
+
 #include "postgres.h"
 
 #include "access/age_adjacency.h"
@@ -582,52 +584,125 @@ static TupleTableSlot *access_age_adjacency_match_scan(ScanState *node)
         }
 
         ExecClearTuple(slot);
-        MemoryContextReset(state->scan_context);
-        store_age_adjacency_match_tuple(state, &payload, &tuple);
 
-        if (state->scan_nattrs > 0)
+        /*
+         * ID-only scans are the dominant fixed-MATCH path.  Their payload is
+         * already by-value, so avoid resetting a per-row memory context,
+         * switching contexts, zeroing a temporary tuple, and copying fields
+         * through that tuple before filling the virtual slot.
+         */
+        if (!state->fetch_properties)
         {
-            for (i = 0; i < state->scan_nattrs; i++)
+            graphid start_id;
+            graphid end_id;
+
+            if (state->outgoing)
             {
-                switch (state->scan_attnos[i])
+                start_id = state->current_key;
+                end_id = payload.next_vertex_id;
+            }
+            else
+            {
+                start_id = payload.next_vertex_id;
+                end_id = state->current_key;
+            }
+
+            if (state->scan_nattrs > 0)
+            {
+                for (i = 0; i < state->scan_nattrs; i++)
                 {
-                case Anum_ag_label_edge_table_id:
-                    slot->tts_values[i] = GRAPHID_GET_DATUM(tuple.edge_id);
-                    slot->tts_isnull[i] = false;
-                    break;
-                case Anum_ag_label_edge_table_start_id:
-                    slot->tts_values[i] = GRAPHID_GET_DATUM(tuple.start_id);
-                    slot->tts_isnull[i] = false;
-                    break;
-                case Anum_ag_label_edge_table_end_id:
-                    slot->tts_values[i] = GRAPHID_GET_DATUM(tuple.end_id);
-                    slot->tts_isnull[i] = false;
-                    break;
-                case Anum_ag_label_edge_table_properties:
-                    slot->tts_values[i] = tuple.properties;
-                    slot->tts_isnull[i] = tuple.properties_isnull;
-                    break;
-                default:
-                    elog(ERROR, "unexpected AGE adjacency match attr %d",
-                         state->scan_attnos[i]);
+                    switch (state->scan_attnos[i])
+                    {
+                    case Anum_ag_label_edge_table_id:
+                        slot->tts_values[i] =
+                            GRAPHID_GET_DATUM(payload.edge_id);
+                        slot->tts_isnull[i] = false;
+                        break;
+                    case Anum_ag_label_edge_table_start_id:
+                        slot->tts_values[i] = GRAPHID_GET_DATUM(start_id);
+                        slot->tts_isnull[i] = false;
+                        break;
+                    case Anum_ag_label_edge_table_end_id:
+                        slot->tts_values[i] = GRAPHID_GET_DATUM(end_id);
+                        slot->tts_isnull[i] = false;
+                        break;
+                    case Anum_ag_label_edge_table_properties:
+                        slot->tts_values[i] = (Datum)0;
+                        slot->tts_isnull[i] = true;
+                        break;
+                    default:
+                        elog(ERROR, "unexpected AGE adjacency match attr %d",
+                             state->scan_attnos[i]);
+                    }
                 }
+            }
+            else
+            {
+                slot->tts_values[Anum_ag_label_edge_table_id - 1] =
+                    GRAPHID_GET_DATUM(payload.edge_id);
+                slot->tts_isnull[Anum_ag_label_edge_table_id - 1] = false;
+                slot->tts_values[Anum_ag_label_edge_table_start_id - 1] =
+                    GRAPHID_GET_DATUM(start_id);
+                slot->tts_isnull[Anum_ag_label_edge_table_start_id - 1] = false;
+                slot->tts_values[Anum_ag_label_edge_table_end_id - 1] =
+                    GRAPHID_GET_DATUM(end_id);
+                slot->tts_isnull[Anum_ag_label_edge_table_end_id - 1] = false;
+                slot->tts_values[Anum_ag_label_edge_table_properties - 1] =
+                    (Datum)0;
+                slot->tts_isnull[Anum_ag_label_edge_table_properties - 1] =
+                    true;
             }
         }
         else
         {
-            slot->tts_values[Anum_ag_label_edge_table_id - 1] =
-                GRAPHID_GET_DATUM(tuple.edge_id);
-            slot->tts_isnull[Anum_ag_label_edge_table_id - 1] = false;
-            slot->tts_values[Anum_ag_label_edge_table_start_id - 1] =
-                GRAPHID_GET_DATUM(tuple.start_id);
-            slot->tts_isnull[Anum_ag_label_edge_table_start_id - 1] = false;
-            slot->tts_values[Anum_ag_label_edge_table_end_id - 1] =
-                GRAPHID_GET_DATUM(tuple.end_id);
-            slot->tts_isnull[Anum_ag_label_edge_table_end_id - 1] = false;
-            slot->tts_values[Anum_ag_label_edge_table_properties - 1] =
-                tuple.properties;
-            slot->tts_isnull[Anum_ag_label_edge_table_properties - 1] =
-                tuple.properties_isnull;
+            MemoryContextReset(state->scan_context);
+            store_age_adjacency_match_tuple(state, &payload, &tuple);
+
+            if (state->scan_nattrs > 0)
+            {
+                for (i = 0; i < state->scan_nattrs; i++)
+                {
+                    switch (state->scan_attnos[i])
+                    {
+                    case Anum_ag_label_edge_table_id:
+                        slot->tts_values[i] = GRAPHID_GET_DATUM(tuple.edge_id);
+                        slot->tts_isnull[i] = false;
+                        break;
+                    case Anum_ag_label_edge_table_start_id:
+                        slot->tts_values[i] =
+                            GRAPHID_GET_DATUM(tuple.start_id);
+                        slot->tts_isnull[i] = false;
+                        break;
+                    case Anum_ag_label_edge_table_end_id:
+                        slot->tts_values[i] = GRAPHID_GET_DATUM(tuple.end_id);
+                        slot->tts_isnull[i] = false;
+                        break;
+                    case Anum_ag_label_edge_table_properties:
+                        slot->tts_values[i] = tuple.properties;
+                        slot->tts_isnull[i] = tuple.properties_isnull;
+                        break;
+                    default:
+                        elog(ERROR, "unexpected AGE adjacency match attr %d",
+                             state->scan_attnos[i]);
+                    }
+                }
+            }
+            else
+            {
+                slot->tts_values[Anum_ag_label_edge_table_id - 1] =
+                    GRAPHID_GET_DATUM(tuple.edge_id);
+                slot->tts_isnull[Anum_ag_label_edge_table_id - 1] = false;
+                slot->tts_values[Anum_ag_label_edge_table_start_id - 1] =
+                    GRAPHID_GET_DATUM(tuple.start_id);
+                slot->tts_isnull[Anum_ag_label_edge_table_start_id - 1] = false;
+                slot->tts_values[Anum_ag_label_edge_table_end_id - 1] =
+                    GRAPHID_GET_DATUM(tuple.end_id);
+                slot->tts_isnull[Anum_ag_label_edge_table_end_id - 1] = false;
+                slot->tts_values[Anum_ag_label_edge_table_properties - 1] =
+                    tuple.properties;
+                slot->tts_isnull[Anum_ag_label_edge_table_properties - 1] =
+                    tuple.properties_isnull;
+            }
         }
 
         ExecStoreVirtualTuple(slot);
@@ -2354,6 +2429,8 @@ const char *age_adjacency_match_terminal_prefetch_reason_name(
             return "large-terminal-fanout";
         case AGE_ADJACENCY_MATCH_PREFETCH_REASON_SMALL_TERMINAL_FANOUT:
             return "small-terminal-fanout";
+        case AGE_ADJACENCY_MATCH_PREFETCH_REASON_PROPERTY_SOURCE_TOO_BROAD:
+            return "property-source-too-broad";
         case AGE_ADJACENCY_MATCH_PREFETCH_REASON_NONE:
             break;
     }
@@ -2509,6 +2586,8 @@ make_age_adjacency_match_terminal_property_request(
     request.property_key = state->right_property_key;
     request.property_value = state->right_property_value;
     request.property_value_isnull = state->right_property_value_isnull;
+    request.estimated_match_count =
+        state->estimated_property_source_matches;
 
     return request;
 }

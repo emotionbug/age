@@ -438,7 +438,8 @@ static void get_scalar_agtype_value_no_copy(agtype *agt,
 
     found = get_ith_agtype_value_from_container_no_copy(&agt->root, 0, value,
                                                         needs_free);
-    Assert(found);
+    if (!found)
+        elog(ERROR, "failed to read scalar agtype value");
 }
 
 static void free_agtype_value_no_copy(agtype_value *value, bool needs_free)

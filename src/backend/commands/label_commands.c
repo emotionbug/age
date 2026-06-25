@@ -1102,8 +1102,8 @@ static Node *build_typed_property_index_expr(char *property_name,
 {
     FuncCall *access_call;
     char *function_name;
-    Node *container;
-    Node *key;
+    Node *container = NULL;
+    Node *key = NULL;
 
     if (pg_strcasecmp(property_type, "agtype") == 0)
     {

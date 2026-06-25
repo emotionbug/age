@@ -6057,14 +6057,10 @@ static void
 age_adjacency_visible_payload_run_scan_activate_cursor(
     AgeAdjacencyVisiblePayloadRunScan *scan, int64 cursor_index)
 {
-    AgeAdjacencyVisiblePayloadKeyCursor *cursor;
-
     Assert(scan != NULL);
     Assert(cursor_index >= 0 && cursor_index < scan->cursor_count);
     Assert(scan->active_cursor_count < scan->cursor_count);
-
-    cursor = &scan->cursors[cursor_index];
-    Assert(cursor->payload_valid);
+    Assert(scan->cursors[cursor_index].payload_valid);
     scan->active_cursor_indexes[scan->active_cursor_count] = cursor_index;
     scan->active_cursor_count++;
     age_adjacency_visible_payload_run_scan_sift_up(
@@ -8713,6 +8709,8 @@ age_adjacency_debug_payload(PG_FUNCTION_ARGS)
 
     age_adjacency_scan_payload(index_rel, key, &target);
 
+    if (BufferIsValid(target.visibilitymap_buffer))
+        ReleaseBuffer(target.visibilitymap_buffer);
     ExecDropSingleTupleTableSlot(slot);
     relation_close(heap_rel, AccessShareLock);
     index_close(index_rel, AccessShareLock);
@@ -8763,6 +8761,8 @@ age_adjacency_candidate_edges(PG_FUNCTION_ARGS)
 
     age_adjacency_scan_payload(index_rel, key, &target);
 
+    if (BufferIsValid(target.visibilitymap_buffer))
+        ReleaseBuffer(target.visibilitymap_buffer);
     ExecDropSingleTupleTableSlot(slot);
     relation_close(heap_rel, AccessShareLock);
     index_close(index_rel, AccessShareLock);
@@ -8816,6 +8816,8 @@ age_adjacency_candidate_edge_rows(PG_FUNCTION_ARGS)
 
     age_adjacency_scan_payload(index_rel, key, &target);
 
+    if (BufferIsValid(target.visibilitymap_buffer))
+        ReleaseBuffer(target.visibilitymap_buffer);
     ExecDropSingleTupleTableSlot(slot);
     relation_close(heap_rel, AccessShareLock);
     index_close(index_rel, AccessShareLock);

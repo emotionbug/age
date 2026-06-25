@@ -67,6 +67,7 @@
 #include "parser/cypher_property_signature.h"
 #include "utils/ag_cache.h"
 #include "utils/ag_func.h"
+#include "utils/age_vle_source_cost.h"
 #include "utils/graphid.h"
 
 /*
@@ -89,6 +90,10 @@
 #define AGE_VARNAME_ID AGE_DEFAULT_VARNAME_PREFIX"id"
 #define AGE_VARNAME_SET_CLAUSE AGE_DEFAULT_VARNAME_PREFIX"set_clause"
 #define AGE_VARNAME_SET_VALUE AGE_DEFAULT_VARNAME_PREFIX"set_value"
+
+#define AGE_ADJACENCY_REVERSE_MATCH_MIN_BUDGET 32.0
+#define AGE_ADJACENCY_REVERSE_MATCH_MAX_BUDGET 4096.0
+#define AGE_ADJACENCY_REVERSE_MATCH_FRACTION 0.01
 
 /*
  * In the transformation stage, we need to track
@@ -181,7 +186,8 @@ static Expr *transform_cypher_edge(cypher_parsestate *cpstate,
 static Expr *transform_cypher_adjacency_candidate_edge(
     cypher_parsestate *cpstate, cypher_relationship *rel,
     transform_entity *prev_entity, cypher_node *next_node,
-    List **target_list, bool valid_label, bool outgoing);
+    List **target_list, bool valid_label, bool outgoing,
+    bool terminal_elided, bool *candidate_registered);
 static void register_reverse_adjacency_candidate(
     cypher_parsestate *cpstate, cypher_relationship *rel,
     transform_entity *source_entity, cypher_node *terminal_node,
@@ -192,6 +198,8 @@ static char *make_match_graph_pattern_key(
 static char *make_node_property_graph_pattern_key(
     cypher_parsestate *cpstate, cypher_node *node);
 static bool age_adjacency_match_endpoint_is_bound(transform_entity *entity);
+static bool age_adjacency_match_terminal_is_selective(
+    cypher_parsestate *cpstate, cypher_node *node);
 static Expr *transform_cypher_node(cypher_parsestate *cpstate,
                                    cypher_node *node, List **target_list,
                                    bool output_node, bool valid_label);
@@ -5897,6 +5905,8 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
     bool old_skip_raw = cpstate->skip_raw_targets;
     bool path_has_vle = false;
     List *reverse_captures = NIL;
+    cypher_node *elided_adjacency_terminal = NULL;
+    bool elided_adjacency_terminal_owns_properties = false;
 
     special_VLE_case = isa_special_VLE_case(path);
 
@@ -5945,6 +5955,7 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
         if (i % 2 == 0)
         {
             cypher_node *node = NULL;
+            Node *owned_terminal_props = NULL;
             bool output_node = false;
 
             node = lfirst(lc);
@@ -6009,6 +6020,23 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
              * the regression tests.
              */
             output_node = true;
+
+            /*
+             * A fixed one-hop adjacency candidate can own an anonymous
+             * terminal's existence and label check.  The edge is transformed
+             * before the terminal node, so defer the omission decision until
+             * candidate registration has succeeded and then suppress the
+             * otherwise redundant vertex RTE here.
+             */
+            if (node == elided_adjacency_terminal)
+            {
+                output_node = false;
+                if (elided_adjacency_terminal_owns_properties)
+                {
+                    owned_terminal_props = node->props;
+                    node->props = NULL;
+                }
+            }
 
             if (compact_vle_path_only &&
                 node->name == NULL && node->label == NULL &&
@@ -6101,6 +6129,8 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
 
             entity = transform_match_node_entity(cpstate, query, node,
                                                  output_node, valid_label);
+            if (owned_terminal_props != NULL)
+                node->props = owned_terminal_props;
             entities = lappend(entities, entity);
 
             prev_entity = entity;
@@ -6160,10 +6190,38 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                 {
                     cypher_node *next_node =
                         (cypher_node *)lfirst(lnext(path->path, lc));
+                    bool terminal_has_owned_property =
+                        next_node->label != NULL &&
+                        next_node->props != NULL &&
+                        is_ag_node(next_node->props, cypher_map) &&
+                        list_length(((cypher_map *)next_node->props)->keyvals) ==
+                            2;
+                    bool source_is_bound =
+                        age_adjacency_match_endpoint_is_bound(prev_entity);
+                    bool retain_terminal_for_reverse =
+                        !source_is_bound &&
+                        terminal_has_owned_property &&
+                        age_adjacency_match_terminal_is_selective(cpstate,
+                                                                  next_node);
+                    bool terminal_elided =
+                        list_length(path->path) == 3 &&
+                        next_node->parsed_name == NULL &&
+                        (next_node->props == NULL ||
+                         terminal_has_owned_property) &&
+                        !retain_terminal_for_reverse;
+                    bool candidate_registered = false;
+
                     expr = transform_cypher_adjacency_candidate_edge(
                         cpstate, rel, prev_entity, next_node,
                         &query->targetList, valid_label,
-                        rel->dir == CYPHER_REL_DIR_RIGHT);
+                        rel->dir == CYPHER_REL_DIR_RIGHT,
+                        terminal_elided, &candidate_registered);
+                    if (terminal_elided && candidate_registered)
+                    {
+                        elided_adjacency_terminal = next_node;
+                        elided_adjacency_terminal_owns_properties =
+                            terminal_has_owned_property;
+                    }
 
                     /*
                      * Forward candidate not generated because the source is an
@@ -6172,9 +6230,7 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                      * register the reverse candidate from the (now-pending)
                      * terminal entity (item 10).
                      */
-                    if (expr == NULL &&
-                        !age_adjacency_match_endpoint_is_bound(prev_entity) &&
-                        next_node->props != NULL)
+                    if (retain_terminal_for_reverse)
                     {
                         ReverseAdjacencyCapture *cap =
                             palloc0(sizeof(ReverseAdjacencyCapture));
@@ -7069,6 +7125,81 @@ static bool age_adjacency_match_endpoint_is_bound(transform_entity *entity)
     return node != NULL && node->props != NULL;
 }
 
+/*
+ * Retaining an anonymous terminal lets the planner drive the edge from its
+ * property index in reverse, but it also prevents the forward adjacency path
+ * from owning/eliding that terminal.  Keep the extra relation only when the
+ * property source is small enough to repay the additional join alternative.
+ */
+static bool age_adjacency_match_terminal_is_selective(
+    cypher_parsestate *cpstate, cypher_node *node)
+{
+    Node *property_value_node = NULL;
+    Node *property_value_expr;
+    Const *property_value;
+    char *property_key;
+    Oid property_index_oid = InvalidOid;
+    double reltuples;
+    double estimated_matches;
+    double budget;
+    AgeGraphPropertySelectivitySource source_kind =
+        AGE_GRAPH_PROPERTY_SELECTIVITY_NONE;
+
+    if (cpstate == NULL || node == NULL || node->label == NULL ||
+        node->props == NULL)
+        return false;
+
+    property_key = get_cypher_map_first_property_key(node->props,
+                                                     &property_value_node);
+    if (property_key == NULL || property_value_node == NULL)
+        return false;
+
+    /*
+     * This is a rejection gate, not a prerequisite for reverse planning.
+     * Without a property-source index (or a plan-time constant) there is no
+     * reliable evidence that the terminal is broad, so preserve the historical
+     * reverse candidate and let the ordinary relation costs decide.  Only a
+     * known broad posting list should force terminal elision.
+     */
+    if (!get_age_adjacency_match_property_index(
+            cpstate->graph_oid, node->label, property_key,
+            &property_index_oid, NULL, NULL, NULL) ||
+        !OidIsValid(property_index_oid))
+        return true;
+
+    property_value_expr = transform_cypher_expr(
+        cpstate, copyObject(property_value_node), EXPR_KIND_WHERE);
+    if (property_value_expr == NULL || !IsA(property_value_expr, Const))
+        return true;
+
+    property_value = castNode(Const, property_value_expr);
+    if (property_value->constisnull || property_value->consttype != AGTYPEOID)
+        return true;
+
+    reltuples = get_vle_relation_estimated_tuples(property_index_oid);
+    estimated_matches = cypher_estimate_graph_property_index_matches(
+        property_index_oid, property_value, 0.15, &source_kind);
+    if (reltuples <= 0 || estimated_matches <= 0)
+        return true;
+
+    budget = Min(AGE_ADJACENCY_REVERSE_MATCH_MAX_BUDGET,
+                 Max(AGE_ADJACENCY_REVERSE_MATCH_MIN_BUDGET,
+                     reltuples * AGE_ADJACENCY_REVERSE_MATCH_FRACTION));
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE reverse adjacency property gate: "
+                             "label=%s key=%s index=%u matches=%.0f "
+                             "reltuples=%.0f budget=%.0f source=%s result=%s",
+                             node->label, property_key, property_index_oid,
+                             estimated_matches, reltuples, budget,
+                             age_graph_property_selectivity_source_name(
+                                 source_kind),
+                             estimated_matches <= budget ? "retain" :
+                                                           "elide")));
+
+    return estimated_matches <= budget;
+}
+
 static Node *copy_func_arg(FuncExpr *func_expr, int index)
 {
     return (Node *)copyObject(list_nth(func_expr->args, index));
@@ -7788,7 +7919,8 @@ static Expr *transform_cypher_edge(cypher_parsestate *cpstate,
 static Expr *transform_cypher_adjacency_candidate_edge(
     cypher_parsestate *cpstate, cypher_relationship *rel,
     transform_entity *prev_entity, cypher_node *next_node,
-    List **target_list, bool valid_label, bool outgoing)
+    List **target_list, bool valid_label, bool outgoing,
+    bool terminal_elided, bool *candidate_registered)
 {
     ParseState *pstate = (ParseState *)cpstate;
     Relation label_relation;
@@ -7817,10 +7949,14 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     int32 right_label_id = INVALID_LABEL_ID;
     char *graph_pattern_key;
 
+    if (candidate_registered != NULL)
+        *candidate_registered = false;
+
     if (!valid_label ||
         rel->label == NULL ||
         rel->varlen != NULL ||
-        !age_adjacency_match_endpoint_is_bound(prev_entity))
+        prev_entity == NULL ||
+        !prev_entity->in_join_tree)
     {
         return NULL;
     }
@@ -7924,9 +8060,12 @@ static Expr *transform_cypher_adjacency_candidate_edge(
         rel->props != NULL,
         next_node != NULL && next_node->label != NULL,
         next_node != NULL && next_node->props != NULL,
+        terminal_elided,
         right_label_id,
         outgoing ? Anum_ag_label_edge_table_start_id :
                    Anum_ag_label_edge_table_end_id);
+    if (candidate_registered != NULL)
+        *candidate_registered = true;
     return NULL;
 }
 
@@ -8090,6 +8229,7 @@ static void register_reverse_adjacency_candidate(
         rel->props != NULL,
         terminal_node->label != NULL,
         terminal_node->props != NULL,
+        false,
         right_label_id,
         Anum_ag_label_edge_table_end_id);
 }

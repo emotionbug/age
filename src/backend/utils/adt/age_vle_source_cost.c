@@ -4449,6 +4449,8 @@ const char *age_graph_property_selectivity_source_name(
             return "fallback-mcv-ceiling";
         case AGE_GRAPH_PROPERTY_SELECTIVITY_TYPED_DISTINCT:
             return "typed-distinct";
+        case AGE_GRAPH_PROPERTY_SELECTIVITY_TYPED_SPARSE:
+            return "typed-sparse";
         case AGE_GRAPH_PROPERTY_SELECTIVITY_FALLBACK_CEILING:
             return "fallback-ceiling";
         case AGE_GRAPH_PROPERTY_SELECTIVITY_NONE:
@@ -6025,7 +6027,7 @@ static const char *age_vle_source_runtime_pressure_name(
 static char *age_vle_source_runtime_pressure_action(
     const VLESourceRuntimePressure *pressure)
 {
-    const char *action;
+    const char *action = "observe";
     bool include_direction = false;
 
     Assert(pressure != NULL);

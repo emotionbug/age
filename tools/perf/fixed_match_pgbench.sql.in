@@ -1,0 +1,5 @@
+SELECT *
+FROM ag_catalog.cypher(
+    'hidden_age_perf_regression',
+    E'MATCH (a\x3aN)-[\x3aNoise]->(\x3aSink {bucket\x3a 1}) WHERE id(a)=@SOURCE_ID@ RETURN count(*)')
+AS (result ag_catalog.agtype);

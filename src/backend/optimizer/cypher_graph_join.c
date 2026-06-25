@@ -58,6 +58,10 @@ static AgeGraphJoinRelCandidate *graph_join_metadata_pool_carrier_candidate(
 static bool graph_join_pool_evidence_can_use_carrier(
     const AgeGraphJoinRelCandidate *carrier,
     const AgeGraphJoinPathEvidence *evidence);
+static void graph_join_metadata_prune_stale_paths(
+    AgeGraphJoinRelMetadata *metadata);
+static bool graph_join_metadata_path_is_live(
+    const AgeGraphJoinRelMetadata *metadata, const Path *path);
 static void graph_join_metadata_append_lowering_candidates(
     AgeGraphJoinRelMetadata *metadata);
 static void graph_join_metadata_merge_lowering_candidate(
@@ -1094,6 +1098,7 @@ void age_graph_join_refresh_rel_metadata(
     if (!age_graph_join_metadata_matches_root(root))
         age_graph_join_metadata_begin(root);
     metadata = age_graph_join_get_rel_metadata(rel, true);
+    graph_join_metadata_prune_stale_paths(metadata);
     metadata->candidates = NIL;
 
     foreach(lc, rel->pathlist)
@@ -1145,6 +1150,52 @@ void age_graph_join_refresh_rel_metadata(
                                  list_length(metadata->lowering_pool),
                                  list_length(rel->pathlist))));
     }
+}
+
+static bool graph_join_metadata_path_is_live(
+    const AgeGraphJoinRelMetadata *metadata, const Path *path)
+{
+    if (metadata == NULL || metadata->rel == NULL || path == NULL)
+        return false;
+
+    return list_member_ptr(metadata->rel->pathlist, path) ||
+           list_member_ptr(metadata->rel->partial_pathlist, path);
+}
+
+static void graph_join_metadata_prune_stale_paths(
+    AgeGraphJoinRelMetadata *metadata)
+{
+    List *live_lowering_candidates = NIL;
+    List *live_path_evidence = NIL;
+    ListCell *lc;
+
+    if (metadata == NULL)
+        return;
+
+    foreach(lc, metadata->lowering_candidates)
+    {
+        AgeGraphJoinRelCandidate *candidate = lfirst(lc);
+
+        if (candidate != NULL &&
+            graph_join_metadata_path_is_live(metadata, candidate->path))
+        {
+            live_lowering_candidates = lappend(live_lowering_candidates,
+                                               candidate);
+        }
+    }
+    metadata->lowering_candidates = live_lowering_candidates;
+
+    foreach(lc, metadata->path_evidence)
+    {
+        AgeGraphJoinRelPathEvidence *path_evidence = lfirst(lc);
+
+        if (path_evidence != NULL &&
+            graph_join_metadata_path_is_live(metadata, path_evidence->path))
+        {
+            live_path_evidence = lappend(live_path_evidence, path_evidence);
+        }
+    }
+    metadata->path_evidence = live_path_evidence;
 }
 
 static void graph_join_metadata_append_lowering_candidates(

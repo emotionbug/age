@@ -217,7 +217,8 @@ static void get_scalar_agtype_value_no_copy(agtype *agt, agtype_value *value,
 
     found = get_ith_agtype_value_from_container_no_copy(&agt->root, 0, value,
                                                         needs_free);
-    Assert(found);
+    if (!found)
+        elog(ERROR, "failed to read scalar agtype value");
 }
 
 static void free_agtype_value_no_copy(agtype_value *value, bool needs_free)
@@ -2088,7 +2089,7 @@ static bool eval_single_pair_contains_constraint(agtype_container *properties,
                                                  bool *result)
 {
     agtype_container *container = properties;
-    agtype_value property_value;
+    agtype_value property_value = {0};
     bool property_needs_free = false;
     int i;
 

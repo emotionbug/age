@@ -577,7 +577,8 @@ static Datum create_vertex(cypher_create_custom_scan_state *css,
         /* Convert to an agtype value */
         v_found = get_ith_agtype_value_from_container_no_copy(&a->root, 0, &v,
                                                               &v_needs_free);
-        Assert(v_found);
+        if (!v_found)
+            elog(ERROR, "failed to read existing vertex value");
 
         if (v.type != AGTV_VERTEX)
         {

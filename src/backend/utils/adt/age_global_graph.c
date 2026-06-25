@@ -2326,7 +2326,8 @@ static void get_global_graph_scalar_arg_no_copy(char *funcname,
 
     found = get_ith_agtype_value_from_container_no_copy(&agt_arg->root, 0,
                                                         result, needs_free);
-    Assert(found);
+    if (!found)
+        elog(ERROR, "%s: failed to read scalar agtype value", funcname);
 
     if (error && result->type == AGTV_NULL)
     {

@@ -308,19 +308,23 @@ static void cache_edge_property_constraints(VLE_local_context *vlelctx)
     constraint_it = agtype_iterator_init(
         &vlelctx->edge_property_constraint->root);
     token = agtype_iterator_next(&constraint_it, &agtv, true);
-    Assert(token == WAGT_BEGIN_OBJECT);
+    if (token != WAGT_BEGIN_OBJECT)
+        elog(ERROR, "invalid VLE edge property constraint object");
 
     for (index = 0; index < vlelctx->num_edge_property_constraints; index++)
     {
         token = agtype_iterator_next(&constraint_it, &pairs[index].key, true);
-        Assert(token == WAGT_KEY);
+        if (token != WAGT_KEY)
+            elog(ERROR, "invalid VLE edge property constraint key");
 
         token = agtype_iterator_next(&constraint_it, &pairs[index].value, true);
-        Assert(token == WAGT_VALUE);
+        if (token != WAGT_VALUE)
+            elog(ERROR, "invalid VLE edge property constraint value");
     }
 
     token = agtype_iterator_next(&constraint_it, &agtv, true);
-    Assert(token == WAGT_END_OBJECT);
+    if (token != WAGT_END_OBJECT)
+        elog(ERROR, "invalid VLE edge property constraint terminator");
 
     vlelctx->edge_property_constraint_pairs = pairs;
     vlelctx->num_cached_edge_property_constraints =

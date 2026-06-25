@@ -47,6 +47,7 @@ typedef struct AgeAdjacencyMatchTerminalPropertyRequest
     const char *property_key;
     Datum property_value;
     bool property_value_isnull;
+    int64 estimated_match_count;
 } AgeAdjacencyMatchTerminalPropertyRequest;
 
 extern AgeAdjacencyMatchTerminalPropertyLookup *

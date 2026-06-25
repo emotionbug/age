@@ -737,7 +737,8 @@ static void get_vle_scalar_arg_no_copy(char *funcname, agtype *agt_arg,
 
     found = get_ith_agtype_value_from_container_no_copy(&agt_arg->root, 0,
                                                         result, needs_free);
-    Assert(found);
+    if (!found)
+        elog(ERROR, "%s: failed to read scalar agtype value", funcname);
 
     if (error && result->type == AGTV_NULL)
     {
@@ -781,7 +782,8 @@ static graphid get_agtype_scalar_graphid_arg(agtype *agt_arg,
     found = get_ith_agtype_value_from_container_no_copy(&agt_arg->root, 0,
                                                         &agtv_value,
                                                         &value_needs_free);
-    Assert(found);
+    if (!found)
+        elog(ERROR, "%s", type_error_msg);
 
     if (agtv_value.type != AGTV_INTEGER)
     {
@@ -822,7 +824,8 @@ static bool get_agtype_scalar_bool_arg(agtype *agt_arg,
     found = get_ith_agtype_value_from_container_no_copy(&agt_arg->root, 0,
                                                         &agtv_value,
                                                         &value_needs_free);
-    Assert(found);
+    if (!found)
+        elog(ERROR, "%s", type_error_msg);
 
     if (agtv_value.type != AGTV_BOOL)
     {
@@ -7740,7 +7743,8 @@ static bool get_edge_uniqueness_fixed_edge_id(Datum arg, Oid type, int argno,
 
     id_found = get_ith_agtype_value_from_container_no_copy(
         &agt->root, 0, &agtv_id, &id_needs_free);
-    Assert(id_found);
+    if (!id_found)
+        elog(ERROR, "failed to read edge id argument %d", argno);
 
     if (agtv_id.type != AGTV_INTEGER)
     {
@@ -8068,7 +8072,8 @@ Datum _ag_enforce_edge_uniqueness(PG_FUNCTION_ARGS)
 
                 id_found = get_ith_agtype_value_from_container_no_copy(
                     &agt_i->root, 0, &agtv_id, &id_needs_free);
-                Assert(id_found);
+                if (!id_found)
+                    elog(ERROR, "failed to read edge id argument %d", i);
 
                 if (agtv_id.type != AGTV_INTEGER)
                 {

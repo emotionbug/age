@@ -239,7 +239,8 @@ void age_vle_traversal_state_set_iterator_policy(
 {
     Assert(state != NULL);
     Assert(state->worklist != NULL);
-    Assert(age_vle_traversal_iterator_policy_is_valid(iterator_policy));
+    if (!age_vle_traversal_iterator_policy_is_valid(iterator_policy))
+        elog(ERROR, "invalid VLE traversal iterator policy");
     Assert(state->worklist->size == 0);
     Assert(state->path_depth == 0);
     Assert(state->active_frame_index == -1);
@@ -447,7 +448,8 @@ static int64 age_vle_arena_segment_begin(
     Assert(work_start >= 0);
     Assert(path_length > 0);
     Assert(parent_frame_index < frame_start);
-    Assert(age_vle_traversal_iterator_policy_is_valid(iterator_policy));
+    if (!age_vle_traversal_iterator_policy_is_valid(iterator_policy))
+        elog(ERROR, "invalid VLE traversal iterator policy");
 
     segments = &state->arena_segments;
     age_vle_arena_segments_ensure_capacity(segments, segments->size + 1);
@@ -1629,7 +1631,6 @@ bool age_vle_consume_next_frame(VLETraversalState *state, const char *caller,
         bool replay_iterator;
         uint8 *edge_flags;
         int64 frame_index;
-        int64 item_path_length;
 
         replay_iterator =
             age_vle_traversal_uses_path_replay_iterator(state);
@@ -1637,12 +1638,11 @@ bool age_vle_consume_next_frame(VLETraversalState *state, const char *caller,
             return false;
 
         frame_index = selection.item.frame_index;
-        item_path_length = selection.item.path_length;
         item_kind = selection.item.kind;
         Assert(frame_index >= 0);
         Assert(frame_index < state->frame_stack->size);
         frame = &state->frame_stack->array[frame_index];
-        Assert(item_path_length == frame->path_length);
+        Assert(selection.item.path_length == frame->path_length);
         edge_flags = age_vle_edge_state_flag_at(&state->edge_state,
                                                 frame->edge_index, caller);
 

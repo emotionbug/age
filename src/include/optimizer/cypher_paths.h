@@ -52,6 +52,7 @@ typedef struct CypherAdjacencyMatchCandidate
     char *right_property_index_type;
     bool right_property_index_metadata_backed;
     bool right_property_prefetch_eligible;
+    bool right_property_prefetch_cost_rejected;
     AgeAdjacencyMatchValueKind right_property_value_kind_id;
     AgeAdjacencyMatchTerminalStrategy terminal_source_strategy_id;
     Const *right_property_value;
@@ -65,6 +66,7 @@ typedef struct CypherAdjacencyMatchCandidate
     bool has_edge_property_predicate;
     bool has_right_label_constraint;
     bool has_right_property_predicate;
+    bool terminal_elided;
     int32 right_label_id;
     AttrNumber endpoint_attno;
     double estimated_endpoint_fanout;
@@ -97,6 +99,10 @@ void cypher_register_vle_pattern_handoff(const char *marker_alias,
                                          const char *graph_pattern_key);
 void cypher_register_node_pattern_handoff(const char *node_alias,
                                           const char *graph_pattern_key);
+double cypher_estimate_graph_property_index_matches(
+    Oid property_index_oid, Const *property_value,
+    double fallback_selectivity,
+    AgeGraphPropertySelectivitySource *source_kind);
 void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
                                                Oid index_oid,
                                                Oid graph_oid,
@@ -123,6 +129,7 @@ void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
                                                bool has_edge_property_predicate,
                                                bool has_right_label_constraint,
                                                bool has_right_property_predicate,
+                                               bool terminal_elided,
                                                int32 right_label_id,
                                                AttrNumber endpoint_attno);
 

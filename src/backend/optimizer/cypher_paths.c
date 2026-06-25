@@ -17,6 +17,8 @@
  * under the License.
  */
 
+#include <math.h>
+
 #include "postgres.h"
 
 #include "access/xact.h"
@@ -200,7 +202,11 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
                                              Const *endpoint_const);
 static bool adjacency_match_requires_edge_payload(
     const CypherAdjacencyMatchCandidate *candidate);
+static bool adjacency_match_terminal_property_index_available(
+    const CypherAdjacencyMatchCandidate *candidate);
 static bool adjacency_match_has_terminal_property_prefetch(
+    const CypherAdjacencyMatchCandidate *candidate);
+static bool adjacency_match_property_source_is_bounded(
     const CypherAdjacencyMatchCandidate *candidate);
 static AgeAdjacencyMatchValueKind adjacency_match_terminal_property_value_kind(
     const CypherAdjacencyMatchCandidate *candidate);
@@ -603,6 +609,8 @@ static bool estimate_graph_property_index_mcv_selectivity(Oid property_index_oid
 static bool estimate_graph_property_index_distinct_values(Oid property_index_oid,
                                                           double reltuples,
                                                           double *distinct_values);
+static bool estimate_graph_property_index_sparse_selectivity(
+    Oid property_index_oid, double reltuples, double *selectivity);
 static int64 graph_property_selectivity_ppm(double selectivity);
 static void get_vle_stream_edge_source_indexes(
     const char *graph_name, const char *label_name,
@@ -724,6 +732,7 @@ void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
                                                bool has_edge_property_predicate,
                                                bool has_right_label_constraint,
                                                bool has_right_property_predicate,
+                                               bool terminal_elided,
                                                int32 right_label_id,
                                                AttrNumber endpoint_attno)
 {
@@ -782,16 +791,18 @@ void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
         copyObject(right_property_value) : NULL;
     candidate->right_property_value_expr = right_property_value_expr != NULL ?
         copyObject(right_property_value_expr) : NULL;
-    candidate->right_property_prefetch_eligible =
-        adjacency_match_has_terminal_property_prefetch(candidate);
-    candidate->right_property_value_kind_id =
-        adjacency_match_terminal_property_value_kind(candidate);
     candidate->outgoing = outgoing;
     candidate->has_edge_variable_projection = has_edge_variable_projection;
     candidate->has_edge_property_predicate = has_edge_property_predicate;
     candidate->has_right_label_constraint = has_right_label_constraint;
     candidate->has_right_property_predicate = has_right_property_predicate;
+    candidate->terminal_elided = terminal_elided;
     candidate->right_label_id = right_label_id;
+    candidate->right_property_prefetch_eligible =
+        adjacency_match_terminal_property_index_available(candidate);
+    candidate->right_property_prefetch_cost_rejected = false;
+    candidate->right_property_value_kind_id =
+        adjacency_match_terminal_property_value_kind(candidate);
     candidate->terminal_source_strategy_id =
         adjacency_match_terminal_source_strategy(candidate);
     candidate->endpoint_attno = endpoint_attno;
@@ -1016,7 +1027,7 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
                              "edge_rel=%u index=%u alias=%s direction=%s "
                              "endpoint_attno=%d endpoint_alias=%s "
                              "endpoint_rti=%u edge_var=%s edge_props=%s "
-                             "right_label=%s right_props=%s "
+                             "right_label=%s right_props=%s terminal_elided=%s "
                              "index_source=%s index_kind=%s provider=%s "
                              "metadata=%s pattern=%s right_property_key=%s "
                              "right_property_index=%s right_property_value=%s "
@@ -1036,6 +1047,8 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
                                  candidate->has_right_label_constraint ?
                                  "true" : "false",
                                  candidate->has_right_property_predicate ?
+                                 "true" : "false",
+                                 candidate->terminal_elided ?
                                  "true" : "false",
                                  candidate->index_source != NULL ?
                                  candidate->index_source : "unknown",
@@ -2178,11 +2191,24 @@ static bool graph_join_candidate_nestloop_pair_is_legal(
     Relids outer_paramrels;
     Relids innerrelids;
 
-    (void)inner_path;
-
     if (outerrel == NULL ||
         innerrel == NULL ||
-        outer_path == NULL)
+        outer_path == NULL ||
+        inner_path == NULL)
+    {
+        return false;
+    }
+
+    /*
+     * add_path() may discard a path after AGE has attached lowering evidence
+     * to it.  Metadata refresh prunes those entries, but keep the legality
+     * check defensive: pointer membership is safe even after the path object
+     * itself has been released, while PATH_REQ_OUTER() is not.
+     */
+    if ((!list_member_ptr(outerrel->pathlist, outer_path) &&
+         !list_member_ptr(outerrel->partial_pathlist, outer_path)) ||
+        (!list_member_ptr(innerrel->pathlist, inner_path) &&
+         !list_member_ptr(innerrel->partial_pathlist, inner_path)))
     {
         return false;
     }
@@ -5803,6 +5829,22 @@ static GraphPropertySourceSelectivity estimate_graph_property_source_selectivity
     }
 
     reltuples = get_vle_relation_estimated_tuples(property_index_oid);
+    if (estimate_graph_property_index_sparse_selectivity(
+            property_index_oid, reltuples, &mcv_selectivity))
+    {
+        if (mcv_selectivity <= fallback_selectivity)
+        {
+            estimate.selectivity = mcv_selectivity;
+            estimate.source_kind = AGE_GRAPH_PROPERTY_SELECTIVITY_TYPED_SPARSE;
+        }
+        else
+        {
+            estimate.source_kind =
+                AGE_GRAPH_PROPERTY_SELECTIVITY_FALLBACK_CEILING;
+        }
+        return estimate;
+    }
+
     if (!estimate_graph_property_index_distinct_values(
             property_index_oid, reltuples, &distinct_values))
         return estimate;
@@ -5825,6 +5867,74 @@ static GraphPropertySourceSelectivity estimate_graph_property_source_selectivity
     }
 
     return estimate;
+}
+
+/*
+ * Expression indexes on optional graph properties are often almost entirely
+ * NULL.  A rare non-NULL value can be missed by ANALYZE's sample, leaving
+ * stadistinct at zero and stanullfrac at one.  Treat the minimum observable
+ * non-NULL population as one tuple rather than falling back to the generic
+ * 15/25 percent graph-property selectivity.
+ */
+static bool estimate_graph_property_index_sparse_selectivity(
+    Oid property_index_oid, double reltuples, double *selectivity)
+{
+    HeapTuple stat_tuple;
+    Form_pg_statistic stats;
+    double nonnull_fraction;
+    double distinct_values = 0.0;
+
+    Assert(selectivity != NULL);
+    *selectivity = 0.0;
+
+    if (!OidIsValid(property_index_oid) || reltuples <= 0)
+        return false;
+
+    stat_tuple = SearchSysCache3(STATRELATTINH,
+                                 ObjectIdGetDatum(property_index_oid),
+                                 Int16GetDatum(1),
+                                 BoolGetDatum(false));
+    if (!HeapTupleIsValid(stat_tuple))
+        return false;
+
+    stats = (Form_pg_statistic) GETSTRUCT(stat_tuple);
+    nonnull_fraction = Max(0.0, 1.0 - stats->stanullfrac);
+    if (stats->stadistinct > 0)
+        distinct_values = stats->stadistinct;
+    else if (stats->stadistinct < 0)
+        distinct_values = -stats->stadistinct * reltuples;
+
+    ReleaseSysCache(stat_tuple);
+
+    /* Ordinary dense distributions are handled by MCV/ndistinct evidence. */
+    if (nonnull_fraction > 0.10)
+        return false;
+
+    if (distinct_values > 0)
+        nonnull_fraction /= Max(1.0, Min(distinct_values, reltuples));
+
+    *selectivity = Max(nonnull_fraction, 1.0 / reltuples);
+    return true;
+}
+
+double cypher_estimate_graph_property_index_matches(
+    Oid property_index_oid, Const *property_value,
+    double fallback_selectivity,
+    AgeGraphPropertySelectivitySource *source_kind)
+{
+    GraphPropertySourceSelectivity estimate;
+    double reltuples;
+
+    estimate = estimate_graph_property_source_selectivity(
+        property_index_oid, fallback_selectivity, property_value);
+    if (source_kind != NULL)
+        *source_kind = estimate.source_kind;
+
+    reltuples = get_vle_relation_estimated_tuples(property_index_oid);
+    if (reltuples <= 0 || estimate.selectivity <= 0)
+        return 0.0;
+
+    return clamp_row_est(Max(1.0, reltuples * estimate.selectivity));
 }
 
 static bool estimate_graph_property_index_mcv_selectivity(Oid property_index_oid,
@@ -8140,6 +8250,7 @@ static void restrict_adjacency_match_terminal_property_prefetch(
         candidate->right_property_index_metadata_backed = false;
         candidate->right_property_index_oid = InvalidOid;
         candidate->right_property_prefetch_eligible = false;
+        candidate->right_property_prefetch_cost_rejected = false;
         candidate->right_property_value_kind_id =
             AGE_ADJACENCY_MATCH_VALUE_NONE;
     }
@@ -8148,7 +8259,8 @@ static void restrict_adjacency_match_terminal_property_prefetch(
         candidate->right_property_value_kind_id =
             adjacency_match_terminal_property_value_kind(candidate);
         candidate->right_property_prefetch_eligible =
-            adjacency_match_has_terminal_property_prefetch(candidate);
+            adjacency_match_terminal_property_index_available(candidate);
+        candidate->right_property_prefetch_cost_rejected = false;
     }
     candidate->terminal_source_strategy_id =
         adjacency_match_terminal_source_strategy(candidate);
@@ -8169,16 +8281,23 @@ static void add_adjacency_match_custom_path(
     int partial_workers = 0;
     bool can_add_partial;
 
-    if (candidate == NULL ||
-        candidate->bound_endpoint_expr == NULL ||
-        candidate->required_outer == NULL ||
-        adjacency_match_bound_expr_uses_age_id(candidate->bound_endpoint_expr))
-    {
+    if (candidate == NULL || candidate->bound_endpoint_expr == NULL)
         return;
-    }
+
+    endpoint_const = find_endpoint_graphid_const(root, candidate);
+    if (candidate->required_outer == NULL && endpoint_const == NULL)
+        return;
+
+    /*
+     * age_id(vertex) cannot be evaluated against the edge scan slot.  A
+     * base-relation graphid equality is safe, however, because it replaces the
+     * expression with a plan-stable Const before setrefs runs.
+     */
+    if (endpoint_const == NULL &&
+        adjacency_match_bound_expr_uses_age_id(candidate->bound_endpoint_expr))
+        return;
 
     key_expr = (Expr *)candidate->bound_endpoint_expr;
-    endpoint_const = find_endpoint_graphid_const(root, candidate);
     if (endpoint_const != NULL)
         key_expr = (Expr *)endpoint_const;
     path_required_outer = endpoint_const != NULL ? NULL :
@@ -8227,6 +8346,16 @@ static void add_adjacency_match_custom_path(
                                         graph_join_candidate));
     cp->methods = &age_adjacency_match_path_methods;
 
+    /*
+     * An elided anonymous terminal has no fallback vertex RTE.  Keep only the
+     * path that owns its label/existence contract so a later cost comparison
+     * cannot select a semantically incomplete ordinary edge scan.
+     */
+    if (candidate->terminal_elided)
+    {
+        rel->pathlist = NIL;
+        rel->partial_pathlist = NIL;
+    }
     add_path(rel, (Path *)cp);
     can_add_partial = adjacency_match_can_add_partial_path(rel, candidate,
                                                            &payload_request,
@@ -8758,11 +8887,13 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
     if (rows < 1)
         rows = 1;
     composite_fanout = rows;
-    if (adjacency_match_plans_terminal_property_prefetch(candidate,
-                                                        payload_request))
+    candidate->right_property_prefetch_cost_rejected = false;
+    if (candidate->right_property_prefetch_eligible &&
+        adjacency_match_terminal_property_index_available(candidate))
     {
         GraphPropertySourceSelectivity property_selectivity;
         double fallback_selectivity;
+        int prefetch_threshold;
 
         fallback_selectivity =
             candidate->has_right_label_constraint ? 0.15 : 0.25;
@@ -8780,6 +8911,18 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
                 property_selectivity.selectivity));
         rows = clamp_row_est(Max(1.0, rows * property_selectivity.selectivity));
         composite_fanout = rows;
+
+        prefetch_threshold = adjacency_match_terminal_prefetch_threshold(
+            candidate, payload_request);
+        if (prefetch_threshold > 0 &&
+            candidate->estimated_terminal_fanout >= prefetch_threshold &&
+            !adjacency_match_property_source_is_bounded(candidate))
+        {
+            candidate->right_property_prefetch_eligible = false;
+            candidate->right_property_prefetch_cost_rejected = true;
+            candidate->terminal_source_strategy_id =
+                adjacency_match_terminal_source_strategy(candidate);
+        }
     }
     else
     {
@@ -8844,7 +8987,7 @@ static bool adjacency_match_requires_edge_payload(
          candidate->has_edge_property_predicate);
 }
 
-static bool adjacency_match_has_terminal_property_prefetch(
+static bool adjacency_match_terminal_property_index_available(
     const CypherAdjacencyMatchCandidate *candidate)
 {
     return candidate != NULL &&
@@ -8854,6 +8997,37 @@ static bool adjacency_match_has_terminal_property_prefetch(
         candidate->right_property_value_expr != NULL &&
         (candidate->right_property_value == NULL ||
          !candidate->right_property_value->constisnull);
+}
+
+static bool adjacency_match_has_terminal_property_prefetch(
+    const CypherAdjacencyMatchCandidate *candidate)
+{
+    return candidate != NULL &&
+        candidate->right_property_prefetch_eligible &&
+        adjacency_match_terminal_property_index_available(candidate);
+}
+
+static bool adjacency_match_property_source_is_bounded(
+    const CypherAdjacencyMatchCandidate *candidate)
+{
+    double source_budget;
+
+    if (candidate == NULL ||
+        candidate->estimated_property_source_matches <= 0)
+    {
+        return true;
+    }
+
+    /*
+     * A global property posting set is only a win when its build is bounded by
+     * the local adjacency run it will prune.  Keep a small absolute allowance
+     * for tiny graphs, then cap global work at thirty-two times the terminal
+     * run.  A graphid posting set is compact, while rejecting it can turn one
+     * property-index scan into an index probe for every adjacent vertex.
+     */
+    source_budget = Max(256.0,
+                        candidate->estimated_terminal_fanout * 32.0);
+    return candidate->estimated_property_source_matches <= source_budget;
 }
 
 static AgeAdjacencyMatchValueKind
@@ -8996,6 +9170,12 @@ adjacency_match_terminal_prefetch_reason_kind(
 {
     bool fetch_properties;
 
+    if (candidate != NULL &&
+        candidate->right_property_prefetch_cost_rejected)
+    {
+        return
+            AGE_ADJACENCY_MATCH_PREFETCH_REASON_PROPERTY_SOURCE_TOO_BROAD;
+    }
     if (!adjacency_match_has_terminal_property_prefetch(candidate))
         return AGE_ADJACENCY_MATCH_PREFETCH_REASON_NOT_INDEXABLE;
 
