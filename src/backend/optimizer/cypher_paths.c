@@ -217,8 +217,9 @@ typedef struct AgeWCOJPathBuildState
 } AgeWCOJPathBuildState;
 
 #define AGE_GENERIC_MIN_PAIR_ROWS 4096.0
-#define AGE_GENERIC_MIN_CYCLE_PRESSURE 8.0
+#define AGE_GENERIC_MIN_PAIR_PRESSURE 8.0
 #define AGE_GENERIC_COMPETING_COST_FACTOR 0.90
+#define AGE_GENERIC_MIN_COST_FACTOR 0.05
 
 typedef struct AgeEdgeUniquenessCollectContext
 {
@@ -270,6 +271,10 @@ static void add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
                                   JoinPathExtraData *extra);
 static bool generic_component_is_cyclic(List *entries,
                                         List *variable_rtis);
+static bool generic_component_is_connected(List *entries,
+                                           List *variable_rtis);
+static bool generic_component_is_star(List *entries,
+                                      List *variable_rtis);
 static List *generic_variable_order(PlannerInfo *root, List *entries);
 static List *collect_generic_restrictinfos(PlannerInfo *root,
                                            Relids component_relids,
@@ -281,7 +286,7 @@ static List *make_generic_vertex_path_desc(Index rti, int variable,
                                            Expr *key_expr);
 static List *make_generic_edge_path_desc(
     CypherWCOJTerminalEntry *entry, List *variable_rtis);
-static double estimate_generic_cycle_pressure(
+static double estimate_generic_pair_pressure(
     const double *vertex_rows, int variable_count,
     const AgeGenericEdgeEstimate *edges, int edge_count,
     double generic_work, double *max_pair_rows);
@@ -2836,6 +2841,81 @@ generic_component_is_cyclic(List *entries, List *variable_rtis)
     return false;
 }
 
+static bool
+generic_component_is_connected(List *entries, List *variable_rtis)
+{
+    int variable_count = list_length(variable_rtis);
+    int *parents;
+    ListCell *lc;
+    int reference_root;
+    int index;
+
+    if (entries == NIL || variable_count < 2)
+        return false;
+    parents = palloc(sizeof(int) * variable_count);
+    for (index = 0; index < variable_count; index++)
+        parents[index] = index;
+
+    foreach(lc, entries)
+    {
+        CypherWCOJTerminalEntry *entry = lfirst(lc);
+        int left = generic_variable_position(variable_rtis,
+                                             entry->source_rti);
+        int right = generic_variable_position(variable_rtis,
+                                              entry->terminal_rti);
+        int left_root;
+        int right_root;
+
+        if (left < 0 || right < 0 || left == right)
+            return false;
+        left_root = generic_union_find_root(parents, left);
+        right_root = generic_union_find_root(parents, right);
+        if (left_root != right_root)
+            parents[right_root] = left_root;
+    }
+
+    reference_root = generic_union_find_root(parents, 0);
+    for (index = 1; index < variable_count; index++)
+    {
+        if (generic_union_find_root(parents, index) != reference_root)
+            return false;
+    }
+    return true;
+}
+
+static bool
+generic_component_is_star(List *entries, List *variable_rtis)
+{
+    int variable_count = list_length(variable_rtis);
+    int edge_count = list_length(entries);
+    int *degrees;
+    ListCell *lc;
+    int index;
+
+    if (edge_count < 2 || variable_count < 3)
+        return false;
+    degrees = palloc0(sizeof(int) * variable_count);
+    foreach(lc, entries)
+    {
+        CypherWCOJTerminalEntry *entry = lfirst(lc);
+        int left = generic_variable_position(variable_rtis,
+                                             entry->source_rti);
+        int right = generic_variable_position(variable_rtis,
+                                              entry->terminal_rti);
+
+        if (left < 0 || right < 0 || left == right)
+            return false;
+        degrees[left]++;
+        degrees[right]++;
+    }
+    for (index = 0; index < variable_count; index++)
+    {
+        if (degrees[index] == edge_count)
+            return true;
+    }
+    return false;
+}
+
 static List *
 collect_generic_restrictinfos(PlannerInfo *root, Relids component_relids,
                               List *current_restrictlist)
@@ -2982,10 +3062,10 @@ make_generic_edge_path_desc(CypherWCOJTerminalEntry *entry,
  * share a vertex.  The denominator is the provider work required by Generic
  * Join.  This is deliberately a pressure estimate rather than a cardinality
  * estimate: it is used only to account for the severe under-pricing of a
- * sequence of parameterized graph expansions on dense cyclic patterns.
+ * sequence of parameterized graph expansions on dense multiway patterns.
  */
 static double
-estimate_generic_cycle_pressure(const double *vertex_rows,
+estimate_generic_pair_pressure(const double *vertex_rows,
                                 int variable_count,
                                 const AgeGenericEdgeEstimate *edges,
                                 int edge_count, double generic_work,
@@ -3089,11 +3169,11 @@ generic_join_path_is_risk_adjusted(CustomPath *path)
 static bool
 generic_join_needs_risk_adjustment(Path *competing_path,
                                    double max_pair_rows,
-                                   double cycle_pressure)
+                                   double pair_pressure)
 {
     return competing_path != NULL &&
         max_pair_rows >= AGE_GENERIC_MIN_PAIR_ROWS &&
-        cycle_pressure >= AGE_GENERIC_MIN_CYCLE_PRESSURE;
+        pair_pressure >= AGE_GENERIC_MIN_PAIR_PRESSURE;
 }
 
 static void
@@ -3135,8 +3215,11 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     Cost total_cost = 0;
     double input_rows = 0;
     double max_pair_rows = 0;
-    double cycle_pressure;
+    double pair_pressure;
+    bool is_cyclic;
+    bool is_star;
     bool risk_adjusted;
+    double risk_cost_factor = AGE_GENERIC_COMPETING_COST_FACTOR;
     int edge_count = 0;
     int variable_count;
     int disabled_nodes = 0;
@@ -3178,10 +3261,14 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
 
     variable_rtis = generic_variable_order(root, entries);
     if (variable_rtis == NIL ||
-        !generic_component_is_cyclic(entries, variable_rtis))
-    {
+        !generic_component_is_connected(entries, variable_rtis))
         return;
-    }
+    is_cyclic = generic_component_is_cyclic(entries, variable_rtis);
+    is_star = generic_component_is_star(entries, variable_rtis);
+
+    /* The direct WCOJ path has a lower-overhead batched star executor. */
+    if (!is_cyclic && is_star)
+        return;
     restrictinfos = collect_generic_restrictinfos(
         root, covered_relids, extra->restrictlist);
     variable_count = list_length(variable_rtis);
@@ -3261,11 +3348,28 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     }
 
     competing_path = cheapest_generic_competing_path(joinrel);
-    cycle_pressure = estimate_generic_cycle_pressure(
+    pair_pressure = estimate_generic_pair_pressure(
         vertex_rows, variable_count, edge_estimates, edge_count,
         input_rows, &max_pair_rows);
     risk_adjusted = generic_join_needs_risk_adjustment(
-        competing_path, max_pair_rows, cycle_pressure);
+        competing_path, max_pair_rows, pair_pressure);
+
+    /*
+     * Cycles keep the existing cost-based Generic Join candidate.  Acyclic
+     * components are admitted only when adjacent relation estimates imply a
+     * material binary intermediate; query-wide semijoin reduction can then
+     * remove impossible endpoint domains before tuple enumeration.
+     */
+    if (!is_cyclic && !risk_adjusted)
+        return;
+
+    if (risk_adjusted)
+    {
+        risk_cost_factor = Max(
+            AGE_GENERIC_MIN_COST_FACTOR,
+            Min(AGE_GENERIC_COMPETING_COST_FACTOR,
+                1.0 / sqrt(Max(pair_pressure, 1.0))));
+    }
 
     custom_path = makeNode(CustomPath);
     custom_path->path.pathtype = T_CustomScan;
@@ -3286,12 +3390,13 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
 
     /*
      * AGE's parameterized graph expansion paths intentionally use a compact
-     * evidence cost scale.  A dense cycle can therefore look almost free even
-     * when two adjacent expansions imply a very large binary intermediate.
-     * For a statistically clear, non-trivial pressure signal, price Generic
-     * Join just below the best competing unparameterized path.  Runtime work
-     * remains bounded by provider rows plus complete bindings, while patterns
-     * below the threshold retain normal PostgreSQL path competition.
+     * evidence cost scale.  A dense component can therefore look almost free
+     * even when two adjacent expansions imply a very large binary
+     * intermediate.  For a statistically clear pressure signal, discount
+     * Generic Join in proportion to the square root of that pressure.  This
+     * keeps borderline shapes in normal PostgreSQL path competition while
+     * allowing semijoin reduction to win decisively when the binary
+     * intermediate is orders of magnitude larger than provider work.
      */
     if (risk_adjusted)
     {
@@ -3301,7 +3406,7 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
         Cost risk_adjusted_total = Min(
             custom_path->path.total_cost,
             competing_path->total_cost *
-                AGE_GENERIC_COMPETING_COST_FACTOR);
+                risk_cost_factor);
 
         custom_path->path.startup_cost = risk_adjusted_startup;
         custom_path->path.total_cost = Max(
@@ -3313,7 +3418,7 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
          * acyclic expansion, but it makes an upper Aggregate or Sort compare
          * one-row binary output with the full bag cardinality of Generic Join.
          * Restore the joinrel cardinality for competing paths only when the
-         * cycle-pressure evidence above is strong enough to justify the risk
+         * pair-pressure evidence above is strong enough to justify the risk
          * correction.
          */
         normalize_generic_competing_rows(joinrel, &custom_path->path);

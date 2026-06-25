@@ -1091,6 +1091,137 @@ SELECT 'mixed_label_direction',
 
 SELECT * FROM wcoj_generic_summary ORDER BY case_name;
 ROLLBACK;
+
+-- A high-pressure acyclic chain is admitted to Generic Join only when the
+-- estimated adjacent-edge intermediate is large.  Query-wide semijoin
+-- reduction keeps the single common C endpoint before any A x C binding is
+-- enumerated.  The shape is deliberately not a star, which remains assigned
+-- to the lower-overhead direct WCOJ executor.
+SELECT create_vlabel('wcoj_generic', 'A');
+SELECT create_vlabel('wcoj_generic', 'B');
+SELECT create_vlabel('wcoj_generic', 'C');
+SELECT create_vlabel('wcoj_generic', 'D');
+SELECT create_elabel('wcoj_generic', 'F1');
+SELECT create_elabel('wcoj_generic', 'F2');
+SELECT create_elabel('wcoj_generic', 'F3');
+
+INSERT INTO wcoj_generic."A" (id, properties)
+SELECT _graphid(_label_id('wcoj_generic', 'A'), i), '{}'::agtype
+FROM generate_series(1, 128) i;
+INSERT INTO wcoj_generic."B" (id, properties)
+VALUES (_graphid(_label_id('wcoj_generic', 'B'), 1), '{}'::agtype);
+INSERT INTO wcoj_generic."C" (id, properties)
+SELECT _graphid(_label_id('wcoj_generic', 'C'), i), '{}'::agtype
+FROM generate_series(1, 255) i;
+INSERT INTO wcoj_generic."D" (id, properties)
+VALUES (_graphid(_label_id('wcoj_generic', 'D'), 1), '{}'::agtype);
+
+INSERT INTO wcoj_generic."F1" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('wcoj_generic', 'F1'), i),
+       _graphid(_label_id('wcoj_generic', 'A'), i),
+       _graphid(_label_id('wcoj_generic', 'B'), 1),
+       '{}'::agtype
+FROM generate_series(1, 128) i;
+INSERT INTO wcoj_generic."F2" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('wcoj_generic', 'F2'), i),
+       _graphid(_label_id('wcoj_generic', 'B'), 1),
+       _graphid(_label_id('wcoj_generic', 'C'), i),
+       '{}'::agtype
+FROM generate_series(1, 128) i;
+INSERT INTO wcoj_generic."F3" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('wcoj_generic', 'F3'), i),
+       _graphid(_label_id('wcoj_generic', 'C'), 127 + i),
+       _graphid(_label_id('wcoj_generic', 'D'), 1),
+       '{}'::agtype
+FROM generate_series(1, 128) i;
+
+CREATE INDEX wcoj_generic_f1_out
+ON wcoj_generic."F1" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX wcoj_generic_f2_out
+ON wcoj_generic."F2" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX wcoj_generic_f3_out
+ON wcoj_generic."F3" USING age_adjacency(start_id, id, end_id);
+
+ANALYZE wcoj_generic."A";
+ANALYZE wcoj_generic."B";
+ANALYZE wcoj_generic."C";
+ANALYZE wcoj_generic."D";
+ANALYZE wcoj_generic."F1";
+ANALYZE wcoj_generic."F2";
+ANALYZE wcoj_generic."F3";
+
+DO $wcoj_acyclic_semijoin_plan$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_semijoin_passes boolean := false;
+    has_rows_removed boolean := false;
+    has_rows_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('wcoj_generic', $cypher$
+            MATCH (a:A)-[f1:F1]->(b:B)-[f2:F2]->(c:C)-[f3:F3]->(d:D)
+            RETURN id(a), id(b), id(c), id(d), id(f1), id(f2), id(f3)
+        $cypher$) AS (a agtype, b agtype, c agtype, d agtype,
+                      f1 agtype, f2 agtype, f3 agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_semijoin_passes := has_semijoin_passes OR
+            plan_text LIKE '%Semijoin Reduction Passes: 2%';
+        has_rows_removed := has_rows_removed OR
+            plan_text LIKE '%Semijoin Rows Removed: 508%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 128%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_semijoin_passes OR
+       NOT has_rows_removed OR NOT has_rows_emitted THEN
+        RAISE EXCEPTION 'acyclic Generic Join semijoin reduction was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj acyclic semijoin reduction verified';
+END
+$wcoj_acyclic_semijoin_plan$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_binary_chain ON COMMIT DROP AS
+SELECT * FROM cypher('wcoj_generic', $$
+    MATCH (a:A)-[f1:F1]->(b:B)-[f2:F2]->(c:C)-[f3:F3]->(d:D)
+    RETURN id(a), id(b), id(c), id(d), id(f1), id(f2), id(f3)
+$$) AS (a agtype, b agtype, c agtype, d agtype,
+        f1 agtype, f2 agtype, f3 agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE generic_semijoin_chain ON COMMIT DROP AS
+SELECT * FROM cypher('wcoj_generic', $$
+    MATCH (a:A)-[f1:F1]->(b:B)-[f2:F2]->(c:C)-[f3:F3]->(d:D)
+    RETURN id(a), id(b), id(c), id(d), id(f1), id(f2), id(f3)
+$$) AS (a agtype, b agtype, c agtype, d agtype,
+        f1 agtype, f2 agtype, f3 agtype);
+
+SELECT (SELECT count(*) FROM generic_binary_chain) AS binary_rows,
+       (SELECT count(*) FROM generic_semijoin_chain) AS generic_rows,
+       (SELECT count(*) FROM (
+           (TABLE generic_binary_chain
+            EXCEPT ALL TABLE generic_semijoin_chain)
+           UNION ALL
+           (TABLE generic_semijoin_chain
+            EXCEPT ALL TABLE generic_binary_chain)
+       ) diff) AS diff_rows;
+ROLLBACK;
+
 SELECT drop_graph('wcoj_generic', true);
 
 -- A parameterized WCOJ path must preserve required_outer through its Sort
