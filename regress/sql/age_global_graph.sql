@@ -355,5 +355,127 @@ SELECT * FROM drop_graph('vle_trigger_test', true);
 
 -----------------------------------------------------------------------------------------------------------------------------
 --
+-- age_graph_edge_label_stats: (src_label, edge_label, dst_label) triple counts.
+-- This is the graph cardinality-estimation primitive -- it must distinguish the
+-- vertex-label combination each edge label connects (label skew), not just the
+-- edge label's total count, and it must compute via a C heap scan (the
+-- SQL/plpgsql form crashes the backend over AGE inheritance/SPI).
+--
+SELECT create_graph('edge_label_stats');
+
+SELECT * FROM cypher('edge_label_stats', $$
+  CREATE (a:Person {name: 'a'}), (b:Person {name: 'b'}),
+         (c:Company {name: 'c'})
+$$) AS (r agtype);
+
+-- KNOWS runs Person->Person (x2), WORKS_AT runs Person->Company (x2).
+SELECT * FROM cypher('edge_label_stats', $$
+  MATCH (a:Person {name: 'a'}), (b:Person {name: 'b'}), (c:Company {name: 'c'})
+  CREATE (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(a),
+         (a)-[:WORKS_AT]->(c), (b)-[:WORKS_AT]->(c)
+$$) AS (r agtype);
+
+-- Triples: the label skew (KNOWS:Person->Person vs WORKS_AT:Person->Company)
+-- is visible, which the edge-label-total fanout cannot express.
+SELECT src_label, edge_label, dst_label, edge_count
+FROM ag_catalog.age_graph_edge_label_stats('edge_label_stats')
+ORDER BY edge_label, src_label, dst_label;
+
+-- Refresh persists the same triples into the ag_graph_edge_stats cache and
+-- reports how many were cached; the cached rows match the live counts.  (This
+-- also exercises the graph-join planner-hook fix: an INSERT into a non-label
+-- table inside a function must not re-enter graph-join lowering.)
+SELECT ag_catalog.age_refresh_graph_edge_label_stats('edge_label_stats')
+       AS cached_triples;
+SELECT src_label, edge_label, dst_label, edge_count
+FROM ag_catalog.ag_graph_edge_stats s
+JOIN ag_catalog.ag_graph g ON g.graphid = s.graph
+WHERE g.name = 'edge_label_stats'
+ORDER BY edge_label, src_label, dst_label;
+
+-- Refresh is idempotent: a second add + refresh updates counts in place.
+SELECT * FROM cypher('edge_label_stats', $$
+  MATCH (a:Person {name: 'a'}), (b:Person {name: 'b'})
+  CREATE (a)-[:KNOWS]->(b)
+$$) AS (r agtype);
+SELECT ag_catalog.age_refresh_graph_edge_label_stats('edge_label_stats')
+       AS cached_triples;
+SELECT src_label, edge_label, dst_label, edge_count
+FROM ag_catalog.ag_graph_edge_stats s
+JOIN ag_catalog.ag_graph g ON g.graphid = s.graph
+WHERE g.name = 'edge_label_stats'
+ORDER BY edge_label, src_label, dst_label;
+
+-- Empty graph: no edges -> no triples, refresh caches zero.
+SELECT create_graph('edge_label_stats_empty');
+SELECT count(*) AS triple_count
+FROM ag_catalog.age_graph_edge_label_stats('edge_label_stats_empty');
+SELECT ag_catalog.age_refresh_graph_edge_label_stats('edge_label_stats_empty')
+       AS cached_triples;
+
+-- Unknown graph errors (both functions).
+SELECT * FROM ag_catalog.age_graph_edge_label_stats('no_such_graph');
+SELECT ag_catalog.age_refresh_graph_edge_label_stats('no_such_graph');
+
+-- Out-degree distribution: one :H hub with 5 :E edges vs two :L vertices with 1
+-- each.  max_out_degree exposes the hub (5) that the mean degree alone hides.
+SELECT create_graph('edge_degree_stats');
+SELECT create_vlabel('edge_degree_stats', 'H');
+SELECT create_vlabel('edge_degree_stats', 'L');
+SELECT create_elabel('edge_degree_stats', 'E');
+SELECT * FROM cypher('edge_degree_stats', $$ CREATE (:H {id: 0}) $$) AS (z agtype);
+SELECT * FROM cypher('edge_degree_stats', $$
+    MATCH (h:H {id: 0})
+    CREATE (h)-[:E]->(:L {i: 1}), (h)-[:E]->(:L {i: 2}), (h)-[:E]->(:L {i: 3}),
+           (h)-[:E]->(:L {i: 4}), (h)-[:E]->(:L {i: 5})
+$$) AS (z agtype);
+SELECT * FROM cypher('edge_degree_stats', $$ CREATE (:L {id: 10})-[:E]->(:L {i: 6}) $$) AS (z agtype);
+SELECT * FROM cypher('edge_degree_stats', $$ CREATE (:L {id: 11})-[:E]->(:L {i: 7}) $$) AS (z agtype);
+SELECT src_label, edge_label, max_out_degree,
+       round(avg_out_degree::numeric, 2) AS avg_out_degree, source_vertex_count
+FROM ag_catalog.age_graph_edge_degree_stats('edge_degree_stats')
+ORDER BY src_label, edge_label;
+-- Empty graph: no source vertices.
+SELECT count(*) AS degree_rows
+FROM ag_catalog.age_graph_edge_degree_stats('edge_label_stats_empty');
+-- Unknown graph errors.
+SELECT * FROM ag_catalog.age_graph_edge_degree_stats('no_such_graph');
+
+-- In-degree mirrors out-degree on the terminal side.  Three :S vertices each
+-- point to one :H hub (so :H has in-degree 3, a receiving hub that out-degree
+-- alone -- where every :S has out-degree 1 -- cannot see), and the hub points
+-- to one leaf.
+SELECT create_graph('edge_in_degree_stats');
+SELECT create_vlabel('edge_in_degree_stats', 'S');
+SELECT create_vlabel('edge_in_degree_stats', 'H');
+SELECT create_elabel('edge_in_degree_stats', 'E');
+SELECT * FROM cypher('edge_in_degree_stats', $$ CREATE (:H {id: 0}) $$) AS (z agtype);
+SELECT * FROM cypher('edge_in_degree_stats', $$
+    MATCH (h:H {id: 0})
+    CREATE (:S {id: 1})-[:E]->(h), (:S {id: 2})-[:E]->(h),
+           (:S {id: 3})-[:E]->(h), (h)-[:E]->(:S {id: 4})
+$$) AS (z agtype);
+-- Out-degree: every :S has out-degree 1; :H has out-degree 1.
+SELECT src_label, edge_label, max_out_degree,
+       round(avg_out_degree::numeric, 2) AS avg_out_degree, source_vertex_count
+FROM ag_catalog.age_graph_edge_degree_stats('edge_in_degree_stats')
+ORDER BY src_label, edge_label;
+-- In-degree: :H receives 3 (the hub), the leaf :S receives 1.
+SELECT dst_label, edge_label, max_in_degree,
+       round(avg_in_degree::numeric, 2) AS avg_in_degree, terminal_vertex_count
+FROM ag_catalog.age_graph_edge_in_degree_stats('edge_in_degree_stats')
+ORDER BY dst_label, edge_label;
+-- Empty graph and unknown graph behave like the out-degree variant.
+SELECT count(*) AS in_degree_rows
+FROM ag_catalog.age_graph_edge_in_degree_stats('edge_label_stats_empty');
+SELECT * FROM ag_catalog.age_graph_edge_in_degree_stats('no_such_graph');
+
+SELECT * FROM drop_graph('edge_label_stats', true);
+SELECT * FROM drop_graph('edge_label_stats_empty', true);
+SELECT * FROM drop_graph('edge_degree_stats', true);
+SELECT * FROM drop_graph('edge_in_degree_stats', true);
+
+-----------------------------------------------------------------------------------------------------------------------------
+--
 -- End of tests
 --

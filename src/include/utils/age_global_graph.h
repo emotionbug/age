@@ -237,6 +237,16 @@ void destroy_entry_property_relation_cache(HTAB *relation_cache);
 uint64 get_graph_version(Oid graph_oid);
 void increment_graph_version(Oid graph_oid);
 Oid get_graph_oid_for_table(Oid table_oid);
+double age_cached_edge_dst_label_selectivity(Oid graph_oid,
+                                             const char *src_label_name,
+                                             const char *edge_label_name,
+                                             const char *dst_label_name);
+double age_cached_edge_avg_out_degree(Oid graph_oid,
+                                      const char *src_label_name,
+                                      const char *edge_label_name);
+double age_cached_edge_avg_in_degree(Oid graph_oid,
+                                     const char *dst_label_name,
+                                     const char *edge_label_name);
 
 /* Shared memory initialization for PG < 17 (shmem_request_hook path) */
 #if PG_VERSION_NUM < 170000

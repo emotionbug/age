@@ -24,6 +24,7 @@
 #include "nodes/makefuncs.h"
 #include "optimizer/cypher_graph_join.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"
 
 static char *copy_graph_join_text(const char *value,
                                   const char *fallback);
@@ -249,11 +250,26 @@ void age_graph_join_lowering_artifact_add_typed_table(
         }
     }
 
-    entry = palloc0(sizeof(*entry));
-    entry->source_kind_id = source_kind_id;
-    entry->component_family_kind = component_family_kind;
-    entry->table = table;
-    artifact->entries = lappend(artifact->entries, entry);
+    /*
+     * The artifact is registered in a transaction-lifetime context (the graph
+     * pattern registry) but this runs inside a per-statement planner context.
+     * Allocate the entry and grow the entries list in the artifact's own
+     * context, otherwise the list dangles once the statement's planner context
+     * is freed and a later statement's planning (e.g. a nested SPI query in the
+     * same transaction) crashes iterating it.
+     */
+    {
+        MemoryContext oldcontext =
+            MemoryContextSwitchTo(GetMemoryChunkContext(artifact));
+
+        entry = palloc0(sizeof(*entry));
+        entry->source_kind_id = source_kind_id;
+        entry->component_family_kind = component_family_kind;
+        entry->table = table;
+        artifact->entries = lappend(artifact->entries, entry);
+
+        MemoryContextSwitchTo(oldcontext);
+    }
 
 apply_identity:
     table->declared_entry_count = Max(table->declared_entry_count,

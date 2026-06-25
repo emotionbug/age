@@ -155,6 +155,7 @@ typedef struct AgeAdjacencyMatchScanState
     AgeGraphJoinConnectorKind join_order_next_connector_kind;
     AgeGraphJoinOrderPropertyKind join_order_next_property_kind;
     char *join_order_next_source_evidence;
+    double join_order_next_total_cost;
     bool graph_join_parallel_safe;
     bool graph_join_parallel_aware;
     int64 graph_join_parallel_workers;
@@ -929,6 +930,8 @@ static void load_age_adjacency_match_descriptor(
     state->join_order_next_source_evidence = adjacency_match_descriptor_text(
         descriptor,
         AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_NEXT_SOURCE_EVIDENCE);
+    state->join_order_next_total_cost = adjacency_match_descriptor_float8(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_NEXT_TOTAL_COST);
     state->graph_join_parallel_safe =
         adjacency_match_descriptor_bool(
             descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_SAFE);
@@ -1449,6 +1452,27 @@ static char *format_age_adjacency_match_cost_input(
                     state->edge_payload_required ? "edge-row" : "id-only");
 }
 
+/*
+ * Closed-vocabulary state of the selected/next-best alternative credit (see the
+ * VLE stream's equivalent): "none" when there is no competing candidate,
+ * "active" when the next-best source is dearer than the selected one (so the
+ * cost gap yields a credit < 1.0), else "inert".  Surfacing the state, not the
+ * raw cost floats, keeps EXPLAIN deterministic while exposing whether the
+ * graph-join cost gap is being consumed on the adjacency path.
+ */
+static const char *age_adjacency_match_join_order_alt_credit_state(
+    AgeAdjacencyMatchScanState *state)
+{
+    double selected_total_cost = state->css.ss.ps.plan->total_cost;
+    double next_total_cost = state->join_order_next_total_cost;
+
+    if (state->join_order_candidate_count <= 1)
+        return "none";
+    if (selected_total_cost > 0 && next_total_cost > selected_total_cost)
+        return "active";
+    return "inert";
+}
+
 static char *format_age_adjacency_match_join_order(
     AgeAdjacencyMatchScanState *state)
 {
@@ -1456,7 +1480,7 @@ static char *format_age_adjacency_match_join_order(
                     "rows=%ld fanout=%ld terminal-fanout=%ld "
                     "composite-fanout=%ld source=%s candidates=%ld "
                     "declared-cover=%ld cover=%s "
-                    "next=%s/%s/%s",
+                    "next=%s/%s/%s alt-credit=%s",
                     state->join_order_component != NULL ?
                     state->join_order_component : "edge",
                     state->join_order_solved_relids != NULL ?
@@ -1488,7 +1512,8 @@ static char *format_age_adjacency_match_join_order(
                     age_graph_join_order_property_name(
                         state->join_order_next_property_kind) : "none",
                     state->join_order_next_source_evidence != NULL ?
-                    state->join_order_next_source_evidence : "none");
+                    state->join_order_next_source_evidence : "none",
+                    age_adjacency_match_join_order_alt_credit_state(state));
 }
 
 static char *format_age_adjacency_match_composite_source(

@@ -2097,8 +2097,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
               RETURN count(p)$$) AS (c agtype)
 $plan$);
-                                                                                                                                       plan                                                                                                                                        
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                               plan                                                                                                                                                
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
    Output: (count(_age_default_alias_0.id))::agtype
    ->  Nested Loop
@@ -2113,7 +2113,7 @@ $plan$);
                VLE Edge: label=e1, properties=0
                VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
                VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-               VLE Join Order: component=vle-expansion solved=(b 2 3) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+               VLE Join Order: component=vle-expansion solved=(b 2 3) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
                VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2206,8 +2206,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
               RETURN p$$) AS (p agtype)
 $plan$);
-                                                                                                                                    plan                                                                                                                                     
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                            plan                                                                                                                                             
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_1.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_alias_0
@@ -2221,7 +2221,7 @@ $plan$);
          VLE Edge: label=e1, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2241,8 +2241,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
               RETURN p$$) AS (p agtype)
 $plan$);
-                                                                                                                                    plan                                                                                                                                     
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                            plan                                                                                                                                             
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_1.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_alias_0
@@ -2256,7 +2256,7 @@ $plan$);
          VLE Edge: label=e1, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2277,8 +2277,8 @@ FROM cypher('cypher_match',
               RETURN size(nodes(p)), size(relationships(p))$$)
      AS (nodes agtype, rels agtype)
 $plan$);
-                                                                                                                                    plan                                                                                                                                     
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                            plan                                                                                                                                             
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_vle_path_node_count(_age_default_alias_1.edges), age_vle_path_length(_age_default_alias_1.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_alias_0
@@ -2292,7 +2292,7 @@ $plan$);
          VLE Edge: label=e1, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2313,8 +2313,8 @@ FROM cypher('cypher_match',
               RETURN nodes(p), relationships(p)$$)
      AS (nodes agtype, rels agtype)
 $plan$);
-                                                                                                                                    plan                                                                                                                                     
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                            plan                                                                                                                                             
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_nodes(_age_default_alias_1.edges), age_materialize_vle_edges(_age_default_alias_1.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_alias_0
@@ -2328,7 +2328,7 @@ $plan$);
          VLE Edge: label=e1, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2348,8 +2348,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)
               RETURN p$$) AS (p agtype)
 $plan$);
-                                                                                                                                    plan                                                                                                                                     
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                            plan                                                                                                                                             
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_1.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_alias_0
@@ -2363,7 +2363,7 @@ $plan$);
          VLE Edge: label=e1, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2383,8 +2383,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
               RETURN relationships(p)$$) AS (r agtype)
 $plan$);
-                                                                                                                                                 plan                                                                                                                                                  
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                         plan                                                                                                                                                          
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_edges(_age_default_alias_0.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_vle_function_end_var_2
@@ -2402,7 +2402,7 @@ $plan$);
                VLE Edge: label=e1, properties=0
                VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
                VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-               VLE Join Order: component=vle-expansion solved=(b 4 5 6) connector=vle-expand-into bound=out property=expand-into-verification rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+               VLE Join Order: component=vle-expansion solved=(b 4 5 6) connector=vle-expand-into bound=out property=expand-into-verification rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
                VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2424,8 +2424,8 @@ FROM cypher('cypher_match',
               ORDER BY last(relationships(p)).payload.a$$)
      AS (payload agtype, count agtype)
 $plan$);
-                                                                                                                                             plan                                                                                                                                              
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                     plan                                                                                                                                                      
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Result
    Output: (agtype_object_field_agtype(agtype_object_field_agtype(age_vle_edge_properties_at(_age_default_alias_0.edges, '-1'::agtype), '"payload"'::agtype), '"a"'::agtype)), ((count(*)))::agtype
    ->  Sort
@@ -2447,7 +2447,7 @@ $plan$);
                            VLE Edge: label=e1, properties=0
                            VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
                            VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-                           VLE Join Order: component=vle-expansion solved=(b 2 3) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+                           VLE Join Order: component=vle-expansion solved=(b 2 3) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                            VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
                            VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                            VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2469,8 +2469,8 @@ FROM cypher('cypher_match',
               ORDER BY last(nodes(p)).payload.a$$)
      AS (payload agtype, count agtype)
 $plan$);
-                                                                                                                                             plan                                                                                                                                              
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                     plan                                                                                                                                                      
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Result
    Output: (agtype_object_field_agtype(agtype_object_field_agtype(age_vle_node_properties_at(_age_default_alias_0.edges, '-1'::agtype), '"payload"'::agtype), '"a"'::agtype)), ((count(*)))::agtype
    ->  Sort
@@ -2492,7 +2492,7 @@ $plan$);
                            VLE Edge: label=e1, properties=0
                            VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
                            VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-                           VLE Join Order: component=vle-expansion solved=(b 2 3) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+                           VLE Join Order: component=vle-expansion solved=(b 2 3) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                            VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
                            VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                            VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2512,8 +2512,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
               RETURN p$$) AS (p agtype)
 $plan$);
-                                                                                                                                                 plan                                                                                                                                                  
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                         plan                                                                                                                                                          
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_vle_function_end_var_7
@@ -2531,7 +2531,7 @@ $plan$);
                VLE Edge: label=e1, properties=0
                VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
                VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-               VLE Join Order: component=vle-expansion solved=(b 4 5 6) connector=vle-expand-into bound=out property=expand-into-verification rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+               VLE Join Order: component=vle-expansion solved=(b 4 5 6) connector=vle-expand-into bound=out property=expand-into-verification rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
                VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none

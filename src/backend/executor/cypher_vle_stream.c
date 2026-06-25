@@ -60,6 +60,8 @@ typedef struct AgeVLEStreamScanState
     AgeGraphJoinConnectorKind join_order_next_connector_kind;
     AgeGraphJoinOrderPropertyKind join_order_next_property_kind;
     char *join_order_next_source_evidence;
+    double join_order_next_total_cost;
+    double join_order_next_rows;
     AgeVLESourceStats source_stats;
     AgeVLESourceStats current_source_stats;
     AgeVLESourceStats total_source_stats;
@@ -244,6 +246,10 @@ static void initialize_age_vle_stream_graph_join_descriptor(
     state->join_order_next_source_evidence =
         (char *)age_graph_join_descriptor_text_field(
             descriptor, AGE_GRAPH_JOIN_DESC_NEXT_SOURCE_EVIDENCE);
+    state->join_order_next_total_cost = age_graph_join_descriptor_float_field(
+        descriptor, AGE_GRAPH_JOIN_DESC_NEXT_TOTAL_COST, 0);
+    state->join_order_next_rows = age_graph_join_descriptor_float_field(
+        descriptor, AGE_GRAPH_JOIN_DESC_NEXT_ROWS, 0);
 }
 
 static void initialize_age_vle_stream_input_descriptor(
@@ -632,6 +638,29 @@ static void explain_age_vle_stream_scan(CustomScanState *node,
     }
 }
 
+/*
+ * Closed-vocabulary state of the selected/next-best alternative credit, derived
+ * from the candidate count and the selected-vs-next-best total cost ordering.
+ * "none" = no competing alternative (credit is identity); "inert" = an
+ * alternative exists but is not cheaper-bounded, so the credit stays 1.0;
+ * "active" = the next-best is dearer than the selected source, so the gap
+ * yields a credit < 1.0.  Surfacing the state (not the raw cost floats) keeps
+ * EXPLAIN deterministic while making it visible whether the graph-join cost gap
+ * is actually being consumed.
+ */
+static const char *age_vle_stream_join_order_alt_credit_state(
+    AgeVLEStreamScanState *state)
+{
+    double selected_total_cost = state->css.ss.ps.plan->total_cost;
+    double next_total_cost = state->join_order_next_total_cost;
+
+    if (state->join_order_candidate_count <= 1)
+        return "none";
+    if (selected_total_cost > 0 && next_total_cost > selected_total_cost)
+        return "active";
+    return "inert";
+}
+
 static char *format_age_vle_stream_join_order(
     AgeVLEStreamScanState *state)
 {
@@ -641,7 +670,7 @@ static char *format_age_vle_stream_join_order(
                     "rows=%ld fanout=start:%ld/end:%ld "
                     "consumer=%s class=%s source=%s candidates=%ld "
                     "declared-cover=%ld cover=%s "
-                    "next=%s/%s/%s",
+                    "next=%s/%s/%s alt-credit=%s",
                     state->join_order_component != NULL ?
                     state->join_order_component : "vle",
                     state->join_order_solved_relids != NULL ?
@@ -682,7 +711,8 @@ static char *format_age_vle_stream_join_order(
                     age_graph_join_order_property_name(
                         state->join_order_next_property_kind) : "none",
                     state->join_order_next_source_evidence != NULL ?
-                    state->join_order_next_source_evidence : "none");
+                    state->join_order_next_source_evidence : "none",
+                    age_vle_stream_join_order_alt_credit_state(state));
 }
 
 static char *format_age_vle_stream_matrix_frontier(

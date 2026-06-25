@@ -805,6 +805,36 @@ SELECT * FROM cypher('age_adj_match_descriptor', $$
     MATCH (:N {i: 0})-[:R]->(:Z)
     RETURN count(*)
 $$) AS (plan agtype);
+
+-- Graph statistics cost conditioning: R edges run 2/3 to :N and 1/3 to :M.
+-- Before refreshing the stats cache the destination-label fanout uses the 0.50
+-- default (terminal-fanout=1 for the :N terminal); after refresh it is
+-- conditioned on the real (R, N) selectivity (2/3), raising terminal-fanout.
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (m:N {i: 1})
+    MATCH (:N {i: 0})-[:R]->(n:N {i: m.i})
+    RETURN n.i
+$$) AS (plan agtype);
+SELECT ag_catalog.age_refresh_graph_edge_label_stats('age_adj_match_descriptor')
+       AS cached_triples;
+SELECT src_label, edge_label, dst_label, edge_count
+FROM ag_catalog.ag_graph_edge_stats s
+JOIN ag_catalog.ag_graph g ON g.graphid = s.graph
+WHERE g.name = 'age_adj_match_descriptor'
+ORDER BY edge_label, src_label, dst_label;
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (m:N {i: 1})
+    MATCH (:N {i: 0})-[:R]->(n:N {i: m.i})
+    RETURN n.i
+$$) AS (plan agtype);
+-- Clear the cache again so the remaining descriptor tests below see the default
+-- (un-conditioned) estimate, keeping their expected output unchanged.
+DELETE FROM ag_catalog.ag_graph_edge_stats
+WHERE graph = (SELECT graphid FROM ag_catalog.ag_graph
+               WHERE name = 'age_adj_match_descriptor');
+
 SET client_min_messages = warning;
 DO $age_adj_parallel_match$
 DECLARE
@@ -899,6 +929,145 @@ $$) AS (name name, type text, entity_type text, labels_or_types name[],
         properties name[], state text, provider text, options jsonb)
 WHERE name = 'n_i_source';
 SELECT drop_graph('age_adj_match_descriptor', true);
+
+-- Source-label conditioning: the cached triple (src_label, edge_label,
+-- dst_label) conditions fanout on the SOURCE vertex label, a dimension the
+-- adjacency directory (keyed on edge_label -> dst_label) cannot express.  Here
+-- :A runs 3/4 of its :E edges to :X while :B runs only 1/4 to :X, so the same
+-- ()-[:E]->(:X) expansion gets terminal-fanout=3 from an :A source but
+-- terminal-fanout=1 from a :B source.
+SELECT create_graph('age_adj_source_skew');
+SELECT create_vlabel('age_adj_source_skew', 'A');
+SELECT create_vlabel('age_adj_source_skew', 'B');
+SELECT create_vlabel('age_adj_source_skew', 'X');
+SELECT create_vlabel('age_adj_source_skew', 'Y');
+SELECT create_elabel('age_adj_source_skew', 'E');
+SELECT * FROM cypher('age_adj_source_skew', $$ CREATE (a:A {k: 0}) $$) AS (z agtype);
+SELECT * FROM cypher('age_adj_source_skew', $$
+    MATCH (a:A {k: 0})
+    CREATE (a)-[:E]->(:X {k: 1}), (a)-[:E]->(:X {k: 2}),
+           (a)-[:E]->(:X {k: 3}), (a)-[:E]->(:Y {k: 4})
+$$) AS (z agtype);
+SELECT * FROM cypher('age_adj_source_skew', $$ CREATE (b:B {k: 0}) $$) AS (z agtype);
+SELECT * FROM cypher('age_adj_source_skew', $$
+    MATCH (b:B {k: 0})
+    CREATE (b)-[:E]->(:X {k: 5}), (b)-[:E]->(:Y {k: 6}),
+           (b)-[:E]->(:Y {k: 7}), (b)-[:E]->(:Y {k: 8})
+$$) AS (z agtype);
+SELECT * FROM cypher('age_adj_source_skew', $$
+    CREATE INDEX e_adj FOR ()-[e:E]->() ON (ADJACENCY)
+$$) AS (c text);
+ANALYZE age_adj_source_skew."A"; ANALYZE age_adj_source_skew."B";
+ANALYZE age_adj_source_skew."X"; ANALYZE age_adj_source_skew."Y";
+ANALYZE age_adj_source_skew."E";
+SELECT ag_catalog.age_refresh_graph_edge_label_stats('age_adj_source_skew')
+       AS cached_triples;
+SELECT src_label, edge_label, dst_label, edge_count
+FROM ag_catalog.ag_graph_edge_stats s
+JOIN ag_catalog.ag_graph g ON g.graphid = s.graph
+WHERE g.name = 'age_adj_source_skew'
+ORDER BY src_label, dst_label;
+-- :A source -> terminal-fanout 3 (A runs 3/4 to X)
+SELECT * FROM cypher('age_adj_source_skew', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (a:A {k: 0}) MATCH (a)-[:E]->(x:X {k: a.k + 1}) RETURN x.k
+$$) AS (plan agtype);
+-- :B source -> terminal-fanout 1 (B runs 1/4 to X); directory cannot tell A from B
+SELECT * FROM cypher('age_adj_source_skew', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (b:B {k: 0}) MATCH (b)-[:E]->(x:X {k: b.k + 1}) RETURN x.k
+$$) AS (plan agtype);
+SELECT drop_graph('age_adj_source_skew', true);
+
+-- Degree conditioning: the cached per-source-label average out-degree refines
+-- the base (endpoint) fanout.  :A vertices have out-degree 6, :B have 2;
+-- before refreshing the degree cache the estimate is the global blend (4),
+-- after refresh the :A source uses 6 and a :B source uses 2.
+SELECT create_graph('age_adj_degree');
+SELECT create_vlabel('age_adj_degree', 'A');
+SELECT create_vlabel('age_adj_degree', 'B');
+SELECT create_vlabel('age_adj_degree', 'T');
+SELECT create_elabel('age_adj_degree', 'E');
+SELECT * FROM cypher('age_adj_degree', $$ CREATE (:A {id: 0}) $$) AS (z agtype);
+SELECT * FROM cypher('age_adj_degree', $$
+    MATCH (a:A {id: 0})
+    CREATE (a)-[:E]->(:T {k: 1}), (a)-[:E]->(:T {k: 2}), (a)-[:E]->(:T {k: 3}),
+           (a)-[:E]->(:T {k: 4}), (a)-[:E]->(:T {k: 5}), (a)-[:E]->(:T {k: 6})
+$$) AS (z agtype);
+SELECT * FROM cypher('age_adj_degree', $$ CREATE (:B {id: 0}) $$) AS (z agtype);
+SELECT * FROM cypher('age_adj_degree', $$
+    MATCH (b:B {id: 0})
+    CREATE (b)-[:E]->(:T {k: 7}), (b)-[:E]->(:T {k: 8})
+$$) AS (z agtype);
+SELECT * FROM cypher('age_adj_degree', $$
+    CREATE INDEX e_adj FOR ()-[e:E]->() ON (ADJACENCY)
+$$) AS (c text);
+ANALYZE age_adj_degree."A"; ANALYZE age_adj_degree."B";
+ANALYZE age_adj_degree."T"; ANALYZE age_adj_degree."E";
+SELECT src_label, edge_label, max_out_degree,
+       round(avg_out_degree::numeric, 2) AS avg_out_degree
+FROM ag_catalog.age_graph_edge_degree_stats('age_adj_degree')
+ORDER BY src_label;
+-- Before refresh: global blend (fanout=4).
+SELECT * FROM cypher('age_adj_degree', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (a:A {id: 0}) MATCH (a)-[:E]->(t:T {k: a.id + 1}) RETURN t.k
+$$) AS (plan agtype);
+SELECT ag_catalog.age_refresh_graph_edge_degree_stats('age_adj_degree')
+       AS cached_rows;
+-- After refresh: :A source uses its own average out-degree (6).
+SELECT * FROM cypher('age_adj_degree', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (a:A {id: 0}) MATCH (a)-[:E]->(t:T {k: a.id + 1}) RETURN t.k
+$$) AS (plan agtype);
+-- A :B source uses its own (2); the directory cannot distinguish A from B here.
+SELECT * FROM cypher('age_adj_degree', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (b:B {id: 0}) MATCH (b)-[:E]->(t:T {k: b.id + 1}) RETURN t.k
+$$) AS (plan agtype);
+SELECT drop_graph('age_adj_degree', true);
+
+-- Direction-aware degree conditioning: an :M vertex has out-degree 2 (M -> 2 T)
+-- but in-degree 5 (5 S -> M) for :E.  An outgoing expansion from M conditions
+-- its base fanout on the out-degree (2), an incoming expansion to M on the
+-- in-degree (5) -- the directional cache the bound endpoint sits in.  Without
+-- the in-degree cache an incoming expansion would wrongly reuse the out-degree.
+SELECT create_graph('age_adj_direction');
+SELECT create_vlabel('age_adj_direction', 'M');
+SELECT create_vlabel('age_adj_direction', 'T');
+SELECT create_vlabel('age_adj_direction', 'S');
+SELECT create_elabel('age_adj_direction', 'E');
+SELECT * FROM cypher('age_adj_direction', $$ CREATE (:M {id: 0}) $$) AS (z agtype);
+SELECT * FROM cypher('age_adj_direction', $$
+    MATCH (m:M {id: 0}) CREATE (m)-[:E]->(:T {k: 1}), (m)-[:E]->(:T {k: 2})
+$$) AS (z agtype);
+SELECT * FROM cypher('age_adj_direction', $$
+    MATCH (m:M {id: 0})
+    CREATE (:S {k: 1})-[:E]->(m), (:S {k: 2})-[:E]->(m), (:S {k: 3})-[:E]->(m),
+           (:S {k: 4})-[:E]->(m), (:S {k: 5})-[:E]->(m)
+$$) AS (z agtype);
+SELECT * FROM cypher('age_adj_direction', $$
+    CREATE INDEX e_out FOR ()-[r:E]->() ON (ADJACENCY)
+$$) AS (c text);
+CREATE INDEX e_in ON age_adj_direction."E"
+    USING age_adjacency (end_id, id, start_id);
+ANALYZE age_adj_direction."M"; ANALYZE age_adj_direction."T";
+ANALYZE age_adj_direction."S"; ANALYZE age_adj_direction."E";
+SELECT ag_catalog.age_refresh_graph_edge_degree_stats('age_adj_direction')
+       AS out_rows;
+SELECT ag_catalog.age_refresh_graph_edge_in_degree_stats('age_adj_direction')
+       AS in_rows;
+-- Outgoing from :M uses out-degree (fanout=2).
+SELECT * FROM cypher('age_adj_direction', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (m:M {id: 0}) MATCH (m)-[:E]->(t:T) RETURN t.k
+$$) AS (plan agtype);
+-- Incoming to :M uses in-degree (fanout=5) -- the directional difference.
+SELECT * FROM cypher('age_adj_direction', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (m:M {id: 0}) MATCH (m)<-[:E]-(s:S) RETURN s.k
+$$) AS (plan agtype);
+SELECT drop_graph('age_adj_direction', true);
 
 SELECT create_graph('age_adj_match_prefetch_gate');
 SELECT create_vlabel('age_adj_match_prefetch_gate', 'N');

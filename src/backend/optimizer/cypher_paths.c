@@ -32,6 +32,7 @@
 #include "catalog/ag_namespace.h"
 #include "catalog/ag_label.h"
 #include "catalog/ag_graph.h"
+#include "utils/age_global_graph.h"
 #include "commands/label_commands.h"
 #include "executor/cypher_adjacency_match.h"
 #include "executor/cypher_property_projection.h"
@@ -1326,10 +1327,29 @@ static void register_graph_join_index_path_candidates(PlannerInfo *root,
                                                       RelOptInfo *rel)
 {
     ListCell *lc;
+    RangeTblEntry *rte;
 
     if (root == NULL ||
         rel == NULL ||
-        rel->pathlist == NIL)
+        rel->pathlist == NIL ||
+        rel->relid == 0 ||
+        rel->relid >= root->simple_rel_array_size)
+    {
+        return;
+    }
+
+    /*
+     * Only graph label relations participate in graph-join lowering.  Plain
+     * relations -- catalog tables like ag_graph or the ag_graph_edge_stats
+     * stats cache, reached while planning a nested SPI query in the same
+     * transaction -- must be skipped, or the lowering artifact (kept in a
+     * transaction-lifetime registry) is re-entered with stale cross-statement
+     * state and crashes the backend.
+     */
+    rte = root->simple_rte_array[rel->relid];
+    if (rte == NULL ||
+        rte->rtekind != RTE_RELATION ||
+        !OidIsValid(get_graph_oid_for_table(rte->relid)))
     {
         return;
     }
@@ -8536,6 +8556,55 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
     if (endpoint_fanout <= 0)
         endpoint_fanout = Min(rows, 8.0);
 
+    /*
+     * Condition the base (endpoint) fanout on the cached per-source-label
+     * average out-degree when the degree cache has been refreshed: a mean
+     * degree conditioned on the source vertex label, more accurate than the
+     * global reltuples/distinct estimate.  Opt-in -- no degree cache leaves the
+     * estimate unchanged.
+     */
+    {
+        label_cache_data *edge_label_cache =
+            search_label_relation_cache(candidate->edge_label_oid);
+
+        if (edge_label_cache != NULL &&
+            candidate->bound_endpoint_rti > 0 &&
+            candidate->bound_endpoint_rti < root->simple_rel_array_size)
+        {
+            RangeTblEntry *src_rte =
+                root->simple_rte_array[candidate->bound_endpoint_rti];
+
+            if (src_rte != NULL && src_rte->rtekind == RTE_RELATION)
+            {
+                label_cache_data *src_label_cache =
+                    search_label_relation_cache(src_rte->relid);
+
+                if (src_label_cache != NULL &&
+                    src_label_cache->graph == edge_label_cache->graph)
+                {
+                    /*
+                     * The bound endpoint is the source for an outgoing
+                     * expansion (its out-degree is the fanout) but the terminal
+                     * for an incoming expansion (its in-degree is the fanout),
+                     * so pick the matching directional cache.
+                     */
+                    double cached_degree = candidate->outgoing ?
+                        age_cached_edge_avg_out_degree(
+                            edge_label_cache->graph,
+                            NameStr(src_label_cache->name),
+                            NameStr(edge_label_cache->name)) :
+                        age_cached_edge_avg_in_degree(
+                            edge_label_cache->graph,
+                            NameStr(src_label_cache->name),
+                            NameStr(edge_label_cache->name));
+
+                    if (cached_degree > 0.0)
+                        endpoint_fanout = cached_degree;
+                }
+            }
+        }
+    }
+
     terminal_fanout = endpoint_fanout;
     candidate->estimated_terminal_label_groups = 0;
     candidate->estimated_value_posting_source_kind =
@@ -8580,7 +8649,61 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
     else if (candidate->has_right_label_constraint &&
              label_id_is_valid(candidate->right_label_id))
     {
-        terminal_fanout = Max(1.0, terminal_fanout * 0.50);
+        double dst_label_selectivity = -1.0;
+        label_cache_data *edge_label_cache =
+            search_label_relation_cache(candidate->edge_label_oid);
+
+        if (edge_label_cache != NULL)
+        {
+            label_cache_data *dst_label_cache =
+                search_label_graph_oid_cache(edge_label_cache->graph,
+                                             candidate->right_label_id);
+
+            if (dst_label_cache != NULL)
+            {
+                const char *src_label_name = NULL;
+                label_cache_data *src_label_cache = NULL;
+
+                /*
+                 * Source vertex label of the bound endpoint, when its relation
+                 * is a label table in this graph.  The cached triple
+                 * (src_label, edge_label, dst_label) conditions the fanout on
+                 * the source label -- the dimension the adjacency directory
+                 * cannot express (it keys only on edge_label -> dst_label).
+                 * When the source label is not recoverable the lookup falls
+                 * back to the all-source ratio.
+                 */
+                if (candidate->bound_endpoint_rti > 0 &&
+                    candidate->bound_endpoint_rti < root->simple_rel_array_size)
+                {
+                    RangeTblEntry *src_rte =
+                        root->simple_rte_array[candidate->bound_endpoint_rti];
+
+                    if (src_rte != NULL && src_rte->rtekind == RTE_RELATION)
+                        src_label_cache =
+                            search_label_relation_cache(src_rte->relid);
+                }
+                if (src_label_cache != NULL &&
+                    src_label_cache->graph == edge_label_cache->graph)
+                    src_label_name = NameStr(src_label_cache->name);
+
+                dst_label_selectivity = age_cached_edge_dst_label_selectivity(
+                    edge_label_cache->graph,
+                    src_label_name,
+                    NameStr(edge_label_cache->name),
+                    NameStr(dst_label_cache->name));
+            }
+        }
+
+        /*
+         * Condition the destination-label fanout on the cached triple
+         * selectivity from ag_graph_edge_stats when the graph statistics cache
+         * has been refreshed; otherwise keep the 0.50 default so an
+         * un-refreshed graph's plans are unchanged.
+         */
+        terminal_fanout = Max(1.0, terminal_fanout *
+                              (dst_label_selectivity >= 0.0 ?
+                               dst_label_selectivity : 0.50));
     }
     candidate->estimated_endpoint_fanout = endpoint_fanout;
     candidate->estimated_terminal_fanout = terminal_fanout;

@@ -858,7 +858,7 @@ $$) AS (plan agtype);
                      Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                      Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
                      Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
-                     Adjacency Join Order: component=_age_default_alias_1 solved=(b 5 6) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none
+                     Adjacency Join Order: component=_age_default_alias_1 solved=(b 5 6) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
                      Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
                      Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=recheck value=none candidate-fanout=1 composite-fanout=1 value-posting=none planned=none threshold=0 reason=not-indexable
                      Adjacency Composite Policy: class=adjacency-composite-recheck recommendation=keep-recheck runtime-class=adjacency-composite-recheck runtime-recommendation=keep-recheck class-match=true
@@ -898,7 +898,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source handoff=label-slice label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache
@@ -938,7 +938,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=2 composite-fanout=2 source-handoff=label-slice source-fanout=2 source-blocks=2 property-source-matches=0 residual=1 label-groups=2 main-blocks=2 fanout-source=directory value-posting=label-slice index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
-               Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-directory-anchored rows=1 fanout=3 terminal-fanout=2 composite-fanout=2 source=adjacency-value candidates=1 declared-cover=1 cover=matched next=none/none/none
+               Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-directory-anchored rows=1 fanout=3 terminal-fanout=2 composite-fanout=2 source=adjacency-value candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                Adjacency Parallel: safe=true aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=worker-local-ready active=serial
                Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=none value=none candidate-fanout=2 composite-fanout=2 value-posting=label-slice planned=none threshold=0 reason=not-indexable
                Adjacency Terminal Property: none
@@ -975,7 +975,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source handoff=label-slice label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache runtime-class=adjacency-composite-id-cache runtime-recommendation=keep-id-cache class-match=true
@@ -1014,7 +1014,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source handoff=label-slice label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache runtime-class=adjacency-composite-id-cache runtime-recommendation=keep-id-cache class-match=true
@@ -1052,7 +1052,7 @@ $$) AS (plan agtype);
                      Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                      Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:no
                      Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=1 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
-                     Adjacency Join Order: component=_age_default_alias_1 solved=(b 2 3) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=1 declared-cover=1 cover=matched next=none/none/none
+                     Adjacency Join Order: component=_age_default_alias_1 solved=(b 2 3) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                      Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
                      Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=none value=none candidate-fanout=1 composite-fanout=1 value-posting=none planned=none threshold=0 reason=not-indexable
                      Adjacency Terminal Property: none
@@ -1067,6 +1067,113 @@ $$) AS (plan agtype);
                Index Searches: 0
 (30 rows)
 
+-- Graph statistics cost conditioning: R edges run 2/3 to :N and 1/3 to :M.
+-- Before refreshing the stats cache the destination-label fanout uses the 0.50
+-- default (terminal-fanout=1 for the :N terminal); after refresh it is
+-- conditioned on the real (R, N) selectivity (2/3), raising terminal-fanout.
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (m:N {i: 1})
+    MATCH (:N {i: 0})-[:R]->(n:N {i: m.i})
+    RETURN n.i
+$$) AS (plan agtype);
+                                                                                                                                                                                   QUERY PLAN                                                                                                                                                                                    
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: agtype_object_field_agtype(n.properties, '"i"'::agtype)
+   Join Filter: (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = agtype_access_operator(VARIADIC ARRAY[m.properties, '"i"'::agtype]))
+   ->  Nested Loop
+         Output: n.properties
+         Inner Unique: true
+         Join Filter: (_age_default_alias_1.end_id = n.id)
+         ->  Nested Loop
+               Output: _age_default_alias_1.end_id
+               ->  Seq Scan on age_adj_match_descriptor."N" _age_default_alias_0
+                     Output: _age_default_alias_0.id, _age_default_alias_0.properties
+                     Filter: ((_age_default_alias_0.properties @> '{"i": 0}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '0'::agtype))
+               ->  Custom Scan (AGE Adjacency Match) on age_adj_match_descriptor."R" _age_default_alias_1
+                     Output: _age_default_alias_1.start_id, _age_default_alias_1.end_id
+                     Filter: (_age_default_alias_0.id = _age_default_alias_1.start_id)
+                     Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=id-only
+                     Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
+                     Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+                     Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
+                     Adjacency Join Order: component=_age_default_alias_1 solved=(b 5 6) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
+                     Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+                     Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=recheck value=none candidate-fanout=1 composite-fanout=1 value-posting=none planned=none threshold=0 reason=not-indexable
+                     Adjacency Composite Policy: class=adjacency-composite-recheck recommendation=keep-recheck
+                     Adjacency Terminal Property: key=i index=none provider=none domain=none metadata=no value=none prefetch=ineligible precheck=no mode=none
+                     Adjacency Payload Columns: mode=id-only columns=start_id,end_id
+         ->  Seq Scan on age_adj_match_descriptor."N" n
+               Output: n.id, n.properties
+   ->  Seq Scan on age_adj_match_descriptor."N" m
+         Output: m.id, m.properties
+         Filter: ((m.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[m.properties, '"i"'::agtype]) = '1'::agtype))
+(30 rows)
+
+SELECT ag_catalog.age_refresh_graph_edge_label_stats('age_adj_match_descriptor')
+       AS cached_triples;
+ cached_triples 
+----------------
+              2
+(1 row)
+
+SELECT src_label, edge_label, dst_label, edge_count
+FROM ag_catalog.ag_graph_edge_stats s
+JOIN ag_catalog.ag_graph g ON g.graphid = s.graph
+WHERE g.name = 'age_adj_match_descriptor'
+ORDER BY edge_label, src_label, dst_label;
+ src_label | edge_label | dst_label | edge_count 
+-----------+------------+-----------+------------
+ N         | R          | M         |          1
+ N         | R          | N         |          2
+(2 rows)
+
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (m:N {i: 1})
+    MATCH (:N {i: 0})-[:R]->(n:N {i: m.i})
+    RETURN n.i
+$$) AS (plan agtype);
+                                                                                                                                                                                   QUERY PLAN                                                                                                                                                                                    
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: agtype_object_field_agtype(n.properties, '"i"'::agtype)
+   Join Filter: (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = agtype_access_operator(VARIADIC ARRAY[m.properties, '"i"'::agtype]))
+   ->  Nested Loop
+         Output: n.properties
+         Inner Unique: true
+         Join Filter: (_age_default_alias_1.end_id = n.id)
+         ->  Nested Loop
+               Output: _age_default_alias_1.end_id
+               ->  Seq Scan on age_adj_match_descriptor."N" _age_default_alias_0
+                     Output: _age_default_alias_0.id, _age_default_alias_0.properties
+                     Filter: ((_age_default_alias_0.properties @> '{"i": 0}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '0'::agtype))
+               ->  Custom Scan (AGE Adjacency Match) on age_adj_match_descriptor."R" _age_default_alias_1
+                     Output: _age_default_alias_1.start_id, _age_default_alias_1.end_id
+                     Filter: (_age_default_alias_0.id = _age_default_alias_1.start_id)
+                     Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=2 composite-fanout=2 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=id-only
+                     Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
+                     Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+                     Adjacency Cost Input: fanout=3 terminal-fanout=2 composite-fanout=2 source-handoff=label-slice source-fanout=2 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
+                     Adjacency Join Order: component=_age_default_alias_1 solved=(b 5 6) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=2 fanout=3 terminal-fanout=2 composite-fanout=2 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
+                     Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+                     Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=recheck value=none candidate-fanout=2 composite-fanout=2 value-posting=none planned=none threshold=0 reason=not-indexable
+                     Adjacency Composite Policy: class=adjacency-composite-recheck recommendation=keep-recheck
+                     Adjacency Terminal Property: key=i index=none provider=none domain=none metadata=no value=none prefetch=ineligible precheck=no mode=none
+                     Adjacency Payload Columns: mode=id-only columns=start_id,end_id
+         ->  Seq Scan on age_adj_match_descriptor."N" n
+               Output: n.id, n.properties
+   ->  Seq Scan on age_adj_match_descriptor."N" m
+         Output: m.id, m.properties
+         Filter: ((m.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[m.properties, '"i"'::agtype]) = '1'::agtype))
+(30 rows)
+
+-- Clear the cache again so the remaining descriptor tests below see the default
+-- (un-conditioned) estimate, keeping their expected output unchanged.
+DELETE FROM ag_catalog.ag_graph_edge_stats
+WHERE graph = (SELECT graphid FROM ag_catalog.ag_graph
+               WHERE name = 'age_adj_match_descriptor');
 SET client_min_messages = warning;
 DO $age_adj_parallel_match$
 DECLARE
@@ -1140,7 +1247,7 @@ $$) AS (plan agtype);
                            Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=out properties=0 metadata=no
                            Adjacency Pruning: required=start_id,end_id terminal-source=none right-prune=label:no/props:none index-solved=0 residual-count=0 residual=edge:no/right-label:no/right-props:no edge-var:no
                            Adjacency Cost Input: fanout=32768 terminal-fanout=32768 composite-fanout=32768 source-handoff=posting-run source-fanout=32768 source-blocks=77 property-source-matches=0 residual=0 label-groups=1 main-blocks=77 fanout-source=directory value-posting=run index-solved=0 residual-weight=100% index-credit=100% prefetch-threshold=0 reason=not-indexable payload=id-only
-                           Adjacency Join Order: component=_age_default_alias_0 solved=(b 3 5) connector=adjacency-expand bound=start-bound property=adjacency-directory-anchored rows=6554 fanout=32768 terminal-fanout=32768 composite-fanout=32768 source=adjacency-value candidates=1 declared-cover=1 cover=matched next=none/none/none
+                           Adjacency Join Order: component=_age_default_alias_0 solved=(b 3 5) connector=adjacency-expand bound=start-bound property=adjacency-directory-anchored rows=6554 fanout=32768 terminal-fanout=32768 composite-fanout=32768 source=adjacency-value candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                            Adjacency Parallel: safe=true aware=true workers=2 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=worker-local-ready active=serial
                            Adjacency Terminal Property: none
                            Adjacency Payload Columns: mode=id-only columns=start_id,end_id
@@ -1181,7 +1288,7 @@ $$) AS (plan agtype);
                            Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=out properties=0 metadata=no
                            Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                            Adjacency Cost Input: fanout=32768 terminal-fanout=32768 composite-fanout=4915 source-handoff=label-property-intersection source-fanout=4915 source-blocks=12 property-source-matches=4915 residual=2 label-groups=1 main-blocks=77 fanout-source=directory value-posting=label-slice index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=2 reason=large-terminal-fanout payload=id-only
-                           Adjacency Join Order: component=_age_default_alias_0 solved=(b 3 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=983 fanout=32768 terminal-fanout=32768 composite-fanout=4915 source=adjacency-value candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+                           Adjacency Join Order: component=_age_default_alias_0 solved=(b 3 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=983 fanout=32768 terminal-fanout=32768 composite-fanout=4915 source=adjacency-value candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                            Adjacency Parallel: safe=true aware=true workers=2 gather-cost=0.00 order-preserving=false shared-state=true shared-source=none:0/0 slice=shared-source-dynamic active=0/2
                            Adjacency Composite Source: strategy=label-block+property-source handoff=label-property-intersection label=yes property=source value=const candidate-fanout=32768 composite-fanout=4915 value-posting=label-slice planned=source-prefetch threshold=2 reason=large-terminal-fanout
                            Adjacency Composite Policy: class=adjacency-composite-prefilter recommendation=keep-property-prefilter
@@ -1241,7 +1348,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source handoff=label-slice label=yes property=source value=runtime-slot candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache runtime-class=adjacency-composite-id-cache runtime-recommendation=keep-id-cache class-match=true
@@ -1279,7 +1386,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id,properties terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=3 residual=edge:yes/right-label:yes/right-props:join-verify edge-var:yes
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=3 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=205% index-credit=80% prefetch-threshold=2 reason=edge-payload-required payload=edge-row
-               Adjacency Join Order: component=e solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+               Adjacency Join Order: component=e solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source handoff=label-slice label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=2 reason=edge-payload-required
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache
@@ -1317,6 +1424,578 @@ drop cascades to table age_adj_match_descriptor."M"
 drop cascades to table age_adj_match_descriptor."Z"
 drop cascades to table age_adj_match_descriptor."R"
 NOTICE:  graph "age_adj_match_descriptor" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
+-- Source-label conditioning: the cached triple (src_label, edge_label,
+-- dst_label) conditions fanout on the SOURCE vertex label, a dimension the
+-- adjacency directory (keyed on edge_label -> dst_label) cannot express.  Here
+-- :A runs 3/4 of its :E edges to :X while :B runs only 1/4 to :X, so the same
+-- ()-[:E]->(:X) expansion gets terminal-fanout=3 from an :A source but
+-- terminal-fanout=1 from a :B source.
+SELECT create_graph('age_adj_source_skew');
+NOTICE:  graph "age_adj_source_skew" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_source_skew', 'A');
+NOTICE:  VLabel "A" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_source_skew', 'B');
+NOTICE:  VLabel "B" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_source_skew', 'X');
+NOTICE:  VLabel "X" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_source_skew', 'Y');
+NOTICE:  VLabel "Y" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_elabel('age_adj_source_skew', 'E');
+NOTICE:  ELabel "E" has been created
+ create_elabel 
+---------------
+ 
+(1 row)
+
+SELECT * FROM cypher('age_adj_source_skew', $$ CREATE (a:A {k: 0}) $$) AS (z agtype);
+ z 
+---
+(0 rows)
+
+SELECT * FROM cypher('age_adj_source_skew', $$
+    MATCH (a:A {k: 0})
+    CREATE (a)-[:E]->(:X {k: 1}), (a)-[:E]->(:X {k: 2}),
+           (a)-[:E]->(:X {k: 3}), (a)-[:E]->(:Y {k: 4})
+$$) AS (z agtype);
+ z 
+---
+(0 rows)
+
+SELECT * FROM cypher('age_adj_source_skew', $$ CREATE (b:B {k: 0}) $$) AS (z agtype);
+ z 
+---
+(0 rows)
+
+SELECT * FROM cypher('age_adj_source_skew', $$
+    MATCH (b:B {k: 0})
+    CREATE (b)-[:E]->(:X {k: 5}), (b)-[:E]->(:Y {k: 6}),
+           (b)-[:E]->(:Y {k: 7}), (b)-[:E]->(:Y {k: 8})
+$$) AS (z agtype);
+ z 
+---
+(0 rows)
+
+SELECT * FROM cypher('age_adj_source_skew', $$
+    CREATE INDEX e_adj FOR ()-[e:E]->() ON (ADJACENCY)
+$$) AS (c text);
+   c   
+-------
+ e_adj
+(1 row)
+
+ANALYZE age_adj_source_skew."A"; ANALYZE age_adj_source_skew."B";
+ANALYZE age_adj_source_skew."X"; ANALYZE age_adj_source_skew."Y";
+ANALYZE age_adj_source_skew."E";
+SELECT ag_catalog.age_refresh_graph_edge_label_stats('age_adj_source_skew')
+       AS cached_triples;
+ cached_triples 
+----------------
+              4
+(1 row)
+
+SELECT src_label, edge_label, dst_label, edge_count
+FROM ag_catalog.ag_graph_edge_stats s
+JOIN ag_catalog.ag_graph g ON g.graphid = s.graph
+WHERE g.name = 'age_adj_source_skew'
+ORDER BY src_label, dst_label;
+ src_label | edge_label | dst_label | edge_count 
+-----------+------------+-----------+------------
+ A         | E          | X         |          3
+ A         | E          | Y         |          1
+ B         | E          | X         |          1
+ B         | E          | Y         |          3
+(4 rows)
+
+-- :A source -> terminal-fanout 3 (A runs 3/4 to X)
+SELECT * FROM cypher('age_adj_source_skew', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (a:A {k: 0}) MATCH (a)-[:E]->(x:X {k: a.k + 1}) RETURN x.k
+$$) AS (plan agtype);
+                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: agtype_object_field_agtype(x.properties, '"k"'::agtype)
+   Inner Unique: true
+   Join Filter: (agtype_access_operator(VARIADIC ARRAY[x.properties, '"k"'::agtype]) = (agtype_access_operator(VARIADIC ARRAY[a.properties, '"k"'::agtype]) + '1'::agtype))
+   ->  Nested Loop
+         Output: a.properties, _age_default_alias_0.end_id
+         ->  Seq Scan on age_adj_source_skew."A" a
+               Output: a.id, a.properties
+               Filter: ((a.properties @> '{"k": 0}'::agtype) AND agtype_object_field_equals(a.properties, '"k"'::agtype, '0'::agtype))
+         ->  Custom Scan (AGE Adjacency Match) on age_adj_source_skew."E" _age_default_alias_0
+               Output: _age_default_alias_0.start_id, _age_default_alias_0.end_id
+               Filter: (_age_default_alias_0.start_id = a.id)
+               Adjacency Index: direction=outgoing endpoint=start_id fanout=4 terminal-fanout=3 composite-fanout=3 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_adj payload=id-only
+               Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
+               Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+               Adjacency Cost Input: fanout=4 terminal-fanout=3 composite-fanout=3 source-handoff=label-slice source-fanout=3 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
+               Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=3 fanout=4 terminal-fanout=3 composite-fanout=3 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
+               Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+               Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=recheck value=none candidate-fanout=3 composite-fanout=3 value-posting=none planned=none threshold=0 reason=not-indexable
+               Adjacency Composite Policy: class=adjacency-composite-recheck recommendation=keep-recheck
+               Adjacency Terminal Property: key=k index=none provider=none domain=none metadata=no value=none prefetch=ineligible precheck=no mode=none
+               Adjacency Payload Columns: mode=id-only columns=start_id,end_id
+   ->  Materialize
+         Output: x.properties, x.id
+         ->  Index Scan using "X_pkey" on age_adj_source_skew."X" x
+               Output: x.properties, x.id
+               Index Cond: (x.id = _age_default_alias_0.end_id)
+(27 rows)
+
+-- :B source -> terminal-fanout 1 (B runs 1/4 to X); directory cannot tell A from B
+SELECT * FROM cypher('age_adj_source_skew', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (b:B {k: 0}) MATCH (b)-[:E]->(x:X {k: b.k + 1}) RETURN x.k
+$$) AS (plan agtype);
+                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: agtype_object_field_agtype(x.properties, '"k"'::agtype)
+   Inner Unique: true
+   Join Filter: (agtype_access_operator(VARIADIC ARRAY[x.properties, '"k"'::agtype]) = (agtype_access_operator(VARIADIC ARRAY[b.properties, '"k"'::agtype]) + '1'::agtype))
+   ->  Nested Loop
+         Output: b.properties, _age_default_alias_0.end_id
+         ->  Seq Scan on age_adj_source_skew."B" b
+               Output: b.id, b.properties
+               Filter: ((b.properties @> '{"k": 0}'::agtype) AND agtype_object_field_equals(b.properties, '"k"'::agtype, '0'::agtype))
+         ->  Custom Scan (AGE Adjacency Match) on age_adj_source_skew."E" _age_default_alias_0
+               Output: _age_default_alias_0.start_id, _age_default_alias_0.end_id
+               Filter: (_age_default_alias_0.start_id = b.id)
+               Adjacency Index: direction=outgoing endpoint=start_id fanout=4 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_adj payload=id-only
+               Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
+               Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+               Adjacency Cost Input: fanout=4 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
+               Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=4 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
+               Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+               Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=recheck value=none candidate-fanout=1 composite-fanout=1 value-posting=none planned=none threshold=0 reason=not-indexable
+               Adjacency Composite Policy: class=adjacency-composite-recheck recommendation=keep-recheck
+               Adjacency Terminal Property: key=k index=none provider=none domain=none metadata=no value=none prefetch=ineligible precheck=no mode=none
+               Adjacency Payload Columns: mode=id-only columns=start_id,end_id
+   ->  Index Scan using "X_pkey" on age_adj_source_skew."X" x
+         Output: x.id, x.properties
+         Index Cond: (x.id = _age_default_alias_0.end_id)
+(25 rows)
+
+SELECT drop_graph('age_adj_source_skew', true);
+NOTICE:  drop cascades to 7 other objects
+DETAIL:  drop cascades to table age_adj_source_skew._ag_label_vertex
+drop cascades to table age_adj_source_skew._ag_label_edge
+drop cascades to table age_adj_source_skew."A"
+drop cascades to table age_adj_source_skew."B"
+drop cascades to table age_adj_source_skew."X"
+drop cascades to table age_adj_source_skew."Y"
+drop cascades to table age_adj_source_skew."E"
+NOTICE:  graph "age_adj_source_skew" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
+-- Degree conditioning: the cached per-source-label average out-degree refines
+-- the base (endpoint) fanout.  :A vertices have out-degree 6, :B have 2;
+-- before refreshing the degree cache the estimate is the global blend (4),
+-- after refresh the :A source uses 6 and a :B source uses 2.
+SELECT create_graph('age_adj_degree');
+NOTICE:  graph "age_adj_degree" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_degree', 'A');
+NOTICE:  VLabel "A" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_degree', 'B');
+NOTICE:  VLabel "B" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_degree', 'T');
+NOTICE:  VLabel "T" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_elabel('age_adj_degree', 'E');
+NOTICE:  ELabel "E" has been created
+ create_elabel 
+---------------
+ 
+(1 row)
+
+SELECT * FROM cypher('age_adj_degree', $$ CREATE (:A {id: 0}) $$) AS (z agtype);
+ z 
+---
+(0 rows)
+
+SELECT * FROM cypher('age_adj_degree', $$
+    MATCH (a:A {id: 0})
+    CREATE (a)-[:E]->(:T {k: 1}), (a)-[:E]->(:T {k: 2}), (a)-[:E]->(:T {k: 3}),
+           (a)-[:E]->(:T {k: 4}), (a)-[:E]->(:T {k: 5}), (a)-[:E]->(:T {k: 6})
+$$) AS (z agtype);
+ z 
+---
+(0 rows)
+
+SELECT * FROM cypher('age_adj_degree', $$ CREATE (:B {id: 0}) $$) AS (z agtype);
+ z 
+---
+(0 rows)
+
+SELECT * FROM cypher('age_adj_degree', $$
+    MATCH (b:B {id: 0})
+    CREATE (b)-[:E]->(:T {k: 7}), (b)-[:E]->(:T {k: 8})
+$$) AS (z agtype);
+ z 
+---
+(0 rows)
+
+SELECT * FROM cypher('age_adj_degree', $$
+    CREATE INDEX e_adj FOR ()-[e:E]->() ON (ADJACENCY)
+$$) AS (c text);
+   c   
+-------
+ e_adj
+(1 row)
+
+ANALYZE age_adj_degree."A"; ANALYZE age_adj_degree."B";
+ANALYZE age_adj_degree."T"; ANALYZE age_adj_degree."E";
+SELECT src_label, edge_label, max_out_degree,
+       round(avg_out_degree::numeric, 2) AS avg_out_degree
+FROM ag_catalog.age_graph_edge_degree_stats('age_adj_degree')
+ORDER BY src_label;
+ src_label | edge_label | max_out_degree | avg_out_degree 
+-----------+------------+----------------+----------------
+ A         | E          |              6 |           6.00
+ B         | E          |              2 |           2.00
+(2 rows)
+
+-- Before refresh: global blend (fanout=4).
+SELECT * FROM cypher('age_adj_degree', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (a:A {id: 0}) MATCH (a)-[:E]->(t:T {k: a.id + 1}) RETURN t.k
+$$) AS (plan agtype);
+                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: agtype_object_field_agtype(t.properties, '"k"'::agtype)
+   Inner Unique: true
+   Join Filter: (agtype_access_operator(VARIADIC ARRAY[t.properties, '"k"'::agtype]) = (agtype_access_operator(VARIADIC ARRAY[a.properties, '"id"'::agtype]) + '1'::agtype))
+   ->  Nested Loop
+         Output: a.properties, _age_default_alias_0.end_id
+         ->  Seq Scan on age_adj_degree."A" a
+               Output: a.id, a.properties
+               Filter: ((a.properties @> '{"id": 0}'::agtype) AND agtype_object_field_equals(a.properties, '"id"'::agtype, '0'::agtype))
+         ->  Custom Scan (AGE Adjacency Match) on age_adj_degree."E" _age_default_alias_0
+               Output: _age_default_alias_0.start_id, _age_default_alias_0.end_id
+               Filter: (_age_default_alias_0.start_id = a.id)
+               Adjacency Index: direction=outgoing endpoint=start_id fanout=4 terminal-fanout=2 composite-fanout=2 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_adj payload=id-only
+               Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
+               Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+               Adjacency Cost Input: fanout=4 terminal-fanout=2 composite-fanout=2 source-handoff=label-slice source-fanout=2 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
+               Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=2 fanout=4 terminal-fanout=2 composite-fanout=2 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
+               Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+               Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=recheck value=none candidate-fanout=2 composite-fanout=2 value-posting=none planned=none threshold=0 reason=not-indexable
+               Adjacency Composite Policy: class=adjacency-composite-recheck recommendation=keep-recheck
+               Adjacency Terminal Property: key=k index=none provider=none domain=none metadata=no value=none prefetch=ineligible precheck=no mode=none
+               Adjacency Payload Columns: mode=id-only columns=start_id,end_id
+   ->  Materialize
+         Output: t.properties, t.id
+         ->  Index Scan using "T_pkey" on age_adj_degree."T" t
+               Output: t.properties, t.id
+               Index Cond: (t.id = _age_default_alias_0.end_id)
+(27 rows)
+
+SELECT ag_catalog.age_refresh_graph_edge_degree_stats('age_adj_degree')
+       AS cached_rows;
+ cached_rows 
+-------------
+           2
+(1 row)
+
+-- After refresh: :A source uses its own average out-degree (6).
+SELECT * FROM cypher('age_adj_degree', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (a:A {id: 0}) MATCH (a)-[:E]->(t:T {k: a.id + 1}) RETURN t.k
+$$) AS (plan agtype);
+                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: agtype_object_field_agtype(t.properties, '"k"'::agtype)
+   Inner Unique: true
+   Join Filter: (agtype_access_operator(VARIADIC ARRAY[t.properties, '"k"'::agtype]) = (agtype_access_operator(VARIADIC ARRAY[a.properties, '"id"'::agtype]) + '1'::agtype))
+   ->  Nested Loop
+         Output: a.properties, _age_default_alias_0.end_id
+         ->  Seq Scan on age_adj_degree."A" a
+               Output: a.id, a.properties
+               Filter: ((a.properties @> '{"id": 0}'::agtype) AND agtype_object_field_equals(a.properties, '"id"'::agtype, '0'::agtype))
+         ->  Custom Scan (AGE Adjacency Match) on age_adj_degree."E" _age_default_alias_0
+               Output: _age_default_alias_0.start_id, _age_default_alias_0.end_id
+               Filter: (_age_default_alias_0.start_id = a.id)
+               Adjacency Index: direction=outgoing endpoint=start_id fanout=6 terminal-fanout=3 composite-fanout=3 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_adj payload=id-only
+               Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
+               Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+               Adjacency Cost Input: fanout=6 terminal-fanout=3 composite-fanout=3 source-handoff=label-slice source-fanout=3 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
+               Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=3 fanout=6 terminal-fanout=3 composite-fanout=3 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
+               Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+               Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=recheck value=none candidate-fanout=3 composite-fanout=3 value-posting=none planned=none threshold=0 reason=not-indexable
+               Adjacency Composite Policy: class=adjacency-composite-recheck recommendation=keep-recheck
+               Adjacency Terminal Property: key=k index=none provider=none domain=none metadata=no value=none prefetch=ineligible precheck=no mode=none
+               Adjacency Payload Columns: mode=id-only columns=start_id,end_id
+   ->  Materialize
+         Output: t.properties, t.id
+         ->  Index Scan using "T_pkey" on age_adj_degree."T" t
+               Output: t.properties, t.id
+               Index Cond: (t.id = _age_default_alias_0.end_id)
+(27 rows)
+
+-- A :B source uses its own (2); the directory cannot distinguish A from B here.
+SELECT * FROM cypher('age_adj_degree', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (b:B {id: 0}) MATCH (b)-[:E]->(t:T {k: b.id + 1}) RETURN t.k
+$$) AS (plan agtype);
+                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: agtype_object_field_agtype(t.properties, '"k"'::agtype)
+   Inner Unique: true
+   Join Filter: (agtype_access_operator(VARIADIC ARRAY[t.properties, '"k"'::agtype]) = (agtype_access_operator(VARIADIC ARRAY[b.properties, '"id"'::agtype]) + '1'::agtype))
+   ->  Nested Loop
+         Output: b.properties, _age_default_alias_0.end_id
+         ->  Seq Scan on age_adj_degree."B" b
+               Output: b.id, b.properties
+               Filter: ((b.properties @> '{"id": 0}'::agtype) AND agtype_object_field_equals(b.properties, '"id"'::agtype, '0'::agtype))
+         ->  Custom Scan (AGE Adjacency Match) on age_adj_degree."E" _age_default_alias_0
+               Output: _age_default_alias_0.start_id, _age_default_alias_0.end_id
+               Filter: (_age_default_alias_0.start_id = b.id)
+               Adjacency Index: direction=outgoing endpoint=start_id fanout=2 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_adj payload=id-only
+               Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
+               Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+               Adjacency Cost Input: fanout=2 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
+               Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=2 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
+               Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+               Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=recheck value=none candidate-fanout=1 composite-fanout=1 value-posting=none planned=none threshold=0 reason=not-indexable
+               Adjacency Composite Policy: class=adjacency-composite-recheck recommendation=keep-recheck
+               Adjacency Terminal Property: key=k index=none provider=none domain=none metadata=no value=none prefetch=ineligible precheck=no mode=none
+               Adjacency Payload Columns: mode=id-only columns=start_id,end_id
+   ->  Index Scan using "T_pkey" on age_adj_degree."T" t
+         Output: t.id, t.properties
+         Index Cond: (t.id = _age_default_alias_0.end_id)
+(25 rows)
+
+SELECT drop_graph('age_adj_degree', true);
+NOTICE:  drop cascades to 6 other objects
+DETAIL:  drop cascades to table age_adj_degree._ag_label_vertex
+drop cascades to table age_adj_degree._ag_label_edge
+drop cascades to table age_adj_degree."A"
+drop cascades to table age_adj_degree."B"
+drop cascades to table age_adj_degree."T"
+drop cascades to table age_adj_degree."E"
+NOTICE:  graph "age_adj_degree" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
+-- Direction-aware degree conditioning: an :M vertex has out-degree 2 (M -> 2 T)
+-- but in-degree 5 (5 S -> M) for :E.  An outgoing expansion from M conditions
+-- its base fanout on the out-degree (2), an incoming expansion to M on the
+-- in-degree (5) -- the directional cache the bound endpoint sits in.  Without
+-- the in-degree cache an incoming expansion would wrongly reuse the out-degree.
+SELECT create_graph('age_adj_direction');
+NOTICE:  graph "age_adj_direction" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_direction', 'M');
+NOTICE:  VLabel "M" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_direction', 'T');
+NOTICE:  VLabel "T" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_direction', 'S');
+NOTICE:  VLabel "S" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_elabel('age_adj_direction', 'E');
+NOTICE:  ELabel "E" has been created
+ create_elabel 
+---------------
+ 
+(1 row)
+
+SELECT * FROM cypher('age_adj_direction', $$ CREATE (:M {id: 0}) $$) AS (z agtype);
+ z 
+---
+(0 rows)
+
+SELECT * FROM cypher('age_adj_direction', $$
+    MATCH (m:M {id: 0}) CREATE (m)-[:E]->(:T {k: 1}), (m)-[:E]->(:T {k: 2})
+$$) AS (z agtype);
+ z 
+---
+(0 rows)
+
+SELECT * FROM cypher('age_adj_direction', $$
+    MATCH (m:M {id: 0})
+    CREATE (:S {k: 1})-[:E]->(m), (:S {k: 2})-[:E]->(m), (:S {k: 3})-[:E]->(m),
+           (:S {k: 4})-[:E]->(m), (:S {k: 5})-[:E]->(m)
+$$) AS (z agtype);
+ z 
+---
+(0 rows)
+
+SELECT * FROM cypher('age_adj_direction', $$
+    CREATE INDEX e_out FOR ()-[r:E]->() ON (ADJACENCY)
+$$) AS (c text);
+   c   
+-------
+ e_out
+(1 row)
+
+CREATE INDEX e_in ON age_adj_direction."E"
+    USING age_adjacency (end_id, id, start_id);
+ANALYZE age_adj_direction."M"; ANALYZE age_adj_direction."T";
+ANALYZE age_adj_direction."S"; ANALYZE age_adj_direction."E";
+SELECT ag_catalog.age_refresh_graph_edge_degree_stats('age_adj_direction')
+       AS out_rows;
+ out_rows 
+----------
+        2
+(1 row)
+
+SELECT ag_catalog.age_refresh_graph_edge_in_degree_stats('age_adj_direction')
+       AS in_rows;
+ in_rows 
+---------
+       2
+(1 row)
+
+-- Outgoing from :M uses out-degree (fanout=2).
+SELECT * FROM cypher('age_adj_direction', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (m:M {id: 0}) MATCH (m)-[:E]->(t:T) RETURN t.k
+$$) AS (plan agtype);
+                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: agtype_object_field_agtype(t.properties, '"k"'::agtype)
+   ->  Seq Scan on age_adj_direction."M" m
+         Output: m.id, m.properties
+         Filter: ((m.properties @> '{"id": 0}'::agtype) AND agtype_object_field_equals(m.properties, '"id"'::agtype, '0'::agtype))
+   ->  Nested Loop
+         Output: _age_default_alias_0.start_id, t.properties
+         Inner Unique: true
+         ->  Custom Scan (AGE Adjacency Match) on age_adj_direction."E" _age_default_alias_0
+               Output: _age_default_alias_0.start_id, _age_default_alias_0.end_id
+               Filter: (_age_default_alias_0.start_id = m.id)
+               Adjacency Index: direction=outgoing endpoint=start_id fanout=2 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_out payload=id-only
+               Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
+               Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:no
+               Adjacency Cost Input: fanout=2 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=1 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
+               Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=2 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
+               Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+               Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=none value=none candidate-fanout=1 composite-fanout=1 value-posting=none planned=none threshold=0 reason=not-indexable
+               Adjacency Terminal Property: none
+               Adjacency Payload Columns: mode=id-only columns=start_id,end_id
+         ->  Index Scan using "T_pkey" on age_adj_direction."T" t
+               Output: t.id, t.properties
+               Index Cond: (t.id = _age_default_alias_0.end_id)
+(23 rows)
+
+-- Incoming to :M uses in-degree (fanout=5) -- the directional difference.
+SELECT * FROM cypher('age_adj_direction', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (m:M {id: 0}) MATCH (m)<-[:E]-(s:S) RETURN s.k
+$$) AS (plan agtype);
+                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                 
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: agtype_object_field_agtype(s.properties, '"k"'::agtype)
+   ->  Seq Scan on age_adj_direction."M" m
+         Output: m.id, m.properties
+         Filter: ((m.properties @> '{"id": 0}'::agtype) AND agtype_object_field_equals(m.properties, '"id"'::agtype, '0'::agtype))
+   ->  Nested Loop
+         Output: _age_default_alias_0.end_id, s.properties
+         Inner Unique: true
+         ->  Custom Scan (AGE Adjacency Match) on age_adj_direction."E" _age_default_alias_0
+               Output: _age_default_alias_0.end_id, _age_default_alias_0.start_id
+               Filter: (_age_default_alias_0.end_id = m.id)
+               Adjacency Index: direction=incoming endpoint=end_id fanout=5 terminal-fanout=3 composite-fanout=2 label-groups=0 main-blocks=0 fanout-source=statistics source=relcache-scan payload=id-only
+               Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=in properties=0 metadata=no
+               Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:no
+               Adjacency Cost Input: fanout=5 terminal-fanout=3 composite-fanout=2 source-handoff=label-slice source-fanout=3 source-blocks=0 property-source-matches=0 residual=1 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
+               Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=end-bound property=query-order rows=2 fanout=5 terminal-fanout=3 composite-fanout=2 source=unknown candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
+               Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+               Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=none value=none candidate-fanout=3 composite-fanout=2 value-posting=none planned=none threshold=0 reason=not-indexable
+               Adjacency Terminal Property: none
+               Adjacency Payload Columns: mode=id-only columns=start_id,end_id
+         ->  Materialize
+               Output: s.properties, s.id
+               ->  Index Scan using "S_pkey" on age_adj_direction."S" s
+                     Output: s.properties, s.id
+                     Index Cond: (s.id = _age_default_alias_0.start_id)
+(25 rows)
+
+SELECT drop_graph('age_adj_direction', true);
+NOTICE:  drop cascades to 6 other objects
+DETAIL:  drop cascades to table age_adj_direction._ag_label_vertex
+drop cascades to table age_adj_direction._ag_label_edge
+drop cascades to table age_adj_direction."M"
+drop cascades to table age_adj_direction."T"
+drop cascades to table age_adj_direction."S"
+drop cascades to table age_adj_direction."E"
+NOTICE:  graph "age_adj_direction" has been dropped
  drop_graph 
 ------------
  
@@ -1392,7 +2071,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=1 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=1 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=1 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source handoff=label-slice label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache runtime-class=adjacency-composite-id-cache runtime-recommendation=keep-id-cache class-match=true
@@ -1513,7 +2192,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=64 terminal-fanout=32 composite-fanout=1 source-handoff=label-property-intersection source-fanout=1 source-blocks=0 property-source-matches=1 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=2 reason=large-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=64 terminal-fanout=32 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=64 terminal-fanout=32 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source handoff=label-property-intersection label=yes property=source value=const candidate-fanout=32 composite-fanout=1 value-posting=none planned=source-prefetch threshold=2 reason=large-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-prefilter recommendation=keep-property-prefilter runtime-class=adjacency-composite-prefilter runtime-recommendation=keep-property-prefilter class-match=true

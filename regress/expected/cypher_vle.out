@@ -339,8 +339,8 @@ SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)
 (19 rows)
 
 SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)-[:edge*1..1]->(:end) RETURN count(*) $$) AS (plan agtype);
-                                                                                                                                    QUERY PLAN                                                                                                                                     
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                            QUERY PLAN                                                                                                                                             
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
    Output: (count(*))::agtype
    ->  Nested Loop
@@ -354,7 +354,7 @@ SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)
                VLE Edge: label=edge, properties=0
                VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
                VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-               VLE Join Order: component=vle-expansion solved=(b 2 3) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+               VLE Join Order: component=vle-expansion solved=(b 2 3) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
                VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2226,8 +2226,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                           QUERY PLAN                                                                                                                                                           
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_268
@@ -2244,7 +2244,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=ineligible reason=missing-terminal-label property-tuples=0 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=4 composite=0 planned=none basis=missing-terminal-label
@@ -2265,8 +2265,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                           QUERY PLAN                                                                                                                                                           
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=7.00 loops=1)
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_270 (actual rows=1.00 loops=1)
@@ -2285,7 +2285,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=ineligible reason=missing-terminal-label property-tuples=0 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=4 composite=0 planned=none basis=missing-terminal-label
@@ -2318,8 +2318,8 @@ ANALYZE vle_index_probe."R";
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                           QUERY PLAN                                                                                                                                                           
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=7.00 loops=1)
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_272 (actual rows=1.00 loops=1)
@@ -2338,7 +2338,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=ineligible reason=missing-terminal-label property-tuples=0 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=4 composite=0 planned=none basis=missing-terminal-label
@@ -2366,8 +2366,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                QUERY PLAN                                                                                                                                                                
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                         QUERY PLAN                                                                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Index Scan using "N_pkey" on vle_index_probe."N" s
@@ -2382,7 +2382,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:7/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-expand bound=out property=vle-frontier-anchored rows=7 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-expand bound=out property=vle-frontier-anchored rows=7 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=10 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=7 composite=7 planned=metadata-only basis=terminal-label-property
@@ -2403,8 +2403,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) WHERE n.rare = true RETURN n.rare$$)
 AS (plan agtype);
-                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                            QUERY PLAN                                                                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Index Scan using "N_pkey" on vle_index_probe."N" s
@@ -2419,7 +2419,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:7/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=4 declared-cover=3 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=4 declared-cover=3 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_rare_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=10 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=7 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.150000 selectivity-source=fallback-mcv-ceiling
@@ -2440,8 +2440,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) WHERE n.rare = true RETURN n.rare$$)
 AS (plan agtype);
-                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                            QUERY PLAN                                                                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=1.00 loops=1)
    Output: _age_default_alias_0.edges
    ->  Index Scan using "N_pkey" on vle_index_probe."N" s (actual rows=1.00 loops=1)
@@ -2457,7 +2457,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:7/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=4 declared-cover=3 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=4 declared-cover=3 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_rare_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=10 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=7 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.150000 selectivity-source=fallback-mcv-ceiling
@@ -2485,8 +2485,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) WHERE n.isolated = true RETURN n.isolated$$)
 AS (plan agtype);
-                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                            QUERY PLAN                                                                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=0.00 loops=1)
    Output: _age_default_alias_0.edges
    ->  Index Scan using "N_pkey" on vle_index_probe."N" s (actual rows=1.00 loops=1)
@@ -2502,7 +2502,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:7/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=4 declared-cover=3 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=4 declared-cover=3 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_isolated_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=10 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=7 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.150000 selectivity-source=fallback-ceiling
@@ -2530,8 +2530,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) WHERE n.rare = s.rare RETURN n.rare$$)
 AS (plan agtype);
-                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                            QUERY PLAN                                                                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Index Scan using "N_pkey" on vle_index_probe."N" s
@@ -2546,7 +2546,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:7/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=7 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=4 declared-cover=3 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=7 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=4 declared-cover=3 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_rare_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=10 predicate=runtime-slot prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=7 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.150000 selectivity-source=fallback
@@ -2567,8 +2567,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) WHERE n.rare = s.rare RETURN n.rare$$)
 AS (plan agtype);
-                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                            QUERY PLAN                                                                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=1.00 loops=1)
    Output: _age_default_alias_0.edges
    ->  Index Scan using "N_pkey" on vle_index_probe."N" s (actual rows=1.00 loops=1)
@@ -2584,7 +2584,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:7/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=7 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=4 declared-cover=3 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=7 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=4 declared-cover=3 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_rare_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=10 predicate=runtime-slot prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=7 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.150000 selectivity-source=fallback
@@ -2612,8 +2612,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..1]->(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                     QUERY PLAN                                                                                                                                                      
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                              QUERY PLAN                                                                                                                                                               
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_280
@@ -2630,7 +2630,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2647,8 +2647,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 3})<-[:R*1..1]-(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                          QUERY PLAN                                                                                                                                                           
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                   QUERY PLAN                                                                                                                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_282
@@ -2665,7 +2665,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=none/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=in property=query-order rows=1 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=in property=query-order rows=1 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=ineligible reason=missing-terminal-label property-tuples=0 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=1 composite=0 planned=none basis=missing-terminal-label
@@ -2686,8 +2686,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n$$)
 AS (plan agtype);
-                                                                                                                                                          QUERY PLAN                                                                                                                                                          
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                   QUERY PLAN                                                                                                                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_vle_terminal_vertex(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_284
@@ -2704,7 +2704,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-vertex class=terminal-object source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-vertex class=terminal-object source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-vertex class=terminal-object active=out budget=1 weight=2 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2721,8 +2721,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN n$$)
 AS (plan agtype);
-                                                                                                                                                          QUERY PLAN                                                                                                                                                          
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                   QUERY PLAN                                                                                                                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=7.00 loops=1)
    Output: age_vle_terminal_vertex(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_286 (actual rows=1.00 loops=1)
@@ -2741,7 +2741,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-vertex class=terminal-object source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-vertex class=terminal-object source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-vertex class=terminal-object active=out budget=1 weight=2 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2765,8 +2765,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..1]->(n) RETURN properties(n)$$)
 AS (plan agtype);
-                                                                                                                                                            QUERY PLAN                                                                                                                                                            
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                     QUERY PLAN                                                                                                                                                                     
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_288
@@ -2783,7 +2783,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-properties class=terminal-object source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-properties class=terminal-object source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-properties class=terminal-object active=out budget=1 weight=2 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2801,8 +2801,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:N)-[:R*1..1]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                       QUERY PLAN                                                                                                                                       
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                               QUERY PLAN                                                                                                                                               
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=11.00 loops=1)
    Output: _age_default_alias_0.edges
    ->  Index Only Scan using "N_pkey" on vle_index_probe."N" _age_default_vle_function_start_var_290 (actual rows=10.00 loops=1)
@@ -2818,7 +2818,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=ineligible reason=missing-terminal-label property-tuples=0 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=4 composite=0 planned=none basis=missing-terminal-label
@@ -2846,8 +2846,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                QUERY PLAN                                                                                                                                                                
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                         QUERY PLAN                                                                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=11.00 loops=1)
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_index_probe."N" _age_default_vle_function_start_var_292 (actual rows=1.00 loops=1)
@@ -2866,7 +2866,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=8 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=8 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=ineligible reason=missing-terminal-label property-tuples=0 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=4 composite=0 planned=none basis=missing-terminal-label
@@ -2926,8 +2926,8 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_directory_label_cost',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                QUERY PLAN                                                                                                                                                                
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                         QUERY PLAN                                                                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Index Scan using "N_pkey" on vle_directory_label_cost."N" s
@@ -2942,7 +2942,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=2 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-expand bound=out property=vle-frontier-anchored rows=1 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-expand bound=out property=vle-frontier-anchored rows=1 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3007,8 +3007,8 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_fanout_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                QUERY PLAN                                                                                                                                                                
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                         QUERY PLAN                                                                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_fanout_policy."N" _age_default_vle_function_start_var_295
@@ -3025,7 +3025,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=3 fanout=start:3/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=6 fanout=start:3/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=6 fanout=start:3/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3043,8 +3043,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_fanout_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                QUERY PLAN                                                                                                                                                                
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                         QUERY PLAN                                                                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_fanout_policy."N" _age_default_vle_function_start_var_297
@@ -3061,7 +3061,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=3 fanout=start:3/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=9 fanout=start:3/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=9 fanout=start:3/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:14
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3126,8 +3126,8 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_tie_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:T {i: 0})<-[:R*1..1]-(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                          QUERY PLAN                                                                                                                                                           
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                   QUERY PLAN                                                                                                                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_tie_policy."T" _age_default_vle_function_start_var_299
@@ -3144,7 +3144,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=none/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=in property=query-order rows=1 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=in property=query-order rows=1 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=in budget=2 weight=1 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3162,8 +3162,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_tie_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:T {i: 0})<-[:R*1..1]-(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                     QUERY PLAN                                                                                                                                                     
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                              QUERY PLAN                                                                                                                                                              
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_tie_policy."T" _age_default_vle_function_start_var_301
@@ -3180,7 +3180,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=none/in=age-adjacency, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=in property=query-order rows=1 fanout=start:1/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=in property=query-order rows=1 fanout=start:1/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=in budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3197,8 +3197,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_tie_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:T {i: 0})<-[:R*1..1]-(n) RETURN n$$)
 AS (plan agtype);
-                                                                                                                                                         QUERY PLAN                                                                                                                                                          
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                  QUERY PLAN                                                                                                                                                                   
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_vle_terminal_vertex(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_tie_policy."T" _age_default_vle_function_start_var_303
@@ -3215,7 +3215,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=none/in=age-adjacency, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=in property=query-order rows=1 fanout=start:1/end:1 consumer=terminal-vertex class=terminal-object source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=in property=query-order rows=1 fanout=start:1/end:1 consumer=terminal-vertex class=terminal-object source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-vertex class=terminal-object active=in budget=1 weight=2 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3287,8 +3287,8 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_headroom_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                QUERY PLAN                                                                                                                                                                
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                         QUERY PLAN                                                                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_headroom_policy."N" _age_default_vle_function_start_var_305
@@ -3305,7 +3305,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=7 fanout=start:2/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=4 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=4 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3366,8 +3366,8 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_empty_cache_policy',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                           QUERY PLAN                                                                                                                                                           
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=8.00 loops=1)
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_empty_cache_policy."N" _age_default_vle_function_start_var_307 (actual rows=1.00 loops=1)
@@ -3386,7 +3386,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:8/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:9
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3410,8 +3410,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_empty_cache_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                           QUERY PLAN                                                                                                                                                           
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_empty_cache_policy."N" _age_default_vle_function_start_var_309
@@ -3428,7 +3428,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:8/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:18
          VLE Source Threshold Input: source=runtime-cache headroom=35 batch=18 direction=out reason=root-empty-saturated class=adjacency-empty-batch observed=1 saturated=1 relaxed=0
          VLE Source Payload Input: source=runtime-cache headroom=50 scan-runs=1 replay-runs=0 seed-runs=1 replay-percent=0 seed-percent=100 observed=1 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
@@ -3445,8 +3445,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_empty_cache_policy',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                           QUERY PLAN                                                                                                                                                           
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=8.00 loops=1)
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_empty_cache_policy."N" _age_default_vle_function_start_var_311 (actual rows=1.00 loops=1)
@@ -3465,7 +3465,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:8/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:18
          VLE Source Threshold Input: source=runtime-cache headroom=35 batch=18 direction=out reason=root-empty-saturated class=adjacency-empty-batch observed=1 saturated=1 relaxed=0
          VLE Source Payload Input: source=runtime-cache headroom=50 scan-runs=1 replay-runs=0 seed-runs=1 replay-percent=0 seed-percent=100 observed=1 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
@@ -3489,8 +3489,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_empty_cache_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                           QUERY PLAN                                                                                                                                                           
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_empty_cache_policy."N" _age_default_vle_function_start_var_313
@@ -3507,7 +3507,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:8/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.30 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:18
          VLE Source Threshold Input: source=runtime-cache headroom=30 batch=18 direction=out reason=root-empty-repeat-observed class=adjacency-empty-lifecycle observed=2 saturated=1 relaxed=1
          VLE Source Payload Input: source=runtime-cache headroom=50 scan-runs=2 replay-runs=0 seed-runs=2 replay-percent=0 seed-percent=100 observed=2 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
@@ -3524,8 +3524,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_empty_cache_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]-(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                                  QUERY PLAN                                                                                                                                                                   
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                           QUERY PLAN                                                                                                                                                                            
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_empty_cache_policy."N" _age_default_vle_function_start_var_315
@@ -3542,7 +3542,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:8/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-bidirectional-expand bound=both property=vle-frontier-anchored rows=27 fanout=start:8/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-bidirectional-expand bound=both property=vle-frontier-anchored rows=27 fanout=start:8/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=both budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.40 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:18
          VLE Source Threshold Input: source=runtime-cache headroom=40 batch=18 direction=out reason=root-empty-repeat-observed class=adjacency-empty-lifecycle observed=2 saturated=1 relaxed=1
          VLE Source Payload Input: source=runtime-cache headroom=50 scan-runs=2 replay-runs=0 seed-runs=2 replay-percent=0 seed-percent=100 observed=2 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
@@ -3600,8 +3600,8 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_directional_feedback_policy',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH p=(:N {i: 0})-[:R*1..3]-(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                                  QUERY PLAN                                                                                                                                                                   
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                           QUERY PLAN                                                                                                                                                                            
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=6.00 loops=1)
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_directional_feedback_policy."N" _age_default_vle_function_start_var_317 (actual rows=1.00 loops=1)
@@ -3620,7 +3620,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=age-adjacency, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:6/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-bidirectional-expand bound=both property=vle-frontier-anchored rows=21 fanout=start:6/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-bidirectional-expand bound=both property=vle-frontier-anchored rows=21 fanout=start:6/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=both budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:9
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3644,8 +3644,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_directional_feedback_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                           QUERY PLAN                                                                                                                                                           
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_directional_feedback_policy."N" _age_default_vle_function_start_var_319
@@ -3662,7 +3662,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:6/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=18 fanout=start:6/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=18 fanout=start:6/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:18
          VLE Source Threshold Input: source=runtime-cache headroom=35 batch=18 direction=out reason=root-empty-saturated class=adjacency-empty-batch observed=1 saturated=1 relaxed=0
          VLE Source Payload Input: source=runtime-cache headroom=50 scan-runs=7 replay-runs=0 seed-runs=1 replay-percent=0 seed-percent=14 observed=1 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
@@ -3719,8 +3719,8 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_payload_replay_policy',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                          QUERY PLAN                                                                                                                                                           
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                   QUERY PLAN                                                                                                                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=8.00 loops=1)
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_payload_replay_policy."N" _age_default_vle_function_start_var_321 (actual rows=1.00 loops=1)
@@ -3739,7 +3739,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:9
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3763,8 +3763,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_payload_replay_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                          QUERY PLAN                                                                                                                                                           
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                   QUERY PLAN                                                                                                                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_payload_replay_policy."N" _age_default_vle_function_start_var_323
@@ -3781,7 +3781,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.18 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:16
          VLE Source Threshold Input: source=runtime-cache headroom=50 batch=8 direction=out reason=root-empty-observed class=adjacency-cache-seeded observed=1 saturated=0 relaxed=1
          VLE Source Payload Input: source=runtime-cache headroom=18 scan-runs=4 replay-runs=1 seed-runs=2 replay-percent=25 seed-percent=50 observed=1 value-posting=none/observed:0 reason=payload-replay-ratio-observed class=adjacency-replay
@@ -3798,8 +3798,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_payload_replay_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n$$)
 AS (plan agtype);
-                                                                                                                                                               QUERY PLAN                                                                                                                                                               
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                        QUERY PLAN                                                                                                                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_vle_terminal_vertex(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_payload_replay_policy."N" _age_default_vle_function_start_var_325
@@ -3816,7 +3816,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=terminal-vertex class=terminal-object source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=terminal-vertex class=terminal-object source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-vertex class=terminal-object active=out budget=1 weight=2 cache-seed=eligible endpoint-headroom=0.20 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:12
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=runtime-cache headroom=20 scan-runs=4 replay-runs=1 seed-runs=2 replay-percent=25 seed-percent=50 observed=1 value-posting=none/observed:0 reason=payload-replay-ratio-observed class=adjacency-replay
@@ -3833,8 +3833,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_payload_replay_policy',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                QUERY PLAN                                                                                                                                                                
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                         QUERY PLAN                                                                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=8.00 loops=1)
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_payload_replay_policy."N" _age_default_vle_function_start_var_327 (actual rows=1.00 loops=1)
@@ -3853,7 +3853,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:14
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3878,8 +3878,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_payload_replay_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..3]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                QUERY PLAN                                                                                                                                                                
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                         QUERY PLAN                                                                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_payload_replay_policy."N" _age_default_vle_function_start_var_329
@@ -3896,7 +3896,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:14
          VLE Source Threshold Input: source=runtime-cache headroom=35 batch=8 direction=out reason=root-empty-observed class=adjacency-cache-seeded observed=1 saturated=0 relaxed=1
          VLE Source Payload Input: source=runtime-cache headroom=35 scan-runs=4 replay-runs=1 seed-runs=2 replay-percent=25 seed-percent=50 observed=1 value-posting=none/observed:0 reason=payload-replay-observed class=adjacency-replay-observed
@@ -3955,8 +3955,8 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_adjacency_only_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                QUERY PLAN                                                                                                                                                                
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                         QUERY PLAN                                                                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_adjacency_only_policy."N" _age_default_vle_function_start_var_331
@@ -3973,7 +3973,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=3 fanout=start:0/end:0 stats=rel:known/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=1 fanout=start:0/end:0 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=1 fanout=start:0/end:0 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -4033,8 +4033,8 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_anonymous_label_source_policy',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH p=(:N {i: 0})-[*1..1]->(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                     QUERY PLAN                                                                                                                                                      
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                              QUERY PLAN                                                                                                                                                               
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=1.00 loops=1)
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_anonymous_label_source_policy."N" _age_default_vle_function_start_var_333 (actual rows=1.00 loops=1)
@@ -4053,7 +4053,7 @@ AS (plan agtype);
          VLE Edge: label=, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:known/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -4451,8 +4451,8 @@ AS (plan agtype);
 SELECT * FROM cypher('cypher_vle',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:begin)-[:edge*1..2]->() RETURN p$$)
 AS (plan agtype);
-                                                                                                                                 QUERY PLAN                                                                                                                                  
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                         QUERY PLAN                                                                                                                                          
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Seq Scan on cypher_vle.begin _age_default_vle_function_start_var_347
@@ -4466,7 +4466,7 @@ AS (plan agtype);
          VLE Edge: label=edge, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -4790,8 +4790,8 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_frontier_empty_policy',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH p=(:N {i: 0})-[:R*1..2]->(n) RETURN p$$)
 AS (plan agtype);
-                                                                                                                                                          QUERY PLAN                                                                                                                                                           
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                   QUERY PLAN                                                                                                                                                                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=1.00 loops=1)
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Bitmap Heap Scan on vle_frontier_empty_policy."N" _age_default_vle_function_start_var_355 (actual rows=1.00 loops=1)
@@ -4810,7 +4810,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=2 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=2 fanout=start:1/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-expand bound=out property=vle-frontier-anchored rows=2 fanout=start:1/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=2 declared-cover=2 cover=matched next=postgres-index-seek/index-anchored/postgres-index-path alt-credit=active
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -4885,8 +4885,8 @@ ANALYZE vle_fixed_label_chain."e1";
 SELECT * FROM cypher('vle_fixed_label_chain',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1) RETURN count(*)$$)
 AS (plan agtype);
-                                                                                                                                         QUERY PLAN                                                                                                                                          
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                 QUERY PLAN                                                                                                                                                  
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate
    Output: (count(*))::agtype
    ->  Nested Loop
@@ -4900,7 +4900,7 @@ AS (plan agtype);
                VLE Edge: label=e1, properties=0
                VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
                VLE Source Cost: reltuples=13 fanout=start:2/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-               VLE Join Order: component=vle-expansion solved=(b 2 3) connector=vle-expand bound=out property=vle-frontier-anchored rows=8 fanout=start:2/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none
+               VLE Join Order: component=vle-expansion solved=(b 2 3) connector=vle-expand bound=out property=vle-frontier-anchored rows=8 fanout=start:2/end:1 consumer=path class=path-materialized source=vle-edge-source candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:5 empty-batch=eligible/size:15
                VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -4924,8 +4924,8 @@ AS (paths agtype);
 SELECT * FROM cypher('vle_fixed_label_chain',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(:v1)-[:e1]->(n:v1) WHERE n.i = 5 RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                            QUERY PLAN                                                                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=1.00 loops=1)
    Output: _age_default_alias_1.edges
    ->  Seq Scan on vle_fixed_label_chain.v1 _age_default_alias_0 (actual rows=12.00 loops=1)
@@ -4939,7 +4939,7 @@ AS (plan agtype);
          VLE Edge: label=e1, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=13 fanout=start:2/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-composite-expand bound=out property=index-anchored rows=4 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+         VLE Join Order: component=vle-expansion solved=(b 4 5) connector=vle-composite-expand bound=out property=index-anchored rows=4 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=inert
          VLE Terminal Property Source: label=v1 source=graph-metadata:v1_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=12 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=2 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.083333 selectivity-source=typed-distinct
@@ -5054,8 +5054,8 @@ ANALYZE vle_typed_selectivity."R";
 SELECT * FROM cypher('vle_typed_selectivity',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) WHERE n.i = 1 RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                    QUERY PLAN                                                                                                                                                                     
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                             QUERY PLAN                                                                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Seq Scan on vle_typed_selectivity."N" s
@@ -5070,7 +5070,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=19 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=2 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=2 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=20 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=19 composite=2 planned=property-prefilter basis=terminal-label-property selectivity=0.100000 selectivity-source=typed-mcv
@@ -5189,8 +5189,8 @@ ANALYZE vle_value_posting_feedback."R";
 SELECT * FROM cypher('vle_value_posting_feedback',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..1]->(n:N) WHERE n.i = 59 RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                    QUERY PLAN                                                                                                                                                                     
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                             QUERY PLAN                                                                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=0.00 loops=1)
    Output: _age_default_alias_0.edges
    ->  Seq Scan on vle_value_posting_feedback."N" s (actual rows=1.00 loops=1)
@@ -5206,7 +5206,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=36 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=19 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.027778 selectivity-source=typed-distinct
@@ -5234,8 +5234,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_value_posting_feedback',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..1]->(n:N) WHERE n.i = 59 RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                    QUERY PLAN                                                                                                                                                                     
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                             QUERY PLAN                                                                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Seq Scan on vle_value_posting_feedback."N" s
@@ -5250,7 +5250,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=36 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=19 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.027778 selectivity-source=typed-distinct
@@ -5271,8 +5271,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_value_posting_feedback',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..1]->(n:N) WHERE n.i = 1 RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                    QUERY PLAN                                                                                                                                                                     
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                             QUERY PLAN                                                                                                                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Seq Scan on vle_value_posting_feedback."N" s
@@ -5287,7 +5287,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=36 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=19 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.027778 selectivity-source=typed-distinct
@@ -5325,7 +5325,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=matrix-frontier-expand bound=out property=matrix-frontier-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=vle-matrix-frontier candidates=2 declared-cover=1 cover=matched next=vle-expand/vle-frontier-anchored/vle-edge-source
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=matrix-frontier-expand bound=out property=matrix-frontier-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=vle-matrix-frontier candidates=2 declared-cover=1 cover=matched next=vle-expand/vle-frontier-anchored/vle-edge-source alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=endpoint-label-acceptance property-tuples=36 predicate=const prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=19 composite=19 planned=metadata-only basis=endpoint-label-acceptance
@@ -5370,7 +5370,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=matrix-frontier-expand bound=out property=matrix-frontier-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=vle-matrix-frontier candidates=2 declared-cover=1 cover=matched next=vle-expand/vle-frontier-anchored/vle-edge-source
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=matrix-frontier-expand bound=out property=matrix-frontier-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=vle-matrix-frontier candidates=2 declared-cover=1 cover=matched next=vle-expand/vle-frontier-anchored/vle-edge-source alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=endpoint-label-acceptance property-tuples=36 predicate=const prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=19 composite=19 planned=metadata-only basis=endpoint-label-acceptance
@@ -5489,8 +5489,8 @@ ANALYZE vle_fixed_chain_value_replay."R";
 SELECT * FROM cypher('vle_fixed_chain_value_replay',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (s:N) WHERE id(s) = 844424930132868 MATCH (s)-[:R]->(:N)-[:R]->(:N)-[:R]->(n:N) WHERE n.i = 59 RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                            QUERY PLAN                                                                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=2.00 loops=1)
    Output: _age_default_alias_0.edges
    ->  Seq Scan on vle_fixed_chain_value_replay."N" s (actual rows=1.00 loops=1)
@@ -5506,7 +5506,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=50 fanout=start:2/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=3 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=3 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=34 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=2 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.029412 selectivity-source=typed-distinct
@@ -5534,8 +5534,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_fixed_chain_value_replay',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930132868 MATCH (s)-[:R]->(:N)-[:R]->(:N)-[:R]->(n:N) WHERE n.i = 59 RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                                                    QUERY PLAN                                                                                                                                                                    
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                            QUERY PLAN                                                                                                                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Seq Scan on vle_fixed_chain_value_replay."N" s
@@ -5550,7 +5550,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=50 fanout=start:2/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=3 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index
+         VLE Join Order: component=vle-expansion solved=(b 5 6) connector=vle-composite-expand bound=out property=index-anchored rows=3 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar source=vle-edge-source candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=inert
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=34 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=2 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.029412 selectivity-source=typed-distinct

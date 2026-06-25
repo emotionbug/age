@@ -50,6 +50,8 @@
 #include "catalog/ag_graph.h"
 #include "catalog/ag_label.h"
 #include "utils/ag_cache.h"
+#include "funcapi.h"
+#include "miscadmin.h"
 
 #include <pthread.h>
 
@@ -4634,4 +4636,657 @@ Datum age_invalidate_graph_cache(PG_FUNCTION_ARGS)
      * and causes "trigger function returned null value" errors during COPY.
      */
     PG_RETURN_POINTER(NULL);
+}
+
+/*
+ * age_graph_edge_label_stats(graph_name)
+ *
+ * Graph cardinality-estimation primitive: the (src_label, edge_label,
+ * dst_label) edge-count triples for a graph.  This is the source-selectivity
+ * authority the graph-source cost model lacks today -- fanout estimation keys
+ * only on an edge label's total reltuples, so it cannot tell that ':KNOWS'
+ * edges run mostly between ':Person' vertices rather than to ':Company'.
+ *
+ * Implemented in C (a direct heap scan of each child edge table) rather than
+ * SQL because a plpgsql/SPI version crashes the backend: looping
+ * RETURN QUERY EXECUTE over AGE label tables faults on the second iteration,
+ * and the AGE label-id functions fault over the parent inheritance scan.  The
+ * label id encoded in each endpoint graphid names the source/destination vertex
+ * labels; the edge label is the scanned relation's own label.
+ */
+PG_FUNCTION_INFO_V1(age_graph_edge_label_stats);
+
+typedef struct edge_label_triple_key
+{
+    int32 src_label_id;
+    int32 edge_label_id;
+    int32 dst_label_id;
+} edge_label_triple_key;
+
+typedef struct edge_label_triple_entry
+{
+    edge_label_triple_key key;
+    int64 edge_count;
+} edge_label_triple_entry;
+
+Datum age_graph_edge_label_stats(PG_FUNCTION_ARGS)
+{
+    char *graph_name;
+    Oid graph_oid;
+    ReturnSetInfo *rsi;
+    TupleDesc ret_tdesc;
+    Tuplestorestate *tuple_store;
+    HASHCTL hash_ctl;
+    HTAB *triples;
+    Relation ag_label;
+    TupleDesc label_tupdesc;
+    SysScanDesc label_scan;
+    ScanKeyData label_key;
+    HeapTuple label_tuple;
+    Snapshot snapshot;
+    HASH_SEQ_STATUS seq;
+    edge_label_triple_entry *entry;
+
+    if (PG_ARGISNULL(0))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("graph_name must not be null")));
+    }
+
+    graph_name = NameStr(*PG_GETARG_NAME(0));
+    graph_oid = get_graph_oid(graph_name);
+    if (!OidIsValid(graph_oid))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("graph \"%s\" does not exist", graph_name)));
+    }
+
+    rsi = (ReturnSetInfo *) fcinfo->resultinfo;
+    if (rsi == NULL || !IsA(rsi, ReturnSetInfo) ||
+        (rsi->allowedModes & SFRM_Materialize) == 0)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("set-valued function called in context that cannot "
+                        "accept a set")));
+    }
+
+    /*
+     * Use the standard materialize-mode SRF setup so the tuplestore is created
+     * in the proper memory context for every call site (a plain SELECT and an
+     * INSERT ... SELECT set up the ReturnSetInfo/econtext differently).
+     */
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+    tuple_store = rsi->setResult;
+    ret_tdesc = rsi->setDesc;
+
+    MemSet(&hash_ctl, 0, sizeof(hash_ctl));
+    hash_ctl.keysize = sizeof(edge_label_triple_key);
+    hash_ctl.entrysize = sizeof(edge_label_triple_entry);
+    hash_ctl.hcxt = CurrentMemoryContext;
+    triples = hash_create("age edge label triple stats", 256, &hash_ctl,
+                          HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+    snapshot = GetActiveSnapshot();
+    ag_label = table_open(ag_label_relation_id(), AccessShareLock);
+    label_tupdesc = RelationGetDescr(ag_label);
+    ScanKeyInit(&label_key, Anum_ag_label_graph, BTEqualStrategyNumber,
+                F_OIDEQ, ObjectIdGetDatum(graph_oid));
+    label_scan = systable_beginscan(ag_label, ag_label_graph_oid_index_id(),
+                                    true, snapshot, 1, &label_key);
+
+    while (HeapTupleIsValid(label_tuple = systable_getnext(label_scan)))
+    {
+        bool isnull;
+        char label_kind;
+        int32 edge_label_id;
+        Oid edge_relation_oid;
+        Relation edge_rel;
+        TupleDesc edge_tupdesc;
+        TableScanDesc edge_scan;
+        HeapTuple edge_tuple;
+
+        label_kind = DatumGetChar(heap_getattr(label_tuple, Anum_ag_label_kind,
+                                               label_tupdesc, &isnull));
+        if (isnull || label_kind != LABEL_TYPE_EDGE)
+            continue;
+
+        edge_label_id = DatumGetInt32(heap_getattr(label_tuple, Anum_ag_label_id,
+                                                   label_tupdesc, &isnull));
+        if (isnull)
+            continue;
+
+        edge_relation_oid = DatumGetObjectId(heap_getattr(
+            label_tuple, Anum_ag_label_relation, label_tupdesc, &isnull));
+        if (isnull || !OidIsValid(edge_relation_oid))
+            continue;
+
+        /*
+         * A direct heap scan of an edge label table returns only that table's
+         * own rows (inheritance is not expanded), so the default parent edge
+         * relation contributes nothing and each child contributes its own
+         * edges under its own label id.
+         */
+        edge_rel = table_open(edge_relation_oid, AccessShareLock);
+        edge_tupdesc = RelationGetDescr(edge_rel);
+        /* edge tables have 4 columns: id, start_id, end_id, properties */
+        if (edge_tupdesc->natts != 4)
+        {
+            table_close(edge_rel, AccessShareLock);
+            continue;
+        }
+        edge_scan = table_beginscan(edge_rel, snapshot, 0, NULL);
+        while ((edge_tuple = heap_getnext(edge_scan,
+                                          ForwardScanDirection)) != NULL)
+        {
+            graphid start_id;
+            graphid end_id;
+            bool start_isnull;
+            bool end_isnull;
+            edge_label_triple_key key;
+            edge_label_triple_entry *te;
+            bool found;
+
+            start_id = DatumGetInt64(heap_getattr(
+                edge_tuple, Anum_ag_label_edge_table_start_id, edge_tupdesc,
+                &start_isnull));
+            end_id = DatumGetInt64(heap_getattr(
+                edge_tuple, Anum_ag_label_edge_table_end_id, edge_tupdesc,
+                &end_isnull));
+            if (start_isnull || end_isnull)
+                continue;
+
+            key.src_label_id = get_graphid_label_id(start_id);
+            key.edge_label_id = edge_label_id;
+            key.dst_label_id = get_graphid_label_id(end_id);
+
+            te = (edge_label_triple_entry *) hash_search(triples, &key,
+                                                         HASH_ENTER, &found);
+            if (!found)
+                te->edge_count = 0;
+            te->edge_count++;
+        }
+        table_endscan(edge_scan);
+        table_close(edge_rel, AccessShareLock);
+    }
+
+    systable_endscan(label_scan);
+    table_close(ag_label, AccessShareLock);
+
+    hash_seq_init(&seq, triples);
+    while ((entry = (edge_label_triple_entry *) hash_seq_search(&seq)) != NULL)
+    {
+        Datum values[4];
+        bool nulls[4] = {false, false, false, false};
+        label_cache_data *src_label;
+        label_cache_data *edge_label;
+        label_cache_data *dst_label;
+
+        src_label = search_label_graph_oid_cache(graph_oid,
+                                                 entry->key.src_label_id);
+        edge_label = search_label_graph_oid_cache(graph_oid,
+                                                  entry->key.edge_label_id);
+        dst_label = search_label_graph_oid_cache(graph_oid,
+                                                 entry->key.dst_label_id);
+        if (src_label == NULL || edge_label == NULL || dst_label == NULL)
+            continue;
+
+        values[0] = NameGetDatum(&src_label->name);
+        values[1] = NameGetDatum(&edge_label->name);
+        values[2] = NameGetDatum(&dst_label->name);
+        values[3] = Int64GetDatum(entry->edge_count);
+
+        tuplestore_putvalues(tuple_store, ret_tdesc, values, nulls);
+    }
+    hash_destroy(triples);
+
+    PG_RETURN_NULL();
+}
+
+/*
+ * Cached destination-label selectivity for an edge label: the fraction of that
+ * edge label's edges whose destination vertex carries dst_label_name, read from
+ * the ag_graph_edge_stats cache.  Returns -1 when the cache holds no rows for
+ * the (optionally source-restricted) edge label (e.g. it was never refreshed),
+ * so the caller keeps its default estimate; this keeps the conditioning opt-in
+ * and leaves un-refreshed graphs' plans unchanged.
+ *
+ * When src_label_name is non-NULL the ratio is conditioned on that source
+ * vertex label -- the fraction of src_label's edge_label edges that reach
+ * dst_label.  This is the dimension the adjacency directory cannot express
+ * (it keys only on edge_label -> dst_label), so it is the cache's net-new
+ * authority for fanout.  When src_label_name is NULL the ratio is over all
+ * sources, matching the original behaviour.
+ */
+double age_cached_edge_dst_label_selectivity(Oid graph_oid,
+                                             const char *src_label_name,
+                                             const char *edge_label_name,
+                                             const char *dst_label_name)
+{
+    Oid stats_oid;
+    Relation stats_rel;
+    TupleDesc tupdesc;
+    TableScanDesc scan;
+    HeapTuple tuple;
+    int64 total_count = 0;
+    int64 matched_count = 0;
+
+    if (!OidIsValid(graph_oid) || edge_label_name == NULL ||
+        dst_label_name == NULL)
+        return -1.0;
+
+    stats_oid = ag_relation_id("ag_graph_edge_stats", "table");
+    if (!OidIsValid(stats_oid))
+        return -1.0;
+
+    stats_rel = table_open(stats_oid, AccessShareLock);
+    tupdesc = RelationGetDescr(stats_rel);
+    scan = table_beginscan(stats_rel, GetActiveSnapshot(), 0, NULL);
+    while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+    {
+        bool isnull;
+        Oid row_graph;
+        Name row_src_label;
+        Name row_edge_label;
+        Name row_dst_label;
+        int64 row_count;
+
+        /* ag_graph_edge_stats columns: graph, src_label, edge_label, dst_label, edge_count */
+        row_graph = DatumGetObjectId(heap_getattr(tuple, 1, tupdesc, &isnull));
+        if (isnull || row_graph != graph_oid)
+            continue;
+        row_edge_label = DatumGetName(heap_getattr(tuple, 3, tupdesc, &isnull));
+        if (isnull || strcmp(NameStr(*row_edge_label), edge_label_name) != 0)
+            continue;
+        if (src_label_name != NULL)
+        {
+            row_src_label = DatumGetName(heap_getattr(tuple, 2, tupdesc,
+                                                      &isnull));
+            if (isnull || strcmp(NameStr(*row_src_label), src_label_name) != 0)
+                continue;
+        }
+        row_count = DatumGetInt64(heap_getattr(tuple, 5, tupdesc, &isnull));
+        if (isnull)
+            continue;
+
+        total_count += row_count;
+
+        row_dst_label = DatumGetName(heap_getattr(tuple, 4, tupdesc, &isnull));
+        if (!isnull && strcmp(NameStr(*row_dst_label), dst_label_name) == 0)
+            matched_count += row_count;
+    }
+    table_endscan(scan);
+    table_close(stats_rel, AccessShareLock);
+
+    if (total_count <= 0)
+        return -1.0;
+
+    return (double) matched_count / (double) total_count;
+}
+
+/*
+ * age_graph_edge_degree_stats(graph_name)
+ *
+ * Per (src_label, edge_label) out-degree distribution: the maximum and average
+ * number of edge_label edges leaving a single src_label vertex, plus the count
+ * of source vertices.  The graph-source cost model already conditions on the
+ * mean degree; this exposes the *max* so a planner/operator can see hub skew
+ * (a power-law degree tail) that the mean hides -- e.g. one vertex with 10000
+ * edges among thousands with one.  Implemented as a direct two-level heap-scan
+ * aggregation: per-source-vertex degree first, then rolled up per source label.
+ */
+PG_FUNCTION_INFO_V1(age_graph_edge_degree_stats);
+
+typedef struct edge_source_degree_key
+{
+    graphid source_id;
+    int32 edge_label_id;
+} edge_source_degree_key;
+
+typedef struct edge_source_degree_entry
+{
+    edge_source_degree_key key;
+    int64 degree;
+} edge_source_degree_entry;
+
+typedef struct edge_label_degree_key
+{
+    int32 src_label_id;
+    int32 edge_label_id;
+} edge_label_degree_key;
+
+typedef struct edge_label_degree_entry
+{
+    edge_label_degree_key key;
+    int64 max_degree;
+    int64 sum_degree;
+    int64 vertex_count;
+} edge_label_degree_entry;
+
+static Datum age_edge_degree_stats_worker(FunctionCallInfo fcinfo,
+                                          AttrNumber endpoint_attno)
+{
+    char *graph_name;
+    Oid graph_oid;
+    ReturnSetInfo *rsi;
+    TupleDesc ret_tdesc;
+    Tuplestorestate *tuple_store;
+    HASHCTL hash_ctl;
+    HTAB *per_vertex;
+    HTAB *per_label;
+    Relation ag_label;
+    TupleDesc label_tupdesc;
+    SysScanDesc label_scan;
+    ScanKeyData label_key;
+    HeapTuple label_tuple;
+    Snapshot snapshot;
+    HASH_SEQ_STATUS seq;
+    edge_source_degree_entry *vertex_entry;
+    edge_label_degree_entry *label_entry;
+
+    if (PG_ARGISNULL(0))
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("graph_name must not be null")));
+
+    graph_name = NameStr(*PG_GETARG_NAME(0));
+    graph_oid = get_graph_oid(graph_name);
+    if (!OidIsValid(graph_oid))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("graph \"%s\" does not exist", graph_name)));
+
+    rsi = (ReturnSetInfo *) fcinfo->resultinfo;
+    if (rsi == NULL || !IsA(rsi, ReturnSetInfo) ||
+        (rsi->allowedModes & SFRM_Materialize) == 0)
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("set-valued function called in context that cannot "
+                        "accept a set")));
+
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+    tuple_store = rsi->setResult;
+    ret_tdesc = rsi->setDesc;
+
+    MemSet(&hash_ctl, 0, sizeof(hash_ctl));
+    hash_ctl.keysize = sizeof(edge_source_degree_key);
+    hash_ctl.entrysize = sizeof(edge_source_degree_entry);
+    hash_ctl.hcxt = CurrentMemoryContext;
+    per_vertex = hash_create("age edge source degree", 1024, &hash_ctl,
+                             HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+    MemSet(&hash_ctl, 0, sizeof(hash_ctl));
+    hash_ctl.keysize = sizeof(edge_label_degree_key);
+    hash_ctl.entrysize = sizeof(edge_label_degree_entry);
+    hash_ctl.hcxt = CurrentMemoryContext;
+    per_label = hash_create("age edge label degree", 64, &hash_ctl,
+                            HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+    snapshot = GetActiveSnapshot();
+    ag_label = table_open(ag_label_relation_id(), AccessShareLock);
+    label_tupdesc = RelationGetDescr(ag_label);
+    ScanKeyInit(&label_key, Anum_ag_label_graph, BTEqualStrategyNumber,
+                F_OIDEQ, ObjectIdGetDatum(graph_oid));
+    label_scan = systable_beginscan(ag_label, ag_label_graph_oid_index_id(),
+                                    true, snapshot, 1, &label_key);
+
+    /* Pass 1: per-source-vertex degree for each edge label. */
+    while (HeapTupleIsValid(label_tuple = systable_getnext(label_scan)))
+    {
+        bool isnull;
+        char label_kind;
+        int32 edge_label_id;
+        Oid edge_relation_oid;
+        Relation edge_rel;
+        TupleDesc edge_tupdesc;
+        TableScanDesc edge_scan;
+        HeapTuple edge_tuple;
+
+        label_kind = DatumGetChar(heap_getattr(label_tuple, Anum_ag_label_kind,
+                                               label_tupdesc, &isnull));
+        if (isnull || label_kind != LABEL_TYPE_EDGE)
+            continue;
+        edge_label_id = DatumGetInt32(heap_getattr(label_tuple, Anum_ag_label_id,
+                                                   label_tupdesc, &isnull));
+        if (isnull)
+            continue;
+        edge_relation_oid = DatumGetObjectId(heap_getattr(
+            label_tuple, Anum_ag_label_relation, label_tupdesc, &isnull));
+        if (isnull || !OidIsValid(edge_relation_oid))
+            continue;
+
+        edge_rel = table_open(edge_relation_oid, AccessShareLock);
+        edge_tupdesc = RelationGetDescr(edge_rel);
+        if (edge_tupdesc->natts != 4)
+        {
+            table_close(edge_rel, AccessShareLock);
+            continue;
+        }
+        edge_scan = table_beginscan(edge_rel, snapshot, 0, NULL);
+        while ((edge_tuple = heap_getnext(edge_scan,
+                                          ForwardScanDirection)) != NULL)
+        {
+            graphid endpoint_id;
+            bool endpoint_isnull;
+            edge_source_degree_key key;
+            edge_source_degree_entry *ve;
+            bool found;
+
+            endpoint_id = DatumGetInt64(heap_getattr(
+                edge_tuple, endpoint_attno, edge_tupdesc,
+                &endpoint_isnull));
+            if (endpoint_isnull)
+                continue;
+
+            MemSet(&key, 0, sizeof(key));
+            key.source_id = endpoint_id;
+            key.edge_label_id = edge_label_id;
+            ve = (edge_source_degree_entry *) hash_search(per_vertex, &key,
+                                                          HASH_ENTER, &found);
+            if (!found)
+                ve->degree = 0;
+            ve->degree++;
+        }
+        table_endscan(edge_scan);
+        table_close(edge_rel, AccessShareLock);
+    }
+    systable_endscan(label_scan);
+    table_close(ag_label, AccessShareLock);
+
+    /* Pass 2: roll each source vertex's degree up under its source label. */
+    hash_seq_init(&seq, per_vertex);
+    while ((vertex_entry =
+            (edge_source_degree_entry *) hash_seq_search(&seq)) != NULL)
+    {
+        edge_label_degree_key key;
+        edge_label_degree_entry *le;
+        bool found;
+
+        MemSet(&key, 0, sizeof(key));
+        key.src_label_id = get_graphid_label_id(vertex_entry->key.source_id);
+        key.edge_label_id = vertex_entry->key.edge_label_id;
+        le = (edge_label_degree_entry *) hash_search(per_label, &key,
+                                                     HASH_ENTER, &found);
+        if (!found)
+        {
+            le->max_degree = 0;
+            le->sum_degree = 0;
+            le->vertex_count = 0;
+        }
+        if (vertex_entry->degree > le->max_degree)
+            le->max_degree = vertex_entry->degree;
+        le->sum_degree += vertex_entry->degree;
+        le->vertex_count++;
+    }
+
+    hash_seq_init(&seq, per_label);
+    while ((label_entry =
+            (edge_label_degree_entry *) hash_seq_search(&seq)) != NULL)
+    {
+        Datum values[5];
+        bool nulls[5] = {false, false, false, false, false};
+        label_cache_data *src_label;
+        label_cache_data *edge_label;
+
+        src_label = search_label_graph_oid_cache(graph_oid,
+                                                 label_entry->key.src_label_id);
+        edge_label = search_label_graph_oid_cache(graph_oid,
+                                                  label_entry->key.edge_label_id);
+        if (src_label == NULL || edge_label == NULL)
+            continue;
+
+        values[0] = NameGetDatum(&src_label->name);
+        values[1] = NameGetDatum(&edge_label->name);
+        values[2] = Int64GetDatum(label_entry->max_degree);
+        values[3] = Float8GetDatum(label_entry->vertex_count > 0 ?
+                                   (double) label_entry->sum_degree /
+                                   (double) label_entry->vertex_count : 0.0);
+        values[4] = Int64GetDatum(label_entry->vertex_count);
+        tuplestore_putvalues(tuple_store, ret_tdesc, values, nulls);
+    }
+
+    hash_destroy(per_vertex);
+    hash_destroy(per_label);
+
+    PG_RETURN_NULL();
+}
+
+/*
+ * Out-degree: distribution of how many edge_label edges leave each src_label
+ * source vertex (keyed on the edge's start endpoint).
+ */
+Datum age_graph_edge_degree_stats(PG_FUNCTION_ARGS)
+{
+    return age_edge_degree_stats_worker(fcinfo,
+                                        Anum_ag_label_edge_table_start_id);
+}
+
+/*
+ * In-degree: the mirror image -- how many edge_label edges arrive at each
+ * dst_label terminal vertex (keyed on the edge's end endpoint).  Gives the
+ * reverse-direction fanout the cost model needs to reason about expanding a
+ * pattern from its terminal side instead of its source side.
+ */
+PG_FUNCTION_INFO_V1(age_graph_edge_in_degree_stats);
+
+Datum age_graph_edge_in_degree_stats(PG_FUNCTION_ARGS)
+{
+    return age_edge_degree_stats_worker(fcinfo,
+                                        Anum_ag_label_edge_table_end_id);
+}
+
+/*
+ * Cached average out-degree for a (src_label, edge_label) pair, read from
+ * ag_graph_edge_degree_cache.  Returns -1 when the degree cache has no matching
+ * row (e.g. it was never refreshed), so the caller keeps its default estimate;
+ * this keeps the conditioning opt-in.  This is a per-source-label mean degree,
+ * which refines the global reltuples/distinct base-fanout estimate.
+ */
+double age_cached_edge_avg_out_degree(Oid graph_oid,
+                                      const char *src_label_name,
+                                      const char *edge_label_name)
+{
+    Oid cache_oid;
+    Relation cache_rel;
+    TupleDesc tupdesc;
+    TableScanDesc scan;
+    HeapTuple tuple;
+    double result = -1.0;
+
+    if (!OidIsValid(graph_oid) || src_label_name == NULL ||
+        edge_label_name == NULL)
+        return -1.0;
+
+    cache_oid = ag_relation_id("ag_graph_edge_degree_cache", "table");
+    if (!OidIsValid(cache_oid))
+        return -1.0;
+
+    cache_rel = table_open(cache_oid, AccessShareLock);
+    tupdesc = RelationGetDescr(cache_rel);
+    scan = table_beginscan(cache_rel, GetActiveSnapshot(), 0, NULL);
+    while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+    {
+        bool isnull;
+        Oid row_graph;
+        Name row_src_label;
+        Name row_edge_label;
+
+        /* columns: graph, src_label, edge_label, max_out_degree, avg_out_degree, source_vertex_count */
+        row_graph = DatumGetObjectId(heap_getattr(tuple, 1, tupdesc, &isnull));
+        if (isnull || row_graph != graph_oid)
+            continue;
+        row_src_label = DatumGetName(heap_getattr(tuple, 2, tupdesc, &isnull));
+        if (isnull || strcmp(NameStr(*row_src_label), src_label_name) != 0)
+            continue;
+        row_edge_label = DatumGetName(heap_getattr(tuple, 3, tupdesc, &isnull));
+        if (isnull || strcmp(NameStr(*row_edge_label), edge_label_name) != 0)
+            continue;
+        result = DatumGetFloat8(heap_getattr(tuple, 5, tupdesc, &isnull));
+        if (isnull)
+            result = -1.0;
+        break;
+    }
+    table_endscan(scan);
+    table_close(cache_rel, AccessShareLock);
+
+    return result;
+}
+
+/*
+ * Cached average in-degree for a (dst_label, edge_label) pair, read from
+ * ag_graph_edge_in_degree_cache.  The terminal-side mirror of
+ * age_cached_edge_avg_out_degree(): conditions the base fanout of an incoming
+ * (reverse) adjacency expansion on how many edge_label edges arrive at a
+ * dst_label vertex.  Returns -1 when the cache has no matching row.
+ */
+double age_cached_edge_avg_in_degree(Oid graph_oid,
+                                     const char *dst_label_name,
+                                     const char *edge_label_name)
+{
+    Oid cache_oid;
+    Relation cache_rel;
+    TupleDesc tupdesc;
+    TableScanDesc scan;
+    HeapTuple tuple;
+    double result = -1.0;
+
+    if (!OidIsValid(graph_oid) || dst_label_name == NULL ||
+        edge_label_name == NULL)
+        return -1.0;
+
+    cache_oid = ag_relation_id("ag_graph_edge_in_degree_cache", "table");
+    if (!OidIsValid(cache_oid))
+        return -1.0;
+
+    cache_rel = table_open(cache_oid, AccessShareLock);
+    tupdesc = RelationGetDescr(cache_rel);
+    scan = table_beginscan(cache_rel, GetActiveSnapshot(), 0, NULL);
+    while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+    {
+        bool isnull;
+        Oid row_graph;
+        Name row_dst_label;
+        Name row_edge_label;
+
+        /* columns: graph, dst_label, edge_label, max_in_degree, avg_in_degree, terminal_vertex_count */
+        row_graph = DatumGetObjectId(heap_getattr(tuple, 1, tupdesc, &isnull));
+        if (isnull || row_graph != graph_oid)
+            continue;
+        row_dst_label = DatumGetName(heap_getattr(tuple, 2, tupdesc, &isnull));
+        if (isnull || strcmp(NameStr(*row_dst_label), dst_label_name) != 0)
+            continue;
+        row_edge_label = DatumGetName(heap_getattr(tuple, 3, tupdesc, &isnull));
+        if (isnull || strcmp(NameStr(*row_edge_label), edge_label_name) != 0)
+            continue;
+        result = DatumGetFloat8(heap_getattr(tuple, 5, tupdesc, &isnull));
+        if (isnull)
+            result = -1.0;
+        break;
+    }
+    table_endscan(scan);
+    table_close(cache_rel, AccessShareLock);
+
+    return result;
 }

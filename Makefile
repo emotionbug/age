@@ -169,6 +169,7 @@ REGRESS = scan \
           cypher_subquery \
           age_global_graph \
           age_adjacency \
+          cypher_wcoj_semantics \
           age_load \
           index \
           analyze \

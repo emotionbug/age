@@ -76,6 +76,74 @@ CREATE UNIQUE INDEX ag_label_seq_name_graph_index
     USING btree (seq_name, graph);
 
 --
+-- Graph cardinality-estimation statistics cache.  Holds the
+-- (src_label, edge_label, dst_label) edge-count triples for a graph, refreshed
+-- explicitly via ag_catalog.age_refresh_graph_edge_label_stats().  This is the
+-- persistent, plan-time-cheap form of age_graph_edge_label_stats() that the
+-- graph-source cost model will condition fanout on (a full edge scan is too
+-- expensive to run per plan).  Marked dumpable extension config like
+-- ag_graph/ag_label.
+--
+-- NB: deliberately NO foreign key to ag_graph.  An FK to ag_graph fires a
+-- referential-integrity check on every insert, which plans a probe query and
+-- re-enters AGE's graph-join planner hook in a nested context where its
+-- lowering-artifact state is unset, crashing the backend.  This is derived,
+-- refreshable data, so a stale row after a graph drop is harmless and far
+-- preferable to that crash.
+--
+CREATE TABLE ag_graph_edge_stats (
+                          graph oid NOT NULL,
+                          src_label name NOT NULL,
+                          edge_label name NOT NULL,
+                          dst_label name NOT NULL,
+                          edge_count bigint NOT NULL
+);
+SELECT pg_catalog.pg_extension_config_dump('ag_graph_edge_stats', '');
+CREATE UNIQUE INDEX ag_graph_edge_stats_triple_index
+    ON ag_graph_edge_stats
+    USING btree (graph, src_label, edge_label, dst_label);
+
+--
+-- Per (src_label, edge_label) out-degree cache: the plan-time-cheap form of
+-- age_graph_edge_degree_stats(), refreshed via
+-- ag_catalog.age_refresh_graph_edge_degree_stats().  The graph-source cost
+-- model conditions the adjacency base (endpoint) fanout on avg_out_degree --
+-- a per-source-label mean degree, more accurate than the global
+-- reltuples/distinct estimate.  No FK to ag_graph (same reason as
+-- ag_graph_edge_stats: the RI check re-enters the graph-join planner hook).
+--
+CREATE TABLE ag_graph_edge_degree_cache (
+                          graph oid NOT NULL,
+                          src_label name NOT NULL,
+                          edge_label name NOT NULL,
+                          max_out_degree bigint NOT NULL,
+                          avg_out_degree double precision NOT NULL,
+                          source_vertex_count bigint NOT NULL
+);
+SELECT pg_catalog.pg_extension_config_dump('ag_graph_edge_degree_cache', '');
+CREATE UNIQUE INDEX ag_graph_edge_degree_cache_index
+    ON ag_graph_edge_degree_cache
+    USING btree (graph, src_label, edge_label);
+
+--
+-- Per (dst_label, edge_label) in-degree cache: the terminal-side mirror of
+-- ag_graph_edge_degree_cache, used to condition the base fanout of *incoming*
+-- (reverse) adjacency expansions on the terminal vertex's average in-degree.
+--
+CREATE TABLE ag_graph_edge_in_degree_cache (
+                          graph oid NOT NULL,
+                          dst_label name NOT NULL,
+                          edge_label name NOT NULL,
+                          max_in_degree bigint NOT NULL,
+                          avg_in_degree double precision NOT NULL,
+                          terminal_vertex_count bigint NOT NULL
+);
+SELECT pg_catalog.pg_extension_config_dump('ag_graph_edge_in_degree_cache', '');
+CREATE UNIQUE INDEX ag_graph_edge_in_degree_cache_index
+    ON ag_graph_edge_in_degree_cache
+    USING btree (graph, dst_label, edge_label);
+
+--
 -- catalog lookup functions
 --
 
@@ -688,6 +756,153 @@ CREATE FUNCTION ag_catalog._extract_label_id(graphid)
     STABLE
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
+
+--
+-- Graph cardinality-estimation statistics: the (src_label, edge_label,
+-- dst_label) edge-count triples for a graph.  This is the source-selectivity
+-- authority the graph-source cost model lacks today -- fanout estimation keys
+-- only on an edge label's total reltuples, so it cannot tell that, say,
+-- ':KNOWS' edges run mostly between ':Person' vertices rather than to
+-- ':Company'.  Exposed as a refresh primitive (computed by scanning the child
+-- edge tables in C) intended to back an ANALYZE-time stats cache and
+-- triple/label conditioning in the graph-source cost model.
+--
+CREATE FUNCTION ag_catalog.age_graph_edge_label_stats(graph_name name)
+    RETURNS TABLE(src_label name, edge_label name, dst_label name,
+                  edge_count bigint)
+    LANGUAGE c
+    STABLE
+AS 'MODULE_PATHNAME';
+
+--
+-- Per (src_label, edge_label) out-degree distribution: the maximum and average
+-- number of edges leaving a single source vertex, with the source-vertex count.
+-- Surfaces hub skew (a power-law degree tail) that the mean degree -- already
+-- used by the cost model -- hides.
+--
+CREATE FUNCTION ag_catalog.age_graph_edge_degree_stats(graph_name name)
+    RETURNS TABLE(src_label name, edge_label name, max_out_degree bigint,
+                  avg_out_degree double precision, source_vertex_count bigint)
+    LANGUAGE c
+    STABLE
+AS 'MODULE_PATHNAME';
+
+--
+-- Per (dst_label, edge_label) in-degree distribution: the mirror of
+-- age_graph_edge_degree_stats(), counting edges arriving at each terminal
+-- vertex.  Supplies the reverse-direction fanout for expanding a pattern from
+-- its terminal side.
+--
+CREATE FUNCTION ag_catalog.age_graph_edge_in_degree_stats(graph_name name)
+    RETURNS TABLE(dst_label name, edge_label name, max_in_degree bigint,
+                  avg_in_degree double precision, terminal_vertex_count bigint)
+    LANGUAGE c
+    STABLE
+AS 'MODULE_PATHNAME';
+
+--
+-- Refresh the graph cardinality-estimation statistics cache for one graph:
+-- replace its rows in ag_graph_edge_stats with the current triple counts from
+-- age_graph_edge_label_stats().  Returns the number of triples cached.
+--
+CREATE FUNCTION ag_catalog.age_refresh_graph_edge_label_stats(graph_name name)
+    RETURNS bigint
+    LANGUAGE plpgsql
+AS $age_refresh_graph_edge_label_stats$
+DECLARE
+    graph_oid oid;
+    triple_count bigint;
+BEGIN
+    SELECT g.graphid INTO graph_oid
+    FROM ag_catalog.ag_graph g
+    WHERE g.name = graph_name;
+
+    IF graph_oid IS NULL THEN
+        RAISE EXCEPTION 'graph "%" does not exist', graph_name
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    DELETE FROM ag_catalog.ag_graph_edge_stats WHERE graph = graph_oid;
+
+    INSERT INTO ag_catalog.ag_graph_edge_stats
+                (graph, src_label, edge_label, dst_label, edge_count)
+    SELECT graph_oid, s.src_label, s.edge_label, s.dst_label, s.edge_count
+    FROM ag_catalog.age_graph_edge_label_stats(graph_name) s;
+
+    GET DIAGNOSTICS triple_count = ROW_COUNT;
+    RETURN triple_count;
+END
+$age_refresh_graph_edge_label_stats$;
+
+--
+-- Refresh the per (src_label, edge_label) out-degree cache for one graph from
+-- age_graph_edge_degree_stats().  Returns the number of rows cached.
+--
+CREATE FUNCTION ag_catalog.age_refresh_graph_edge_degree_stats(graph_name name)
+    RETURNS bigint
+    LANGUAGE plpgsql
+AS $age_refresh_graph_edge_degree_stats$
+DECLARE
+    graph_oid oid;
+    row_count bigint;
+BEGIN
+    SELECT g.graphid INTO graph_oid
+    FROM ag_catalog.ag_graph g
+    WHERE g.name = graph_name;
+
+    IF graph_oid IS NULL THEN
+        RAISE EXCEPTION 'graph "%" does not exist', graph_name
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    DELETE FROM ag_catalog.ag_graph_edge_degree_cache WHERE graph = graph_oid;
+
+    INSERT INTO ag_catalog.ag_graph_edge_degree_cache
+                (graph, src_label, edge_label, max_out_degree,
+                 avg_out_degree, source_vertex_count)
+    SELECT graph_oid, s.src_label, s.edge_label, s.max_out_degree,
+           s.avg_out_degree, s.source_vertex_count
+    FROM ag_catalog.age_graph_edge_degree_stats(graph_name) s;
+
+    GET DIAGNOSTICS row_count = ROW_COUNT;
+    RETURN row_count;
+END
+$age_refresh_graph_edge_degree_stats$;
+
+--
+-- Refresh the per (dst_label, edge_label) in-degree cache for one graph from
+-- age_graph_edge_in_degree_stats().  Returns the number of rows cached.
+--
+CREATE FUNCTION ag_catalog.age_refresh_graph_edge_in_degree_stats(graph_name name)
+    RETURNS bigint
+    LANGUAGE plpgsql
+AS $age_refresh_graph_edge_in_degree_stats$
+DECLARE
+    graph_oid oid;
+    row_count bigint;
+BEGIN
+    SELECT g.graphid INTO graph_oid
+    FROM ag_catalog.ag_graph g
+    WHERE g.name = graph_name;
+
+    IF graph_oid IS NULL THEN
+        RAISE EXCEPTION 'graph "%" does not exist', graph_name
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    DELETE FROM ag_catalog.ag_graph_edge_in_degree_cache WHERE graph = graph_oid;
+
+    INSERT INTO ag_catalog.ag_graph_edge_in_degree_cache
+                (graph, dst_label, edge_label, max_in_degree,
+                 avg_in_degree, terminal_vertex_count)
+    SELECT graph_oid, s.dst_label, s.edge_label, s.max_in_degree,
+           s.avg_in_degree, s.terminal_vertex_count
+    FROM ag_catalog.age_graph_edge_in_degree_stats(graph_name) s;
+
+    GET DIAGNOSTICS row_count = ROW_COUNT;
+    RETURN row_count;
+END
+$age_refresh_graph_edge_in_degree_stats$;
 
 --
 -- VLE cache invalidation trigger function.

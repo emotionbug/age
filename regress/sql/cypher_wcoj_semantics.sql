@@ -1,0 +1,53 @@
+/*
+ * Cyclic / fork fixed-MATCH semantics lock-in for the WCOJ-style multiway
+ * intersection work (TODO item 6).  These results are the correctness contract
+ * a future multiway-intersection executor MUST preserve: the binary-join plan
+ * and a WCOJ plan have to return identical rows.  Scalars are returned (not
+ * whole vertices) so the expected output is stable across runs.
+ */
+LOAD 'age';
+SET search_path = ag_catalog, public;
+
+SELECT create_graph('wcoj_semantics');
+SELECT create_vlabel('wcoj_semantics', 'N');
+SELECT create_elabel('wcoj_semantics', 'E');
+
+-- Triangle 1->2->3->1, with a dangling tail 3->4 and a fork target 2->5.
+SELECT * FROM cypher('wcoj_semantics', $$
+    CREATE (a:N {id: 1})-[:E]->(b:N {id: 2})-[:E]->(c:N {id: 3})-[:E]->(a),
+           (c)-[:E]->(:N {id: 4}),
+           (b)-[:E]->(:N {id: 5})
+$$) AS (z agtype);
+
+-- Triangle: a directed 3-cycle closing back to the start variable enumerates
+-- each rotation once (the cycle is matched from every vertex).
+SELECT a, b, c FROM cypher('wcoj_semantics', $$
+    MATCH (a:N)-[:E]->(b:N)-[:E]->(c:N)-[:E]->(a)
+    RETURN a.id AS a, b.id AS b, c.id AS c
+$$) AS (a agtype, b agtype, c agtype)
+ORDER BY a, b, c;
+
+-- Fork: one vertex with two outgoing edges yields the unordered pair of its
+-- distinct targets (b.id < c.id de-duplicates the symmetric match).
+SELECT a, b, c FROM cypher('wcoj_semantics', $$
+    MATCH (b:N)<-[:E]-(a:N)-[:E]->(c:N)
+    WHERE b.id < c.id
+    RETURN a.id AS a, b.id AS b, c.id AS c
+$$) AS (a agtype, b agtype, c agtype)
+ORDER BY a, b, c;
+
+-- Relationship uniqueness: within one MATCH the same edge may not be reused, so
+-- a two-hop pattern never returns a path that traverses a single edge twice.
+SELECT a, b, c FROM cypher('wcoj_semantics', $$
+    MATCH (a:N)-[r1:E]->(b:N)-[r2:E]->(c:N)
+    RETURN a.id AS a, b.id AS b, c.id AS c
+$$) AS (a agtype, b agtype, c agtype)
+ORDER BY a, b, c;
+
+-- Diamond / two-path-between-endpoints: count the distinct intermediate fan.
+SELECT total FROM cypher('wcoj_semantics', $$
+    MATCH (a:N {id: 1})-[:E]->(b:N)-[:E]->(c:N)
+    RETURN count(*) AS total
+$$) AS (total agtype);
+
+SELECT drop_graph('wcoj_semantics', true);
