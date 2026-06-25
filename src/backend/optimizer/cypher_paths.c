@@ -3229,6 +3229,7 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     Path *reference_path;
     double rows;
     double pages;
+    double materialization_credit;
     Cost local_random_page_cost;
     Cost local_seq_page_cost;
 
@@ -3305,9 +3306,13 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     cp->path.parallel_safe = false;
     cp->path.parallel_workers = 0;
     cp->path.pathkeys = reference_path->pathkeys;
+    materialization_credit =
+        cypher_property_projection_materialization_credit(slots, rows);
     cp->path.rows = rows;
     cp->path.startup_cost = 0;
     cp->path.total_cost = local_seq_page_cost * pages + cpu_tuple_cost * rows;
+    cp->path.total_cost = Max(cp->path.startup_cost,
+                              cp->path.total_cost - materialization_credit);
     cp->flags = CUSTOMPATH_SUPPORT_PROJECTION;
     cp->custom_paths = NIL;
     cp->custom_private = list_make2(make_property_projection_slot_private(slots),
@@ -3330,9 +3335,11 @@ static void add_property_projection_custom_path(PlannerInfo *root,
     ereport(DEBUG2,
             (errmsg_internal("AGE property projection CustomPath added: "
                              "scanrelid=%u rows=%.0f total_cost=%.2f "
+                             "materialization_credit=%.2f "
                              "slot_count=%d limit_needed=%s",
                              scanrelid, cp->path.rows,
                              cp->path.total_cost,
+                             materialization_credit,
                              list_length(slots),
                              extra != NULL && extra->limit_needed ?
                              "true" : "false")));

@@ -29,51 +29,76 @@
 #include "utils/agtype.h"
 
 static Oid agtype_access_operator_oid = InvalidOid;
-static Oid agtype_object_field_agtype_oid = InvalidOid;
-static Oid agtype_object_field_int8_oid = InvalidOid;
-static Oid agtype_object_field_float8_oid = InvalidOid;
-static Oid agtype_object_field_numeric_agtype_oid = InvalidOid;
-static Oid agtype_object_field_numeric_oid = InvalidOid;
-static Oid agtype_object_field_text_agtype_oid = InvalidOid;
 
 #define AGTYPE_FIELD_DESCRIPTOR_INDEX 0
 
-typedef struct CypherPropertyFieldDescriptor
+/*
+ * Single owner of the property physical-type universe, keyed by the
+ * (value_type, field_result_type) signature (InvalidOid is the AGTYPEOID
+ * sentinel because AGTYPEOID is not a compile-time constant).  One row carries
+ * every facet so the parser and optimizer no longer keep parallel tables:
+ *
+ *   - parser facet: the agtype_object_field_* accessor (field_name/field_oid)
+ *     used to recognize and build property access signatures.
+ *   - optimizer facet: the typed age_collect_* aggregate, the scalar->agtype
+ *     final conversion, the materialization weight and the wire width that feed
+ *     the lower/final PathTarget cost contract.  scalar_physical marks the rows
+ *     that participate in scalar property-field / conversion matching; the
+ *     agtype row is parser-only and cost-fallback authority.
+ *
+ * Each module reaches its facet through the accessor functions below, never the
+ * struct directly, so the boundary stays explicit.
+ */
+typedef struct CypherPropertyPhysicalDescriptor
 {
     Oid value_type;
-    /* InvalidOid marks AGTYPEOID, which must be resolved at runtime. */
     Oid field_result_type;
+    bool scalar_physical;
     const char *field_name;
-    Oid *field_oid;
-} CypherPropertyFieldDescriptor;
+    Oid field_oid;
+    const char *collect_agg_name;
+    Oid collect_agg_oid;
+    const char *to_agtype_name;
+    Oid to_agtype_oid;
+    int final_materialization_weight;
+    int wire_width;
+} CypherPropertyPhysicalDescriptor;
 
-static CypherPropertyFieldDescriptor property_field_descriptors[] = {
-    {InvalidOid, InvalidOid, "agtype_object_field_agtype",
-     &agtype_object_field_agtype_oid},
-    {INT8OID, INT8OID, "agtype_object_field_int8",
-     &agtype_object_field_int8_oid},
-    {FLOAT8OID, FLOAT8OID, "agtype_object_field_float8",
-     &agtype_object_field_float8_oid},
-    {NUMERICOID, InvalidOid, "agtype_object_field_numeric_agtype",
-     &agtype_object_field_numeric_agtype_oid},
-    {NUMERICOID, NUMERICOID, "agtype_object_field_numeric",
-     &agtype_object_field_numeric_oid},
-    {TEXTOID, TEXTOID, "agtype_object_field_text_agtype",
-     &agtype_object_field_text_agtype_oid}
+static CypherPropertyPhysicalDescriptor cypher_property_physical_descriptors[] = {
+    {InvalidOid, InvalidOid, false, "agtype_object_field_agtype", InvalidOid,
+     NULL, InvalidOid, NULL, InvalidOid, 2, sizeof(int32) + 24},
+    {INT8OID, INT8OID, true, "agtype_object_field_int8", InvalidOid,
+     "age_collect_int8", InvalidOid, "int8_to_agtype", InvalidOid,
+     1, sizeof(int32) + sizeof(int64)},
+    {FLOAT8OID, FLOAT8OID, true, "agtype_object_field_float8", InvalidOid,
+     "age_collect_float8", InvalidOid, "float8_to_agtype", InvalidOid,
+     1, sizeof(int32) + sizeof(int64)},
+    {NUMERICOID, InvalidOid, true, "agtype_object_field_numeric_agtype",
+     InvalidOid, NULL, InvalidOid, NULL, InvalidOid, 2, sizeof(int32) + 8},
+    {NUMERICOID, NUMERICOID, true, "agtype_object_field_numeric", InvalidOid,
+     "age_collect_numeric", InvalidOid, "numeric_to_agtype", InvalidOid,
+     1, sizeof(int32) + 8},
+    {TEXTOID, TEXTOID, true, "agtype_object_field_text_agtype", InvalidOid,
+     "age_collect_text", InvalidOid, "text_to_agtype", InvalidOid,
+     1, sizeof(int32) + 16}
 };
 
 static bool property_key_paths_equal(List *left, List *right);
 static Node *make_prefix_property_access_expr(Node *container, List *keys);
-static CypherPropertyFieldDescriptor *find_property_field_descriptor(
+static CypherPropertyPhysicalDescriptor *find_property_field_descriptor(
     Oid funcid);
-static CypherPropertyFieldDescriptor *find_property_field_descriptor_by_type(
+static CypherPropertyPhysicalDescriptor *find_property_field_descriptor_by_type(
     Oid value_type, Oid field_result_type);
 static Oid get_property_field_oid_from_descriptor(
-    CypherPropertyFieldDescriptor *descriptor);
+    CypherPropertyPhysicalDescriptor *descriptor);
 static Oid get_property_field_value_type(
-    CypherPropertyFieldDescriptor *descriptor);
+    CypherPropertyPhysicalDescriptor *descriptor);
 static Oid get_property_field_result_type(
-    CypherPropertyFieldDescriptor *descriptor);
+    CypherPropertyPhysicalDescriptor *descriptor);
+static Oid get_typed_collect_agg_oid_from_descriptor(
+    CypherPropertyPhysicalDescriptor *descriptor);
+static Oid get_scalar_to_agtype_oid_from_descriptor(
+    CypherPropertyPhysicalDescriptor *descriptor);
 static Oid get_agtype_access_operator_oid(void);
 
 bool cypher_extract_property_access_signature(
@@ -97,7 +122,7 @@ bool cypher_extract_property_access_signature(
     func = castNode(FuncExpr, node);
 
     {
-        CypherPropertyFieldDescriptor *descriptor;
+        CypherPropertyPhysicalDescriptor *descriptor;
 
         descriptor = find_property_field_descriptor(func->funcid);
         if (descriptor != NULL)
@@ -217,18 +242,23 @@ bool cypher_extract_property_access_terminal_args(Node *node, Node **object,
 
 void cypher_property_signature_invalidate_oids(void)
 {
+    int i;
+
     agtype_access_operator_oid = InvalidOid;
-    agtype_object_field_agtype_oid = InvalidOid;
-    agtype_object_field_int8_oid = InvalidOid;
-    agtype_object_field_float8_oid = InvalidOid;
-    agtype_object_field_numeric_agtype_oid = InvalidOid;
-    agtype_object_field_numeric_oid = InvalidOid;
-    agtype_object_field_text_agtype_oid = InvalidOid;
+    for (i = 0; i < lengthof(cypher_property_physical_descriptors); i++)
+    {
+        CypherPropertyPhysicalDescriptor *descriptor =
+            &cypher_property_physical_descriptors[i];
+
+        descriptor->field_oid = InvalidOid;
+        descriptor->collect_agg_oid = InvalidOid;
+        descriptor->to_agtype_oid = InvalidOid;
+    }
 }
 
 Oid cypher_get_property_field_oid(Oid value_type, Oid field_result_type)
 {
-    CypherPropertyFieldDescriptor *descriptor;
+    CypherPropertyPhysicalDescriptor *descriptor;
 
     descriptor = find_property_field_descriptor_by_type(value_type,
                                                         field_result_type);
@@ -241,7 +271,7 @@ Oid cypher_get_property_field_oid(Oid value_type, Oid field_result_type)
 bool cypher_property_field_func_matches(Oid funcid, Oid value_type,
                                         Oid field_result_type)
 {
-    CypherPropertyFieldDescriptor *descriptor;
+    CypherPropertyPhysicalDescriptor *descriptor;
 
     descriptor = find_property_field_descriptor_by_type(value_type,
                                                         field_result_type);
@@ -279,7 +309,7 @@ static Node *make_prefix_property_access_expr(Node *container, List *keys)
     foreach(lc, keys)
     {
         prefix = (Node *)makeFuncExpr(get_property_field_oid_from_descriptor(
-                                          &property_field_descriptors[
+                                          &cypher_property_physical_descriptors[
                                               AGTYPE_FIELD_DESCRIPTOR_INDEX]),
                                       AGTYPEOID,
                                       list_make2(prefix, copyObject(lfirst(lc))),
@@ -290,7 +320,7 @@ static Node *make_prefix_property_access_expr(Node *container, List *keys)
     return prefix;
 }
 
-static CypherPropertyFieldDescriptor *find_property_field_descriptor(
+static CypherPropertyPhysicalDescriptor *find_property_field_descriptor(
     Oid funcid)
 {
     int i;
@@ -298,10 +328,10 @@ static CypherPropertyFieldDescriptor *find_property_field_descriptor(
     if (!OidIsValid(funcid))
         return NULL;
 
-    for (i = 0; i < lengthof(property_field_descriptors); i++)
+    for (i = 0; i < lengthof(cypher_property_physical_descriptors); i++)
     {
-        CypherPropertyFieldDescriptor *descriptor =
-            &property_field_descriptors[i];
+        CypherPropertyPhysicalDescriptor *descriptor =
+            &cypher_property_physical_descriptors[i];
 
         if (get_property_field_oid_from_descriptor(descriptor) == funcid)
             return descriptor;
@@ -310,15 +340,15 @@ static CypherPropertyFieldDescriptor *find_property_field_descriptor(
     return NULL;
 }
 
-static CypherPropertyFieldDescriptor *find_property_field_descriptor_by_type(
+static CypherPropertyPhysicalDescriptor *find_property_field_descriptor_by_type(
     Oid value_type, Oid field_result_type)
 {
     int i;
 
-    for (i = 0; i < lengthof(property_field_descriptors); i++)
+    for (i = 0; i < lengthof(cypher_property_physical_descriptors); i++)
     {
-        CypherPropertyFieldDescriptor *descriptor =
-            &property_field_descriptors[i];
+        CypherPropertyPhysicalDescriptor *descriptor =
+            &cypher_property_physical_descriptors[i];
 
         if (get_property_field_value_type(descriptor) == value_type &&
             get_property_field_result_type(descriptor) == field_result_type)
@@ -331,22 +361,22 @@ static CypherPropertyFieldDescriptor *find_property_field_descriptor_by_type(
 }
 
 static Oid get_property_field_oid_from_descriptor(
-    CypherPropertyFieldDescriptor *descriptor)
+    CypherPropertyPhysicalDescriptor *descriptor)
 {
     Assert(descriptor != NULL);
 
-    if (!OidIsValid(*descriptor->field_oid))
+    if (!OidIsValid(descriptor->field_oid))
     {
-        *descriptor->field_oid =
+        descriptor->field_oid =
             get_ag_func_oid(descriptor->field_name, 2,
                             AGTYPEOID, AGTYPEOID);
     }
 
-    return *descriptor->field_oid;
+    return descriptor->field_oid;
 }
 
 static Oid get_property_field_value_type(
-    CypherPropertyFieldDescriptor *descriptor)
+    CypherPropertyPhysicalDescriptor *descriptor)
 {
     Assert(descriptor != NULL);
 
@@ -357,7 +387,7 @@ static Oid get_property_field_value_type(
 }
 
 static Oid get_property_field_result_type(
-    CypherPropertyFieldDescriptor *descriptor)
+    CypherPropertyPhysicalDescriptor *descriptor)
 {
     Assert(descriptor != NULL);
 
@@ -365,6 +395,185 @@ static Oid get_property_field_result_type(
         return AGTYPEOID;
 
     return descriptor->field_result_type;
+}
+
+static Oid get_typed_collect_agg_oid_from_descriptor(
+    CypherPropertyPhysicalDescriptor *descriptor)
+{
+    Assert(descriptor != NULL);
+
+    if (descriptor->collect_agg_name == NULL)
+        return InvalidOid;
+
+    if (!OidIsValid(descriptor->collect_agg_oid))
+    {
+        descriptor->collect_agg_oid =
+            get_ag_func_oid(descriptor->collect_agg_name, 1,
+                            descriptor->value_type);
+    }
+
+    return descriptor->collect_agg_oid;
+}
+
+static Oid get_scalar_to_agtype_oid_from_descriptor(
+    CypherPropertyPhysicalDescriptor *descriptor)
+{
+    Assert(descriptor != NULL);
+
+    if (descriptor->to_agtype_name == NULL)
+        return InvalidOid;
+
+    if (!OidIsValid(descriptor->to_agtype_oid))
+    {
+        descriptor->to_agtype_oid =
+            get_ag_func_oid(descriptor->to_agtype_name, 1,
+                            descriptor->value_type);
+    }
+
+    return descriptor->to_agtype_oid;
+}
+
+/*
+ * Optimizer facet accessors.  These expose the collect/final/cost columns of
+ * the shared descriptor without handing out the struct, keeping the
+ * parser/optimizer boundary explicit.
+ */
+Oid cypher_property_typed_collect_agg_oid(Oid value_type)
+{
+    int i;
+
+    for (i = 0; i < lengthof(cypher_property_physical_descriptors); i++)
+    {
+        CypherPropertyPhysicalDescriptor *descriptor =
+            &cypher_property_physical_descriptors[i];
+
+        if (descriptor->value_type == value_type &&
+            descriptor->collect_agg_name != NULL)
+        {
+            return get_typed_collect_agg_oid_from_descriptor(descriptor);
+        }
+    }
+
+    return InvalidOid;
+}
+
+bool cypher_property_is_typed_collect_agg_oid(Oid agg_oid, Oid *value_type)
+{
+    int i;
+
+    if (!OidIsValid(agg_oid))
+        return false;
+
+    for (i = 0; i < lengthof(cypher_property_physical_descriptors); i++)
+    {
+        CypherPropertyPhysicalDescriptor *descriptor =
+            &cypher_property_physical_descriptors[i];
+
+        if (descriptor->collect_agg_name == NULL)
+            continue;
+
+        if (get_typed_collect_agg_oid_from_descriptor(descriptor) == agg_oid)
+        {
+            if (value_type != NULL)
+                *value_type = descriptor->value_type;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool cypher_property_scalar_field_func_matches(Oid funcid, Oid result_type)
+{
+    int i;
+
+    if (!OidIsValid(funcid))
+        return false;
+
+    for (i = 0; i < lengthof(cypher_property_physical_descriptors); i++)
+    {
+        CypherPropertyPhysicalDescriptor *descriptor =
+            &cypher_property_physical_descriptors[i];
+
+        if (!descriptor->scalar_physical)
+            continue;
+        if (get_property_field_result_type(descriptor) != result_type)
+            continue;
+        if (get_property_field_oid_from_descriptor(descriptor) == funcid)
+            return true;
+    }
+
+    return false;
+}
+
+bool cypher_property_scalar_to_agtype_func_matches(Oid funcid, Oid value_type)
+{
+    int i;
+
+    if (!OidIsValid(funcid))
+        return false;
+
+    for (i = 0; i < lengthof(cypher_property_physical_descriptors); i++)
+    {
+        CypherPropertyPhysicalDescriptor *descriptor =
+            &cypher_property_physical_descriptors[i];
+
+        if (!descriptor->scalar_physical ||
+            descriptor->value_type != value_type)
+            continue;
+        if (get_scalar_to_agtype_oid_from_descriptor(descriptor) == funcid)
+            return true;
+    }
+
+    return false;
+}
+
+int cypher_property_final_materialization_weight(Oid field_result_type)
+{
+    int i;
+
+    for (i = 0; i < lengthof(cypher_property_physical_descriptors); i++)
+    {
+        CypherPropertyPhysicalDescriptor *descriptor =
+            &cypher_property_physical_descriptors[i];
+
+        if (get_property_field_result_type(descriptor) == field_result_type)
+            return descriptor->final_materialization_weight;
+    }
+
+    /*
+     * Types outside the descriptor table: agtype is the heaviest physical
+     * form, any other valid scalar costs one unit, an invalid result none.
+     */
+    if (field_result_type == AGTYPEOID)
+        return 2;
+    if (OidIsValid(field_result_type))
+        return 1;
+    return 0;
+}
+
+int cypher_property_slot_wire_width(Oid value_type)
+{
+    int i;
+
+    for (i = 0; i < lengthof(cypher_property_physical_descriptors); i++)
+    {
+        CypherPropertyPhysicalDescriptor *descriptor =
+            &cypher_property_physical_descriptors[i];
+
+        if (get_property_field_value_type(descriptor) == value_type)
+            return descriptor->wire_width;
+    }
+
+    /*
+     * agtype is the widest physical form; other types outside the descriptor
+     * table fall back to a generic Datum slot.
+     */
+    if (value_type == AGTYPEOID)
+        return sizeof(int32) + 24;
+    if (OidIsValid(value_type))
+        return sizeof(int32) + sizeof(Datum);
+    return 0;
 }
 
 static Oid get_agtype_access_operator_oid(void)

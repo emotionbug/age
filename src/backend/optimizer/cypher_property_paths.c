@@ -52,10 +52,6 @@ static Oid array_agg_anynonarray_agg_func_oid = InvalidOid;
 static Oid count_any_agg_func_oid = InvalidOid;
 static Oid age_collect_numeric_property_agg_func_oid = InvalidOid;
 static Oid age_collect_numeric_path_property_agg_func_oid = InvalidOid;
-static Oid age_collect_float8_agg_func_oid = InvalidOid;
-static Oid age_collect_int8_agg_func_oid = InvalidOid;
-static Oid age_collect_numeric_agg_func_oid = InvalidOid;
-static Oid age_collect_text_agg_func_oid = InvalidOid;
 static Oid age_array_agg_property_agg_func_oid = InvalidOid;
 static Oid age_array_agg_map2_property_agg_func_oid = InvalidOid;
 static Oid age_array_agg_map_property_agg_func_oid = InvalidOid;
@@ -66,10 +62,6 @@ static Oid agtype_build_map_nonull_func_oid = InvalidOid;
 static Oid agtype_build_list_func_oid = InvalidOid;
 static Oid agtype_ctid_property_field_agtype_func_oid = InvalidOid;
 static Oid agtype_id_property_field_agtype_func_oid = InvalidOid;
-static Oid int8_to_agtype_func_oid = InvalidOid;
-static Oid float8_to_agtype_func_oid = InvalidOid;
-static Oid numeric_to_agtype_func_oid = InvalidOid;
-static Oid text_to_agtype_func_oid = InvalidOid;
 static Oid agtype_eq_func_oid = InvalidOid;
 static Oid agtype_lt_func_oid = InvalidOid;
 static Oid agtype_le_func_oid = InvalidOid;
@@ -78,22 +70,6 @@ static Oid agtype_ge_func_oid = InvalidOid;
 static Oid agtype_field_equals_func_oid = InvalidOid;
 static Oid agtype_field_cmp_func_oid = InvalidOid;
 static Oid agtype_field_exists_nonnull_func_oid = InvalidOid;
-
-typedef struct CypherTypedCollectDescriptor
-{
-    Oid value_type;
-    const char *agg_name;
-    Oid *agg_oid;
-} CypherTypedCollectDescriptor;
-
-typedef struct CypherScalarPhysicalDescriptor
-{
-    Oid value_type;
-    /* InvalidOid means the helper returns AGTYPEOID, resolved at runtime. */
-    Oid field_result_type;
-    const char *final_name;
-    Oid *final_oid;
-} CypherScalarPhysicalDescriptor;
 
 typedef struct CypherArrayAggPropertyRewriteContext
 {
@@ -107,22 +83,6 @@ typedef struct CypherCanonicalPropertyIndexExpr
     CypherCachedPropertySlotDescriptor slot;
     Node *expr;
 } CypherCanonicalPropertyIndexExpr;
-
-static CypherTypedCollectDescriptor typed_collect_descriptors[] = {
-    {FLOAT8OID, "age_collect_float8", &age_collect_float8_agg_func_oid},
-    {INT8OID, "age_collect_int8", &age_collect_int8_agg_func_oid},
-    {NUMERICOID, "age_collect_numeric", &age_collect_numeric_agg_func_oid},
-    {TEXTOID, "age_collect_text", &age_collect_text_agg_func_oid}
-};
-
-static CypherScalarPhysicalDescriptor scalar_physical_descriptors[] = {
-    {INT8OID, INT8OID, "int8_to_agtype", &int8_to_agtype_func_oid},
-    {FLOAT8OID, FLOAT8OID, "float8_to_agtype", &float8_to_agtype_func_oid},
-    {NUMERICOID, InvalidOid, NULL, NULL},
-    {NUMERICOID, NUMERICOID, "numeric_to_agtype",
-     &numeric_to_agtype_func_oid},
-    {TEXTOID, TEXTOID, "text_to_agtype", &text_to_agtype_func_oid}
-};
 
 static bool is_ag_catalog_aggref(Aggref *aggref);
 static bool is_array_agg_agtype_aggref(Aggref *aggref);
@@ -179,9 +139,11 @@ static double row_scaled_index_domain_credit(int index_match_slot_count,
                                              double input_rows);
 static int array_agg_index_domain_width_weight(
     CypherArrayAggPropertyHandoff *handoff);
-static bool array_agg_slot_reuses_prior_key_source(
-    CypherArrayAggPropertyHandoff *handoff,
-    const CypherCachedPropertySlotDescriptor *slot, ListCell *slot_cell);
+static bool cached_property_slot_list_reuses_prior(
+    List *slots, const CypherCachedPropertySlotDescriptor *slot,
+    ListCell *slot_cell);
+static int cached_property_slot_list_heap_lookup_count(List *slots);
+static int cached_property_slot_list_heap_final_weight(List *slots);
 static int array_agg_heap_lookup_slot_count(
     CypherArrayAggPropertyHandoff *handoff);
 static int array_agg_reused_slot_count(CypherArrayAggPropertyHandoff *handoff);
@@ -208,12 +170,8 @@ static bool init_property_handoff_descriptor(
 static bool make_cached_property_slot_descriptor(
     const CypherPropertyHandoffDescriptor *handoff,
     CypherCachedPropertySlotDescriptor *slot);
-static void refresh_typed_collect_cached_slot(
-    CypherTypedCollectHandoff *handoff);
-static void refresh_property_index_cached_slot(
-    CypherPropertyIndexHandoff *handoff);
-static void refresh_scalar_final_cached_slot(
-    CypherScalarFinalHandoff *handoff);
+static void refresh_property_materialization_target(
+    CypherPropertyMaterializationTarget *materialization);
 static void init_property_index_handoff(Node *expr,
                                         CypherPropertyIndexHandoff *handoff);
 static bool property_index_expr_matches(Node *index_expr,
@@ -267,16 +225,8 @@ static Oid get_cached_age_array_agg_map_slots_agg_oid(void);
 static Oid get_cached_age_array_agg_list_slots_agg_oid(void);
 static Oid get_cached_agtype_build_map_nonull_oid(void);
 static Oid get_cached_agtype_build_list_oid(void);
-static Oid get_scalar_property_field_result_type(
-    CypherScalarPhysicalDescriptor *descriptor);
-static CypherScalarPhysicalDescriptor *find_scalar_property_field_descriptor(
-    Oid funcid, Oid result_type);
 static Oid get_cached_agtype_ctid_property_field_agtype_oid(void);
 static Oid get_cached_agtype_id_property_field_agtype_oid(void);
-static Oid get_cached_scalar_to_agtype_oid(
-    CypherScalarPhysicalDescriptor *descriptor);
-static CypherScalarPhysicalDescriptor *find_scalar_to_agtype_descriptor(
-    Oid funcid, Oid value_type);
 static Node *append_property_path_field_expr(Node *expr, List *keys);
 static bool find_array_agg_property_handoff_walker(Node *node,
                                                    void *context);
@@ -372,8 +322,7 @@ bool cypher_rewrite_collect_numeric_property_expr(Node *node)
     }
 
     func = castNode(FuncExpr, arg_tle->expr);
-    if (find_scalar_property_field_descriptor(func->funcid, AGTYPEOID) ==
-        NULL ||
+    if (!cypher_property_scalar_field_func_matches(func->funcid, AGTYPEOID) ||
         list_length(func->args) != 2)
     {
         return false;
@@ -810,15 +759,15 @@ Node *cypher_make_property_index_handoff_expr(
     if (handoff->index_domain_matches_cached_slot)
     {
         slot_expr = cypher_make_cached_property_slot_expr(
-            &handoff->index_cached_property_slot);
+            &handoff->index_materialization.cached_property_slot);
         if (slot_expr != NULL)
             return slot_expr;
     }
 
-    if (handoff->has_cached_property_slot)
+    if (handoff->materialization.has_cached_property_slot)
     {
         slot_expr = cypher_make_cached_property_slot_expr(
-            &handoff->cached_property_slot);
+            &handoff->materialization.cached_property_slot);
         if (slot_expr != NULL)
             return slot_expr;
     }
@@ -1517,9 +1466,10 @@ double cypher_typed_collect_materialization_credit(List *arg_plans,
             continue;
 
         handoff = arg_plan->handoff;
-        if (handoff->has_cached_property_slot)
+        if (handoff->materialization.has_cached_property_slot)
         {
-            weight = handoff->cached_property_slot.final_materialization_weight;
+            weight = handoff->materialization.cached_property_slot
+                .final_materialization_weight;
             base_weight += Max(1, weight);
             base_weight += 1.0;
         }
@@ -1571,9 +1521,9 @@ static Node *make_typed_collect_handoff_arg(
     if (handoff == NULL || handoff->arg_expr == NULL)
         return NULL;
 
-    if (handoff->has_cached_property_slot)
+    if (handoff->materialization.has_cached_property_slot)
         slot_expr = cypher_make_cached_property_slot_expr(
-            &handoff->cached_property_slot);
+            &handoff->materialization.cached_property_slot);
 
     return slot_expr != NULL ? slot_expr : handoff->arg_expr;
 }
@@ -1831,24 +1781,40 @@ static double row_scaled_index_domain_credit(int index_match_slot_count,
         width_credit;
 }
 
+/*
+ * Row-scaled credit for adopting the property projection CustomScan.  The scan
+ * materializes each distinct container/key source once via its typed field
+ * helper instead of the generic agtype path; slots that reuse an earlier
+ * source only copy the cached value (the executor links them as duplicate
+ * slots).  Charge each heap lookup its descriptor-sourced final materialization
+ * weight and each reused slot a single copy unit, scaled by the scanned rows,
+ * so the unified type descriptor and the slot-reuse shape are both real cost
+ * inputs to the projection choice point.
+ */
+double cypher_property_projection_materialization_credit(List *slots,
+                                                         double input_rows)
+{
+    int heap_final_weight;
+    int reused_slot_count;
+    int total_weight;
+
+    if (slots == NIL)
+        return 0.0;
+
+    heap_final_weight = cached_property_slot_list_heap_final_weight(slots);
+    reused_slot_count = list_length(slots) -
+        cached_property_slot_list_heap_lookup_count(slots);
+    total_weight = heap_final_weight + reused_slot_count;
+
+    if (total_weight <= 0)
+        return 0.0;
+
+    return row_scaled_materialization_credit((double) total_weight, input_rows);
+}
+
 static int estimated_array_agg_slot_wire_width(Oid value_type)
 {
-    if (value_type == INT8OID || value_type == FLOAT8OID)
-        return sizeof(int32) + sizeof(int64);
-
-    if (value_type == NUMERICOID)
-        return sizeof(int32) + 8;
-
-    if (value_type == TEXTOID)
-        return sizeof(int32) + 16;
-
-    if (value_type == AGTYPEOID)
-        return sizeof(int32) + 24;
-
-    if (OidIsValid(value_type))
-        return sizeof(int32) + sizeof(Datum);
-
-    return 0;
+    return cypher_property_slot_wire_width(value_type);
 }
 
 static int array_agg_state_width_weight(CypherArrayAggPropertyHandoff *handoff)
@@ -1886,13 +1852,21 @@ static int array_agg_index_domain_width_weight(
     return per_slot_width * handoff->index_domain_match_slot_count;
 }
 
-static bool array_agg_slot_reuses_prior_key_source(
-    CypherArrayAggPropertyHandoff *handoff,
-    const CypherCachedPropertySlotDescriptor *slot, ListCell *slot_cell)
+/*
+ * Reuse accounting shared by the array_agg materialization cost and the
+ * projection choice point.  A cached-property slot is a heap lookup when no
+ * earlier slot in the list already reads the same container/key source; later
+ * slots over the same source only copy the cached value.  Both the array_agg
+ * state width and the projection credit charge the heap lookups their full
+ * typed materialization weight and the reused slots a single copy unit.
+ */
+static bool cached_property_slot_list_reuses_prior(
+    List *slots, const CypherCachedPropertySlotDescriptor *slot,
+    ListCell *slot_cell)
 {
     ListCell *lc;
 
-    foreach(lc, handoff->cached_property_slots)
+    foreach(lc, slots)
     {
         CypherCachedPropertySlotDescriptor *prev_slot = lfirst(lc);
 
@@ -1905,24 +1879,46 @@ static bool array_agg_slot_reuses_prior_key_source(
     return false;
 }
 
-static int array_agg_heap_lookup_slot_count(
-    CypherArrayAggPropertyHandoff *handoff)
+static int cached_property_slot_list_heap_lookup_count(List *slots)
 {
     int heap_lookup_count = 0;
     ListCell *lc;
 
-    if (handoff == NULL)
-        return 0;
-
-    foreach(lc, handoff->cached_property_slots)
+    foreach(lc, slots)
     {
         CypherCachedPropertySlotDescriptor *slot = lfirst(lc);
 
-        if (!array_agg_slot_reuses_prior_key_source(handoff, slot, lc))
+        if (!cached_property_slot_list_reuses_prior(slots, slot, lc))
             heap_lookup_count++;
     }
 
     return heap_lookup_count;
+}
+
+static int cached_property_slot_list_heap_final_weight(List *slots)
+{
+    int heap_final_weight = 0;
+    ListCell *lc;
+
+    foreach(lc, slots)
+    {
+        CypherCachedPropertySlotDescriptor *slot = lfirst(lc);
+
+        if (!cached_property_slot_list_reuses_prior(slots, slot, lc))
+            heap_final_weight += slot->final_materialization_weight;
+    }
+
+    return heap_final_weight;
+}
+
+static int array_agg_heap_lookup_slot_count(
+    CypherArrayAggPropertyHandoff *handoff)
+{
+    if (handoff == NULL)
+        return 0;
+
+    return cached_property_slot_list_heap_lookup_count(
+        handoff->cached_property_slots);
 }
 
 static int array_agg_reused_slot_count(CypherArrayAggPropertyHandoff *handoff)
@@ -1937,21 +1933,11 @@ static int array_agg_reused_slot_count(CypherArrayAggPropertyHandoff *handoff)
 static int array_agg_heap_final_materialization_weight(
     CypherArrayAggPropertyHandoff *handoff)
 {
-    int heap_final_weight = 0;
-    ListCell *lc;
-
     if (handoff == NULL)
         return 0;
 
-    foreach(lc, handoff->cached_property_slots)
-    {
-        CypherCachedPropertySlotDescriptor *slot = lfirst(lc);
-
-        if (!array_agg_slot_reuses_prior_key_source(handoff, slot, lc))
-            heap_final_weight += slot->final_materialization_weight;
-    }
-
-    return heap_final_weight;
+    return cached_property_slot_list_heap_final_weight(
+        handoff->cached_property_slots);
 }
 
 static int array_agg_source_reuse_width_weight(
@@ -2711,7 +2697,6 @@ bool cypher_extract_typed_property_sort_args(Node *node, Node **properties,
                                              Node **key)
 {
     FuncExpr *func;
-    CypherScalarPhysicalDescriptor *descriptor;
 
     if (node == NULL || !IsA(node, FuncExpr))
         return false;
@@ -2720,9 +2705,8 @@ bool cypher_extract_typed_property_sort_args(Node *node, Node **properties,
     if (list_length(func->args) != 2)
         return false;
 
-    descriptor = find_scalar_property_field_descriptor(func->funcid,
-                                                       exprType(node));
-    if (descriptor == NULL)
+    if (!cypher_property_scalar_field_func_matches(func->funcid,
+                                                   exprType(node)))
         return false;
 
     *properties = linitial(func->args);
@@ -3268,13 +3252,7 @@ static bool property_signature_uses_typed_physical_result(
 static int cached_property_slot_final_materialization_weight(
     Oid field_result_type)
 {
-    if (field_result_type == AGTYPEOID)
-        return 2;
-
-    if (OidIsValid(field_result_type))
-        return 1;
-
-    return 0;
+    return cypher_property_final_materialization_weight(field_result_type);
 }
 
 static bool cached_property_slot_keys_are_strings(List *keys)
@@ -3558,11 +3536,11 @@ static bool extract_typed_collect_handoff(Aggref *aggref,
     handoff->arg_expr = (Node *)arg_tle->expr;
     handoff->value_type = value_type;
     handoff->agg_func_oid = typed_agg_oid;
-    handoff->has_property_descriptor =
+    handoff->materialization.has_property_descriptor =
         init_property_handoff_descriptor(
             handoff->arg_expr, InvalidOid, handoff->agg_func_oid, NULL,
-            &handoff->property_descriptor);
-    refresh_typed_collect_cached_slot(handoff);
+            &handoff->materialization.property_descriptor);
+    refresh_property_materialization_target(&handoff->materialization);
 
     return true;
 }
@@ -3583,31 +3561,14 @@ static bool init_property_handoff_descriptor(
         expr, &descriptor->property_signature);
 }
 
-static void refresh_typed_collect_cached_slot(
-    CypherTypedCollectHandoff *handoff)
+static void refresh_property_materialization_target(
+    CypherPropertyMaterializationTarget *materialization)
 {
-    handoff->has_cached_property_slot =
-        handoff->has_property_descriptor &&
+    materialization->has_cached_property_slot =
+        materialization->has_property_descriptor &&
         make_cached_property_slot_descriptor(
-            &handoff->property_descriptor, &handoff->cached_property_slot);
-}
-
-static void refresh_property_index_cached_slot(
-    CypherPropertyIndexHandoff *handoff)
-{
-    handoff->has_cached_property_slot =
-        handoff->has_property_descriptor &&
-        make_cached_property_slot_descriptor(
-            &handoff->property_descriptor, &handoff->cached_property_slot);
-}
-
-static void refresh_scalar_final_cached_slot(
-    CypherScalarFinalHandoff *handoff)
-{
-    handoff->has_cached_property_slot =
-        handoff->has_property_descriptor &&
-        make_cached_property_slot_descriptor(
-            &handoff->property_descriptor, &handoff->cached_property_slot);
+            &materialization->property_descriptor,
+            &materialization->cached_property_slot);
 }
 
 static void init_property_index_handoff(Node *expr,
@@ -3617,11 +3578,11 @@ static void init_property_index_handoff(Node *expr,
 
     memset(handoff, 0, sizeof(CypherPropertyIndexHandoff));
     handoff->query_expr = expr;
-    handoff->has_property_descriptor =
+    handoff->materialization.has_property_descriptor =
         init_property_handoff_descriptor(
             expr, InvalidOid, InvalidOid, NULL,
-            &handoff->property_descriptor);
-    refresh_property_index_cached_slot(handoff);
+            &handoff->materialization.property_descriptor);
+    refresh_property_materialization_target(&handoff->materialization);
 }
 
 static bool property_index_expr_matches(Node *index_expr,
@@ -3631,9 +3592,9 @@ static bool property_index_expr_matches(Node *index_expr,
         return false;
 
     return equal(handoff->query_expr, index_expr) ||
-           (handoff->has_property_descriptor &&
+           (handoff->materialization.has_property_descriptor &&
             cypher_property_access_signature_matches(
-                &handoff->property_descriptor.property_signature,
+                &handoff->materialization.property_descriptor.property_signature,
                 index_expr));
 }
 
@@ -3641,7 +3602,6 @@ static void set_property_index_handoff_expr(Node *index_expr,
                                             Oid index_oid,
                                             CypherPropertyIndexHandoff *handoff)
 {
-    CypherPropertyHandoffDescriptor index_descriptor;
     Node *index_expr_copy;
 
     if (handoff == NULL || index_expr == NULL)
@@ -3651,29 +3611,25 @@ static void set_property_index_handoff_expr(Node *index_expr,
     handoff->index_oid = index_oid;
     handoff->index_expr = index_expr_copy;
 
-    memset(&index_descriptor, 0, sizeof(index_descriptor));
-    if (init_property_handoff_descriptor(index_expr_copy, InvalidOid,
-                                         InvalidOid, index_expr_copy,
-                                         &index_descriptor))
-    {
-        handoff->has_index_cached_property_slot =
-            make_cached_property_slot_descriptor(
-                &index_descriptor,
-                &handoff->index_cached_property_slot);
-    }
+    handoff->index_materialization.has_property_descriptor =
+        init_property_handoff_descriptor(
+            index_expr_copy, InvalidOid, InvalidOid, index_expr_copy,
+            &handoff->index_materialization.property_descriptor);
+    refresh_property_materialization_target(&handoff->index_materialization);
 
     handoff->index_domain_matches_cached_slot =
-        handoff->has_cached_property_slot &&
-        handoff->has_index_cached_property_slot &&
+        handoff->materialization.has_cached_property_slot &&
+        handoff->index_materialization.has_cached_property_slot &&
         cached_property_slots_same_physical_signature(
-            &handoff->cached_property_slot,
-            &handoff->index_cached_property_slot);
+            &handoff->materialization.cached_property_slot,
+            &handoff->index_materialization.cached_property_slot);
 
-    if (handoff->has_property_descriptor &&
+    if (handoff->materialization.has_property_descriptor &&
         handoff->index_domain_matches_cached_slot)
     {
-        handoff->property_descriptor.index_expr = handoff->index_expr;
-        refresh_property_index_cached_slot(handoff);
+        handoff->materialization.property_descriptor.index_expr =
+            handoff->index_expr;
+        refresh_property_materialization_target(&handoff->materialization);
     }
 }
 
@@ -4148,7 +4104,6 @@ bool cypher_extract_scalar_final_handoff(Node *node,
     FuncExpr *func;
     Node *candidate;
     Oid candidate_type;
-    CypherScalarPhysicalDescriptor *descriptor;
 
     if (handoff == NULL)
         return false;
@@ -4167,20 +4122,19 @@ bool cypher_extract_scalar_final_handoff(Node *node,
         return false;
 
     candidate_type = exprType(candidate);
-    descriptor = find_scalar_to_agtype_descriptor(func->funcid,
-                                                  candidate_type);
-    if (descriptor == NULL)
+    if (!cypher_property_scalar_to_agtype_func_matches(func->funcid,
+                                                       candidate_type))
         return false;
 
     handoff->scalar_expr = candidate;
-    handoff->value_type = descriptor->value_type;
+    handoff->value_type = candidate_type;
     handoff->field_result_type = candidate_type;
     handoff->final_func_oid = func->funcid;
-    handoff->has_property_descriptor =
+    handoff->materialization.has_property_descriptor =
         init_property_handoff_descriptor(
             candidate, handoff->final_func_oid, InvalidOid, NULL,
-            &handoff->property_descriptor);
-    refresh_scalar_final_cached_slot(handoff);
+            &handoff->materialization.property_descriptor);
+    refresh_property_materialization_target(&handoff->materialization);
     return true;
 }
 
@@ -4212,9 +4166,9 @@ bool cypher_build_scalar_final_deferred_targets(
             Expr *canonical_arg;
             Node *slot_expr = NULL;
 
-            if (handoff.has_cached_property_slot)
+            if (handoff.materialization.has_cached_property_slot)
                 slot_expr = cypher_make_cached_property_slot_expr(
-                    &handoff.cached_property_slot);
+                    &handoff.materialization.cached_property_slot);
 
             handoff.scalar_expr = slot_expr != NULL ?
                 slot_expr : copyObject(handoff.scalar_expr);
@@ -4268,9 +4222,10 @@ static Expr *add_or_get_lower_scalar_handoff(
             Node *existing = lfirst(lc);
 
             if (equal(existing, expr) ||
-                (handoff->has_property_descriptor &&
+                (handoff->materialization.has_property_descriptor &&
                  cypher_property_access_signature_matches(
-                     &handoff->property_descriptor.property_signature,
+                     &handoff->materialization.property_descriptor
+                          .property_signature,
                      existing)))
             {
                 return (Expr *)existing;
@@ -4289,10 +4244,6 @@ void cypher_property_path_invalidate_oids(void)
     count_any_agg_func_oid = InvalidOid;
     age_collect_numeric_property_agg_func_oid = InvalidOid;
     age_collect_numeric_path_property_agg_func_oid = InvalidOid;
-    age_collect_float8_agg_func_oid = InvalidOid;
-    age_collect_int8_agg_func_oid = InvalidOid;
-    age_collect_numeric_agg_func_oid = InvalidOid;
-    age_collect_text_agg_func_oid = InvalidOid;
     age_array_agg_property_agg_func_oid = InvalidOid;
     age_array_agg_map2_property_agg_func_oid = InvalidOid;
     age_array_agg_map_property_agg_func_oid = InvalidOid;
@@ -4303,10 +4254,6 @@ void cypher_property_path_invalidate_oids(void)
     agtype_build_list_func_oid = InvalidOid;
     agtype_ctid_property_field_agtype_func_oid = InvalidOid;
     agtype_id_property_field_agtype_func_oid = InvalidOid;
-    int8_to_agtype_func_oid = InvalidOid;
-    float8_to_agtype_func_oid = InvalidOid;
-    numeric_to_agtype_func_oid = InvalidOid;
-    text_to_agtype_func_oid = InvalidOid;
     agtype_eq_func_oid = InvalidOid;
     agtype_lt_func_oid = InvalidOid;
     agtype_le_func_oid = InvalidOid;
@@ -4403,51 +4350,12 @@ static Oid get_cached_age_collect_numeric_path_property_agg_oid(void)
 
 static Oid get_cached_typed_collect_agg_oid(Oid value_type)
 {
-    int i;
-
-    for (i = 0; i < lengthof(typed_collect_descriptors); i++)
-    {
-        CypherTypedCollectDescriptor *descriptor =
-            &typed_collect_descriptors[i];
-
-        if (descriptor->value_type != value_type)
-            continue;
-
-        if (!OidIsValid(*descriptor->agg_oid))
-        {
-            *descriptor->agg_oid =
-                get_ag_func_oid(descriptor->agg_name, 1,
-                                descriptor->value_type);
-        }
-
-        return *descriptor->agg_oid;
-    }
-
-    return InvalidOid;
+    return cypher_property_typed_collect_agg_oid(value_type);
 }
 
 static bool is_typed_collect_agg_oid(Oid agg_oid, Oid *value_type)
 {
-    int i;
-
-    if (!OidIsValid(agg_oid))
-        return false;
-
-    for (i = 0; i < lengthof(typed_collect_descriptors); i++)
-    {
-        CypherTypedCollectDescriptor *descriptor =
-            &typed_collect_descriptors[i];
-
-        if (get_cached_typed_collect_agg_oid(descriptor->value_type) ==
-            agg_oid)
-        {
-            if (value_type != NULL)
-                *value_type = descriptor->value_type;
-            return true;
-        }
-    }
-
-    return false;
+    return cypher_property_is_typed_collect_agg_oid(agg_oid, value_type);
 }
 
 static Oid get_cached_age_array_agg_property_agg_oid(void)
@@ -4542,42 +4450,6 @@ static Oid get_cached_agtype_build_list_oid(void)
     return agtype_build_list_func_oid;
 }
 
-static CypherScalarPhysicalDescriptor *find_scalar_property_field_descriptor(
-    Oid funcid, Oid result_type)
-{
-    int i;
-
-    if (!OidIsValid(funcid))
-        return NULL;
-
-    for (i = 0; i < lengthof(scalar_physical_descriptors); i++)
-    {
-        CypherScalarPhysicalDescriptor *descriptor =
-            &scalar_physical_descriptors[i];
-
-        if (get_scalar_property_field_result_type(descriptor) != result_type)
-            continue;
-
-        if (cypher_property_field_func_matches(funcid,
-                                               descriptor->value_type,
-                                               result_type))
-            return descriptor;
-    }
-
-    return NULL;
-}
-
-static Oid get_scalar_property_field_result_type(
-    CypherScalarPhysicalDescriptor *descriptor)
-{
-    Assert(descriptor != NULL);
-
-    if (!OidIsValid(descriptor->field_result_type))
-        return AGTYPEOID;
-
-    return descriptor->field_result_type;
-}
-
 static Oid get_cached_agtype_ctid_property_field_agtype_oid(void)
 {
     if (!OidIsValid(agtype_ctid_property_field_agtype_func_oid))
@@ -4657,45 +4529,4 @@ static Oid get_cached_agtype_field_exists_nonnull_oid(void)
     }
 
     return agtype_field_exists_nonnull_func_oid;
-}
-
-static Oid get_cached_scalar_to_agtype_oid(
-    CypherScalarPhysicalDescriptor *descriptor)
-{
-    Assert(descriptor != NULL);
-
-    if (descriptor->final_name == NULL || descriptor->final_oid == NULL)
-        return InvalidOid;
-
-    if (!OidIsValid(*descriptor->final_oid))
-    {
-        *descriptor->final_oid =
-            get_ag_func_oid(descriptor->final_name, 1,
-                            descriptor->value_type);
-    }
-
-    return *descriptor->final_oid;
-}
-
-static CypherScalarPhysicalDescriptor *find_scalar_to_agtype_descriptor(
-    Oid funcid, Oid value_type)
-{
-    int i;
-
-    if (!OidIsValid(funcid))
-        return NULL;
-
-    for (i = 0; i < lengthof(scalar_physical_descriptors); i++)
-    {
-        CypherScalarPhysicalDescriptor *descriptor =
-            &scalar_physical_descriptors[i];
-
-        if (descriptor->value_type != value_type)
-            continue;
-
-        if (get_cached_scalar_to_agtype_oid(descriptor) == funcid)
-            return descriptor;
-    }
-
-    return NULL;
 }

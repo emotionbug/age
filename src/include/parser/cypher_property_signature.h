@@ -41,6 +41,18 @@ bool cypher_extract_property_access_terminal_args(Node *node, Node **object,
 Oid cypher_get_property_field_oid(Oid value_type, Oid field_result_type);
 bool cypher_property_field_func_matches(Oid funcid, Oid value_type,
                                         Oid field_result_type);
+/*
+ * Optimizer facet of the shared property physical descriptor: the typed
+ * collect aggregate, scalar->agtype conversion, and lower/final materialization
+ * cost (weight / wire width) per physical type.  The parser owns the table; the
+ * optimizer consumes only these accessors.
+ */
+Oid cypher_property_typed_collect_agg_oid(Oid value_type);
+bool cypher_property_is_typed_collect_agg_oid(Oid agg_oid, Oid *value_type);
+bool cypher_property_scalar_field_func_matches(Oid funcid, Oid result_type);
+bool cypher_property_scalar_to_agtype_func_matches(Oid funcid, Oid value_type);
+int cypher_property_final_materialization_weight(Oid field_result_type);
+int cypher_property_slot_wire_width(Oid value_type);
 void cypher_property_signature_invalidate_oids(void);
 
 #endif

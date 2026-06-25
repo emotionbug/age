@@ -49,16 +49,28 @@ typedef struct CypherCachedPropertySlotDescriptor
     Node *index_expr;
 } CypherCachedPropertySlotDescriptor;
 
+/*
+ * Shared lower/final materialization contract for property aggregate and
+ * projection handoffs: the property access descriptor that the lower target
+ * must expose, plus the cached-property slot (carrying the final
+ * materialization weight) that the final target reads.  refresh keeps the
+ * cached slot derived from the descriptor in one place for every handoff.
+ */
+typedef struct CypherPropertyMaterializationTarget
+{
+    bool has_property_descriptor;
+    CypherPropertyHandoffDescriptor property_descriptor;
+    bool has_cached_property_slot;
+    CypherCachedPropertySlotDescriptor cached_property_slot;
+} CypherPropertyMaterializationTarget;
+
 typedef struct CypherScalarFinalHandoff
 {
     Node *scalar_expr;
     Oid value_type;
     Oid field_result_type;
     Oid final_func_oid;
-    bool has_property_descriptor;
-    CypherPropertyHandoffDescriptor property_descriptor;
-    bool has_cached_property_slot;
-    CypherCachedPropertySlotDescriptor cached_property_slot;
+    CypherPropertyMaterializationTarget materialization;
 } CypherScalarFinalHandoff;
 
 typedef struct CypherTypedCollectHandoff
@@ -67,10 +79,7 @@ typedef struct CypherTypedCollectHandoff
     Node *arg_expr;
     Oid value_type;
     Oid agg_func_oid;
-    bool has_property_descriptor;
-    CypherPropertyHandoffDescriptor property_descriptor;
-    bool has_cached_property_slot;
-    CypherCachedPropertySlotDescriptor cached_property_slot;
+    CypherPropertyMaterializationTarget materialization;
 } CypherTypedCollectHandoff;
 
 typedef struct CypherTypedCollectArgPlan
@@ -85,12 +94,8 @@ typedef struct CypherPropertyIndexHandoff
     Node *query_expr;
     Oid index_oid;
     Node *index_expr;
-    bool has_property_descriptor;
-    CypherPropertyHandoffDescriptor property_descriptor;
-    bool has_cached_property_slot;
-    CypherCachedPropertySlotDescriptor cached_property_slot;
-    bool has_index_cached_property_slot;
-    CypherCachedPropertySlotDescriptor index_cached_property_slot;
+    CypherPropertyMaterializationTarget materialization;
+    CypherPropertyMaterializationTarget index_materialization;
     bool index_domain_matches_cached_slot;
 } CypherPropertyIndexHandoff;
 
@@ -165,6 +170,8 @@ PathTarget *cypher_build_typed_collect_agg_target(
     PlannerInfo *root, PathTarget *target, List *arg_plans);
 double cypher_typed_collect_materialization_credit(List *arg_plans,
                                                    double input_rows);
+double cypher_property_projection_materialization_credit(List *slots,
+                                                         double input_rows);
 bool cypher_find_array_agg_property_handoff(
     PathTarget *target, CypherArrayAggPropertyHandoff *handoff);
 List *cypher_build_array_agg_property_arg_plans(
