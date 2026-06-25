@@ -8842,10 +8842,6 @@ age_adjacency_count_visible_payloads(Oid index_oid, graphid key,
         if (age_adjacency_find_directory_entry_with_meta(index_rel, key,
                                                          &meta, &entry))
         {
-            if (entry.posting_count > PG_INT64_MAX)
-                ereport(ERROR,
-                        (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-                         errmsg("bigint out of range")));
             count = (int64)entry.posting_count;
         }
 

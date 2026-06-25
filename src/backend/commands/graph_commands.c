@@ -32,6 +32,7 @@
 #include "catalog/ag_label.h"
 #include "commands/label_commands.h"
 #include "commands/graph_commands.h"
+#include "utils/age_global_graph.h"
 #include "utils/name_validation.h"
 
 /*
@@ -214,17 +215,20 @@ Datum drop_graph(PG_FUNCTION_ARGS)
 static void drop_graph_internal(const char *graph_name_str, const bool cascade)
 {
     NameData graph_name;
+    Oid graph_oid;
 
     if (!graph_exists(graph_name_str))
     {
         ereport(ERROR, (errcode(ERRCODE_UNDEFINED_SCHEMA),
                         errmsg("graph \"%s\" does not exist", graph_name_str)));
     }
+    graph_oid = get_graph_oid(graph_name_str);
 
     drop_schema_for_graph((char *)graph_name_str, cascade);
 
     namestrcpy(&graph_name, graph_name_str);
     delete_graph(&graph_name);
+    remove_graph_version(graph_oid);
     CommandCounterIncrement();
 
     ereport(NOTICE, (errmsg("graph \"%s\" has been dropped", graph_name_str)));

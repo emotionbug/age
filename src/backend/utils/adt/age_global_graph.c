@@ -4469,7 +4469,7 @@ uint64 get_graph_version(Oid graph_oid)
     GraphVersionState *state = get_version_state();
     int i;
 
-    if (state == NULL)
+    if (state == NULL || !OidIsValid(graph_oid))
     {
         return 0;
     }
@@ -4510,8 +4510,9 @@ void increment_graph_version(Oid graph_oid)
 {
     GraphVersionState *state = get_version_state();
     int i;
+    int free_idx = -1;
 
-    if (state == NULL)
+    if (state == NULL || !OidIsValid(graph_oid))
     {
         return;
     }
@@ -4554,31 +4555,93 @@ void increment_graph_version(Oid graph_oid)
             pg_atomic_fetch_add_u64(&state->entries[i].version, 1);
             return;
         }
+        if (!OidIsValid(state->entries[i].graph_oid) && free_idx < 0)
+        {
+            free_idx = i;
+        }
     }
 
-    /* add new entry */
-    if (state->num_entries < AGE_MAX_GRAPHS)
+    /* add new entry, reusing slots freed by dropped graphs first */
+    if (free_idx >= 0 || state->num_entries < AGE_MAX_GRAPHS)
     {
-        int idx = state->num_entries;
+        int idx = free_idx >= 0 ? free_idx : state->num_entries;
 
+        if (free_idx >= 0)
+            pg_atomic_write_u64(&state->entries[idx].version, 1);
+        else
+            pg_atomic_init_u64(&state->entries[idx].version, 1);
+
+        /*
+         * When reusing a slot, num_entries already makes it visible to
+         * lock-free readers. Initialize the version before publishing the
+         * graph OID so readers cannot observe a new OID with a stale version.
+         */
+        pg_write_barrier();
         state->entries[idx].graph_oid = graph_oid;
-        pg_atomic_init_u64(&state->entries[idx].version, 1);
         cached_version_graph_oid = graph_oid;
         cached_version_graph_index = idx;
 
-        /*
-         * Write barrier ensures the entry fields are fully visible to
-         * other backends before num_entries is incremented. This prevents
-         * readers on weak memory-ordering architectures (e.g., ARM) from
-         * seeing the incremented count before the entry is initialized.
-         */
-        pg_write_barrier();
-        state->num_entries++;
+        if (free_idx < 0)
+        {
+            /*
+             * Write barrier ensures the entry fields are fully visible to
+             * other backends before num_entries is incremented. This prevents
+             * readers on weak memory-ordering architectures (e.g., ARM) from
+             * seeing the incremented count before the entry is initialized.
+             */
+            pg_write_barrier();
+            state->num_entries++;
+        }
     }
     else
     {
         elog(WARNING, "AGE: graph version counter table full (%d graphs)",
              AGE_MAX_GRAPHS);
+    }
+
+    LWLockRelease(&state->lock);
+}
+
+/*
+ * Remove a dropped graph from the version counter table.
+ *
+ * Version counters live outside normal transaction state, so graph drops must
+ * explicitly release their slot.  The array is kept as a high-water mark with
+ * reusable holes so lock-free readers never need to follow moved entries.
+ */
+void remove_graph_version(Oid graph_oid)
+{
+    GraphVersionState *state = get_version_state();
+    int i;
+
+    if (state == NULL || !OidIsValid(graph_oid))
+    {
+        return;
+    }
+
+    LWLockAcquire(&state->lock, LW_EXCLUSIVE);
+
+    for (i = 0; i < state->num_entries; i++)
+    {
+        if (state->entries[i].graph_oid == graph_oid)
+        {
+            state->entries[i].graph_oid = InvalidOid;
+            pg_atomic_write_u64(&state->entries[i].version, 0);
+
+            if (cached_version_graph_oid == graph_oid)
+            {
+                cached_version_graph_oid = InvalidOid;
+                cached_version_graph_index = -1;
+            }
+
+            while (state->num_entries > 0 &&
+                   !OidIsValid(state->entries[state->num_entries - 1].graph_oid))
+            {
+                state->num_entries--;
+            }
+
+            break;
+        }
     }
 
     LWLockRelease(&state->lock);

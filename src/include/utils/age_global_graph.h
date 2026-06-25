@@ -236,6 +236,7 @@ void destroy_entry_property_relation_cache(HTAB *relation_cache);
 /* Graph version counter functions — shared memory (DSM or shmem) */
 uint64 get_graph_version(Oid graph_oid);
 void increment_graph_version(Oid graph_oid);
+void remove_graph_version(Oid graph_oid);
 Oid get_graph_oid_for_table(Oid table_oid);
 double age_cached_edge_dst_label_selectivity(Oid graph_oid,
                                              const char *src_label_name,
