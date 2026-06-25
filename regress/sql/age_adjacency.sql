@@ -814,6 +814,7 @@ DECLARE
     endpoint_id graphid;
     plan_text text;
     has_parallel_adjacency boolean := false;
+    has_gather_adjacency boolean := false;
 BEGIN
     PERFORM create_graph(graph_name);
     EXECUTE format('SELECT create_vlabel(%L, %L)', graph_name, 'N');
@@ -864,11 +865,19 @@ BEGIN
            plan_text LIKE '%Adjacency Parallel:%slice=worker-local-ready%' THEN
             has_parallel_adjacency := true;
         END IF;
+        IF plan_text LIKE '%Gather%' OR
+           plan_text LIKE '%Adjacency Parallel:%aware=true%' THEN
+            has_gather_adjacency := true;
+        END IF;
     END LOOP;
 
     IF NOT has_parallel_adjacency THEN
         RAISE EXCEPTION
             'expected 1024-fanout AGE Adjacency Match parallel-ready plan';
+    END IF;
+    IF NOT has_gather_adjacency THEN
+        RAISE EXCEPTION
+            'expected 1024-fanout AGE Adjacency Match Gather plan';
     END IF;
 
     PERFORM drop_graph(graph_name, true);

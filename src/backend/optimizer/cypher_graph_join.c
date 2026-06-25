@@ -39,6 +39,14 @@ static void graph_join_metadata_update_component_candidate(
 static bool graph_join_component_candidate_matches(
     const AgeGraphJoinRelComponentCandidate *component_candidate,
     const char *component, const AgeGraphJoinPathEvidence *evidence);
+static bool graph_join_component_physical_properties_match(
+    const AgeGraphJoinPathEvidence *existing,
+    const AgeGraphJoinPathEvidence *candidate);
+static bool graph_join_component_connector_properties_match(
+    const AgeGraphJoinPathEvidence *existing,
+    const AgeGraphJoinPathEvidence *candidate);
+static bool graph_join_text_matches(const char *existing,
+                                    const char *candidate);
 static bool graph_join_metadata_lookup_path_evidence(
     const AgeGraphJoinRelMetadata *metadata, Path *path,
     AgeGraphJoinPathEvidence *evidence);
@@ -652,7 +660,50 @@ static bool graph_join_component_candidate_matches(
 
     return bms_equal(existing->solved_relids, evidence->solved_relids) &&
            bms_equal(existing->provided_relids, evidence->provided_relids) &&
-           bms_equal(existing->required_outer, evidence->required_outer);
+           bms_equal(existing->required_outer, evidence->required_outer) &&
+           graph_join_component_connector_properties_match(existing,
+                                                           evidence) &&
+           graph_join_component_physical_properties_match(existing,
+                                                          evidence);
+}
+
+static bool graph_join_component_physical_properties_match(
+    const AgeGraphJoinPathEvidence *existing,
+    const AgeGraphJoinPathEvidence *candidate)
+{
+    if (existing == NULL || candidate == NULL)
+        return false;
+
+    return existing->parallel_safe == candidate->parallel_safe &&
+           existing->parallel_aware == candidate->parallel_aware &&
+           existing->parallel_workers == candidate->parallel_workers &&
+           existing->order_preserving == candidate->order_preserving &&
+           existing->shared_state_required ==
+           candidate->shared_state_required;
+}
+
+static bool graph_join_component_connector_properties_match(
+    const AgeGraphJoinPathEvidence *existing,
+    const AgeGraphJoinPathEvidence *candidate)
+{
+    if (existing == NULL || candidate == NULL)
+        return false;
+
+    return graph_join_text_matches(existing->connector,
+                                   candidate->connector) &&
+           graph_join_text_matches(existing->order_property,
+                                   candidate->order_property) &&
+           graph_join_text_matches(existing->source_evidence,
+                                   candidate->source_evidence);
+}
+
+static bool graph_join_text_matches(const char *existing,
+                                    const char *candidate)
+{
+    if (existing == NULL || candidate == NULL)
+        return existing == candidate;
+
+    return strcmp(existing, candidate) == 0;
 }
 
 void age_graph_join_register_rel_candidate_table(
