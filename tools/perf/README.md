@@ -130,3 +130,25 @@ PG_CONFIG=/path/to/pg_config FANOUT=3000000 RUNS=7 \
 
 `MIN_SPEEDUP` defaults to `50`; raise it to the deployment target after sizing
 `FANOUT` to the production degree distribution.
+
+## WCOJ survivor-batched payload materialization
+
+`wcoj_completion_setup.sql` and `wcoj_completion_benchmark.sql` include a dense
+4-way star that exposes repeated survivor-local payload scans.  The batched
+executor collects a bounded survivor block and performs one exact-set tagged
+payload run scan per adjacency provider and block, preserving source and edge
+bag multiplicity without materializing the posting product.
+
+```sh
+psql --set=ON_ERROR_STOP=1 \
+  --set=star_sources=4 --set=star_fanout=4096 \
+  --set=cycle_vertices=1024 --set=cycle_fanout=64 \
+  --file=tools/perf/wcoj_completion_setup.sql
+psql --set=ON_ERROR_STOP=1 --set=runs=5 \
+  --file=tools/perf/wcoj_completion_benchmark.sql
+```
+
+Run the same fixture against separately installed baseline and candidate
+builds.  Discard the first sample and compare the median of the next five.
+`wcoj_survivor_batch_results.md` records the reference environment, raw
+samples, telemetry, and correctness checks.
