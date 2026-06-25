@@ -227,9 +227,9 @@ static void init_vle_traversal_context_apply(
         setup->graph_load.source_policy.indexes;
     context_apply->source_policy_known = apply->input->source_policy_known;
     context_apply->source_policy_outgoing_kind =
-        (VLETraversalSourceKind)apply->input->source_policy_outgoing_kind;
+        apply->input->source_policy_outgoing_kind;
     context_apply->source_policy_incoming_kind =
-        (VLETraversalSourceKind)apply->input->source_policy_incoming_kind;
+        apply->input->source_policy_incoming_kind;
     context_apply->empty_lifecycle_policy_known =
         apply->input->empty_lifecycle_policy_known;
     context_apply->empty_lifecycle_eligible =
@@ -654,9 +654,9 @@ void init_vle_context_refresh_input(AgeVLEInput *input,
         input->terminal_label_id : INVALID_LABEL_ID;
     refresh->source_policy_known = input->source_policy_known;
     refresh->source_policy_outgoing_kind =
-        (VLETraversalSourceKind)input->source_policy_outgoing_kind;
+        input->source_policy_outgoing_kind;
     refresh->source_policy_incoming_kind =
-        (VLETraversalSourceKind)input->source_policy_incoming_kind;
+        input->source_policy_incoming_kind;
     refresh->empty_lifecycle_policy_known =
         input->empty_lifecycle_policy_known;
     refresh->empty_lifecycle_eligible = input->empty_lifecycle_eligible;

@@ -27,9 +27,21 @@
 
 static char *copy_graph_join_text(const char *value,
                                   const char *fallback);
-static const char *graph_join_infer_component_family(const char *component,
-                                                     const char *connector,
-                                                     const char *order_property);
+static AgeGraphJoinComponentKind graph_join_infer_component_family_kind(
+    AgeGraphJoinConnectorKind connector_kind,
+    AgeGraphJoinOrderPropertyKind order_property_kind);
+static bool graph_join_component_kinds_match(
+    AgeGraphJoinComponentKind existing, AgeGraphJoinComponentKind candidate);
+static bool graph_join_order_property_kinds_match(
+    AgeGraphJoinOrderPropertyKind existing,
+    AgeGraphJoinOrderPropertyKind candidate);
+static bool graph_join_source_kinds_match(
+    AgeGraphJoinSourceKind existing, AgeGraphJoinSourceKind candidate);
+static bool graph_join_connector_kinds_match(
+    AgeGraphJoinConnectorKind existing, AgeGraphJoinConnectorKind candidate);
+static bool graph_join_source_evidence_matches(
+    AgeGraphJoinSourceEvidenceKind existing_kind,
+    AgeGraphJoinSourceEvidenceKind candidate_kind);
 static void graph_join_metadata_context_reset(void *arg);
 static bool graph_join_metadata_identity_matches(PlannerInfo *root);
 static void apply_graph_join_lowering_input(
@@ -37,6 +49,14 @@ static void apply_graph_join_lowering_input(
     const AgeGraphJoinLoweringInput *lowering_input);
 static void graph_join_metadata_rebuild_component_candidates(
     AgeGraphJoinRelMetadata *metadata);
+static void graph_join_metadata_append_pool_component_candidates(
+    AgeGraphJoinRelMetadata *metadata);
+static AgeGraphJoinRelCandidate *graph_join_metadata_pool_carrier_candidate(
+    AgeGraphJoinRelMetadata *metadata,
+    const AgeGraphJoinPathEvidence *evidence);
+static bool graph_join_pool_evidence_can_use_carrier(
+    const AgeGraphJoinRelCandidate *carrier,
+    const AgeGraphJoinPathEvidence *evidence);
 static void graph_join_metadata_append_lowering_candidates(
     AgeGraphJoinRelMetadata *metadata);
 static void graph_join_metadata_merge_lowering_candidate(
@@ -46,11 +66,13 @@ static int graph_join_metadata_lowering_candidate_count(
     const AgeGraphJoinRelMetadata *metadata);
 static int graph_join_metadata_lowering_artifact_entry_count(
     const AgeGraphJoinRelMetadata *metadata);
+static Cost graph_join_evidence_component_total_cost(
+    const AgeGraphJoinRelCandidate *candidate);
 static AgeGraphJoinLoweringArtifact *graph_join_metadata_merge_lowering_artifact(
     AgeGraphJoinRelMetadata *metadata,
     const AgeGraphJoinLoweringArtifact *artifact);
 static AgeGraphJoinLoweringArtifact *graph_join_metadata_find_lowering_artifact(
-    AgeGraphJoinRelMetadata *metadata, const char *pattern_kind);
+    AgeGraphJoinRelMetadata *metadata, const char *pattern_key);
 static void graph_join_metadata_update_component_candidate(
     AgeGraphJoinRelMetadata *metadata,
     const AgeGraphJoinRelCandidate *candidate);
@@ -59,7 +81,7 @@ static bool graph_join_component_candidate_keeps_existing(
     const AgeGraphJoinRelCandidate *candidate, Cost total_cost);
 static bool graph_join_component_candidate_matches(
     const AgeGraphJoinRelComponentCandidate *component_candidate,
-    const char *component, const AgeGraphJoinPathEvidence *evidence);
+    const AgeGraphJoinPathEvidence *evidence);
 static bool graph_join_component_physical_properties_match(
     const AgeGraphJoinPathEvidence *existing,
     const AgeGraphJoinPathEvidence *candidate);
@@ -71,6 +93,20 @@ static bool graph_join_text_matches(const char *existing,
 static bool graph_join_metadata_lookup_path_evidence(
     const AgeGraphJoinRelMetadata *metadata, Path *path,
     AgeGraphJoinPathEvidence *evidence);
+static AgeGraphJoinLoweringArtifactEntry *
+graph_join_lowering_artifact_find_entry(
+    AgeGraphJoinLoweringArtifact *artifact,
+    AgeGraphJoinSourceKind source_kind_id, bool require_empty_table);
+static AgeGraphJoinCandidateTable *graph_join_make_declared_entry_table(
+    RelOptInfo *rel, const AgeGraphJoinLoweringArtifact *artifact,
+    const AgeGraphJoinLoweringArtifactEntry *entry);
+static AgeGraphJoinConnectorKind graph_join_declared_connector_kind(
+    AgeGraphJoinSourceKind source_kind_id);
+static AgeGraphJoinOrderPropertyKind graph_join_declared_order_property_kind(
+    AgeGraphJoinSourceKind source_kind_id);
+static AgeGraphJoinSourceEvidenceKind
+graph_join_declared_source_evidence_kind(
+    AgeGraphJoinSourceKind source_kind_id);
 static bool graph_join_lowering_candidate_matches(
     const AgeGraphJoinRelCandidate *rel_candidate,
     const AgeGraphJoinPathEvidence *evidence);
@@ -81,6 +117,8 @@ static void graph_join_path_evidence_from_candidate(
     Path *path, const AgeGraphJoinCandidateTable *table,
     const AgeGraphJoinCandidate *candidate,
     AgeGraphJoinPathEvidence *evidence);
+static void graph_join_candidate_table_apply_defaults(
+    AgeGraphJoinCandidateTable *table, AgeGraphJoinCandidate *candidate);
 static bool graph_join_planner_candidate_matches(
     const AgeGraphJoinRelCandidate *rel_candidate, Path *path,
     const AgeGraphJoinPathEvidence *evidence);
@@ -103,15 +141,11 @@ AgeGraphJoinCandidate *age_graph_join_make_candidate(
     Assert(request != NULL);
 
     candidate = palloc0(sizeof(*candidate));
-    candidate->component.name =
-        copy_graph_join_text(request->component, "unknown");
-    candidate->component.family =
-        copy_graph_join_text(
-            request->component_family != NULL ? request->component_family :
-            graph_join_infer_component_family(request->component,
-                                              request->connector,
-                                              request->order_property),
-            "graph-component");
+    candidate->component.display_name = copy_graph_join_text(
+        request->display_name != NULL ? request->display_name :
+        age_graph_join_component_name(request->component_family_kind),
+        "graph-component");
+    candidate->component.family_kind = request->component_family_kind;
     candidate->component.solved_relids = bms_copy(request->solved_relids);
     candidate->component.required_outer = bms_copy(request->required_outer);
     candidate->component.provided_relids = bms_copy(request->provided_relids);
@@ -125,20 +159,20 @@ AgeGraphJoinCandidate *age_graph_join_make_candidate(
     candidate->component.shared_state_required =
         request->shared_state_required;
 
-    candidate->connector.kind =
-        copy_graph_join_text(request->connector, "unknown");
-    candidate->connector.bound =
-        copy_graph_join_text(request->bound, "unknown");
-    candidate->connector.order_property =
-        copy_graph_join_text(request->order_property, "query-order");
-    candidate->connector.source_evidence =
-        copy_graph_join_text(request->source_evidence, "unknown");
+    candidate->connector.kind_id = request->connector_kind;
+    candidate->connector.bound_kind = request->bound_kind;
+    candidate->connector.order_property_kind = request->order_property_kind;
+    candidate->connector.source_evidence_kind =
+        request->source_evidence_kind;
     candidate->connector.solved_relids = bms_copy(request->solved_relids);
     candidate->connector.required_outer = bms_copy(request->required_outer);
     candidate->connector.provided_relids = bms_copy(request->provided_relids);
     candidate->connector.rows = request->rows;
     candidate->connector.startup_cost = request->startup_cost;
     candidate->connector.total_cost = request->total_cost;
+    if (request->pattern_key != NULL)
+        candidate->pattern_key = pstrdup(request->pattern_key);
+    candidate->source_kind_id = request->source_kind_id;
 
     return candidate;
 }
@@ -153,28 +187,33 @@ AgeGraphJoinCandidateTable *age_graph_join_make_candidate_table(void)
 }
 
 AgeGraphJoinLoweringArtifact *age_graph_join_make_pattern_lowering_artifact(
-    const char *pattern_kind, const char *source_kind,
+    const char *pattern_key, AgeGraphJoinSourceKind source_kind_id,
     AgeGraphJoinCandidateTable *table)
 {
     AgeGraphJoinLoweringArtifact *artifact;
 
     artifact = palloc0(sizeof(*artifact));
-    artifact->pattern_kind = copy_graph_join_text(pattern_kind,
+    artifact->pattern_key = copy_graph_join_text(pattern_key,
                                                   "graph-pattern");
-    age_graph_join_lowering_artifact_add_table(artifact, source_kind, table);
+    age_graph_join_lowering_artifact_add_typed_table(
+        artifact,
+        source_kind_id,
+        AGE_GRAPH_JOIN_COMPONENT_UNKNOWN, table);
 
     return artifact;
 }
 
 AgeGraphJoinLoweringArtifact *age_graph_join_make_lowering_artifact(
-    const char *source_kind, AgeGraphJoinCandidateTable *table)
+    const char *pattern_key, AgeGraphJoinCandidateTable *table)
 {
     return age_graph_join_make_pattern_lowering_artifact(
-        source_kind, source_kind, table);
+        pattern_key, AGE_GRAPH_JOIN_SOURCE_UNKNOWN, table);
 }
 
-void age_graph_join_lowering_artifact_add_table(
-    AgeGraphJoinLoweringArtifact *artifact, const char *source_kind,
+void age_graph_join_lowering_artifact_add_typed_table(
+    AgeGraphJoinLoweringArtifact *artifact,
+    AgeGraphJoinSourceKind source_kind_id,
+    AgeGraphJoinComponentKind component_family_kind,
     AgeGraphJoinCandidateTable *table)
 {
     AgeGraphJoinLoweringArtifactEntry *entry;
@@ -187,25 +226,134 @@ void age_graph_join_lowering_artifact_add_table(
         return;
     }
 
+    entry = graph_join_lowering_artifact_find_entry(
+        artifact, source_kind_id, true);
+    if (entry != NULL)
+    {
+        entry->table = table;
+        if (entry->component_family_kind == AGE_GRAPH_JOIN_COMPONENT_UNKNOWN)
+            entry->component_family_kind = component_family_kind;
+        goto apply_identity;
+    }
+
     foreach(lc, artifact->entries)
     {
         AgeGraphJoinLoweringArtifactEntry *existing = lfirst(lc);
 
         if (existing != NULL &&
             existing->table == table &&
-            existing->source_kind != NULL &&
-            source_kind != NULL &&
-            strcmp(existing->source_kind, source_kind) == 0)
+            graph_join_source_kinds_match(
+                existing->source_kind_id, source_kind_id))
         {
             return;
         }
     }
 
     entry = palloc0(sizeof(*entry));
-    entry->source_kind = copy_graph_join_text(source_kind,
-                                              artifact->pattern_kind);
+    entry->source_kind_id = source_kind_id;
+    entry->component_family_kind = component_family_kind;
     entry->table = table;
     artifact->entries = lappend(artifact->entries, entry);
+
+apply_identity:
+    table->declared_entry_count = Max(table->declared_entry_count,
+                                      list_length(artifact->entries));
+    table->cover_match_kind = AGE_GRAPH_JOIN_COVER_MATCHED;
+    table->pattern_key = copy_graph_join_text(artifact->pattern_key,
+                                               "graph-pattern");
+    table->source_kind_id = entry->source_kind_id;
+    table->component_family_kind = entry->component_family_kind;
+    foreach(lc, table->candidates)
+    {
+        AgeGraphJoinCandidate *candidate = lfirst(lc);
+
+        if (candidate == NULL)
+            continue;
+        graph_join_candidate_table_apply_defaults(table, candidate);
+    }
+}
+
+void age_graph_join_lowering_artifact_declare_typed_entry(
+    AgeGraphJoinLoweringArtifact *artifact,
+    AgeGraphJoinSourceKind source_kind_id,
+    AgeGraphJoinComponentKind component_family_kind)
+{
+    AgeGraphJoinLoweringArtifactEntry *entry;
+
+    if (artifact == NULL ||
+        source_kind_id == AGE_GRAPH_JOIN_SOURCE_UNKNOWN)
+    {
+        return;
+    }
+
+    entry = graph_join_lowering_artifact_find_entry(
+        artifact, source_kind_id, false);
+    if (entry != NULL)
+    {
+        if (entry->component_family_kind == AGE_GRAPH_JOIN_COMPONENT_UNKNOWN)
+            entry->component_family_kind = component_family_kind;
+        return;
+    }
+
+    entry = palloc0(sizeof(*entry));
+    entry->source_kind_id = source_kind_id;
+    entry->component_family_kind = component_family_kind;
+    artifact->entries = lappend(artifact->entries, entry);
+}
+
+AgeGraphJoinCandidateTable *
+age_graph_join_lowering_artifact_typed_entry_table(
+    AgeGraphJoinLoweringArtifact *artifact,
+    AgeGraphJoinSourceKind source_kind_id,
+    AgeGraphJoinComponentKind component_family_kind)
+{
+    if (artifact == NULL ||
+        source_kind_id == AGE_GRAPH_JOIN_SOURCE_UNKNOWN)
+    {
+        return NULL;
+    }
+
+    age_graph_join_lowering_artifact_declare_typed_entry(
+        artifact, source_kind_id, component_family_kind);
+    return age_graph_join_lowering_artifact_declared_entry_table(
+        artifact, source_kind_id, component_family_kind);
+}
+
+AgeGraphJoinCandidateTable *
+age_graph_join_lowering_artifact_declared_entry_table(
+    AgeGraphJoinLoweringArtifact *artifact,
+    AgeGraphJoinSourceKind source_kind_id,
+    AgeGraphJoinComponentKind component_family_kind)
+{
+    AgeGraphJoinLoweringArtifactEntry *entry;
+
+    if (artifact == NULL ||
+        source_kind_id == AGE_GRAPH_JOIN_SOURCE_UNKNOWN)
+    {
+        return NULL;
+    }
+
+    entry = graph_join_lowering_artifact_find_entry(
+        artifact, source_kind_id, false);
+    if (entry == NULL)
+        return NULL;
+
+    if (entry->table == NULL)
+        entry->table = age_graph_join_make_candidate_table();
+    else
+        entry->table->candidates = NIL;
+    if (entry->component_family_kind == AGE_GRAPH_JOIN_COMPONENT_UNKNOWN)
+        entry->component_family_kind = component_family_kind;
+
+    entry->table->declared_entry_count = Max(
+        entry->table->declared_entry_count, list_length(artifact->entries));
+    entry->table->cover_match_kind = AGE_GRAPH_JOIN_COVER_MATCHED;
+    entry->table->pattern_key = copy_graph_join_text(
+        artifact->pattern_key, "graph-pattern");
+    entry->table->source_kind_id = entry->source_kind_id;
+    entry->table->component_family_kind = entry->component_family_kind;
+
+    return entry->table;
 }
 
 AgeGraphJoinCandidate *age_graph_join_table_add_candidate(
@@ -215,33 +363,38 @@ AgeGraphJoinCandidate *age_graph_join_table_add_candidate(
     AgeGraphJoinCandidate *candidate;
 
     Assert(table != NULL);
+    Assert(request != NULL);
 
     candidate = age_graph_join_make_candidate(request);
+    graph_join_candidate_table_apply_defaults(table, candidate);
     table->candidates = lappend(table->candidates, candidate);
 
     return candidate;
 }
 
-AgeGraphJoinCandidate *age_graph_join_table_add_path_candidate(
-    AgeGraphJoinCandidateTable *table, Path *path, const char *component,
-    const char *component_family, const char *connector, const char *bound,
-    const char *order_property, const char *source_evidence,
-    bool shared_state_required)
+static void graph_join_candidate_table_apply_defaults(
+    AgeGraphJoinCandidateTable *table, AgeGraphJoinCandidate *candidate)
 {
-    AgeGraphJoinCandidateRequest request;
+    if (table == NULL || candidate == NULL)
+        return;
 
-    age_graph_join_init_path_request(&request, path, component,
-                                     component_family, connector, bound,
-                                     order_property, source_evidence,
-                                     shared_state_required);
-
-    return age_graph_join_table_add_candidate(table, &request);
+    if (table->pattern_key != NULL)
+        candidate->pattern_key = copy_graph_join_text(table->pattern_key,
+                                                       "graph-pattern");
+    if (table->source_kind_id != AGE_GRAPH_JOIN_SOURCE_UNKNOWN)
+        candidate->source_kind_id = table->source_kind_id;
+    if (table->component_family_kind != AGE_GRAPH_JOIN_COMPONENT_UNKNOWN)
+        candidate->component.family_kind = table->component_family_kind;
 }
 
 void age_graph_join_init_path_request(
-    AgeGraphJoinCandidateRequest *request, Path *path, const char *component,
-    const char *component_family, const char *connector, const char *bound,
-    const char *order_property, const char *source_evidence,
+    AgeGraphJoinCandidateRequest *request, Path *path,
+    AgeGraphJoinBoundKind bound_kind,
+    AgeGraphJoinComponentKind component_family_kind,
+    AgeGraphJoinConnectorKind connector_kind,
+    AgeGraphJoinOrderPropertyKind order_property_kind,
+    AgeGraphJoinSourceEvidenceKind source_evidence_kind,
+    AgeGraphJoinSourceKind source_kind_id,
     bool shared_state_required)
 {
     Relids provided_relids = NULL;
@@ -260,12 +413,12 @@ void age_graph_join_init_path_request(
     if (path->pathtarget != NULL && path->pathtarget->width > 0)
         output_width = path->pathtarget->width;
 
-    request->component = component;
-    request->component_family = component_family;
-    request->connector = connector;
-    request->bound = bound;
-    request->order_property = order_property;
-    request->source_evidence = source_evidence;
+    request->component_family_kind = component_family_kind;
+    request->connector_kind = connector_kind;
+    request->bound_kind = bound_kind;
+    request->order_property_kind = order_property_kind;
+    request->source_evidence_kind = source_evidence_kind;
+    request->source_kind_id = source_kind_id;
     request->solved_relids = provided_relids;
     request->required_outer = PATH_REQ_OUTER(path);
     request->provided_relids = provided_relids;
@@ -284,15 +437,18 @@ void age_graph_join_init_path_request(
 void age_graph_join_init_lowered_path_request(
     AgeGraphJoinCandidateRequest *request, Path *path,
     const AgeGraphJoinLoweringInput *lowering_input,
-    const char *component, const char *component_family,
-    const char *connector, const char *bound,
-    const char *order_property, const char *source_evidence,
+    AgeGraphJoinBoundKind bound_kind,
+    AgeGraphJoinComponentKind component_family_kind,
+    AgeGraphJoinConnectorKind connector_kind,
+    AgeGraphJoinOrderPropertyKind order_property_kind,
+    AgeGraphJoinSourceEvidenceKind source_evidence_kind,
+    AgeGraphJoinSourceKind source_kind_id,
     bool shared_state_required)
 {
-    age_graph_join_init_path_request(request, path, component,
-                                     component_family, connector, bound,
-                                     order_property, source_evidence,
-                                     shared_state_required);
+    age_graph_join_init_path_request(
+        request, path, bound_kind,
+        component_family_kind, connector_kind, order_property_kind,
+        source_evidence_kind, source_kind_id, shared_state_required);
     apply_graph_join_lowering_input(request, lowering_input);
 }
 
@@ -313,57 +469,46 @@ static void apply_graph_join_lowering_input(
         request->output_width = lowering_input->output_width;
 }
 
-AgeGraphJoinCandidate *age_graph_join_table_add_scheduled_candidate(
-    AgeGraphJoinCandidateTable *table, Path *path, const char *component,
-    const char *component_family, const char *connector, const char *bound,
-    const char *order_property, const char *source_evidence, double rows,
-    Cost startup_cost, Cost total_cost, bool shared_state_required)
-{
-    AgeGraphJoinCandidateRequest request;
-
-    age_graph_join_init_path_request(&request, path, component,
-                                     component_family, connector, bound,
-                                     order_property, source_evidence,
-                                     shared_state_required);
-    request.rows = rows;
-    request.startup_cost = startup_cost;
-    request.total_cost = total_cost;
-
-    return age_graph_join_table_add_candidate(table, &request);
-}
-
-AgeGraphJoinCandidate *age_graph_join_table_add_lowered_path_candidate(
+AgeGraphJoinCandidate *age_graph_join_table_add_lowered_typed_path_candidate(
     AgeGraphJoinCandidateTable *table, Path *path,
     const AgeGraphJoinLoweringInput *lowering_input,
-    const char *component, const char *component_family,
-    const char *connector, const char *bound,
-    const char *order_property, const char *source_evidence,
+    AgeGraphJoinBoundKind bound_kind,
+    AgeGraphJoinComponentKind component_family_kind,
+    AgeGraphJoinConnectorKind connector_kind,
+    AgeGraphJoinOrderPropertyKind order_property_kind,
+    AgeGraphJoinSourceEvidenceKind source_evidence_kind,
+    AgeGraphJoinSourceKind source_kind_id,
     bool shared_state_required)
 {
     AgeGraphJoinCandidateRequest request;
 
     age_graph_join_init_lowered_path_request(
-        &request, path, lowering_input, component, component_family,
-        connector, bound, order_property, source_evidence,
-        shared_state_required);
+        &request, path, lowering_input, bound_kind,
+        component_family_kind, connector_kind, order_property_kind,
+        source_evidence_kind, source_kind_id, shared_state_required);
 
     return age_graph_join_table_add_candidate(table, &request);
 }
 
-AgeGraphJoinCandidate *age_graph_join_table_add_lowered_scheduled_candidate(
+AgeGraphJoinCandidate *
+age_graph_join_table_add_lowered_typed_scheduled_candidate(
     AgeGraphJoinCandidateTable *table, Path *path,
     const AgeGraphJoinLoweringInput *lowering_input,
-    const char *component, const char *component_family,
-    const char *connector, const char *bound,
-    const char *order_property, const char *source_evidence, double rows,
-    Cost startup_cost, Cost total_cost, bool shared_state_required)
+    AgeGraphJoinBoundKind bound_kind,
+    AgeGraphJoinComponentKind component_family_kind,
+    AgeGraphJoinConnectorKind connector_kind,
+    AgeGraphJoinOrderPropertyKind order_property_kind,
+    AgeGraphJoinSourceEvidenceKind source_evidence_kind,
+    AgeGraphJoinSourceKind source_kind_id,
+    double rows, Cost startup_cost, Cost total_cost,
+    bool shared_state_required)
 {
     AgeGraphJoinCandidateRequest request;
 
     age_graph_join_init_lowered_path_request(
-        &request, path, lowering_input, component, component_family,
-        connector, bound, order_property, source_evidence,
-        shared_state_required);
+        &request, path, lowering_input, bound_kind,
+        component_family_kind, connector_kind, order_property_kind,
+        source_evidence_kind, source_kind_id, shared_state_required);
     request.rows = rows;
     request.startup_cost = startup_cost;
     request.total_cost = total_cost;
@@ -372,7 +517,7 @@ AgeGraphJoinCandidate *age_graph_join_table_add_lowered_scheduled_candidate(
 }
 
 AgeGraphJoinCandidate *age_graph_join_table_add_path_evidence_candidate(
-    AgeGraphJoinCandidateTable *table, Path *path, const char *component,
+    AgeGraphJoinCandidateTable *table, Path *path,
     const AgeGraphJoinPathEvidence *evidence)
 {
     AgeGraphJoinCandidateRequest request;
@@ -382,21 +527,19 @@ AgeGraphJoinCandidate *age_graph_join_table_add_path_evidence_candidate(
 
     if (table == NULL ||
         evidence == NULL ||
-        evidence->order_property == NULL)
+        evidence->order_property_kind == AGE_GRAPH_JOIN_ORDER_UNKNOWN ||
+        evidence->component_kind == AGE_GRAPH_JOIN_COMPONENT_UNKNOWN)
     {
         return NULL;
     }
 
     age_graph_join_init_path_request(
         &request, path,
-        component != NULL ? component :
-        age_graph_join_component_from_evidence(evidence),
-        age_graph_join_component_from_evidence(evidence),
-        evidence->connector != NULL ? evidence->connector : "graph-connector",
-        evidence->bound ? "bound" : "unbound",
-        evidence->order_property,
-        evidence->source_evidence != NULL ?
-        evidence->source_evidence : "path-evidence",
+        evidence->bound ? AGE_GRAPH_JOIN_BOUND_BOUND :
+        AGE_GRAPH_JOIN_BOUND_UNBOUND,
+        evidence->component_kind, evidence->connector_kind,
+        evidence->order_property_kind, evidence->source_evidence_kind,
+        evidence->source_kind_id,
         false);
 
     total_cost = evidence->selected_total_cost > 0 ?
@@ -415,96 +558,135 @@ AgeGraphJoinCandidate *age_graph_join_table_add_path_evidence_candidate(
     request.gather_cost = evidence->gather_cost;
     request.order_preserving = evidence->order_preserving;
     request.shared_state_required = evidence->shared_state_required;
+    request.pattern_key = evidence->pattern_key;
     request.total_cost = total_cost;
     request.rows = path->rows;
 
     return age_graph_join_table_add_candidate(table, &request);
 }
 
-const char *age_graph_join_component_from_evidence(
-    const AgeGraphJoinPathEvidence *evidence)
+const char *age_graph_join_component_name(
+    AgeGraphJoinComponentKind component_kind)
 {
-    if (evidence == NULL)
-        return "graph-component";
-    if (evidence->component_family != NULL)
-        return evidence->component_family;
-
-    return graph_join_infer_component_family(NULL, evidence->connector,
-                                             evidence->order_property);
-}
-
-static const char *graph_join_infer_component_family(const char *component,
-                                                     const char *connector,
-                                                     const char *order_property)
-{
-    if (component != NULL &&
-        (strcmp(component, "node-property-seek") == 0 ||
-         strcmp(component, "vle-expansion") == 0 ||
-         strcmp(component, "adjacency-expansion") == 0 ||
-         strcmp(component, "graph-value-join") == 0 ||
-         strcmp(component, "graph-apply") == 0 ||
-         strcmp(component, "graph-cartesian") == 0))
+    switch (component_kind)
     {
-        return component;
+        case AGE_GRAPH_JOIN_COMPONENT_NODE_PROPERTY_SEEK:
+            return "node-property-seek";
+        case AGE_GRAPH_JOIN_COMPONENT_VLE_EXPANSION:
+            return "vle-expansion";
+        case AGE_GRAPH_JOIN_COMPONENT_ADJACENCY_EXPANSION:
+            return "adjacency-expansion";
+        case AGE_GRAPH_JOIN_COMPONENT_VALUE_JOIN:
+            return "graph-value-join";
+        case AGE_GRAPH_JOIN_COMPONENT_APPLY:
+            return "graph-apply";
+        case AGE_GRAPH_JOIN_COMPONENT_CARTESIAN:
+            return "graph-cartesian";
+        case AGE_GRAPH_JOIN_COMPONENT_UNKNOWN:
+            break;
     }
-
-    if (connector != NULL &&
-        (strcmp(connector, "postgres-index-seek") == 0 ||
-         strcmp(connector, "node-property-index-seek") == 0))
-    {
-        return "node-property-seek";
-    }
-
-    if (connector != NULL &&
-        (strncmp(connector, "vle-", 4) == 0 ||
-         strcmp(connector, "matrix-frontier-expand") == 0))
-    {
-        return "vle-expansion";
-    }
-
-    if (connector != NULL &&
-        (strncmp(connector, "adjacency-", 10) == 0 ||
-         strcmp(connector, "age-adjacency") == 0))
-    {
-        return "adjacency-expansion";
-    }
-    if (connector != NULL &&
-        strcmp(connector, "graph-value-join") == 0)
-        return "graph-value-join";
-    if (connector != NULL &&
-        strcmp(connector, "graph-apply") == 0)
-        return "graph-apply";
-    if (connector != NULL &&
-        strcmp(connector, "graph-cartesian") == 0)
-        return "graph-cartesian";
-
-    if (order_property != NULL &&
-        strcmp(order_property, "index-anchored") == 0)
-        return "node-property-seek";
-    if (order_property != NULL &&
-        (strcmp(order_property, "vle-frontier-anchored") == 0 ||
-         strcmp(order_property, "matrix-frontier-anchored") == 0 ||
-         strcmp(order_property, "expand-into-verification") == 0))
-    {
-        return "vle-expansion";
-    }
-    if (order_property != NULL &&
-        (strcmp(order_property, "adjacency-directory-anchored") == 0 ||
-         strcmp(order_property, "adjacency-anchored") == 0))
-    {
-        return "adjacency-expansion";
-    }
-    if (order_property != NULL &&
-        strcmp(order_property, "value-anchored") == 0)
-        return "graph-value-join";
-    if (order_property != NULL &&
-        strcmp(order_property, "apply-anchored") == 0)
-        return "graph-apply";
-    if (order_property != NULL &&
-        strcmp(order_property, "cartesian") == 0)
-        return "graph-cartesian";
 
     return "graph-component";
+}
+
+static AgeGraphJoinComponentKind graph_join_infer_component_family_kind(
+    AgeGraphJoinConnectorKind connector_kind,
+    AgeGraphJoinOrderPropertyKind order_kind)
+{
+    switch (connector_kind)
+    {
+        case AGE_GRAPH_JOIN_CONNECTOR_POSTGRES_INDEX_SEEK:
+        case AGE_GRAPH_JOIN_CONNECTOR_NODE_PROPERTY_INDEX_SEEK:
+            return AGE_GRAPH_JOIN_COMPONENT_NODE_PROPERTY_SEEK;
+        case AGE_GRAPH_JOIN_CONNECTOR_VLE_EXPAND:
+        case AGE_GRAPH_JOIN_CONNECTOR_VLE_BIDIRECTIONAL_EXPAND:
+        case AGE_GRAPH_JOIN_CONNECTOR_VLE_COMPOSITE_EXPAND:
+        case AGE_GRAPH_JOIN_CONNECTOR_VLE_EXPAND_INTO:
+        case AGE_GRAPH_JOIN_CONNECTOR_VLE_COMPOSITE_EXPAND_INTO:
+        case AGE_GRAPH_JOIN_CONNECTOR_MATRIX_FRONTIER_EXPAND:
+            return AGE_GRAPH_JOIN_COMPONENT_VLE_EXPANSION;
+        case AGE_GRAPH_JOIN_CONNECTOR_AGE_ADJACENCY:
+        case AGE_GRAPH_JOIN_CONNECTOR_ADJACENCY_VALUE_JOIN:
+        case AGE_GRAPH_JOIN_CONNECTOR_ADJACENCY_EXPAND:
+        case AGE_GRAPH_JOIN_CONNECTOR_ADJACENCY_COMPOSITE_EXPAND:
+            return AGE_GRAPH_JOIN_COMPONENT_ADJACENCY_EXPANSION;
+        case AGE_GRAPH_JOIN_CONNECTOR_VALUE_JOIN:
+            return AGE_GRAPH_JOIN_COMPONENT_VALUE_JOIN;
+        case AGE_GRAPH_JOIN_CONNECTOR_APPLY:
+            return AGE_GRAPH_JOIN_COMPONENT_APPLY;
+        case AGE_GRAPH_JOIN_CONNECTOR_CARTESIAN:
+            return AGE_GRAPH_JOIN_COMPONENT_CARTESIAN;
+        case AGE_GRAPH_JOIN_CONNECTOR_UNKNOWN:
+            break;
+    }
+
+    switch (order_kind)
+    {
+        case AGE_GRAPH_JOIN_ORDER_INDEX_ANCHORED:
+            return AGE_GRAPH_JOIN_COMPONENT_NODE_PROPERTY_SEEK;
+        case AGE_GRAPH_JOIN_ORDER_VLE_FRONTIER:
+        case AGE_GRAPH_JOIN_ORDER_MATRIX_FRONTIER:
+        case AGE_GRAPH_JOIN_ORDER_EXPAND_INTO:
+            return AGE_GRAPH_JOIN_COMPONENT_VLE_EXPANSION;
+        case AGE_GRAPH_JOIN_ORDER_ADJACENCY_DIRECTORY:
+        case AGE_GRAPH_JOIN_ORDER_ADJACENCY:
+            return AGE_GRAPH_JOIN_COMPONENT_ADJACENCY_EXPANSION;
+        case AGE_GRAPH_JOIN_ORDER_VALUE:
+            return AGE_GRAPH_JOIN_COMPONENT_VALUE_JOIN;
+        case AGE_GRAPH_JOIN_ORDER_APPLY:
+            return AGE_GRAPH_JOIN_COMPONENT_APPLY;
+        case AGE_GRAPH_JOIN_ORDER_CARTESIAN:
+            return AGE_GRAPH_JOIN_COMPONENT_CARTESIAN;
+        case AGE_GRAPH_JOIN_ORDER_QUERY:
+        case AGE_GRAPH_JOIN_ORDER_UNKNOWN:
+            break;
+    }
+
+    return AGE_GRAPH_JOIN_COMPONENT_UNKNOWN;
+}
+
+static bool graph_join_source_kinds_match(
+    AgeGraphJoinSourceKind existing, AgeGraphJoinSourceKind candidate)
+{
+    return existing != AGE_GRAPH_JOIN_SOURCE_UNKNOWN &&
+           candidate != AGE_GRAPH_JOIN_SOURCE_UNKNOWN &&
+           existing == candidate;
+}
+
+static bool graph_join_component_kinds_match(
+    AgeGraphJoinComponentKind existing, AgeGraphJoinComponentKind candidate)
+{
+    return existing != AGE_GRAPH_JOIN_COMPONENT_UNKNOWN &&
+        candidate != AGE_GRAPH_JOIN_COMPONENT_UNKNOWN &&
+        existing == candidate;
+}
+
+static bool graph_join_order_property_kinds_match(
+    AgeGraphJoinOrderPropertyKind existing,
+    AgeGraphJoinOrderPropertyKind candidate)
+{
+    return existing != AGE_GRAPH_JOIN_ORDER_UNKNOWN &&
+           candidate != AGE_GRAPH_JOIN_ORDER_UNKNOWN &&
+           existing == candidate;
+}
+
+static bool graph_join_connector_kinds_match(
+    AgeGraphJoinConnectorKind existing, AgeGraphJoinConnectorKind candidate)
+{
+    return existing != AGE_GRAPH_JOIN_CONNECTOR_UNKNOWN &&
+           candidate != AGE_GRAPH_JOIN_CONNECTOR_UNKNOWN &&
+           existing == candidate;
+}
+
+static bool graph_join_source_evidence_matches(
+    AgeGraphJoinSourceEvidenceKind existing_kind,
+    AgeGraphJoinSourceEvidenceKind candidate_kind)
+{
+    if (existing_kind == AGE_GRAPH_JOIN_SOURCE_EVIDENCE_UNKNOWN ||
+        candidate_kind == AGE_GRAPH_JOIN_SOURCE_EVIDENCE_UNKNOWN)
+        return false;
+
+    return existing_kind == candidate_kind;
 }
 
 AgeGraphJoinCandidate *age_graph_join_table_select_cheapest(
@@ -548,19 +730,210 @@ bool age_graph_join_apply_selected_path_cost(
     return true;
 }
 
-bool age_graph_join_order_property_is_bound(const char *order_property)
+const char *age_graph_join_connector_name(
+    AgeGraphJoinConnectorKind connector_kind)
 {
-    if (order_property == NULL)
-        return false;
+    switch (connector_kind)
+    {
+        case AGE_GRAPH_JOIN_CONNECTOR_POSTGRES_INDEX_SEEK:
+            return "postgres-index-seek";
+        case AGE_GRAPH_JOIN_CONNECTOR_NODE_PROPERTY_INDEX_SEEK:
+            return "node-property-index-seek";
+        case AGE_GRAPH_JOIN_CONNECTOR_VLE_EXPAND:
+            return "vle-expand";
+        case AGE_GRAPH_JOIN_CONNECTOR_VLE_BIDIRECTIONAL_EXPAND:
+            return "vle-bidirectional-expand";
+        case AGE_GRAPH_JOIN_CONNECTOR_VLE_COMPOSITE_EXPAND:
+            return "vle-composite-expand";
+        case AGE_GRAPH_JOIN_CONNECTOR_VLE_EXPAND_INTO:
+            return "vle-expand-into";
+        case AGE_GRAPH_JOIN_CONNECTOR_VLE_COMPOSITE_EXPAND_INTO:
+            return "vle-composite-expand-into";
+        case AGE_GRAPH_JOIN_CONNECTOR_MATRIX_FRONTIER_EXPAND:
+            return "matrix-frontier-expand";
+        case AGE_GRAPH_JOIN_CONNECTOR_AGE_ADJACENCY:
+            return "age-adjacency";
+        case AGE_GRAPH_JOIN_CONNECTOR_ADJACENCY_VALUE_JOIN:
+            return "adjacency-value-join";
+        case AGE_GRAPH_JOIN_CONNECTOR_ADJACENCY_EXPAND:
+            return "adjacency-expand";
+        case AGE_GRAPH_JOIN_CONNECTOR_ADJACENCY_COMPOSITE_EXPAND:
+            return "adjacency-composite-expand";
+        case AGE_GRAPH_JOIN_CONNECTOR_VALUE_JOIN:
+            return "graph-value-join";
+        case AGE_GRAPH_JOIN_CONNECTOR_APPLY:
+            return "graph-apply";
+        case AGE_GRAPH_JOIN_CONNECTOR_CARTESIAN:
+            return "graph-cartesian";
+        case AGE_GRAPH_JOIN_CONNECTOR_UNKNOWN:
+            break;
+    }
 
-    return strcmp(order_property, "index-anchored") == 0 ||
-           strcmp(order_property, "adjacency-directory-anchored") == 0 ||
-           strcmp(order_property, "adjacency-anchored") == 0 ||
-           strcmp(order_property, "vle-frontier-anchored") == 0 ||
-           strcmp(order_property, "expand-into-verification") == 0 ||
-           strcmp(order_property, "matrix-frontier-anchored") == 0 ||
-           strcmp(order_property, "value-anchored") == 0 ||
-           strcmp(order_property, "apply-anchored") == 0;
+    return "graph-connector";
+}
+
+const char *age_graph_join_source_kind_name(
+    AgeGraphJoinSourceKind source_kind_id)
+{
+    switch (source_kind_id)
+    {
+        case AGE_GRAPH_JOIN_SOURCE_NODE_PROPERTY_INDEX:
+            return "node-property-index";
+        case AGE_GRAPH_JOIN_SOURCE_VLE_MARKER:
+            return "vle-marker";
+        case AGE_GRAPH_JOIN_SOURCE_VLE_TERMINAL_PROPERTY:
+            return "vle-terminal-property";
+        case AGE_GRAPH_JOIN_SOURCE_ADJACENCY_EXPANSION:
+            return "adjacency-expansion";
+        case AGE_GRAPH_JOIN_SOURCE_ADJACENCY_NODE_PROPERTY:
+            return "adjacency-node-property";
+        case AGE_GRAPH_JOIN_SOURCE_VALUE_JOIN:
+            return "graph-value-join";
+        case AGE_GRAPH_JOIN_SOURCE_APPLY:
+            return "graph-apply";
+        case AGE_GRAPH_JOIN_SOURCE_CARTESIAN:
+            return "graph-cartesian";
+        case AGE_GRAPH_JOIN_SOURCE_UNKNOWN:
+            break;
+    }
+
+    return "graph-source";
+}
+
+const char *age_graph_join_source_evidence_kind_name(
+    AgeGraphJoinSourceEvidenceKind source_evidence_kind)
+{
+    switch (source_evidence_kind)
+    {
+        case AGE_GRAPH_JOIN_SOURCE_EVIDENCE_POSTGRES_INDEX:
+            return "postgres-index-path";
+        case AGE_GRAPH_JOIN_SOURCE_EVIDENCE_NODE_PROPERTY_INDEX:
+            return "node-property-index";
+        case AGE_GRAPH_JOIN_SOURCE_EVIDENCE_VLE_EDGE_SOURCE:
+            return "vle-edge-source";
+        case AGE_GRAPH_JOIN_SOURCE_EVIDENCE_VLE_MATRIX_FRONTIER:
+            return "vle-matrix-frontier";
+        case AGE_GRAPH_JOIN_SOURCE_EVIDENCE_ADJACENCY_DIRECTORY:
+            return "adjacency-directory";
+        case AGE_GRAPH_JOIN_SOURCE_EVIDENCE_ADJACENCY_VALUE:
+            return "adjacency-value";
+        case AGE_GRAPH_JOIN_SOURCE_EVIDENCE_ADJACENCY_PAYLOAD:
+            return "adjacency-payload";
+        case AGE_GRAPH_JOIN_SOURCE_EVIDENCE_GRAPH_VALUE:
+            return "graph-value";
+        case AGE_GRAPH_JOIN_SOURCE_EVIDENCE_GRAPH_APPLY:
+            return "graph-apply";
+        case AGE_GRAPH_JOIN_SOURCE_EVIDENCE_GRAPH_CARTESIAN:
+            return "graph-cartesian";
+        case AGE_GRAPH_JOIN_SOURCE_EVIDENCE_UNKNOWN:
+            break;
+    }
+
+    return "unknown";
+}
+
+const char *age_graph_join_bound_kind_name(AgeGraphJoinBoundKind bound_kind)
+{
+    switch (bound_kind)
+    {
+        case AGE_GRAPH_JOIN_BOUND_UNBOUND:
+            return "unbound";
+        case AGE_GRAPH_JOIN_BOUND_BOUND:
+            return "bound";
+        case AGE_GRAPH_JOIN_BOUND_DECLARED_COVER:
+            return "declared-cover";
+        case AGE_GRAPH_JOIN_BOUND_VLE_OUT:
+            return "out";
+        case AGE_GRAPH_JOIN_BOUND_VLE_IN:
+            return "in";
+        case AGE_GRAPH_JOIN_BOUND_VLE_BOTH:
+            return "both";
+        case AGE_GRAPH_JOIN_BOUND_VLE_MIXED:
+            return "mixed";
+        case AGE_GRAPH_JOIN_BOUND_ADJACENCY_START:
+            return "start-bound";
+        case AGE_GRAPH_JOIN_BOUND_ADJACENCY_END:
+            return "end-bound";
+        case AGE_GRAPH_JOIN_BOUND_UNKNOWN:
+            break;
+    }
+
+    return "unknown";
+}
+
+const char *age_graph_join_cover_match_kind_name(
+    AgeGraphJoinCoverMatchKind cover_match_kind)
+{
+    switch (cover_match_kind)
+    {
+        case AGE_GRAPH_JOIN_COVER_MATCHED:
+            return "matched";
+        case AGE_GRAPH_JOIN_COVER_PATTERN_MISMATCH:
+            return "pattern-mismatch";
+        case AGE_GRAPH_JOIN_COVER_SOURCE_MISMATCH:
+            return "source-mismatch";
+        case AGE_GRAPH_JOIN_COVER_COMPONENT_MISMATCH:
+            return "component-mismatch";
+        case AGE_GRAPH_JOIN_COVER_UNKNOWN:
+            break;
+    }
+
+    return "unknown";
+}
+
+const char *age_graph_join_order_property_name(
+    AgeGraphJoinOrderPropertyKind order_property_kind)
+{
+    switch (order_property_kind)
+    {
+        case AGE_GRAPH_JOIN_ORDER_QUERY:
+            return "query-order";
+        case AGE_GRAPH_JOIN_ORDER_INDEX_ANCHORED:
+            return "index-anchored";
+        case AGE_GRAPH_JOIN_ORDER_VLE_FRONTIER:
+            return "vle-frontier-anchored";
+        case AGE_GRAPH_JOIN_ORDER_MATRIX_FRONTIER:
+            return "matrix-frontier-anchored";
+        case AGE_GRAPH_JOIN_ORDER_EXPAND_INTO:
+            return "expand-into-verification";
+        case AGE_GRAPH_JOIN_ORDER_ADJACENCY_DIRECTORY:
+            return "adjacency-directory-anchored";
+        case AGE_GRAPH_JOIN_ORDER_ADJACENCY:
+            return "adjacency-anchored";
+        case AGE_GRAPH_JOIN_ORDER_VALUE:
+            return "value-anchored";
+        case AGE_GRAPH_JOIN_ORDER_APPLY:
+            return "apply-anchored";
+        case AGE_GRAPH_JOIN_ORDER_CARTESIAN:
+            return "cartesian";
+        case AGE_GRAPH_JOIN_ORDER_UNKNOWN:
+            break;
+    }
+
+    return "query-order";
+}
+
+bool age_graph_join_order_property_kind_is_bound(
+    AgeGraphJoinOrderPropertyKind kind)
+{
+    switch (kind)
+    {
+        case AGE_GRAPH_JOIN_ORDER_INDEX_ANCHORED:
+        case AGE_GRAPH_JOIN_ORDER_VLE_FRONTIER:
+        case AGE_GRAPH_JOIN_ORDER_MATRIX_FRONTIER:
+        case AGE_GRAPH_JOIN_ORDER_EXPAND_INTO:
+        case AGE_GRAPH_JOIN_ORDER_ADJACENCY_DIRECTORY:
+        case AGE_GRAPH_JOIN_ORDER_ADJACENCY:
+        case AGE_GRAPH_JOIN_ORDER_VALUE:
+        case AGE_GRAPH_JOIN_ORDER_APPLY:
+            return true;
+        case AGE_GRAPH_JOIN_ORDER_QUERY:
+        case AGE_GRAPH_JOIN_ORDER_CARTESIAN:
+        case AGE_GRAPH_JOIN_ORDER_UNKNOWN:
+            return false;
+    }
+
+    return false;
 }
 
 void age_graph_join_init_path_evidence(
@@ -570,6 +943,7 @@ void age_graph_join_init_path_evidence(
 
     memset(evidence, 0, sizeof(*evidence));
     evidence->candidate_count = 1;
+    evidence->cover_match_kind = AGE_GRAPH_JOIN_COVER_UNKNOWN;
 }
 
 void age_graph_join_complete_path_evidence(
@@ -580,14 +954,11 @@ void age_graph_join_complete_path_evidence(
     if (path == NULL || evidence == NULL)
         return;
 
-    if (evidence->component_family == NULL &&
-        (evidence->connector != NULL || evidence->order_property != NULL))
+    if (evidence->component_kind == AGE_GRAPH_JOIN_COMPONENT_UNKNOWN)
     {
-        evidence->component_family =
-            graph_join_infer_component_family(NULL, evidence->connector,
-                                              evidence->order_property);
+        evidence->component_kind = graph_join_infer_component_family_kind(
+            evidence->connector_kind, evidence->order_property_kind);
     }
-
     rel = path->parent;
     if (evidence->solved_relids == NULL && rel != NULL)
         evidence->solved_relids = rel->relids;
@@ -728,6 +1099,7 @@ void age_graph_join_refresh_rel_metadata(
         if (has_evidence)
         {
             age_graph_join_complete_path_evidence(path, &evidence);
+            graph_join_merge_lowering_pool_evidence(metadata, &evidence);
             candidate->evidence = evidence;
         }
         else
@@ -865,11 +1237,11 @@ static AgeGraphJoinLoweringArtifact *graph_join_metadata_merge_lowering_artifact
     }
 
     shared_artifact = graph_join_metadata_find_lowering_artifact(
-        metadata, artifact->pattern_kind);
+        metadata, artifact->pattern_key);
     if (shared_artifact == NULL)
     {
         shared_artifact = age_graph_join_make_lowering_artifact(
-            artifact->pattern_kind, NULL);
+            artifact->pattern_key, NULL);
         metadata->lowering_artifacts = lappend(metadata->lowering_artifacts,
                                                shared_artifact);
     }
@@ -880,20 +1252,28 @@ static AgeGraphJoinLoweringArtifact *graph_join_metadata_merge_lowering_artifact
 
         if (entry == NULL)
             continue;
-        age_graph_join_lowering_artifact_add_table(
-            shared_artifact, entry->source_kind, entry->table);
+        if (entry->table != NULL)
+            age_graph_join_lowering_artifact_add_typed_table(
+                shared_artifact,
+                entry->source_kind_id,
+                entry->component_family_kind, entry->table);
+        else
+            age_graph_join_lowering_artifact_declare_typed_entry(
+                shared_artifact,
+                entry->source_kind_id,
+                entry->component_family_kind);
     }
 
     return shared_artifact;
 }
 
 static AgeGraphJoinLoweringArtifact *graph_join_metadata_find_lowering_artifact(
-    AgeGraphJoinRelMetadata *metadata, const char *pattern_kind)
+    AgeGraphJoinRelMetadata *metadata, const char *pattern_key)
 {
     ListCell *lc;
 
     if (metadata == NULL ||
-        pattern_kind == NULL)
+        pattern_key == NULL)
     {
         return NULL;
     }
@@ -903,8 +1283,8 @@ static AgeGraphJoinLoweringArtifact *graph_join_metadata_find_lowering_artifact(
         AgeGraphJoinLoweringArtifact *artifact = lfirst(lc);
 
         if (artifact != NULL &&
-            artifact->pattern_kind != NULL &&
-            strcmp(artifact->pattern_kind, pattern_kind) == 0)
+            artifact->pattern_key != NULL &&
+            strcmp(artifact->pattern_key, pattern_key) == 0)
         {
             return artifact;
         }
@@ -922,6 +1302,7 @@ static void graph_join_metadata_rebuild_component_candidates(
         return;
 
     metadata->component_candidates = NIL;
+    graph_join_metadata_append_pool_component_candidates(metadata);
     foreach(lc, metadata->candidates)
     {
         AgeGraphJoinRelCandidate *candidate = lfirst(lc);
@@ -930,11 +1311,133 @@ static void graph_join_metadata_rebuild_component_candidates(
     }
 }
 
+static void graph_join_metadata_append_pool_component_candidates(
+    AgeGraphJoinRelMetadata *metadata)
+{
+    ListCell *lc;
+
+    if (metadata == NULL ||
+        metadata->lowering_pool == NIL)
+    {
+        return;
+    }
+
+    foreach(lc, metadata->lowering_pool)
+    {
+        AgeGraphJoinRelCandidate *pool_candidate = lfirst(lc);
+        AgeGraphJoinRelCandidate *carrier_candidate;
+        AgeGraphJoinRelCandidate component_seed;
+
+        if (pool_candidate == NULL ||
+            pool_candidate->path != NULL ||
+            pool_candidate->evidence.order_property_kind ==
+            AGE_GRAPH_JOIN_ORDER_UNKNOWN)
+        {
+            continue;
+        }
+
+        carrier_candidate = graph_join_metadata_pool_carrier_candidate(
+            metadata, &pool_candidate->evidence);
+        if (carrier_candidate == NULL)
+            continue;
+
+        component_seed = *pool_candidate;
+        component_seed.path = carrier_candidate->path;
+        component_seed.lowering_input = true;
+        graph_join_metadata_update_component_candidate(metadata,
+                                                       &component_seed);
+    }
+}
+
+static AgeGraphJoinRelCandidate *graph_join_metadata_pool_carrier_candidate(
+    AgeGraphJoinRelMetadata *metadata,
+    const AgeGraphJoinPathEvidence *evidence)
+{
+    AgeGraphJoinRelCandidate *selected = NULL;
+    Cost selected_cost = 0;
+    ListCell *lc;
+
+    if (metadata == NULL ||
+        evidence == NULL ||
+        evidence->order_property_kind == AGE_GRAPH_JOIN_ORDER_UNKNOWN)
+    {
+        return NULL;
+    }
+
+    foreach(lc, metadata->candidates)
+    {
+        AgeGraphJoinRelCandidate *candidate = lfirst(lc);
+        Cost candidate_cost;
+
+        if (candidate == NULL ||
+            candidate->path == NULL)
+        {
+            continue;
+        }
+
+        if (graph_join_lowering_candidate_matches(candidate, evidence))
+            return candidate;
+        if (!graph_join_pool_evidence_can_use_carrier(candidate, evidence))
+            continue;
+
+        candidate_cost = graph_join_evidence_component_total_cost(candidate);
+        if (selected == NULL || candidate_cost < selected_cost)
+        {
+            selected = candidate;
+            selected_cost = candidate_cost;
+        }
+    }
+
+    return selected;
+}
+
+static bool graph_join_pool_evidence_can_use_carrier(
+    const AgeGraphJoinRelCandidate *carrier,
+    const AgeGraphJoinPathEvidence *evidence)
+{
+    const AgeGraphJoinPathEvidence *carrier_evidence;
+
+    if (carrier == NULL ||
+        carrier->path == NULL ||
+        evidence == NULL ||
+        evidence->order_property_kind == AGE_GRAPH_JOIN_ORDER_UNKNOWN)
+    {
+        return false;
+    }
+
+    carrier_evidence = &carrier->evidence;
+    if (!graph_join_component_kinds_match(carrier_evidence->component_kind,
+                                          evidence->component_kind))
+    {
+        return false;
+    }
+    if (!graph_join_text_matches(carrier_evidence->pattern_key,
+                                 evidence->pattern_key))
+    {
+        return false;
+    }
+    if (carrier_evidence->provided_relids != NULL &&
+        evidence->provided_relids != NULL &&
+        !bms_is_subset(evidence->provided_relids,
+                       carrier_evidence->provided_relids))
+    {
+        return false;
+    }
+    if (carrier_evidence->solved_relids != NULL &&
+        evidence->solved_relids != NULL &&
+        !bms_is_subset(evidence->solved_relids,
+                       carrier_evidence->solved_relids))
+    {
+        return false;
+    }
+
+    return true;
+}
+
 static void graph_join_metadata_update_component_candidate(
     AgeGraphJoinRelMetadata *metadata,
     const AgeGraphJoinRelCandidate *candidate)
 {
-    const char *component;
     Cost total_cost;
     ListCell *lc;
     AgeGraphJoinRelComponentCandidate *component_candidate;
@@ -942,21 +1445,20 @@ static void graph_join_metadata_update_component_candidate(
     if (metadata == NULL ||
         candidate == NULL ||
         candidate->path == NULL ||
-        candidate->evidence.order_property == NULL)
+        candidate->evidence.order_property_kind == AGE_GRAPH_JOIN_ORDER_UNKNOWN ||
+        candidate->evidence.component_kind == AGE_GRAPH_JOIN_COMPONENT_UNKNOWN)
     {
         return;
     }
 
-    component = age_graph_join_component_from_evidence(&candidate->evidence);
-    total_cost = candidate->evidence.selected_total_cost > 0 ?
-        candidate->evidence.selected_total_cost : candidate->path->total_cost;
+    total_cost = graph_join_evidence_component_total_cost(candidate);
 
     foreach(lc, metadata->component_candidates)
     {
         component_candidate = lfirst(lc);
 
         if (graph_join_component_candidate_matches(
-                component_candidate, component, &candidate->evidence))
+                component_candidate, &candidate->evidence))
         {
             if (graph_join_component_candidate_keeps_existing(
                     component_candidate, candidate, total_cost))
@@ -966,6 +1468,8 @@ static void graph_join_metadata_update_component_candidate(
 
             component_candidate->path = candidate->path;
             component_candidate->evidence = candidate->evidence;
+            component_candidate->component_kind =
+                candidate->evidence.component_kind;
             component_candidate->total_cost = total_cost;
             component_candidate->lowering_input = candidate->lowering_input;
             return;
@@ -975,8 +1479,7 @@ static void graph_join_metadata_update_component_candidate(
     component_candidate = palloc0(sizeof(*component_candidate));
     component_candidate->path = candidate->path;
     component_candidate->evidence = candidate->evidence;
-    component_candidate->component = copy_graph_join_text(component,
-                                                          "graph-component");
+    component_candidate->component_kind = candidate->evidence.component_kind;
     component_candidate->total_cost = total_cost;
     component_candidate->lowering_input = candidate->lowering_input;
     metadata->component_candidates = lappend(metadata->component_candidates,
@@ -1004,21 +1507,45 @@ static bool graph_join_component_candidate_keeps_existing(
     return component_candidate->total_cost <= total_cost;
 }
 
+static Cost graph_join_evidence_component_total_cost(
+    const AgeGraphJoinRelCandidate *candidate)
+{
+    Cost startup_cost;
+    Cost total_cost;
+
+    if (candidate == NULL ||
+        candidate->path == NULL)
+    {
+        return 0;
+    }
+
+    startup_cost = candidate->path->startup_cost;
+    total_cost = candidate->evidence.selected_total_cost > 0 ?
+        candidate->evidence.selected_total_cost :
+        candidate->path->total_cost;
+
+    return age_graph_join_apply_evidence_alternative_credit(
+        startup_cost, total_cost,
+        age_graph_join_evidence_alternative_credit(&candidate->evidence));
+}
+
 static bool graph_join_component_candidate_matches(
     const AgeGraphJoinRelComponentCandidate *component_candidate,
-    const char *component, const AgeGraphJoinPathEvidence *evidence)
+    const AgeGraphJoinPathEvidence *evidence)
 {
     const AgeGraphJoinPathEvidence *existing;
 
     if (component_candidate == NULL ||
-        component_candidate->component == NULL ||
-        component == NULL ||
         evidence == NULL)
     {
         return false;
     }
-    if (strcmp(component_candidate->component, component) != 0)
+    if (!graph_join_component_kinds_match(
+            component_candidate->component_kind,
+            evidence->component_kind))
+    {
         return false;
+    }
 
     existing = &component_candidate->evidence;
 
@@ -1055,12 +1582,25 @@ static bool graph_join_component_connector_properties_match(
     if (existing == NULL || candidate == NULL)
         return false;
 
-    return graph_join_text_matches(existing->connector,
-                                   candidate->connector) &&
-           graph_join_text_matches(existing->order_property,
-                                   candidate->order_property) &&
-           graph_join_text_matches(existing->source_evidence,
-                                   candidate->source_evidence);
+    if (!graph_join_connector_kinds_match(existing->connector_kind,
+                                          candidate->connector_kind))
+        return false;
+    if (!graph_join_order_property_kinds_match(
+            existing->order_property_kind,
+            candidate->order_property_kind))
+    {
+        return false;
+    }
+
+    if (!graph_join_source_evidence_matches(existing->source_evidence_kind,
+                                            candidate->source_evidence_kind))
+        return false;
+
+    return
+           graph_join_text_matches(existing->pattern_key,
+                                   candidate->pattern_key) &&
+           graph_join_source_kinds_match(existing->source_kind_id,
+                                         candidate->source_kind_id);
 }
 
 static bool graph_join_text_matches(const char *existing,
@@ -1070,6 +1610,176 @@ static bool graph_join_text_matches(const char *existing,
         return existing == candidate;
 
     return strcmp(existing, candidate) == 0;
+}
+
+static AgeGraphJoinLoweringArtifactEntry *
+graph_join_lowering_artifact_find_entry(
+    AgeGraphJoinLoweringArtifact *artifact,
+    AgeGraphJoinSourceKind source_kind_id, bool require_empty_table)
+{
+    ListCell *lc;
+
+    if (artifact == NULL ||
+        source_kind_id == AGE_GRAPH_JOIN_SOURCE_UNKNOWN)
+    {
+        return NULL;
+    }
+
+    foreach(lc, artifact->entries)
+    {
+        AgeGraphJoinLoweringArtifactEntry *entry = lfirst(lc);
+
+        if (entry == NULL ||
+            !graph_join_source_kinds_match(entry->source_kind_id,
+                                           source_kind_id))
+        {
+            continue;
+        }
+        if (require_empty_table && entry->table != NULL)
+            continue;
+        return entry;
+    }
+
+    return NULL;
+}
+
+static AgeGraphJoinCandidateTable *graph_join_make_declared_entry_table(
+    RelOptInfo *rel, const AgeGraphJoinLoweringArtifact *artifact,
+    const AgeGraphJoinLoweringArtifactEntry *entry)
+{
+    AgeGraphJoinCandidateTable *table;
+    AgeGraphJoinCandidateRequest request;
+    double rows = 1.0;
+    int output_width = 0;
+
+    if (rel == NULL ||
+        artifact == NULL ||
+        entry == NULL)
+    {
+        return NULL;
+    }
+
+    table = age_graph_join_make_candidate_table();
+    table->declared_entry_count = Max(1, list_length(artifact->entries));
+    table->cover_match_kind = AGE_GRAPH_JOIN_COVER_MATCHED;
+    table->pattern_key = copy_graph_join_text(artifact->pattern_key,
+                                               "graph-pattern");
+    table->source_kind_id = entry->source_kind_id;
+    table->component_family_kind = entry->component_family_kind;
+
+    if (rel->rows > 0)
+        rows = rel->rows;
+    if (rel->reltarget != NULL && rel->reltarget->width > 0)
+        output_width = rel->reltarget->width;
+
+    memset(&request, 0, sizeof(request));
+    request.component_family_kind = entry->component_family_kind;
+    request.connector_kind =
+        graph_join_declared_connector_kind(entry->source_kind_id);
+    request.bound_kind = AGE_GRAPH_JOIN_BOUND_DECLARED_COVER;
+    request.order_property_kind =
+        graph_join_declared_order_property_kind(entry->source_kind_id);
+    request.source_evidence_kind =
+        graph_join_declared_source_evidence_kind(entry->source_kind_id);
+    request.pattern_key = artifact->pattern_key;
+    request.source_kind_id = entry->source_kind_id;
+    request.solved_relids = rel->relids;
+    request.provided_relids = rel->relids;
+    request.rows = rows;
+    request.startup_cost = 0;
+    request.total_cost = rows;
+    request.output_width = output_width;
+    request.parallel_safe = rel->consider_parallel;
+    request.parallel_aware = false;
+    request.parallel_workers = 0;
+    request.gather_cost = 0;
+    request.order_preserving = false;
+    request.shared_state_required = false;
+
+    (void) age_graph_join_table_add_candidate(table, &request);
+
+    return table;
+}
+
+static AgeGraphJoinConnectorKind graph_join_declared_connector_kind(
+    AgeGraphJoinSourceKind source_kind_id)
+{
+    switch (source_kind_id)
+    {
+        case AGE_GRAPH_JOIN_SOURCE_NODE_PROPERTY_INDEX:
+            return AGE_GRAPH_JOIN_CONNECTOR_NODE_PROPERTY_INDEX_SEEK;
+        case AGE_GRAPH_JOIN_SOURCE_VLE_MARKER:
+            return AGE_GRAPH_JOIN_CONNECTOR_VLE_EXPAND;
+        case AGE_GRAPH_JOIN_SOURCE_VLE_TERMINAL_PROPERTY:
+            return AGE_GRAPH_JOIN_CONNECTOR_VLE_COMPOSITE_EXPAND;
+        case AGE_GRAPH_JOIN_SOURCE_ADJACENCY_EXPANSION:
+            return AGE_GRAPH_JOIN_CONNECTOR_ADJACENCY_EXPAND;
+        case AGE_GRAPH_JOIN_SOURCE_ADJACENCY_NODE_PROPERTY:
+            return AGE_GRAPH_JOIN_CONNECTOR_ADJACENCY_VALUE_JOIN;
+        case AGE_GRAPH_JOIN_SOURCE_VALUE_JOIN:
+            return AGE_GRAPH_JOIN_CONNECTOR_VALUE_JOIN;
+        case AGE_GRAPH_JOIN_SOURCE_APPLY:
+            return AGE_GRAPH_JOIN_CONNECTOR_APPLY;
+        case AGE_GRAPH_JOIN_SOURCE_CARTESIAN:
+            return AGE_GRAPH_JOIN_CONNECTOR_CARTESIAN;
+        case AGE_GRAPH_JOIN_SOURCE_UNKNOWN:
+            break;
+    }
+
+    return AGE_GRAPH_JOIN_CONNECTOR_UNKNOWN;
+}
+
+static AgeGraphJoinOrderPropertyKind graph_join_declared_order_property_kind(
+    AgeGraphJoinSourceKind source_kind_id)
+{
+    switch (source_kind_id)
+    {
+        case AGE_GRAPH_JOIN_SOURCE_NODE_PROPERTY_INDEX:
+        case AGE_GRAPH_JOIN_SOURCE_ADJACENCY_NODE_PROPERTY:
+            return AGE_GRAPH_JOIN_ORDER_INDEX_ANCHORED;
+        case AGE_GRAPH_JOIN_SOURCE_VLE_MARKER:
+        case AGE_GRAPH_JOIN_SOURCE_VLE_TERMINAL_PROPERTY:
+            return AGE_GRAPH_JOIN_ORDER_VLE_FRONTIER;
+        case AGE_GRAPH_JOIN_SOURCE_ADJACENCY_EXPANSION:
+            return AGE_GRAPH_JOIN_ORDER_ADJACENCY_DIRECTORY;
+        case AGE_GRAPH_JOIN_SOURCE_VALUE_JOIN:
+            return AGE_GRAPH_JOIN_ORDER_VALUE;
+        case AGE_GRAPH_JOIN_SOURCE_APPLY:
+            return AGE_GRAPH_JOIN_ORDER_APPLY;
+        case AGE_GRAPH_JOIN_SOURCE_CARTESIAN:
+            return AGE_GRAPH_JOIN_ORDER_CARTESIAN;
+        case AGE_GRAPH_JOIN_SOURCE_UNKNOWN:
+            break;
+    }
+
+    return AGE_GRAPH_JOIN_ORDER_QUERY;
+}
+
+static AgeGraphJoinSourceEvidenceKind
+graph_join_declared_source_evidence_kind(AgeGraphJoinSourceKind source_kind_id)
+{
+    switch (source_kind_id)
+    {
+        case AGE_GRAPH_JOIN_SOURCE_NODE_PROPERTY_INDEX:
+            return AGE_GRAPH_JOIN_SOURCE_EVIDENCE_NODE_PROPERTY_INDEX;
+        case AGE_GRAPH_JOIN_SOURCE_VLE_MARKER:
+        case AGE_GRAPH_JOIN_SOURCE_VLE_TERMINAL_PROPERTY:
+            return AGE_GRAPH_JOIN_SOURCE_EVIDENCE_VLE_EDGE_SOURCE;
+        case AGE_GRAPH_JOIN_SOURCE_ADJACENCY_EXPANSION:
+            return AGE_GRAPH_JOIN_SOURCE_EVIDENCE_ADJACENCY_DIRECTORY;
+        case AGE_GRAPH_JOIN_SOURCE_ADJACENCY_NODE_PROPERTY:
+            return AGE_GRAPH_JOIN_SOURCE_EVIDENCE_ADJACENCY_VALUE;
+        case AGE_GRAPH_JOIN_SOURCE_VALUE_JOIN:
+            return AGE_GRAPH_JOIN_SOURCE_EVIDENCE_GRAPH_VALUE;
+        case AGE_GRAPH_JOIN_SOURCE_APPLY:
+            return AGE_GRAPH_JOIN_SOURCE_EVIDENCE_GRAPH_APPLY;
+        case AGE_GRAPH_JOIN_SOURCE_CARTESIAN:
+            return AGE_GRAPH_JOIN_SOURCE_EVIDENCE_GRAPH_CARTESIAN;
+        case AGE_GRAPH_JOIN_SOURCE_UNKNOWN:
+            break;
+    }
+
+    return AGE_GRAPH_JOIN_SOURCE_EVIDENCE_UNKNOWN;
 }
 
 void age_graph_join_register_rel_candidate_table(
@@ -1152,11 +1862,22 @@ AgeGraphJoinLoweringArtifact *age_graph_join_register_rel_lowering_artifact_pool
     shared_artifact = graph_join_metadata_merge_lowering_artifact(metadata,
                                                                   artifact);
 
-    foreach(lc, artifact->entries)
+    foreach(lc, shared_artifact->entries)
     {
         AgeGraphJoinLoweringArtifactEntry *entry = lfirst(lc);
+        AgeGraphJoinCandidateTable *declared_table = NULL;
 
-        age_graph_join_register_rel_lowering_pool(root, rel, entry->table);
+        if (entry == NULL)
+            continue;
+        if (entry->table != NULL && entry->table->candidates != NIL)
+            age_graph_join_register_rel_lowering_pool(root, rel, entry->table);
+        else
+        {
+            declared_table = graph_join_make_declared_entry_table(
+                rel, shared_artifact, entry);
+            age_graph_join_register_rel_lowering_pool(root, rel,
+                                                     declared_table);
+        }
     }
 
     return shared_artifact;
@@ -1176,6 +1897,8 @@ AgeGraphJoinCandidateTable *age_graph_join_bind_lowering_pool_to_path(
     }
 
     bound_table = age_graph_join_make_candidate_table();
+    bound_table->declared_entry_count = table->declared_entry_count;
+    bound_table->cover_match_kind = table->cover_match_kind;
     foreach(lc, table->candidates)
     {
         AgeGraphJoinCandidate *candidate = lfirst(lc);
@@ -1183,12 +1906,15 @@ AgeGraphJoinCandidateTable *age_graph_join_bind_lowering_pool_to_path(
         Cost run_cost;
 
         memset(&request, 0, sizeof(request));
-        request.component = candidate->component.name;
-        request.component_family = candidate->component.family;
-        request.connector = candidate->connector.kind;
-        request.bound = candidate->connector.bound;
-        request.order_property = candidate->connector.order_property;
-        request.source_evidence = candidate->connector.source_evidence;
+        request.display_name = candidate->component.display_name;
+        request.connector_kind = candidate->connector.kind_id;
+        request.bound_kind = candidate->connector.bound_kind;
+        request.order_property_kind = candidate->connector.order_property_kind;
+        request.source_evidence_kind =
+            candidate->connector.source_evidence_kind;
+        request.pattern_key = candidate->pattern_key;
+        request.source_kind_id = candidate->source_kind_id;
+        request.component_family_kind = candidate->component.family_kind;
         request.solved_relids = candidate->connector.solved_relids;
         request.required_outer = candidate->connector.required_outer;
         request.provided_relids = candidate->connector.provided_relids;
@@ -1228,6 +1954,8 @@ AgeGraphJoinCandidateTable *age_graph_join_bind_lowering_artifact_to_path(
     }
 
     bound_table = age_graph_join_make_candidate_table();
+    bound_table->declared_entry_count = list_length(artifact->entries);
+    bound_table->cover_match_kind = AGE_GRAPH_JOIN_COVER_MATCHED;
     foreach(lc, artifact->entries)
     {
         AgeGraphJoinLoweringArtifactEntry *entry = lfirst(lc);
@@ -1304,21 +2032,23 @@ void age_graph_join_register_rel_lowering_table(
     }
 }
 
-void age_graph_join_register_rel_lowering_artifact_path(
+AgeGraphJoinCandidateTable *age_graph_join_register_rel_lowering_artifact_path(
     PlannerInfo *root, RelOptInfo *rel, Path *path,
     const AgeGraphJoinLoweringArtifact *artifact)
 {
     AgeGraphJoinCandidateTable *bound_table;
 
     if (artifact == NULL)
-        return;
+        return NULL;
 
     bound_table = age_graph_join_bind_lowering_artifact_to_path(path,
                                                                 artifact);
     if (bound_table == NULL)
-        return;
+        return NULL;
 
     age_graph_join_register_rel_lowering_table(root, rel, path, bound_table);
+
+    return bound_table;
 }
 
 void age_graph_join_register_rel_path_evidence(
@@ -1333,7 +2063,7 @@ void age_graph_join_register_rel_path_evidence(
         rel == NULL ||
         path == NULL ||
         evidence == NULL ||
-        evidence->order_property == NULL)
+        evidence->order_property_kind == AGE_GRAPH_JOIN_ORDER_UNKNOWN)
     {
         return;
     }
@@ -1373,14 +2103,22 @@ static void graph_join_path_evidence_from_candidate(
     if (candidate == NULL)
         return;
 
-    evidence->component_family = candidate->component.family;
-    evidence->connector = candidate->connector.kind;
-    evidence->order_property = candidate->connector.order_property;
-    evidence->source_evidence = candidate->connector.source_evidence;
+    evidence->component_kind = candidate->component.family_kind;
+    evidence->connector_kind = candidate->connector.kind_id;
+    evidence->order_property_kind =
+        candidate->connector.order_property_kind;
+    evidence->source_evidence_kind =
+        candidate->connector.source_evidence_kind;
+    evidence->pattern_key = candidate->pattern_key;
+    evidence->source_kind_id = candidate->source_kind_id;
     evidence->solved_relids = candidate->connector.solved_relids;
     evidence->required_outer = candidate->connector.required_outer;
     evidence->provided_relids = candidate->connector.provided_relids;
     evidence->candidate_count = age_graph_join_table_candidate_count(table);
+    evidence->declared_cover_count = table != NULL ?
+        table->declared_entry_count : 0;
+    evidence->cover_match_kind = table != NULL ?
+        table->cover_match_kind : AGE_GRAPH_JOIN_COVER_UNKNOWN;
     evidence->selected_total_cost = candidate->connector.total_cost;
     next_best = age_graph_join_table_select_next_best(table, candidate);
     evidence->next_total_cost = next_best != NULL ?
@@ -1394,8 +2132,8 @@ static void graph_join_path_evidence_from_candidate(
     evidence->shared_state_required =
         candidate->component.shared_state_required;
     evidence->physical_properties_known = true;
-    evidence->bound = age_graph_join_order_property_is_bound(
-        evidence->order_property);
+    evidence->bound = age_graph_join_order_property_kind_is_bound(
+        evidence->order_property_kind);
     age_graph_join_complete_path_evidence(path, evidence);
 }
 
@@ -1413,24 +2151,33 @@ static bool graph_join_planner_candidate_matches(
     }
 
     existing = &rel_candidate->evidence;
-    if (!graph_join_text_matches(age_graph_join_component_from_evidence(
-                                     existing),
-                                 age_graph_join_component_from_evidence(
-                                     evidence)))
+    if (!graph_join_component_kinds_match(
+            existing->component_kind,
+            evidence->component_kind))
     {
         return false;
     }
-    if (!graph_join_text_matches(existing->connector, evidence->connector))
+    if (!graph_join_connector_kinds_match(existing->connector_kind,
+                                          evidence->connector_kind))
     {
         return false;
     }
-    if (!graph_join_text_matches(existing->order_property,
-                                 evidence->order_property))
+    if (!graph_join_order_property_kinds_match(
+            existing->order_property_kind,
+            evidence->order_property_kind))
     {
         return false;
     }
-    if (!graph_join_text_matches(existing->source_evidence,
-                                 evidence->source_evidence))
+    if (!graph_join_source_evidence_matches(existing->source_evidence_kind,
+                                            evidence->source_evidence_kind))
+        return false;
+    if (!graph_join_text_matches(existing->pattern_key,
+                                 evidence->pattern_key))
+    {
+        return false;
+    }
+    if (!graph_join_source_kinds_match(existing->source_kind_id,
+                                       evidence->source_kind_id))
     {
         return false;
     }
@@ -1453,26 +2200,33 @@ static bool graph_join_lowering_candidate_matches(
     }
 
     existing = &rel_candidate->evidence;
-    if (strcmp(age_graph_join_component_from_evidence(existing),
-               age_graph_join_component_from_evidence(evidence)) != 0)
+    if (!graph_join_component_kinds_match(
+            existing->component_kind,
+            evidence->component_kind))
     {
         return false;
     }
-    if (existing->connector == NULL ||
-        evidence->connector == NULL ||
-        strcmp(existing->connector, evidence->connector) != 0)
+    if (!graph_join_connector_kinds_match(existing->connector_kind,
+                                          evidence->connector_kind))
     {
         return false;
     }
-    if (existing->order_property == NULL ||
-        evidence->order_property == NULL ||
-        strcmp(existing->order_property, evidence->order_property) != 0)
+    if (!graph_join_order_property_kinds_match(
+            existing->order_property_kind,
+            evidence->order_property_kind))
     {
         return false;
     }
-    if (existing->source_evidence == NULL ||
-        evidence->source_evidence == NULL ||
-        strcmp(existing->source_evidence, evidence->source_evidence) != 0)
+    if (!graph_join_source_evidence_matches(existing->source_evidence_kind,
+                                            evidence->source_evidence_kind))
+        return false;
+    if (!graph_join_text_matches(existing->pattern_key,
+                                 evidence->pattern_key))
+    {
+        return false;
+    }
+    if (!graph_join_source_kinds_match(existing->source_kind_id,
+                                       evidence->source_kind_id))
     {
         return false;
     }
@@ -1487,6 +2241,8 @@ static void graph_join_merge_lowering_pool_evidence(
     AgeGraphJoinPathEvidence *evidence)
 {
     ListCell *lc;
+    AgeGraphJoinCoverMatchKind mismatch_kind = AGE_GRAPH_JOIN_COVER_UNKNOWN;
+    int64 declared_cover_count = 0;
 
     if (metadata == NULL ||
         metadata->lowering_pool == NIL ||
@@ -1498,6 +2254,10 @@ static void graph_join_merge_lowering_pool_evidence(
     foreach(lc, metadata->lowering_pool)
     {
         AgeGraphJoinRelCandidate *pool_candidate = lfirst(lc);
+
+        declared_cover_count = Max(
+            declared_cover_count,
+            pool_candidate->evidence.declared_cover_count);
 
         if (graph_join_lowering_candidate_matches(pool_candidate, evidence))
         {
@@ -1516,9 +2276,45 @@ static void graph_join_merge_lowering_pool_evidence(
                 path_evidence.shared_state_required;
             evidence->physical_properties_known =
                 path_evidence.physical_properties_known;
+            evidence->declared_cover_count = Max(
+                pool_candidate->evidence.declared_cover_count,
+                path_evidence.declared_cover_count);
+            evidence->cover_match_kind = AGE_GRAPH_JOIN_COVER_MATCHED;
             return;
         }
+
+        if (!graph_join_text_matches(pool_candidate->evidence.pattern_key,
+                                     evidence->pattern_key))
+        {
+            if (mismatch_kind == AGE_GRAPH_JOIN_COVER_UNKNOWN)
+                mismatch_kind = AGE_GRAPH_JOIN_COVER_PATTERN_MISMATCH;
+            continue;
+        }
+        if (!graph_join_component_kinds_match(
+                pool_candidate->evidence.component_kind,
+                evidence->component_kind))
+        {
+            mismatch_kind = AGE_GRAPH_JOIN_COVER_COMPONENT_MISMATCH;
+            continue;
+        }
+        if (!graph_join_source_kinds_match(
+                pool_candidate->evidence.source_kind_id,
+                evidence->source_kind_id))
+        {
+            mismatch_kind = AGE_GRAPH_JOIN_COVER_SOURCE_MISMATCH;
+            continue;
+        }
+
+        evidence->declared_cover_count = Max(
+            evidence->declared_cover_count,
+            pool_candidate->evidence.declared_cover_count);
+        evidence->cover_match_kind = AGE_GRAPH_JOIN_COVER_MATCHED;
+        return;
     }
+
+    evidence->declared_cover_count = Max(evidence->declared_cover_count,
+                                         declared_cover_count);
+    evidence->cover_match_kind = mismatch_kind;
 }
 
 static bool graph_join_metadata_lookup_path_evidence(
@@ -1541,11 +2337,40 @@ static bool graph_join_metadata_lookup_path_evidence(
         if (path_evidence->path == path)
         {
             *evidence = path_evidence->evidence;
-            return evidence->order_property != NULL;
+            return evidence->order_property_kind !=
+                   AGE_GRAPH_JOIN_ORDER_UNKNOWN;
         }
     }
 
     return false;
+}
+
+double age_graph_join_evidence_alternative_credit(
+    const AgeGraphJoinPathEvidence *evidence)
+{
+    if (evidence == NULL ||
+        evidence->candidate_count <= 1 ||
+        evidence->selected_total_cost <= 0 ||
+        evidence->next_total_cost <= evidence->selected_total_cost)
+    {
+        return 1.0;
+    }
+
+    return Max(0.25,
+               evidence->selected_total_cost / evidence->next_total_cost);
+}
+
+Cost age_graph_join_apply_evidence_alternative_credit(
+    Cost startup_cost, Cost total_cost, double credit)
+{
+    Cost run_cost;
+
+    if (credit >= 1.0)
+        return total_cost;
+
+    run_cost = Max(total_cost - startup_cost, 0.0);
+
+    return startup_cost + run_cost * credit;
 }
 
 double age_graph_join_path_evidence_credit(
@@ -1554,26 +2379,10 @@ double age_graph_join_path_evidence_credit(
 {
     double credit = 1.0;
 
-    if (outer_evidence != NULL &&
-        outer_evidence->candidate_count > 1 &&
-        outer_evidence->selected_total_cost > 0 &&
-        outer_evidence->next_total_cost > outer_evidence->selected_total_cost)
-    {
-        credit = Min(credit,
-                     Max(0.25,
-                         outer_evidence->selected_total_cost /
-                         outer_evidence->next_total_cost));
-    }
-    if (inner_evidence != NULL &&
-        inner_evidence->candidate_count > 1 &&
-        inner_evidence->selected_total_cost > 0 &&
-        inner_evidence->next_total_cost > inner_evidence->selected_total_cost)
-    {
-        credit = Min(credit,
-                     Max(0.25,
-                         inner_evidence->selected_total_cost /
-                         inner_evidence->next_total_cost));
-    }
+    credit = Min(credit,
+                 age_graph_join_evidence_alternative_credit(outer_evidence));
+    credit = Min(credit,
+                 age_graph_join_evidence_alternative_credit(inner_evidence));
 
     return credit;
 }
@@ -1584,7 +2393,7 @@ int age_graph_join_table_candidate_count(
     if (table == NULL)
         return 0;
 
-    return list_length(table->candidates);
+    return Max(list_length(table->candidates), table->declared_entry_count);
 }
 
 AgeGraphJoinCandidate *age_graph_join_table_select_next_best(
@@ -1622,22 +2431,41 @@ List *age_graph_join_candidate_private(
 
     descriptor = lappend(descriptor,
                          make_graph_join_text_const(
-                             candidate->component.name));
+                             candidate->component.display_name));
     descriptor = lappend(descriptor,
                          make_graph_join_text_const(
-                             candidate->component.family));
+                             age_graph_join_bound_kind_name(
+                                 candidate->connector.bound_kind)));
     descriptor = lappend(descriptor,
                          make_graph_join_text_const(
-                             candidate->connector.kind));
+                             age_graph_join_source_evidence_kind_name(
+                                 candidate->connector.source_evidence_kind)));
     descriptor = lappend(descriptor,
-                         make_graph_join_text_const(
-                             candidate->connector.bound));
+                         make_graph_join_text_const(candidate->pattern_key));
     descriptor = lappend(descriptor,
-                         make_graph_join_text_const(
-                             candidate->connector.order_property));
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(
+                                       candidate->component.family_kind),
+                                   false, true));
     descriptor = lappend(descriptor,
-                         make_graph_join_text_const(
-                             candidate->connector.source_evidence));
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(
+                                       candidate->connector.kind_id),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(
+                                       candidate->connector.order_property_kind),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(
+                                       candidate->connector.source_evidence_kind),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(candidate->source_kind_id),
+                                   false, true));
     descriptor = lappend(descriptor,
                          make_graph_join_text_const(
                              bmsToString(
@@ -1706,8 +2534,22 @@ List *age_graph_join_candidate_private(
     descriptor = lappend(descriptor,
                          makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
                                    Int32GetDatum(1), false, true));
-    descriptor = lappend(descriptor, make_graph_join_text_const("none"));
-    descriptor = lappend(descriptor, make_graph_join_text_const("none"));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(0), false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(AGE_GRAPH_JOIN_COVER_UNKNOWN),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(
+                                       AGE_GRAPH_JOIN_CONNECTOR_UNKNOWN),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(AGE_GRAPH_JOIN_ORDER_UNKNOWN),
+                                   false, true));
     descriptor = lappend(descriptor, make_graph_join_text_const("none"));
     descriptor = lappend(descriptor,
                          makeConst(FLOAT8OID, -1, InvalidOid,
@@ -1741,19 +2583,34 @@ List *age_graph_join_table_selected_private(
                           Int32GetDatum(
                               age_graph_join_table_candidate_count(table)),
                           false, true));
+    set_graph_join_descriptor_value(
+        descriptor, AGE_GRAPH_JOIN_DESC_DECLARED_COVER_COUNT,
+        (Node *)makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                          Int32GetDatum(table->declared_entry_count),
+                          false, true));
+    set_graph_join_descriptor_value(
+        descriptor, AGE_GRAPH_JOIN_DESC_COVER_MATCH_KIND,
+        (Node *)makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                          Int32GetDatum(table->cover_match_kind),
+                          false, true));
     if (next_best != NULL)
     {
         set_graph_join_descriptor_value(
-            descriptor, AGE_GRAPH_JOIN_DESC_NEXT_CONNECTOR,
-            (Node *)make_graph_join_text_const(next_best->connector.kind));
+            descriptor, AGE_GRAPH_JOIN_DESC_NEXT_CONNECTOR_KIND,
+            (Node *)makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                              Int32GetDatum(next_best->connector.kind_id),
+                              false, true));
         set_graph_join_descriptor_value(
-            descriptor, AGE_GRAPH_JOIN_DESC_NEXT_ORDER_PROPERTY,
-            (Node *)make_graph_join_text_const(
-                next_best->connector.order_property));
+            descriptor, AGE_GRAPH_JOIN_DESC_NEXT_ORDER_PROPERTY_KIND,
+            (Node *)makeConst(
+                INT4OID, -1, InvalidOid, sizeof(int32),
+                Int32GetDatum(next_best->connector.order_property_kind),
+                false, true));
         set_graph_join_descriptor_value(
             descriptor, AGE_GRAPH_JOIN_DESC_NEXT_SOURCE_EVIDENCE,
             (Node *)make_graph_join_text_const(
-                next_best->connector.source_evidence));
+                age_graph_join_source_evidence_kind_name(
+                    next_best->connector.source_evidence_kind)));
         set_graph_join_descriptor_value(
             descriptor, AGE_GRAPH_JOIN_DESC_NEXT_ROWS,
             (Node *)makeConst(FLOAT8OID, -1, InvalidOid, sizeof(float8),
@@ -1832,6 +2689,8 @@ static char *copy_graph_join_text(const char *value, const char *fallback)
 {
     if (value == NULL)
         value = fallback;
+    if (value == NULL)
+        return NULL;
 
     return pstrdup(value);
 }

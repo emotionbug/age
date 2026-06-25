@@ -36,10 +36,10 @@ typedef struct VLESourceFanoutEvidence
     double reltuples;
     double start_fanout;
     double end_fanout;
-    const char *start_fanout_source;
-    const char *end_fanout_source;
-    const char *start_value_posting_source;
-    const char *end_value_posting_source;
+    AgeVLEStreamFanoutSourceKind start_fanout_source_kind;
+    AgeVLEStreamFanoutSourceKind end_fanout_source_kind;
+    VLESourceValuePostingKind start_value_posting_source_kind;
+    VLESourceValuePostingKind end_value_posting_source_kind;
 } VLESourceFanoutEvidence;
 
 typedef struct VLEStreamSourceCostInput
@@ -74,13 +74,13 @@ typedef struct VLEStreamSourceCostDecision
     AgeVLEStreamDirectedSourceKind outgoing_kind;
     AgeVLEStreamDirectedSourceKind incoming_kind;
     char *policy_text;
-    const char *policy_consumer;
-    const char *policy_consumer_class;
-    const char *policy_active_direction;
+    AgeVLEOutputRequirement policy_output_requirement;
+    VLESourceConsumerClass policy_consumer_class_id;
+    VLESourceDirectionClass policy_active_direction_id;
     int64 policy_fanout_budget;
     int64 policy_materialization_weight;
-    const char *policy_class;
-    const char *policy_recommendation;
+    VLESourcePolicyClass policy_class_id;
+    VLESourcePolicyRecommendation policy_recommendation_kind;
     bool cache_seed_eligible;
     int64 endpoint_headroom_percent;
     bool empty_lifecycle_eligible;
@@ -96,9 +96,9 @@ typedef struct VLEStreamSourceCostDecision
     int64 threshold_input_in_observed_count;
     int64 threshold_input_out_saturated_count;
     int64 threshold_input_in_saturated_count;
-    const char *threshold_input_source;
-    const char *threshold_input_reason;
-    const char *threshold_input_class;
+    VLESourceDirectionClass threshold_input_direction_id;
+    VLESourceThresholdFeedbackReason threshold_input_reason_id;
+    VLESourcePolicyClass threshold_input_class_id;
     bool payload_input_known;
     int64 payload_input_headroom_percent;
     int64 payload_input_scan_runs;
@@ -114,9 +114,9 @@ typedef struct VLEStreamSourceCostDecision
     int64 payload_input_matrix_replay_source_percent;
     int64 payload_input_matrix_run_block_percent;
     int64 payload_input_matrix_regroup_percent;
-    const char *payload_input_reason;
-    const char *payload_input_class;
-    const char *payload_input_value_posting_source;
+    VLESourcePayloadFeedbackReason payload_input_reason_id;
+    VLESourcePolicyClass payload_input_class_id;
+    VLESourceValuePostingKind payload_input_value_posting_source_kind;
     bool composite_prefilter_planned;
     int64 composite_candidate_fanout;
     int64 composite_fanout;
@@ -152,12 +152,12 @@ typedef struct VLESourceRuntimeThresholdFeedback
     int64 payload_matrix_replay_source_percent;
     int64 payload_matrix_run_block_percent;
     int64 payload_matrix_regroup_percent;
-    const char *source_direction;
-    const char *reason;
-    const char *feedback_class;
-    const char *payload_reason;
-    const char *payload_class;
-    const char *payload_value_posting_source;
+    VLESourceDirectionClass source_direction_id;
+    VLESourceThresholdFeedbackReason reason_id;
+    VLESourcePolicyClass feedback_class_id;
+    VLESourcePayloadFeedbackReason payload_reason_id;
+    VLESourcePolicyClass payload_class_id;
+    VLESourceValuePostingKind payload_value_posting_source_kind;
 } VLESourceRuntimeThresholdFeedback;
 
 extern void estimate_vle_source_fanout_evidence(
@@ -180,6 +180,28 @@ extern void record_vle_source_runtime_threshold_feedback(
 extern double estimate_vle_edge_endpoint_fanout(
     Oid edge_label_oid, AttrNumber endpoint_attno, double reltuples);
 extern double get_vle_relation_estimated_tuples(Oid relation_oid);
+extern const char *age_vle_output_requirement_name(
+    AgeVLEOutputRequirement requirement);
+extern const char *age_vle_value_posting_source_name(
+    VLESourceValuePostingKind source);
+extern const char *age_vle_source_policy_class_name(
+    VLESourcePolicyClass source_class);
+extern const char *age_vle_source_consumer_class_name(
+    VLESourceConsumerClass consumer_class);
+extern const char *age_vle_source_direction_name(
+    VLESourceDirectionClass direction);
+extern const char *age_vle_threshold_feedback_reason_name(
+    VLESourceThresholdFeedbackReason reason);
+extern const char *age_vle_payload_feedback_reason_name(
+    VLESourcePayloadFeedbackReason reason);
+extern const char *age_vle_source_policy_recommendation_name(
+    VLESourcePolicyRecommendation recommendation);
+extern const char *age_vle_stream_composite_source_reason_name(
+    AgeVLEStreamCompositeSourceReason reason);
+extern bool age_vle_stream_composite_source_reason_is_eligible(
+    AgeVLEStreamCompositeSourceReason reason);
+extern const char *age_graph_property_selectivity_source_name(
+    AgeGraphPropertySelectivitySource source);
 extern char *format_vle_stream_edge_source_evidence(
     AgeVLEStreamEdgeSource *source);
 extern char *format_vle_stream_edge_source_cost(

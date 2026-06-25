@@ -132,6 +132,14 @@ typedef struct AgeAdjacencyVisiblePayloadRunNextItem
     AgeAdjacencyVisiblePayloadRunNextBatch batch;
 } AgeAdjacencyVisiblePayloadRunNextItem;
 
+typedef enum VLESourceValuePostingKind
+{
+    VLE_SOURCE_VALUE_POSTING_NONE = 0,
+    VLE_SOURCE_VALUE_POSTING_RUN,
+    VLE_SOURCE_VALUE_POSTING_LABEL_SLICE,
+    VLE_SOURCE_VALUE_POSTING_OTHER
+} VLESourceValuePostingKind;
+
 typedef struct AgeAdjacencyTerminalLabelPostingEstimate
 {
     graphid key;
@@ -140,7 +148,7 @@ typedef struct AgeAdjacencyTerminalLabelPostingEstimate
     int64 run_postings;
     int64 terminal_postings;
     int64 label_groups;
-    const char *value_posting_source;
+    VLESourceValuePostingKind value_posting_source_kind;
     int64 main_blocks;
     bool composite_matches;
     bool label_mismatch;
@@ -215,7 +223,8 @@ extern int64 age_adjacency_visible_payload_scan_active_postings(
 extern bool age_adjacency_estimate_terminal_label_postings(
     Oid index_oid, graphid key, int32 terminal_label_id,
     int64 *run_postings, int64 *terminal_postings, int64 *label_groups,
-    const char **value_posting_source, int64 *main_blocks);
+    VLESourceValuePostingKind *value_posting_source_kind,
+    int64 *main_blocks);
 extern bool age_adjacency_estimate_terminal_label_postings_batch(
     Oid index_oid, int32 terminal_label_id,
     AgeAdjacencyTerminalLabelPostingEstimate *estimates,

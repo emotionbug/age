@@ -24,9 +24,11 @@
 #include "nodes/parsenodes.h"
 #include "nodes/pathnodes.h"
 #include "nodes/pg_list.h"
+#include "access/age_adjacency.h"
+#include "executor/cypher_adjacency_match.h"
+#include "executor/cypher_vle_stream.h"
+#include "optimizer/cypher_graph_join.h"
 #include "utils/relcache.h"
-
-typedef struct AgeGraphJoinLoweringArtifact AgeGraphJoinLoweringArtifact;
 
 typedef struct CypherAdjacencyMatchCandidate
 {
@@ -34,14 +36,13 @@ typedef struct CypherAdjacencyMatchCandidate
     Oid edge_label_oid;
     Oid index_oid;
     char *edge_alias;
-    char *graph_pattern_kind;
+    char *graph_pattern_key;
     char *bound_endpoint_alias;
     Node *bound_endpoint_expr;
-    char *candidate_reason;
     char *index_source;
-    char *index_kind;
+    AgeAdjacencyMatchIndexKind index_kind_id;
     char *index_provider;
-    char *index_direction;
+    AgeAdjacencyMatchIndexDirection index_direction_id;
     int32 index_property_count;
     bool index_metadata_backed;
     char *right_property_key;
@@ -51,7 +52,8 @@ typedef struct CypherAdjacencyMatchCandidate
     char *right_property_index_type;
     bool right_property_index_metadata_backed;
     bool right_property_prefetch_eligible;
-    char *right_property_value_kind;
+    AgeAdjacencyMatchValueKind right_property_value_kind_id;
+    AgeAdjacencyMatchTerminalStrategy terminal_source_strategy_id;
     Const *right_property_value;
     Node *right_property_value_expr;
     Index edge_rti;
@@ -69,8 +71,9 @@ typedef struct CypherAdjacencyMatchCandidate
     double estimated_terminal_fanout;
     double estimated_composite_fanout;
     double estimated_composite_selectivity;
-    char *estimated_composite_selectivity_source;
-    char *estimated_value_posting_source;
+    AgeGraphPropertySelectivitySource
+        estimated_composite_selectivity_source_kind;
+    VLESourceValuePostingKind estimated_value_posting_source_kind;
     double estimated_terminal_label_groups;
     double estimated_main_blocks;
     bool estimated_fanout_from_directory;
@@ -82,23 +85,25 @@ void set_rel_pathlist_init(void);
 void set_rel_pathlist_fini(void);
 void cypher_rewrite_property_index_surfaces(Query *parse);
 void cypher_clear_adjacency_match_candidates(void);
-void cypher_register_graph_pattern_handoff(const char *graph_pattern_kind);
+void cypher_register_graph_pattern_handoff(const char *graph_pattern_key);
+void cypher_declare_graph_pattern_source(
+    const char *graph_pattern_key, AgeGraphJoinSourceKind source_kind_id,
+    AgeGraphJoinComponentKind component_family_kind);
 void cypher_register_vle_pattern_handoff(const char *marker_alias,
-                                         const char *graph_pattern_kind);
+                                         const char *graph_pattern_key);
 void cypher_register_node_pattern_handoff(const char *node_alias,
-                                          const char *graph_pattern_kind);
+                                          const char *graph_pattern_key);
 void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
                                                Oid index_oid,
                                                Oid graph_oid,
                                                const char *edge_alias,
-                                               const char *graph_pattern_kind,
+                                               const char *graph_pattern_key,
                                                const char *bound_endpoint_alias,
                                                Node *bound_endpoint_expr,
-                                               const char *candidate_reason,
                                                const char *index_source,
-                                               const char *index_kind,
+                                               AgeAdjacencyMatchIndexKind index_kind_id,
                                                const char *index_provider,
-                                               const char *index_direction,
+                                               AgeAdjacencyMatchIndexDirection index_direction_id,
                                                int32 index_property_count,
                                                bool index_metadata_backed,
                                                const char *right_property_key,

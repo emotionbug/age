@@ -213,8 +213,23 @@ ag_include_dir = $(srcdir)/src/include
 PG_CPPFLAGS = -I$(ag_include_dir) -I$(ag_include_dir)/parser
 
 PG_CONFIG ?= pg_config
+AGE_CC := $(shell $(PG_CONFIG) --cc 2>/dev/null)
+AGE_CC_VERSION := $(shell $(AGE_CC) --version 2>/dev/null | sed -n '1p')
+ifneq (,$(findstring clang,$(AGE_CC_VERSION)))
+AGE_SHADOW_CFLAGS := -Wshadow-all
+else ifneq (,$(findstring GCC,$(AGE_CC_VERSION))$(findstring gcc,$(notdir $(AGE_CC))))
+AGE_SHADOW_CFLAGS := -Wshadow=compatible-local
+endif
+PG_CFLAGS += $(AGE_SHADOW_CFLAGS)
+
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+AGE_HEADER_DEPS := $(shell find src/include -name '*.h' -type f 2>/dev/null)
+AGE_BCOBJS := $(patsubst %.o,%.bc,$(OBJS))
+
+$(OBJS): $(AGE_HEADER_DEPS)
+$(AGE_BCOBJS): $(AGE_HEADER_DEPS)
 
 # 32-bit platform support: pass SIZEOF_DATUM=4 to enable (e.g., make SIZEOF_DATUM=4)
 # When SIZEOF_DATUM=4, PASSEDBYVALUE is stripped from graphid type for pass-by-reference.

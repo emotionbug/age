@@ -365,20 +365,41 @@ bool age_adjacency_match_terminal_property_prefilter_set(
     return true;
 }
 
-const char *age_adjacency_match_terminal_property_mode(
+AgeAdjacencyMatchTerminalPropertyMode
+age_adjacency_match_terminal_property_mode_id(
     const AgeAdjacencyMatchTerminalPropertyLookup *lookup)
 {
     if (!age_adjacency_match_terminal_property_active(lookup))
-        return "none";
+        return AGE_ADJACENCY_TERMINAL_PROPERTY_NONE;
     if (lookup->property_index_available)
-        return "property-index-prefetch";
+        return AGE_ADJACENCY_TERMINAL_PROPERTY_SOURCE_PREFETCH;
     if (OidIsValid(lookup->property_index_oid) &&
         !lookup->property_value_isnull &&
         !lookup->property_index_prefetch_attempted)
-        return "deferred-prefetch";
+        return AGE_ADJACENCY_TERMINAL_PROPERTY_DEFERRED_PREFETCH;
     if (lookup->match_cache != NULL)
-        return "id-btree-cache";
-    return "id-btree";
+        return AGE_ADJACENCY_TERMINAL_PROPERTY_ID_CACHE;
+    return AGE_ADJACENCY_TERMINAL_PROPERTY_ID_BTREE;
+}
+
+const char *age_adjacency_match_terminal_property_mode_name(
+    AgeAdjacencyMatchTerminalPropertyMode mode)
+{
+    switch (mode)
+    {
+        case AGE_ADJACENCY_TERMINAL_PROPERTY_SOURCE_PREFETCH:
+            return "property-index-prefetch";
+        case AGE_ADJACENCY_TERMINAL_PROPERTY_DEFERRED_PREFETCH:
+            return "deferred-prefetch";
+        case AGE_ADJACENCY_TERMINAL_PROPERTY_ID_CACHE:
+            return "id-btree-cache";
+        case AGE_ADJACENCY_TERMINAL_PROPERTY_ID_BTREE:
+            return "id-btree";
+        case AGE_ADJACENCY_TERMINAL_PROPERTY_NONE:
+            break;
+    }
+
+    return "none";
 }
 
 Oid age_adjacency_match_terminal_property_index_oid(
@@ -450,8 +471,7 @@ static bool terminal_property_lookup_request_valid(
         request->has_property_predicate &&
         request->metadata_backed &&
         label_id_is_valid(request->right_label_id) &&
-        request->property_key != NULL &&
-        strcmp(request->property_key, "none") != 0;
+        request->property_key != NULL;
 }
 
 static HTAB *create_terminal_property_match_cache(MemoryContext context)

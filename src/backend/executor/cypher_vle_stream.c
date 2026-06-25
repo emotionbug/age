@@ -49,14 +49,16 @@ typedef struct AgeVLEStreamScanState
     AgeVLEStreamOutput output;
     AgeVLEStreamEdgeSource edge_source;
     char *join_order_component;
-    char *join_order_connector;
+    AgeGraphJoinConnectorKind join_order_connector_kind;
     char *join_order_bound;
-    char *join_order_property;
+    AgeGraphJoinOrderPropertyKind join_order_property_kind;
     char *join_order_source_evidence;
     char *join_order_solved_relids;
     int64 join_order_candidate_count;
-    char *join_order_next_connector;
-    char *join_order_next_property;
+    int64 join_order_declared_cover_count;
+    AgeGraphJoinCoverMatchKind join_order_cover_match_kind;
+    AgeGraphJoinConnectorKind join_order_next_connector_kind;
+    AgeGraphJoinOrderPropertyKind join_order_next_property_kind;
     char *join_order_next_source_evidence;
     AgeVLESourceStats source_stats;
     AgeVLESourceStats current_source_stats;
@@ -83,9 +85,9 @@ static char *format_age_vle_stream_join_order(
     AgeVLEStreamScanState *state);
 static char *format_age_vle_stream_matrix_frontier(
     AgeVLEStreamScanState *state);
-static const char *age_vle_stream_join_order_connector(
+static AgeGraphJoinConnectorKind age_vle_stream_join_order_connector_kind(
     AgeVLEStreamScanState *state);
-static const char *age_vle_stream_join_order_property(
+static AgeGraphJoinOrderPropertyKind age_vle_stream_join_order_property_kind(
     AgeVLEStreamScanState *state);
 static bool age_vle_stream_has_bound_endpoints(
     AgeVLEStreamScanState *state);
@@ -96,7 +98,7 @@ static void initialize_age_vle_stream_graph_join_descriptor(
     AgeVLEStreamScanState *state, CustomScan *cscan);
 static void initialize_age_vle_stream_input_descriptor(
     AgeVLEStreamScanState *state);
-static int age_vle_stream_source_kind_to_input(
+static VLETraversalSourceKind age_vle_stream_source_kind_to_input(
     AgeVLEStreamDirectedSourceKind kind);
 static void initialize_age_vle_stream_iterator(AgeVLEStreamScanState *state,
                                               ExprContext *econtext);
@@ -206,12 +208,16 @@ static void initialize_age_vle_stream_graph_join_descriptor(
 
     state->join_order_component = (char *)age_graph_join_descriptor_text_field(
         descriptor, AGE_GRAPH_JOIN_DESC_COMPONENT);
-    state->join_order_connector = (char *)age_graph_join_descriptor_text_field(
-        descriptor, AGE_GRAPH_JOIN_DESC_CONNECTOR);
+    state->join_order_connector_kind =
+        (AgeGraphJoinConnectorKind)age_graph_join_descriptor_int_field(
+            descriptor, AGE_GRAPH_JOIN_DESC_CONNECTOR_KIND,
+            AGE_GRAPH_JOIN_CONNECTOR_UNKNOWN);
     state->join_order_bound = (char *)age_graph_join_descriptor_text_field(
         descriptor, AGE_GRAPH_JOIN_DESC_BOUND);
-    state->join_order_property = (char *)age_graph_join_descriptor_text_field(
-        descriptor, AGE_GRAPH_JOIN_DESC_ORDER_PROPERTY);
+    state->join_order_property_kind =
+        (AgeGraphJoinOrderPropertyKind)age_graph_join_descriptor_int_field(
+            descriptor, AGE_GRAPH_JOIN_DESC_ORDER_PROPERTY_KIND,
+            AGE_GRAPH_JOIN_ORDER_UNKNOWN);
     state->join_order_source_evidence =
         (char *)age_graph_join_descriptor_text_field(
             descriptor, AGE_GRAPH_JOIN_DESC_SOURCE_EVIDENCE);
@@ -220,12 +226,21 @@ static void initialize_age_vle_stream_graph_join_descriptor(
             descriptor, AGE_GRAPH_JOIN_DESC_SOLVED_RELIDS);
     state->join_order_candidate_count = age_graph_join_descriptor_int_field(
         descriptor, AGE_GRAPH_JOIN_DESC_CANDIDATE_COUNT, 1);
-    state->join_order_next_connector =
-        (char *)age_graph_join_descriptor_text_field(
-            descriptor, AGE_GRAPH_JOIN_DESC_NEXT_CONNECTOR);
-    state->join_order_next_property =
-        (char *)age_graph_join_descriptor_text_field(
-            descriptor, AGE_GRAPH_JOIN_DESC_NEXT_ORDER_PROPERTY);
+    state->join_order_declared_cover_count =
+        age_graph_join_descriptor_int_field(
+            descriptor, AGE_GRAPH_JOIN_DESC_DECLARED_COVER_COUNT, 0);
+    state->join_order_cover_match_kind =
+        (AgeGraphJoinCoverMatchKind)age_graph_join_descriptor_int_field(
+            descriptor, AGE_GRAPH_JOIN_DESC_COVER_MATCH_KIND,
+            AGE_GRAPH_JOIN_COVER_UNKNOWN);
+    state->join_order_next_connector_kind =
+        (AgeGraphJoinConnectorKind)age_graph_join_descriptor_int_field(
+            descriptor, AGE_GRAPH_JOIN_DESC_NEXT_CONNECTOR_KIND,
+            AGE_GRAPH_JOIN_CONNECTOR_UNKNOWN);
+    state->join_order_next_property_kind =
+        (AgeGraphJoinOrderPropertyKind)age_graph_join_descriptor_int_field(
+            descriptor, AGE_GRAPH_JOIN_DESC_NEXT_ORDER_PROPERTY_KIND,
+            AGE_GRAPH_JOIN_ORDER_UNKNOWN);
     state->join_order_next_source_evidence =
         (char *)age_graph_join_descriptor_text_field(
             descriptor, AGE_GRAPH_JOIN_DESC_NEXT_SOURCE_EVIDENCE);
@@ -322,8 +337,8 @@ static void initialize_age_vle_stream_input_descriptor(
     state->input.empty_lifecycle_batch_size =
         state->edge_source.empty_lifecycle_batch_size;
     state->input.matrix_frontier_policy_known =
-        state->join_order_connector != NULL &&
-        strcmp(state->join_order_connector, "matrix-frontier-expand") == 0;
+        state->join_order_connector_kind ==
+        AGE_GRAPH_JOIN_CONNECTOR_MATRIX_FRONTIER_EXPAND;
     state->input.matrix_frontier_eligible =
         state->input.matrix_frontier_policy_known;
     state->input.matrix_frontier_depth =
@@ -337,7 +352,7 @@ static void initialize_age_vle_stream_input_descriptor(
         state->input.matrix_frontier_batch_size = 1;
 }
 
-static int age_vle_stream_source_kind_to_input(
+static VLETraversalSourceKind age_vle_stream_source_kind_to_input(
     AgeVLEStreamDirectedSourceKind kind)
 {
     switch (kind)
@@ -621,35 +636,47 @@ static char *format_age_vle_stream_join_order(
     return psprintf("component=%s solved=%s connector=%s bound=%s property=%s "
                     "rows=%ld fanout=start:%ld/end:%ld "
                     "consumer=%s class=%s source=%s candidates=%ld "
+                    "declared-cover=%ld cover=%s "
                     "next=%s/%s/%s",
                     state->join_order_component != NULL ?
                     state->join_order_component : "vle",
                     state->join_order_solved_relids != NULL ?
                     state->join_order_solved_relids : "(b)",
-                    state->join_order_connector != NULL ?
-                    state->join_order_connector :
-                    age_vle_stream_join_order_connector(state),
+                    age_graph_join_connector_name(
+                        state->join_order_connector_kind !=
+                        AGE_GRAPH_JOIN_CONNECTOR_UNKNOWN ?
+                        state->join_order_connector_kind :
+                        age_vle_stream_join_order_connector_kind(state)),
                     state->join_order_bound != NULL ?
                     state->join_order_bound :
-                    (source->policy_active_direction != NULL ?
-                    source->policy_active_direction : "unknown"),
-                    state->join_order_property != NULL ?
-                    state->join_order_property :
-                    age_vle_stream_join_order_property(state),
+                    age_vle_source_direction_name(
+                        source->policy_active_direction_id),
+                    age_graph_join_order_property_name(
+                        state->join_order_property_kind !=
+                        AGE_GRAPH_JOIN_ORDER_UNKNOWN ?
+                        state->join_order_property_kind :
+                        age_vle_stream_join_order_property_kind(state)),
                     (long)state->css.ss.ps.plan->plan_rows,
                     (long)source->start_fanout,
                     (long)source->end_fanout,
-                    source->policy_consumer != NULL ?
-                    source->policy_consumer : "unknown",
-                    source->policy_consumer_class != NULL ?
-                    source->policy_consumer_class : "unknown",
+                    age_vle_output_requirement_name(
+                        source->policy_output_requirement),
+                    age_vle_source_consumer_class_name(
+                        source->policy_consumer_class_id),
                     state->join_order_source_evidence != NULL ?
                     state->join_order_source_evidence : "unknown",
                     (long)Max(state->join_order_candidate_count, 1),
-                    state->join_order_next_connector != NULL ?
-                    state->join_order_next_connector : "none",
-                    state->join_order_next_property != NULL ?
-                    state->join_order_next_property : "none",
+                    (long)state->join_order_declared_cover_count,
+                    age_graph_join_cover_match_kind_name(
+                        state->join_order_cover_match_kind),
+                    state->join_order_next_connector_kind !=
+                    AGE_GRAPH_JOIN_CONNECTOR_UNKNOWN ?
+                    age_graph_join_connector_name(
+                        state->join_order_next_connector_kind) : "none",
+                    state->join_order_next_property_kind !=
+                    AGE_GRAPH_JOIN_ORDER_UNKNOWN ?
+                    age_graph_join_order_property_name(
+                        state->join_order_next_property_kind) : "none",
                     state->join_order_next_source_evidence != NULL ?
                     state->join_order_next_source_evidence : "none");
 }
@@ -692,55 +719,54 @@ static char *format_age_vle_stream_matrix_frontier(
                     (long long)stats->matrix_frontier_cache_empty_marks);
 }
 
-static const char *age_vle_stream_join_order_connector(
+static AgeGraphJoinConnectorKind age_vle_stream_join_order_connector_kind(
     AgeVLEStreamScanState *state)
 {
     AgeVLEStreamEdgeSource *source = &state->edge_source;
 
     if (source->composite_source_known &&
-        source->composite_source_planned != NULL &&
-        strcmp(source->composite_source_planned, "property-prefilter") == 0)
+        age_vle_stream_composite_plan_is_property_prefilter(
+            source->composite_source_planned_kind))
     {
         if (age_vle_stream_has_bound_endpoints(state))
-            return "vle-composite-expand-into";
-        return "vle-composite-expand";
+            return AGE_GRAPH_JOIN_CONNECTOR_VLE_COMPOSITE_EXPAND_INTO;
+        return AGE_GRAPH_JOIN_CONNECTOR_VLE_COMPOSITE_EXPAND;
     }
 
     if (age_vle_stream_has_bound_endpoints(state))
-        return "vle-expand-into";
+        return AGE_GRAPH_JOIN_CONNECTOR_VLE_EXPAND_INTO;
 
-    if (source->policy_active_direction != NULL &&
-        strcmp(source->policy_active_direction, "both") == 0)
-        return "vle-bidirectional-expand";
+    if (source->policy_active_direction_id == VLE_SOURCE_DIRECTION_BOTH)
+        return AGE_GRAPH_JOIN_CONNECTOR_VLE_BIDIRECTIONAL_EXPAND;
 
-    return "vle-expand";
+    return AGE_GRAPH_JOIN_CONNECTOR_VLE_EXPAND;
 }
 
-static const char *age_vle_stream_join_order_property(
+static AgeGraphJoinOrderPropertyKind age_vle_stream_join_order_property_kind(
     AgeVLEStreamScanState *state)
 {
     AgeVLEStreamEdgeSource *source = &state->edge_source;
 
     if (source->composite_source_known &&
-        source->composite_source_planned != NULL &&
-        strcmp(source->composite_source_planned, "property-prefilter") == 0)
-        return "index-anchored";
+        age_vle_stream_composite_plan_is_property_prefilter(
+            source->composite_source_planned_kind))
+        return AGE_GRAPH_JOIN_ORDER_INDEX_ANCHORED;
 
-    if ((source->start_fanout_source != NULL &&
-         strcmp(source->start_fanout_source, "directory-label") == 0) ||
-        (source->end_fanout_source != NULL &&
-         strcmp(source->end_fanout_source, "directory-label") == 0))
-        return "vle-frontier-anchored";
+    if (age_vle_stream_fanout_source_is_directory_label(
+            source->start_fanout_source_kind) ||
+        age_vle_stream_fanout_source_is_directory_label(
+            source->end_fanout_source_kind))
+        return AGE_GRAPH_JOIN_ORDER_VLE_FRONTIER;
 
     if (source->cache_seed_eligible ||
         source->empty_lifecycle_eligible ||
         source->payload_input_known)
-        return "vle-frontier-anchored";
+        return AGE_GRAPH_JOIN_ORDER_VLE_FRONTIER;
 
     if (age_vle_stream_has_bound_endpoints(state))
-        return "expand-into-verification";
+        return AGE_GRAPH_JOIN_ORDER_EXPAND_INTO;
 
-    return "query-order";
+    return AGE_GRAPH_JOIN_ORDER_QUERY;
 }
 
 static bool age_vle_stream_has_bound_endpoints(

@@ -51,6 +51,13 @@ typedef enum AgeVLETerminalLabelMode
     AGE_VLE_TERMINAL_LABEL_ENDPOINT_ONLY
 } AgeVLETerminalLabelMode;
 
+typedef enum VLETraversalSourceKind
+{
+    VLE_TRAVERSAL_SOURCE_NONE = 0,
+    VLE_TRAVERSAL_SOURCE_AGE_ADJACENCY,
+    VLE_TRAVERSAL_SOURCE_ENDPOINT_BTREE
+} VLETraversalSourceKind;
+
 typedef struct AgeVLEInput
 {
     int nargs;
@@ -107,8 +114,8 @@ typedef struct AgeVLEInput
     Oid terminal_property_index_oid;
     int64 terminal_property_prefetch_threshold;
     bool source_policy_known;
-    int source_policy_outgoing_kind;
-    int source_policy_incoming_kind;
+    VLETraversalSourceKind source_policy_outgoing_kind;
+    VLETraversalSourceKind source_policy_incoming_kind;
     bool empty_lifecycle_policy_known;
     bool empty_lifecycle_eligible;
     int64 empty_lifecycle_depth;

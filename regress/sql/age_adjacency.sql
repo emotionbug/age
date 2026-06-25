@@ -767,7 +767,7 @@ SELECT * FROM cypher('age_adj_match_descriptor', $$
     RETURN n.i
 $$) AS (i agtype);
 SELECT * FROM cypher('age_adj_match_descriptor', $$
-    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
     MATCH (m:N {i: 1})
     MATCH (:N {i: 0})-[:R]->(n:N {i: m.i})
     RETURN n.i
@@ -791,17 +791,17 @@ RESET enable_bitmapscan;
 RESET enable_indexscan;
 RESET enable_seqscan;
 SELECT * FROM cypher('age_adj_match_descriptor', $$
-    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
     MATCH (:N {i: 0})-[:R]->(n:N {i: 1})
     RETURN n.i
 $$) AS (plan agtype);
 SELECT * FROM cypher('age_adj_match_descriptor', $$
-    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
     MATCH (:N {i: 0})-[:R]->(m:M {i: 1})
     RETURN m.i
 $$) AS (plan agtype);
 SELECT * FROM cypher('age_adj_match_descriptor', $$
-    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
     MATCH (:N {i: 0})-[:R]->(:Z)
     RETURN count(*)
 $$) AS (plan agtype);
@@ -864,7 +864,7 @@ RESET random_page_cost;
 RESET cpu_tuple_cost;
 RESET client_min_messages;
 SELECT * FROM cypher('age_adj_match_descriptor', $$
-    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
     MATCH (:N {i: 0})-[:R]->(n:N {i: 1 + 0})
     RETURN n.i
 $$) AS (plan agtype);
@@ -899,7 +899,7 @@ $$) AS (create_index text);
 ANALYZE age_adj_match_prefetch_gate."N";
 ANALYZE age_adj_match_prefetch_gate."R";
 SELECT * FROM cypher('age_adj_match_prefetch_gate', $$
-    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
     MATCH (:N {i: 10})-[:R]->(n:N {i: 11})
     RETURN n.i
 $$) AS (plan agtype);

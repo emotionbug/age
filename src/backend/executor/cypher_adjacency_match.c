@@ -28,9 +28,11 @@
 #include "executor/cypher_adjacency_match_terminal.h"
 #include "executor/executor.h"
 #include "lib/stringinfo.h"
+#include "optimizer/cypher_graph_join.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/graphid.h"
+#include "utils/age_vle_source_cost.h"
 #include "utils/agtype.h"
 #include "utils/memutils.h"
 
@@ -48,6 +50,32 @@ typedef struct AgeAdjacencyMatchParallelState
     uint32 magic;
     int32 planned_workers;
 } AgeAdjacencyMatchParallelState;
+
+typedef enum AgeAdjacencyTerminalPrunePlan
+{
+    AGE_ADJACENCY_TERMINAL_PRUNE_NONE = 0,
+    AGE_ADJACENCY_TERMINAL_PRUNE_SOURCE_PREFETCH,
+    AGE_ADJACENCY_TERMINAL_PRUNE_ID_CACHE_SMALL,
+    AGE_ADJACENCY_TERMINAL_PRUNE_VERTEX_CACHE,
+    AGE_ADJACENCY_TERMINAL_PRUNE_DEFERRED
+} AgeAdjacencyTerminalPrunePlan;
+
+typedef enum AgeAdjacencyTerminalPolicyClass
+{
+    AGE_ADJACENCY_TERMINAL_CLASS_NONE = 0,
+    AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_PREFILTER,
+    AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_ID_CACHE,
+    AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_DEFERRED,
+    AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_RECHECK
+} AgeAdjacencyTerminalPolicyClass;
+
+typedef enum AgeAdjacencyPayloadSliceMode
+{
+    AGE_ADJACENCY_PAYLOAD_SLICE_SERIAL_ONLY = 0,
+    AGE_ADJACENCY_PAYLOAD_SLICE_WORKER_LOCAL,
+    AGE_ADJACENCY_PAYLOAD_SLICE_WORKER_LOCAL_READY,
+    AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_STATE_REQUIRED
+} AgeAdjacencyPayloadSliceMode;
 
 typedef struct AgeAdjacencyMatchScanState
 {
@@ -71,12 +99,12 @@ typedef struct AgeAdjacencyMatchScanState
     int64 estimated_terminal_label_groups;
     int64 estimated_main_blocks;
     char *fanout_source;
-    char *composite_selectivity_source;
-    char *value_posting_source;
+    AgeGraphPropertySelectivitySource composite_selectivity_source_kind;
+    VLESourceValuePostingKind value_posting_source_kind;
     char *index_source;
-    char *index_kind;
+    AgeAdjacencyMatchIndexKind index_kind_id;
     char *index_provider;
-    char *index_direction;
+    AgeAdjacencyMatchIndexDirection index_direction_id;
     int32 index_property_count;
     bool index_metadata_backed;
     char *right_property_key;
@@ -86,19 +114,21 @@ typedef struct AgeAdjacencyMatchScanState
     char *right_property_index_type;
     bool right_property_index_metadata_backed;
     bool right_property_prefetch_eligible;
-    char *right_property_value_kind;
-    char *terminal_source_strategy;
+    AgeAdjacencyMatchValueKind right_property_value_kind;
+    AgeAdjacencyMatchTerminalStrategy terminal_source_strategy;
     int64 terminal_prefetch_threshold;
-    char *terminal_prefetch_reason;
+    AgeAdjacencyMatchTerminalPrefetchReason terminal_prefetch_reason_kind;
     char *join_order_component;
-    char *join_order_connector;
+    AgeGraphJoinConnectorKind join_order_connector_kind;
     char *join_order_bound;
-    char *join_order_property;
+    AgeGraphJoinOrderPropertyKind join_order_property_kind;
     char *join_order_source_evidence;
     char *join_order_solved_relids;
     int64 join_order_candidate_count;
-    char *join_order_next_connector;
-    char *join_order_next_property;
+    int64 join_order_declared_cover_count;
+    AgeGraphJoinCoverMatchKind join_order_cover_match_kind;
+    AgeGraphJoinConnectorKind join_order_next_connector_kind;
+    AgeGraphJoinOrderPropertyKind join_order_next_property_kind;
     char *join_order_next_source_evidence;
     bool graph_join_parallel_safe;
     bool graph_join_parallel_aware;
@@ -106,7 +136,7 @@ typedef struct AgeAdjacencyMatchScanState
     double graph_join_gather_cost;
     bool graph_join_order_preserving;
     bool graph_join_shared_state_required;
-    char *payload_slice_mode;
+    AgeAdjacencyPayloadSliceMode payload_slice_mode;
     int32 payload_slice_index;
     int32 payload_slice_count;
     int32 payload_parallel_workers;
@@ -179,15 +209,29 @@ static char *format_age_adjacency_match_terminal_prefetch(
     AgeAdjacencyMatchScanState *state);
 static const char *age_adjacency_match_terminal_runtime_outcome(
     AgeAdjacencyMatchScanState *state);
+static const char *age_adjacency_match_terminal_runtime_outcome_name(
+    AgeAdjacencyTerminalPrunePlan outcome);
+static AgeAdjacencyTerminalPrunePlan
+age_adjacency_match_terminal_runtime_outcome_id(
+    AgeAdjacencyMatchScanState *state);
 static const char *age_adjacency_match_terminal_runtime_action(
     AgeAdjacencyMatchScanState *state);
 static const char *age_adjacency_match_terminal_planned_prefetch(
     AgeAdjacencyMatchScanState *state);
+static AgeAdjacencyTerminalPrunePlan
+age_adjacency_match_terminal_planned_prefetch_id(
+    AgeAdjacencyMatchScanState *state);
 static const char *age_adjacency_match_terminal_policy_class(
+    AgeAdjacencyMatchScanState *state);
+static AgeAdjacencyTerminalPolicyClass
+age_adjacency_match_terminal_policy_class_id(
     AgeAdjacencyMatchScanState *state);
 static const char *age_adjacency_match_terminal_policy_recommendation(
     AgeAdjacencyMatchScanState *state);
 static const char *age_adjacency_match_terminal_runtime_class(
+    AgeAdjacencyMatchScanState *state);
+static AgeAdjacencyTerminalPolicyClass
+age_adjacency_match_terminal_runtime_class_id(
     AgeAdjacencyMatchScanState *state);
 static const char *age_adjacency_match_terminal_runtime_recommendation(
     AgeAdjacencyMatchScanState *state);
@@ -206,8 +250,21 @@ static void append_age_adjacency_match_payload_mask(StringInfo buf,
 static const char *age_adjacency_match_attr_name(AttrNumber attno);
 static const char *age_adjacency_match_terminal_property_prune_mode(
     AgeAdjacencyMatchScanState *state);
+static AgeAdjacencyTerminalPrunePlan
+age_adjacency_match_terminal_property_prune_mode_id(
+    AgeAdjacencyMatchScanState *state);
 static const char *age_adjacency_match_terminal_property_residual_mode(
     AgeAdjacencyMatchScanState *state);
+static const char *age_adjacency_match_terminal_prune_plan_name(
+    AgeAdjacencyTerminalPrunePlan plan);
+static const char *age_adjacency_match_terminal_policy_class_name(
+    AgeAdjacencyTerminalPolicyClass policy_class);
+static const char *age_adjacency_match_payload_slice_mode_name(
+    AgeAdjacencyPayloadSliceMode mode);
+static const char *age_adjacency_match_value_kind_name(
+    AgeAdjacencyMatchValueKind kind);
+static const char *age_adjacency_match_terminal_strategy_name(
+    AgeAdjacencyMatchTerminalStrategy strategy);
 static int age_adjacency_match_residual_predicate_count(
     AgeAdjacencyMatchScanState *state);
 static int age_adjacency_match_index_solved_predicate_count(
@@ -646,8 +703,8 @@ static void explain_age_adjacency_match_scan(CustomScanState *node,
                                  "true" : "false",
                                  state->graph_join_shared_state_required ?
                                  "true" : "false",
-                                 state->payload_slice_mode != NULL ?
-                                 state->payload_slice_mode : "unknown",
+                                 age_adjacency_match_payload_slice_mode_name(
+                                     state->payload_slice_mode),
                                  state->payload_slice_count > 1 ?
                                  psprintf("%d/%d",
                                           state->payload_slice_index,
@@ -737,10 +794,14 @@ static void load_age_adjacency_match_descriptor(
         adjacency_match_descriptor_int64(
             descriptor,
             AGE_ADJACENCY_MATCH_DESC_COMPOSITE_SELECTIVITY_PPM);
-    state->composite_selectivity_source = adjacency_match_descriptor_text(
-        descriptor, AGE_ADJACENCY_MATCH_DESC_COMPOSITE_SELECTIVITY_SOURCE);
-    state->value_posting_source = adjacency_match_descriptor_text(
-        descriptor, AGE_ADJACENCY_MATCH_DESC_VALUE_POSTING_SOURCE);
+    state->composite_selectivity_source_kind =
+        (AgeGraphPropertySelectivitySource)adjacency_match_descriptor_int64(
+            descriptor,
+            AGE_ADJACENCY_MATCH_DESC_COMPOSITE_SELECTIVITY_SOURCE_KIND);
+    state->value_posting_source_kind =
+        (VLESourceValuePostingKind)adjacency_match_descriptor_int64(
+            descriptor,
+            AGE_ADJACENCY_MATCH_DESC_VALUE_POSTING_SOURCE_KIND);
     state->estimated_terminal_label_groups =
         adjacency_match_descriptor_int64(
             descriptor, AGE_ADJACENCY_MATCH_DESC_ESTIMATED_LABEL_GROUPS);
@@ -751,12 +812,14 @@ static void load_age_adjacency_match_descriptor(
         descriptor, AGE_ADJACENCY_MATCH_DESC_FANOUT_SOURCE);
     state->index_source = adjacency_match_descriptor_text(
         descriptor, AGE_ADJACENCY_MATCH_DESC_INDEX_SOURCE);
-    state->index_kind = adjacency_match_descriptor_text(
-        descriptor, AGE_ADJACENCY_MATCH_DESC_INDEX_KIND);
+    state->index_kind_id =
+        (AgeAdjacencyMatchIndexKind)adjacency_match_descriptor_int64(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_INDEX_KIND_ID);
     state->index_provider = adjacency_match_descriptor_text(
         descriptor, AGE_ADJACENCY_MATCH_DESC_INDEX_PROVIDER);
-    state->index_direction = adjacency_match_descriptor_text(
-        descriptor, AGE_ADJACENCY_MATCH_DESC_INDEX_DIRECTION);
+    state->index_direction_id =
+        (AgeAdjacencyMatchIndexDirection)adjacency_match_descriptor_int64(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_INDEX_DIRECTION_KIND);
     state->index_property_count = (int32)adjacency_match_descriptor_int64(
         descriptor, AGE_ADJACENCY_MATCH_DESC_INDEX_PROPERTY_COUNT);
     state->index_metadata_backed =
@@ -764,6 +827,11 @@ static void load_age_adjacency_match_descriptor(
             descriptor, AGE_ADJACENCY_MATCH_DESC_INDEX_METADATA_BACKED);
     state->right_property_key = adjacency_match_descriptor_text(
         descriptor, AGE_ADJACENCY_MATCH_DESC_RIGHT_PROPERTY_KEY);
+    if (!state->has_right_property_predicate)
+    {
+        pfree(state->right_property_key);
+        state->right_property_key = NULL;
+    }
     state->right_property_index_oid =
         (Oid)adjacency_match_descriptor_int64(
             descriptor, AGE_ADJACENCY_MATCH_DESC_RIGHT_PROPERTY_INDEX_OID);
@@ -781,23 +849,32 @@ static void load_age_adjacency_match_descriptor(
         adjacency_match_descriptor_bool(
             descriptor,
             AGE_ADJACENCY_MATCH_DESC_RIGHT_PROPERTY_PREFETCH_ELIGIBLE);
-    state->right_property_value_kind = adjacency_match_descriptor_text(
-        descriptor, AGE_ADJACENCY_MATCH_DESC_RIGHT_PROPERTY_VALUE_KIND);
-    state->terminal_source_strategy = adjacency_match_descriptor_text(
-        descriptor, AGE_ADJACENCY_MATCH_DESC_TERMINAL_SOURCE_STRATEGY);
+    state->right_property_value_kind =
+        (AgeAdjacencyMatchValueKind)adjacency_match_descriptor_int64(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_RIGHT_PROPERTY_VALUE_KIND);
+    state->terminal_source_strategy =
+        (AgeAdjacencyMatchTerminalStrategy)adjacency_match_descriptor_int64(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_TERMINAL_SOURCE_STRATEGY);
     state->terminal_prefetch_threshold =
         adjacency_match_descriptor_int64(
             descriptor, AGE_ADJACENCY_MATCH_DESC_TERMINAL_PREFETCH_THRESHOLD);
-    state->terminal_prefetch_reason = adjacency_match_descriptor_text(
-        descriptor, AGE_ADJACENCY_MATCH_DESC_TERMINAL_PREFETCH_REASON);
+    state->terminal_prefetch_reason_kind =
+        (AgeAdjacencyMatchTerminalPrefetchReason)
+        adjacency_match_descriptor_int64(
+            descriptor,
+            AGE_ADJACENCY_MATCH_DESC_TERMINAL_PREFETCH_REASON_KIND);
     state->join_order_component = adjacency_match_descriptor_text(
         descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_COMPONENT);
-    state->join_order_connector = adjacency_match_descriptor_text(
-        descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_CONNECTOR);
+    state->join_order_connector_kind =
+        (AgeGraphJoinConnectorKind)adjacency_match_descriptor_int64(
+            descriptor,
+            AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_CONNECTOR_KIND);
     state->join_order_bound = adjacency_match_descriptor_text(
         descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_BOUND);
-    state->join_order_property = adjacency_match_descriptor_text(
-        descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_PROPERTY);
+    state->join_order_property_kind =
+        (AgeGraphJoinOrderPropertyKind)adjacency_match_descriptor_int64(
+            descriptor,
+            AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_PROPERTY_KIND);
     state->join_order_source_evidence = adjacency_match_descriptor_text(
         descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_SOURCE_EVIDENCE);
     state->join_order_solved_relids = adjacency_match_descriptor_text(
@@ -806,10 +883,22 @@ static void load_age_adjacency_match_descriptor(
         adjacency_match_descriptor_int64(
             descriptor,
             AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_CANDIDATE_COUNT);
-    state->join_order_next_connector = adjacency_match_descriptor_text(
-        descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_NEXT_CONNECTOR);
-    state->join_order_next_property = adjacency_match_descriptor_text(
-        descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_NEXT_PROPERTY);
+    state->join_order_declared_cover_count =
+        adjacency_match_descriptor_int64(
+            descriptor,
+            AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_DECLARED_COVER_COUNT);
+    state->join_order_cover_match_kind =
+        (AgeGraphJoinCoverMatchKind)adjacency_match_descriptor_int64(
+            descriptor,
+            AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_COVER_MATCH_KIND);
+    state->join_order_next_connector_kind =
+        (AgeGraphJoinConnectorKind)adjacency_match_descriptor_int64(
+            descriptor,
+            AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_NEXT_CONNECTOR_KIND);
+    state->join_order_next_property_kind =
+        (AgeGraphJoinOrderPropertyKind)adjacency_match_descriptor_int64(
+            descriptor,
+            AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_NEXT_PROPERTY_KIND);
     state->join_order_next_source_evidence = adjacency_match_descriptor_text(
         descriptor,
         AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_NEXT_SOURCE_EVIDENCE);
@@ -831,7 +920,7 @@ static void load_age_adjacency_match_descriptor(
     state->graph_join_shared_state_required =
         adjacency_match_descriptor_bool(
             descriptor, AGE_ADJACENCY_MATCH_DESC_SHARED_STATE_REQUIRED);
-    state->payload_slice_mode = "serial-only";
+    state->payload_slice_mode = AGE_ADJACENCY_PAYLOAD_SLICE_SERIAL_ONLY;
     state->payload_slice_index = 0;
     state->payload_slice_count = 0;
     state->payload_parallel_workers = 0;
@@ -927,20 +1016,22 @@ static void configure_age_adjacency_match_payload_slice(
         IsParallelWorker())
     {
         slice_index = ParallelWorkerNumber % slice_count;
-        state->payload_slice_mode = "worker-local";
+        state->payload_slice_mode = AGE_ADJACENCY_PAYLOAD_SLICE_WORKER_LOCAL;
     }
     else if (state->graph_join_parallel_safe &&
              !state->graph_join_shared_state_required)
     {
-        state->payload_slice_mode = "worker-local-ready";
+        state->payload_slice_mode =
+            AGE_ADJACENCY_PAYLOAD_SLICE_WORKER_LOCAL_READY;
     }
     else if (state->graph_join_shared_state_required)
     {
-        state->payload_slice_mode = "shared-state-required";
+        state->payload_slice_mode =
+            AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_STATE_REQUIRED;
     }
     else
     {
-        state->payload_slice_mode = "serial-only";
+        state->payload_slice_mode = AGE_ADJACENCY_PAYLOAD_SLICE_SERIAL_ONLY;
     }
 
     state->payload_slice_index = slice_index;
@@ -1015,8 +1106,8 @@ static char *format_age_adjacency_match_index_descriptor(
                          "selectivity-source=%s",
                          (double)state->composite_selectivity_ppm /
                          1000000.0,
-                         state->composite_selectivity_source != NULL ?
-                         state->composite_selectivity_source : "none");
+                         age_graph_property_selectivity_source_name(
+                             state->composite_selectivity_source_kind));
     appendStringInfo(&buf,
                      " label-groups=%ld main-blocks=%ld "
                      "fanout-source=%s source=%s payload=%s",
@@ -1040,12 +1131,12 @@ static char *format_age_adjacency_match_index_metadata(
     appendStringInfo(&buf,
                      "kind=%s provider=%s direction=%s properties=%d "
                      "metadata=%s",
-                     state->index_kind != NULL ? state->index_kind :
-                     "unknown",
+                     age_adjacency_match_index_kind_name(
+                         state->index_kind_id),
                      state->index_provider != NULL ?
                      state->index_provider : "unknown",
-                     state->index_direction != NULL ?
-                     state->index_direction : "unknown",
+                     age_adjacency_match_index_direction_name(
+                         state->index_direction_id),
                      state->index_property_count,
                      state->index_metadata_backed ? "yes" : "no");
 
@@ -1065,8 +1156,8 @@ static char *format_age_adjacency_match_pruning_descriptor(
                      "index-solved=%d residual-count=%d "
                      "residual=edge:%s/right-label:%s/right-props:%s "
                      "edge-var:%s",
-                     state->terminal_source_strategy != NULL ?
-                     state->terminal_source_strategy : "none",
+                     age_adjacency_match_terminal_strategy_name(
+                         state->terminal_source_strategy),
                      label_id_is_valid(state->right_label_id) ?
                      "yes" : "no",
                      age_adjacency_match_terminal_property_prune_mode(state),
@@ -1110,13 +1201,13 @@ static char *format_age_adjacency_match_cost_input(
                     (long)state->estimated_main_blocks,
                     state->fanout_source != NULL ?
                     state->fanout_source : "unknown",
-                    state->value_posting_source != NULL ?
-                    state->value_posting_source : "none",
+                    age_vle_value_posting_source_name(
+                        state->value_posting_source_kind),
                     index_solved_count,
                     residual_weight_percent, index_credit_percent,
                     (long)state->terminal_prefetch_threshold,
-                    state->terminal_prefetch_reason != NULL ?
-                    state->terminal_prefetch_reason : "none",
+                    age_adjacency_match_terminal_prefetch_reason_name(
+                        state->terminal_prefetch_reason_kind),
                     state->edge_payload_required ? "edge-row" : "id-only");
 }
 
@@ -1126,17 +1217,18 @@ static char *format_age_adjacency_match_join_order(
     return psprintf("component=%s solved=%s connector=%s bound=%s property=%s "
                     "rows=%ld fanout=%ld terminal-fanout=%ld "
                     "composite-fanout=%ld source=%s candidates=%ld "
+                    "declared-cover=%ld cover=%s "
                     "next=%s/%s/%s",
                     state->join_order_component != NULL ?
                     state->join_order_component : "edge",
                     state->join_order_solved_relids != NULL ?
                     state->join_order_solved_relids : "(b)",
-                    state->join_order_connector != NULL ?
-                    state->join_order_connector : "unknown",
+                    age_graph_join_connector_name(
+                        state->join_order_connector_kind),
                     state->join_order_bound != NULL ?
                     state->join_order_bound : "unknown",
-                    state->join_order_property != NULL ?
-                    state->join_order_property : "unknown",
+                    age_graph_join_order_property_name(
+                        state->join_order_property_kind),
                     (long)state->css.ss.ps.plan->plan_rows,
                     (long)state->estimated_endpoint_fanout,
                     (long)state->estimated_terminal_fanout,
@@ -1146,10 +1238,17 @@ static char *format_age_adjacency_match_join_order(
                     (state->fanout_source != NULL ?
                      state->fanout_source : "unknown"),
                     (long)Max(state->join_order_candidate_count, 1),
-                    state->join_order_next_connector != NULL ?
-                    state->join_order_next_connector : "none",
-                    state->join_order_next_property != NULL ?
-                    state->join_order_next_property : "none",
+                    (long)state->join_order_declared_cover_count,
+                    age_graph_join_cover_match_kind_name(
+                        state->join_order_cover_match_kind),
+                    state->join_order_next_connector_kind !=
+                    AGE_GRAPH_JOIN_CONNECTOR_UNKNOWN ?
+                    age_graph_join_connector_name(
+                        state->join_order_next_connector_kind) : "none",
+                    state->join_order_next_property_kind !=
+                    AGE_GRAPH_JOIN_ORDER_UNKNOWN ?
+                    age_graph_join_order_property_name(
+                        state->join_order_next_property_kind) : "none",
                     state->join_order_next_source_evidence != NULL ?
                     state->join_order_next_source_evidence : "none");
 }
@@ -1160,24 +1259,24 @@ static char *format_age_adjacency_match_composite_source(
     return psprintf("strategy=%s label=%s property=%s value=%s "
                     "candidate-fanout=%ld composite-fanout=%ld "
                     "value-posting=%s planned=%s threshold=%ld reason=%s",
-                    state->terminal_source_strategy != NULL ?
-                    state->terminal_source_strategy : "none",
+                    age_adjacency_match_terminal_strategy_name(
+                        state->terminal_source_strategy),
                     label_id_is_valid(state->right_label_id) ?
                     "yes" : "no",
                     state->right_property_prefetch_eligible ?
                     "source" :
                     (state->has_right_property_predicate ?
                      "recheck" : "none"),
-                    state->right_property_value_kind != NULL ?
-                    state->right_property_value_kind : "none",
+                    age_adjacency_match_value_kind_name(
+                        state->right_property_value_kind),
                     (long)state->estimated_terminal_fanout,
                     (long)state->estimated_composite_fanout,
-                    state->value_posting_source != NULL ?
-                    state->value_posting_source : "none",
+                    age_vle_value_posting_source_name(
+                        state->value_posting_source_kind),
                     age_adjacency_match_terminal_planned_prefetch(state),
                     (long)state->terminal_prefetch_threshold,
-                    state->terminal_prefetch_reason != NULL ?
-                    state->terminal_prefetch_reason : "none");
+                    age_adjacency_match_terminal_prefetch_reason_name(
+                        state->terminal_prefetch_reason_kind));
 }
 
 static char *format_age_adjacency_match_composite_policy(
@@ -1208,15 +1307,15 @@ static char *format_age_adjacency_match_composite_policy(
 static char *format_age_adjacency_match_terminal_property(
     AgeAdjacencyMatchScanState *state)
 {
-    const char *mode;
+    AgeAdjacencyMatchTerminalPropertyMode mode;
 
     if (!state->has_right_property_predicate)
         return pstrdup("none");
 
-    mode = age_adjacency_match_terminal_property_mode(
+    mode = age_adjacency_match_terminal_property_mode_id(
         state->terminal_property_lookup);
     if (!state->scanned && state->right_property_prefetch_eligible)
-        mode = "deferred-prefetch";
+        mode = AGE_ADJACENCY_TERMINAL_PROPERTY_DEFERRED_PREFETCH;
 
     return psprintf("key=%s index=%s provider=%s domain=%s metadata=%s value=%s "
                     "prefetch=%s precheck=%s mode=%s",
@@ -1230,13 +1329,13 @@ static char *format_age_adjacency_match_terminal_property(
                     state->right_property_index_type : "none",
                     state->right_property_index_metadata_backed ?
                     "yes" : "no",
-                    state->right_property_value_kind != NULL ?
-                    state->right_property_value_kind : "none",
+                    age_adjacency_match_value_kind_name(
+                        state->right_property_value_kind),
                     state->right_property_prefetch_eligible ?
                     "eligible" : "ineligible",
                     age_adjacency_match_terminal_property_active(
                         state->terminal_property_lookup) ? "yes" : "no",
-                    mode);
+                    age_adjacency_match_terminal_property_mode_name(mode));
 }
 
 static char *format_age_adjacency_match_terminal_runtime(
@@ -1273,46 +1372,60 @@ static const char *
 age_adjacency_match_terminal_runtime_outcome(
     AgeAdjacencyMatchScanState *state)
 {
-    const char *mode;
+    return age_adjacency_match_terminal_runtime_outcome_name(
+        age_adjacency_match_terminal_runtime_outcome_id(state));
+}
 
+static AgeAdjacencyTerminalPrunePlan
+age_adjacency_match_terminal_runtime_outcome_id(
+    AgeAdjacencyMatchScanState *state)
+{
     if (state == NULL || !state->has_right_property_predicate)
-        return "none";
+        return AGE_ADJACENCY_TERMINAL_PRUNE_NONE;
 
-    mode = age_adjacency_match_terminal_property_mode(
-        state->terminal_property_lookup);
-    if (strcmp(mode, "property-index-prefetch") == 0)
-        return "source-prefetch";
+    if (age_adjacency_match_terminal_property_mode_id(
+            state->terminal_property_lookup) ==
+        AGE_ADJACENCY_TERMINAL_PROPERTY_SOURCE_PREFETCH)
+        return AGE_ADJACENCY_TERMINAL_PRUNE_SOURCE_PREFETCH;
     if (age_adjacency_match_terminal_property_prefetch_skipped_small(
             state->terminal_property_lookup) > 0)
     {
-        return "id-cache-small";
+        return AGE_ADJACENCY_TERMINAL_PRUNE_ID_CACHE_SMALL;
     }
-    if (strcmp(mode, "id-btree-cache") == 0 ||
-        strcmp(mode, "id-btree") == 0)
+    if (age_adjacency_match_terminal_property_mode_id(
+            state->terminal_property_lookup) ==
+        AGE_ADJACENCY_TERMINAL_PROPERTY_ID_CACHE ||
+        age_adjacency_match_terminal_property_mode_id(
+            state->terminal_property_lookup) ==
+        AGE_ADJACENCY_TERMINAL_PROPERTY_ID_BTREE)
     {
-        return "id-cache";
+        return AGE_ADJACENCY_TERMINAL_PRUNE_VERTEX_CACHE;
     }
-    if (strcmp(mode, "deferred-prefetch") == 0)
-        return "deferred";
+    if (age_adjacency_match_terminal_property_mode_id(
+            state->terminal_property_lookup) ==
+        AGE_ADJACENCY_TERMINAL_PROPERTY_DEFERRED_PREFETCH)
+        return AGE_ADJACENCY_TERMINAL_PRUNE_DEFERRED;
 
-    return "none";
+    return AGE_ADJACENCY_TERMINAL_PRUNE_NONE;
 }
 
 static const char *
 age_adjacency_match_terminal_runtime_action(
     AgeAdjacencyMatchScanState *state)
 {
-    const char *outcome;
-
-    outcome = age_adjacency_match_terminal_runtime_outcome(state);
-    if (strcmp(outcome, "source-prefetch") == 0)
-        return "use-property-source";
-    if (strcmp(outcome, "id-cache-small") == 0)
-        return "keep-id-cache";
-    if (strcmp(outcome, "id-cache") == 0)
-        return "verify-by-id";
-    if (strcmp(outcome, "deferred") == 0)
-        return "await-runtime-value";
+    switch (age_adjacency_match_terminal_runtime_outcome_id(state))
+    {
+        case AGE_ADJACENCY_TERMINAL_PRUNE_SOURCE_PREFETCH:
+            return "use-property-source";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_ID_CACHE_SMALL:
+            return "keep-id-cache";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_VERTEX_CACHE:
+            return "verify-by-id";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_DEFERRED:
+            return "await-runtime-value";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_NONE:
+            break;
+    }
 
     return "none";
 }
@@ -1321,36 +1434,52 @@ static const char *
 age_adjacency_match_terminal_policy_class(
     AgeAdjacencyMatchScanState *state)
 {
-    const char *planned;
+    return age_adjacency_match_terminal_policy_class_name(
+        age_adjacency_match_terminal_policy_class_id(state));
+}
 
+static AgeAdjacencyTerminalPolicyClass
+age_adjacency_match_terminal_policy_class_id(
+    AgeAdjacencyMatchScanState *state)
+{
     if (state == NULL || !state->has_right_property_predicate)
-        return "none";
+        return AGE_ADJACENCY_TERMINAL_CLASS_NONE;
 
-    planned = age_adjacency_match_terminal_planned_prefetch(state);
-    if (strcmp(planned, "source-prefetch") == 0)
-        return "adjacency-composite-prefilter";
-    if (strcmp(planned, "id-cache-small") == 0)
-        return "adjacency-composite-id-cache";
+    switch (age_adjacency_match_terminal_planned_prefetch_id(state))
+    {
+        case AGE_ADJACENCY_TERMINAL_PRUNE_SOURCE_PREFETCH:
+            return AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_PREFILTER;
+        case AGE_ADJACENCY_TERMINAL_PRUNE_ID_CACHE_SMALL:
+            return AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_ID_CACHE;
+        case AGE_ADJACENCY_TERMINAL_PRUNE_NONE:
+        case AGE_ADJACENCY_TERMINAL_PRUNE_VERTEX_CACHE:
+        case AGE_ADJACENCY_TERMINAL_PRUNE_DEFERRED:
+            break;
+    }
     if (state->right_property_prefetch_eligible)
-        return "adjacency-composite-deferred";
+        return AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_DEFERRED;
 
-    return "adjacency-composite-recheck";
+    return AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_RECHECK;
 }
 
 static const char *
 age_adjacency_match_terminal_policy_recommendation(
     AgeAdjacencyMatchScanState *state)
 {
-    const char *planned;
-
     if (state == NULL || !state->has_right_property_predicate)
         return "none";
 
-    planned = age_adjacency_match_terminal_planned_prefetch(state);
-    if (strcmp(planned, "source-prefetch") == 0)
-        return "keep-property-prefilter";
-    if (strcmp(planned, "id-cache-small") == 0)
-        return "keep-id-cache";
+    switch (age_adjacency_match_terminal_planned_prefetch_id(state))
+    {
+        case AGE_ADJACENCY_TERMINAL_PRUNE_SOURCE_PREFETCH:
+            return "keep-property-prefilter";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_ID_CACHE_SMALL:
+            return "keep-id-cache";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_NONE:
+        case AGE_ADJACENCY_TERMINAL_PRUNE_VERTEX_CACHE:
+        case AGE_ADJACENCY_TERMINAL_PRUNE_DEFERRED:
+            break;
+    }
     if (state->right_property_prefetch_eligible)
         return "await-runtime-value";
 
@@ -1361,43 +1490,55 @@ static const char *
 age_adjacency_match_terminal_runtime_class(
     AgeAdjacencyMatchScanState *state)
 {
-    const char *outcome;
+    return age_adjacency_match_terminal_policy_class_name(
+        age_adjacency_match_terminal_runtime_class_id(state));
+}
 
+static AgeAdjacencyTerminalPolicyClass
+age_adjacency_match_terminal_runtime_class_id(
+    AgeAdjacencyMatchScanState *state)
+{
     if (state == NULL || !state->has_right_property_predicate)
-        return "none";
+        return AGE_ADJACENCY_TERMINAL_CLASS_NONE;
 
-    outcome = age_adjacency_match_terminal_runtime_outcome(state);
-    if (strcmp(outcome, "source-prefetch") == 0)
-        return "adjacency-composite-prefilter";
-    if (strcmp(outcome, "id-cache-small") == 0 ||
-        strcmp(outcome, "id-cache") == 0)
-        return "adjacency-composite-id-cache";
-    if (strcmp(outcome, "deferred") == 0)
-        return "adjacency-composite-deferred";
+    switch (age_adjacency_match_terminal_runtime_outcome_id(state))
+    {
+        case AGE_ADJACENCY_TERMINAL_PRUNE_SOURCE_PREFETCH:
+            return AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_PREFILTER;
+        case AGE_ADJACENCY_TERMINAL_PRUNE_ID_CACHE_SMALL:
+        case AGE_ADJACENCY_TERMINAL_PRUNE_VERTEX_CACHE:
+            return AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_ID_CACHE;
+        case AGE_ADJACENCY_TERMINAL_PRUNE_DEFERRED:
+            return AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_DEFERRED;
+        case AGE_ADJACENCY_TERMINAL_PRUNE_NONE:
+            break;
+    }
     if (!state->right_property_prefetch_eligible)
-        return "adjacency-composite-recheck";
+        return AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_RECHECK;
 
-    return "none";
+    return AGE_ADJACENCY_TERMINAL_CLASS_NONE;
 }
 
 static const char *
 age_adjacency_match_terminal_runtime_recommendation(
     AgeAdjacencyMatchScanState *state)
 {
-    const char *outcome;
-
     if (state == NULL || !state->has_right_property_predicate)
         return "none";
 
-    outcome = age_adjacency_match_terminal_runtime_outcome(state);
-    if (strcmp(outcome, "source-prefetch") == 0)
-        return "keep-property-prefilter";
-    if (strcmp(outcome, "id-cache-small") == 0)
-        return "keep-id-cache";
-    if (strcmp(outcome, "id-cache") == 0)
-        return "verify-by-id";
-    if (strcmp(outcome, "deferred") == 0)
-        return "await-runtime-value";
+    switch (age_adjacency_match_terminal_runtime_outcome_id(state))
+    {
+        case AGE_ADJACENCY_TERMINAL_PRUNE_SOURCE_PREFETCH:
+            return "keep-property-prefilter";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_ID_CACHE_SMALL:
+            return "keep-id-cache";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_VERTEX_CACHE:
+            return "verify-by-id";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_DEFERRED:
+            return "await-runtime-value";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_NONE:
+            break;
+    }
     if (!state->right_property_prefetch_eligible)
         return "keep-recheck";
 
@@ -1408,34 +1549,20 @@ static bool
 age_adjacency_match_terminal_class_matches(
     AgeAdjacencyMatchScanState *state)
 {
-    const char *planned_class;
-    const char *runtime_class;
-
-    planned_class = age_adjacency_match_terminal_policy_class(state);
-    runtime_class = age_adjacency_match_terminal_runtime_class(state);
-
-    return strcmp(planned_class, runtime_class) == 0;
+    return age_adjacency_match_terminal_policy_class_id(state) ==
+           age_adjacency_match_terminal_runtime_class_id(state);
 }
 
 static bool
 age_adjacency_match_terminal_lifecycle_matches(
     AgeAdjacencyMatchScanState *state)
 {
-    const char *planned;
-    const char *outcome;
+    AgeAdjacencyTerminalPrunePlan planned;
+    AgeAdjacencyTerminalPrunePlan outcome;
 
-    planned = age_adjacency_match_terminal_planned_prefetch(state);
-    outcome = age_adjacency_match_terminal_runtime_outcome(state);
-
-    if (strcmp(planned, outcome) == 0)
-        return true;
-    if (strcmp(planned, "source-prefetch") == 0 &&
-        strcmp(outcome, "source-prefetch") == 0)
-        return true;
-    if (strcmp(planned, "id-cache-small") == 0 &&
-        strcmp(outcome, "id-cache-small") == 0)
-        return true;
-    if (strcmp(planned, "none") == 0 && strcmp(outcome, "none") == 0)
+    planned = age_adjacency_match_terminal_planned_prefetch_id(state);
+    outcome = age_adjacency_match_terminal_runtime_outcome_id(state);
+    if (planned == outcome)
         return true;
 
     return false;
@@ -1474,8 +1601,8 @@ static char *format_age_adjacency_match_terminal_prefetch(
                     (long long)
                     age_adjacency_match_terminal_property_prefetch_threshold(
                         state->terminal_property_lookup),
-                    state->terminal_prefetch_reason != NULL ?
-                    state->terminal_prefetch_reason : "unknown",
+                    age_adjacency_match_terminal_prefetch_reason_name(
+                        state->terminal_prefetch_reason_kind),
                     (long long)
                     age_adjacency_match_terminal_property_prefetch_skipped_small(
                         state->terminal_property_lookup));
@@ -1485,16 +1612,24 @@ static const char *
 age_adjacency_match_terminal_planned_prefetch(
     AgeAdjacencyMatchScanState *state)
 {
+    return age_adjacency_match_terminal_prune_plan_name(
+        age_adjacency_match_terminal_planned_prefetch_id(state));
+}
+
+static AgeAdjacencyTerminalPrunePlan
+age_adjacency_match_terminal_planned_prefetch_id(
+    AgeAdjacencyMatchScanState *state)
+{
     if (state == NULL || !state->right_property_prefetch_eligible ||
         state->terminal_prefetch_threshold <= 0)
     {
-        return "none";
+        return AGE_ADJACENCY_TERMINAL_PRUNE_NONE;
     }
 
     if (state->estimated_terminal_fanout < state->terminal_prefetch_threshold)
-        return "id-cache-small";
+        return AGE_ADJACENCY_TERMINAL_PRUNE_ID_CACHE_SMALL;
 
-    return "source-prefetch";
+    return AGE_ADJACENCY_TERMINAL_PRUNE_SOURCE_PREFETCH;
 }
 
 static void append_age_adjacency_match_payload_mask(StringInfo buf,
@@ -1752,18 +1887,181 @@ static const char *age_adjacency_match_attr_name(AttrNumber attno)
 static const char *age_adjacency_match_terminal_property_prune_mode(
     AgeAdjacencyMatchScanState *state)
 {
+    return age_adjacency_match_terminal_prune_plan_name(
+        age_adjacency_match_terminal_property_prune_mode_id(state));
+}
+
+static AgeAdjacencyTerminalPrunePlan
+age_adjacency_match_terminal_property_prune_mode_id(
+    AgeAdjacencyMatchScanState *state)
+{
     if (!state->has_right_property_predicate)
-        return "none";
+        return AGE_ADJACENCY_TERMINAL_PRUNE_NONE;
     if (state->right_property_prefetch_eligible)
-        return "source-prefetch";
+        return AGE_ADJACENCY_TERMINAL_PRUNE_SOURCE_PREFETCH;
     if (age_adjacency_match_terminal_property_prefilter_active(
             state->terminal_property_lookup))
-        return "source-prefetch";
+        return AGE_ADJACENCY_TERMINAL_PRUNE_SOURCE_PREFETCH;
     if (age_adjacency_match_terminal_property_active(
             state->terminal_property_lookup))
-        return "vertex-cache";
+        return AGE_ADJACENCY_TERMINAL_PRUNE_VERTEX_CACHE;
 
-    return "deferred";
+    return AGE_ADJACENCY_TERMINAL_PRUNE_DEFERRED;
+}
+
+static const char *age_adjacency_match_terminal_prune_plan_name(
+    AgeAdjacencyTerminalPrunePlan plan)
+{
+    switch (plan)
+    {
+        case AGE_ADJACENCY_TERMINAL_PRUNE_SOURCE_PREFETCH:
+            return "source-prefetch";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_ID_CACHE_SMALL:
+            return "id-cache-small";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_VERTEX_CACHE:
+            return "vertex-cache";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_DEFERRED:
+            return "deferred";
+        case AGE_ADJACENCY_TERMINAL_PRUNE_NONE:
+            break;
+    }
+
+    return "none";
+}
+
+const char *age_adjacency_match_index_kind_name(
+    AgeAdjacencyMatchIndexKind kind)
+{
+    switch (kind)
+    {
+        case AGE_ADJACENCY_MATCH_INDEX_ADJACENCY:
+            return "ADJACENCY";
+        case AGE_ADJACENCY_MATCH_INDEX_PROPERTY:
+            return "PROPERTY";
+        case AGE_ADJACENCY_MATCH_INDEX_UNKNOWN:
+            break;
+    }
+
+    return "unknown";
+}
+
+const char *age_adjacency_match_index_direction_name(
+    AgeAdjacencyMatchIndexDirection direction)
+{
+    switch (direction)
+    {
+        case AGE_ADJACENCY_MATCH_INDEX_DIRECTION_OUT:
+            return "out";
+        case AGE_ADJACENCY_MATCH_INDEX_DIRECTION_IN:
+            return "in";
+        case AGE_ADJACENCY_MATCH_INDEX_DIRECTION_NONE:
+            break;
+    }
+
+    return "unknown";
+}
+
+static const char *age_adjacency_match_terminal_runtime_outcome_name(
+    AgeAdjacencyTerminalPrunePlan outcome)
+{
+    if (outcome == AGE_ADJACENCY_TERMINAL_PRUNE_VERTEX_CACHE)
+        return "id-cache";
+
+    return age_adjacency_match_terminal_prune_plan_name(outcome);
+}
+
+static const char *age_adjacency_match_terminal_policy_class_name(
+    AgeAdjacencyTerminalPolicyClass policy_class)
+{
+    switch (policy_class)
+    {
+        case AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_PREFILTER:
+            return "adjacency-composite-prefilter";
+        case AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_ID_CACHE:
+            return "adjacency-composite-id-cache";
+        case AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_DEFERRED:
+            return "adjacency-composite-deferred";
+        case AGE_ADJACENCY_TERMINAL_CLASS_COMPOSITE_RECHECK:
+            return "adjacency-composite-recheck";
+        case AGE_ADJACENCY_TERMINAL_CLASS_NONE:
+            break;
+    }
+
+    return "none";
+}
+
+static const char *age_adjacency_match_payload_slice_mode_name(
+    AgeAdjacencyPayloadSliceMode mode)
+{
+    switch (mode)
+    {
+        case AGE_ADJACENCY_PAYLOAD_SLICE_WORKER_LOCAL:
+            return "worker-local";
+        case AGE_ADJACENCY_PAYLOAD_SLICE_WORKER_LOCAL_READY:
+            return "worker-local-ready";
+        case AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_STATE_REQUIRED:
+            return "shared-state-required";
+        case AGE_ADJACENCY_PAYLOAD_SLICE_SERIAL_ONLY:
+            break;
+    }
+
+    return "serial-only";
+}
+
+const char *age_adjacency_match_terminal_prefetch_reason_name(
+    AgeAdjacencyMatchTerminalPrefetchReason reason)
+{
+    switch (reason)
+    {
+        case AGE_ADJACENCY_MATCH_PREFETCH_REASON_NOT_INDEXABLE:
+            return "not-indexable";
+        case AGE_ADJACENCY_MATCH_PREFETCH_REASON_EDGE_PAYLOAD_REQUIRED:
+            return "edge-payload-required";
+        case AGE_ADJACENCY_MATCH_PREFETCH_REASON_LARGE_TERMINAL_FANOUT:
+            return "large-terminal-fanout";
+        case AGE_ADJACENCY_MATCH_PREFETCH_REASON_SMALL_TERMINAL_FANOUT:
+            return "small-terminal-fanout";
+        case AGE_ADJACENCY_MATCH_PREFETCH_REASON_NONE:
+            break;
+    }
+
+    return "none";
+}
+
+static const char *age_adjacency_match_value_kind_name(
+    AgeAdjacencyMatchValueKind kind)
+{
+    switch (kind)
+    {
+        case AGE_ADJACENCY_MATCH_VALUE_CONST:
+            return "const";
+        case AGE_ADJACENCY_MATCH_VALUE_RUNTIME_SLOT:
+            return "runtime-slot";
+        case AGE_ADJACENCY_MATCH_VALUE_NONE:
+            break;
+    }
+
+    return "none";
+}
+
+static const char *age_adjacency_match_terminal_strategy_name(
+    AgeAdjacencyMatchTerminalStrategy strategy)
+{
+    switch (strategy)
+    {
+        case AGE_ADJACENCY_MATCH_TERMINAL_STRATEGY_LABEL_PROPERTY:
+            return "label-block+property-source";
+        case AGE_ADJACENCY_MATCH_TERMINAL_STRATEGY_LABEL_BLOCK:
+            return "label-block";
+        case AGE_ADJACENCY_MATCH_TERMINAL_STRATEGY_PROPERTY_SOURCE:
+            return "property-source";
+        case AGE_ADJACENCY_MATCH_TERMINAL_STRATEGY_PROPERTY_RECHECK:
+            return "property-recheck";
+        case AGE_ADJACENCY_MATCH_TERMINAL_STRATEGY_NONE:
+            break;
+    }
+
+    return "none";
 }
 
 static int
@@ -1790,8 +2088,8 @@ age_adjacency_match_index_solved_predicate_count(
 
     if (label_id_is_valid(state->right_label_id))
         count++;
-    if (strcmp(age_adjacency_match_terminal_property_prune_mode(state),
-               "source-prefetch") == 0)
+    if (age_adjacency_match_terminal_property_prune_mode_id(state) ==
+        AGE_ADJACENCY_TERMINAL_PRUNE_SOURCE_PREFETCH)
     {
         count++;
     }

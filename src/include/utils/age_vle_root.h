@@ -36,13 +36,6 @@ typedef enum VLE_path_function
     VLE_FUNCTION_NONE
 } VLE_path_function;
 
-typedef enum VLETraversalSourceKind
-{
-    VLE_TRAVERSAL_SOURCE_NONE,
-    VLE_TRAVERSAL_SOURCE_AGE_ADJACENCY,
-    VLE_TRAVERSAL_SOURCE_ENDPOINT_BTREE
-} VLETraversalSourceKind;
-
 typedef struct VLETraversalDirectedSource
 {
     VLETraversalSourceKind kind;

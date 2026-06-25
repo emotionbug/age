@@ -182,10 +182,10 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     cypher_parsestate *cpstate, cypher_relationship *rel,
     transform_entity *prev_entity, cypher_node *next_node,
     List **target_list, bool valid_label, bool outgoing);
-static char *make_match_graph_pattern_kind(
+static char *make_match_graph_pattern_key(
     cypher_parsestate *cpstate, transform_entity *prev_entity,
     cypher_relationship *rel, cypher_node *next_node, bool outgoing);
-static char *make_node_property_graph_pattern_kind(
+static char *make_node_property_graph_pattern_key(
     cypher_parsestate *cpstate, cypher_node *node);
 static bool age_adjacency_match_endpoint_is_bound(transform_entity *entity);
 static Expr *transform_cypher_node(cypher_parsestate *cpstate,
@@ -197,9 +197,9 @@ static Oid get_age_adjacency_match_index(Oid graph_oid, Oid edge_label_oid,
                                          const char *label_name,
                                          bool outgoing,
                                          char **index_source,
-                                         char **index_kind,
+                                         AgeAdjacencyMatchIndexKind *index_kind_id,
                                          char **index_provider,
-                                         char **index_direction,
+                                         AgeAdjacencyMatchIndexDirection *index_direction_id,
                                          int32 *index_property_count,
                                          bool *index_metadata_backed);
 static Oid get_age_adjacency_match_metadata_index(Oid graph_oid,
@@ -207,9 +207,9 @@ static Oid get_age_adjacency_match_metadata_index(Oid graph_oid,
                                                   Oid age_adjacency_am_oid,
                                                   bool outgoing,
                                                   char **index_source,
-                                                  char **index_kind,
+                                                  AgeAdjacencyMatchIndexKind *index_kind_id,
                                                   char **index_provider,
-                                                  char **index_direction,
+                                                  AgeAdjacencyMatchIndexDirection *index_direction_id,
                                                   int32 *index_property_count);
 static bool get_age_adjacency_match_property_index(Oid graph_oid,
                                                    const char *label_name,
@@ -276,7 +276,7 @@ static TargetEntry *findTarget(List *targetList, char *resname);
 static transform_entity *transform_VLE_edge_entity(cypher_parsestate *cpstate,
                                                    cypher_relationship *rel,
                                                    Query *query,
-                                                   const char *graph_pattern_kind);
+                                                   const char *graph_pattern_key);
 /* create clause */
 static Query *transform_cypher_create(cypher_parsestate *cpstate,
                                       cypher_clause *clause);
@@ -5496,7 +5496,7 @@ static List *transform_match_path(cypher_parsestate *cpstate, Query *query,
 static transform_entity *transform_VLE_edge_entity(cypher_parsestate *cpstate,
                                                    cypher_relationship *rel,
                                                    Query *query,
-                                                   const char *graph_pattern_kind)
+                                                   const char *graph_pattern_key)
 {
     ParseState *pstate = NULL;
     TargetEntry *te = NULL;
@@ -5553,9 +5553,16 @@ static transform_entity *transform_VLE_edge_entity(cypher_parsestate *cpstate,
         alias->colnames = lappend(alias->colnames, makeString("__age_vle_terminal_property"));
     if (vle_nargs > AGE_VLE_STREAM_ARG_TERMINAL_LABEL)
         alias->colnames = lappend(alias->colnames, makeString("__age_vle_terminal_label"));
-    cypher_register_graph_pattern_handoff(graph_pattern_kind);
+    cypher_register_graph_pattern_handoff(graph_pattern_key);
+    cypher_declare_graph_pattern_source(
+        graph_pattern_key, AGE_GRAPH_JOIN_SOURCE_VLE_MARKER,
+        AGE_GRAPH_JOIN_COMPONENT_VLE_EXPANSION);
+    if (vle_nargs > AGE_VLE_STREAM_ARG_TERMINAL_PROPERTY)
+        cypher_declare_graph_pattern_source(
+            graph_pattern_key, AGE_GRAPH_JOIN_SOURCE_VLE_TERMINAL_PROPERTY,
+            AGE_GRAPH_JOIN_COMPONENT_NODE_PROPERTY_SEEK);
     cypher_register_vle_pattern_handoff(alias->aliasname,
-                                        graph_pattern_kind);
+                                        graph_pattern_key);
 
     /*
      * Add the VLE descriptor row to the FROM clause. The planner replaces this
@@ -5690,7 +5697,8 @@ static transform_entity *try_transform_vle_terminal_node(
     }
 
     if (rel->dir != CYPHER_REL_DIR_RIGHT &&
-        rel->dir != CYPHER_REL_DIR_LEFT)
+        rel->dir != CYPHER_REL_DIR_LEFT &&
+        rel->dir != CYPHER_REL_DIR_NONE)
     {
         return NULL;
     }
@@ -5808,7 +5816,7 @@ static transform_entity *transform_match_node_entity(
         Node *n = NULL;
         Node *prop_var = NULL;
         Node *prop_expr = NULL;
-        char *graph_pattern_kind;
+        char *graph_pattern_key;
 
         if (node->name != NULL)
         {
@@ -5831,11 +5839,14 @@ static transform_entity *transform_match_node_entity(
         {
             ((cypher_map*)node->props)->keep_null = true;
         }
-        graph_pattern_kind = make_node_property_graph_pattern_kind(
+        graph_pattern_key = make_node_property_graph_pattern_key(
             cpstate, node);
-        cypher_register_graph_pattern_handoff(graph_pattern_kind);
+        cypher_register_graph_pattern_handoff(graph_pattern_key);
+        cypher_declare_graph_pattern_source(
+            graph_pattern_key, AGE_GRAPH_JOIN_SOURCE_NODE_PROPERTY_INDEX,
+            AGE_GRAPH_JOIN_COMPONENT_NODE_PROPERTY_SEEK);
         cypher_register_node_pattern_handoff(node->name,
-                                             graph_pattern_kind);
+                                             graph_pattern_key);
         n = create_property_constraints(cpstate, entity, node->props,
                                         prop_expr);
 
@@ -6212,7 +6223,7 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
             {
                 transform_entity *vle_entity = NULL;
                 ListCell *next_lc = lnext(path->path, lc);
-                char *graph_pattern_kind = NULL;
+                char *graph_pattern_key = NULL;
 
                 /*
                  * Check to see if the previous node was originally created
@@ -6295,7 +6306,8 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                         next_node->label == NULL &&
                         next_node->props == NULL &&
                         (rel->dir == CYPHER_REL_DIR_RIGHT ||
-                         rel->dir == CYPHER_REL_DIR_LEFT))
+                         rel->dir == CYPHER_REL_DIR_LEFT ||
+                         rel->dir == CYPHER_REL_DIR_NONE))
                     {
                         mark_vle_terminal_only_result(rel);
                     }
@@ -6304,11 +6316,19 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                 {
                     cypher_node *next_node = lfirst(next_lc);
 
-                    graph_pattern_kind = make_match_graph_pattern_kind(
+                    graph_pattern_key = make_match_graph_pattern_key(
                         cpstate, prev_entity, rel, next_node,
                         rel->dir != CYPHER_REL_DIR_LEFT);
                     (void)mark_vle_terminal_label_result(cpstate, rel,
                                                          next_node);
+                    if (path->var_name == NULL &&
+                        rel->name == NULL &&
+                        next_node->name != NULL &&
+                        next_node->props == NULL &&
+                        rel->dir == CYPHER_REL_DIR_NONE)
+                    {
+                        mark_vle_terminal_only_result(rel);
+                    }
                     if (next_node->name == NULL &&
                         next_node->label != NULL &&
                         next_node->props == NULL &&
@@ -6320,7 +6340,7 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
 
                 /* make a transform entity for the vle */
                 vle_entity = transform_VLE_edge_entity(cpstate, rel, query,
-                                                       graph_pattern_kind);
+                                                       graph_pattern_key);
 
                 if (pretransformed_node == NULL &&
                     list_length(path->path) == 3 &&
@@ -6432,9 +6452,9 @@ static Oid get_age_adjacency_match_index(Oid graph_oid, Oid edge_label_oid,
                                          const char *label_name,
                                          bool outgoing,
                                          char **index_source,
-                                         char **index_kind,
+                                         AgeAdjacencyMatchIndexKind *index_kind_id,
                                          char **index_provider,
-                                         char **index_direction,
+                                         AgeAdjacencyMatchIndexDirection *index_direction_id,
                                          int32 *index_property_count,
                                          bool *index_metadata_backed)
 {
@@ -6446,12 +6466,12 @@ static Oid get_age_adjacency_match_index(Oid graph_oid, Oid edge_label_oid,
 
     if (index_source != NULL)
         *index_source = NULL;
-    if (index_kind != NULL)
-        *index_kind = NULL;
+    if (index_kind_id != NULL)
+        *index_kind_id = AGE_ADJACENCY_MATCH_INDEX_UNKNOWN;
     if (index_provider != NULL)
         *index_provider = NULL;
-    if (index_direction != NULL)
-        *index_direction = NULL;
+    if (index_direction_id != NULL)
+        *index_direction_id = AGE_ADJACENCY_MATCH_INDEX_DIRECTION_NONE;
     if (index_property_count != NULL)
         *index_property_count = 0;
     if (index_metadata_backed != NULL)
@@ -6474,9 +6494,9 @@ static Oid get_age_adjacency_match_index(Oid graph_oid, Oid edge_label_oid,
     result = get_age_adjacency_match_metadata_index(graph_oid, label_name,
                                                     age_adjacency_am_oid,
                                                     outgoing, index_source,
-                                                    index_kind,
+                                                    index_kind_id,
                                                     index_provider,
-                                                    index_direction,
+                                                    index_direction_id,
                                                     index_property_count);
     if (OidIsValid(result))
     {
@@ -6503,12 +6523,14 @@ static Oid get_age_adjacency_match_index(Oid graph_oid, Oid edge_label_oid,
             result = index_oid;
             if (index_source != NULL)
                 *index_source = pstrdup("relcache-scan");
-            if (index_kind != NULL)
-                *index_kind = pstrdup("ADJACENCY");
+            if (index_kind_id != NULL)
+                *index_kind_id = AGE_ADJACENCY_MATCH_INDEX_ADJACENCY;
             if (index_provider != NULL)
                 *index_provider = pstrdup("relcache");
-            if (index_direction != NULL)
-                *index_direction = pstrdup(outgoing ? "out" : "in");
+            if (index_direction_id != NULL)
+                *index_direction_id = outgoing ?
+                    AGE_ADJACENCY_MATCH_INDEX_DIRECTION_OUT :
+                    AGE_ADJACENCY_MATCH_INDEX_DIRECTION_IN;
             index_close(index_rel, AccessShareLock);
             break;
         }
@@ -6526,9 +6548,9 @@ static Oid get_age_adjacency_match_metadata_index(Oid graph_oid,
                                                   Oid age_adjacency_am_oid,
                                                   bool outgoing,
                                                   char **index_source,
-                                                  char **index_kind,
+                                                  AgeAdjacencyMatchIndexKind *index_kind_id,
                                                   char **index_provider,
-                                                  char **index_direction,
+                                                  AgeAdjacencyMatchIndexDirection *index_direction_id,
                                                   int32 *index_property_count)
 {
     Oid ag_catalog_oid;
@@ -6539,9 +6561,7 @@ static Oid get_age_adjacency_match_metadata_index(Oid graph_oid,
     TupleDesc tupdesc;
     Oid result = InvalidOid;
     char *result_source = NULL;
-    char *result_kind = NULL;
     char *result_provider = NULL;
-    char *result_direction = NULL;
     int32 result_property_count = 0;
     const char *direction = outgoing ? "out" : "in";
 
@@ -6638,9 +6658,7 @@ static Oid get_age_adjacency_match_metadata_index(Oid graph_oid,
             }
             result = index_oid;
             result_source = psprintf("graph-metadata:%s", index_name);
-            result_kind = pstrdup(tuple_index_kind);
             result_provider = pstrdup(provider);
-            result_direction = pstrdup(tuple_direction);
             index_close(index_rel, AccessShareLock);
             break;
         }
@@ -6652,12 +6670,14 @@ static Oid get_age_adjacency_match_metadata_index(Oid graph_oid,
 
     if (OidIsValid(result) && index_source != NULL)
         *index_source = result_source;
-    if (OidIsValid(result) && index_kind != NULL)
-        *index_kind = result_kind;
+    if (OidIsValid(result) && index_kind_id != NULL)
+        *index_kind_id = AGE_ADJACENCY_MATCH_INDEX_ADJACENCY;
     if (OidIsValid(result) && index_provider != NULL)
         *index_provider = result_provider;
-    if (OidIsValid(result) && index_direction != NULL)
-        *index_direction = result_direction;
+    if (OidIsValid(result) && index_direction_id != NULL)
+        *index_direction_id = outgoing ?
+            AGE_ADJACENCY_MATCH_INDEX_DIRECTION_OUT :
+            AGE_ADJACENCY_MATCH_INDEX_DIRECTION_IN;
     if (OidIsValid(result) && index_property_count != NULL)
         *index_property_count = result_property_count;
 
@@ -7665,9 +7685,11 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     Oid edge_label_oid;
     Oid index_oid;
     char *index_source = NULL;
-    char *index_kind = NULL;
+    AgeAdjacencyMatchIndexKind index_kind_id =
+        AGE_ADJACENCY_MATCH_INDEX_UNKNOWN;
     char *index_provider = NULL;
-    char *index_direction = NULL;
+    AgeAdjacencyMatchIndexDirection index_direction_id =
+        AGE_ADJACENCY_MATCH_INDEX_DIRECTION_NONE;
     int32 index_property_count = 0;
     bool index_metadata_backed = false;
     char *right_property_key = NULL;
@@ -7683,7 +7705,7 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     Expr *key_expr;
     bool has_edge_variable_projection;
     int32 right_label_id = INVALID_LABEL_ID;
-    char *graph_pattern_kind;
+    char *graph_pattern_key;
 
     if (!valid_label ||
         rel->label == NULL ||
@@ -7708,8 +7730,8 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     index_oid = get_age_adjacency_match_index(cpstate->graph_oid,
                                               edge_label_oid, rel->label,
                                               outgoing, &index_source,
-                                              &index_kind, &index_provider,
-                                              &index_direction,
+                                              &index_kind_id, &index_provider,
+                                              &index_direction_id,
                                               &index_property_count,
                                               &index_metadata_backed);
     table_close(label_relation, AccessShareLock);
@@ -7754,18 +7776,29 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     key_arg = make_qual(cpstate, prev_entity, AG_VERTEX_COLNAME_ID);
     key_expr = (Expr *)transformExpr(pstate, copyObject(key_arg),
                                      EXPR_KIND_WHERE);
-    graph_pattern_kind = make_match_graph_pattern_kind(
+    graph_pattern_key = make_match_graph_pattern_key(
         cpstate, prev_entity, rel, next_node, outgoing);
-    cypher_register_graph_pattern_handoff(graph_pattern_kind);
+    cypher_register_graph_pattern_handoff(graph_pattern_key);
+    cypher_declare_graph_pattern_source(
+        graph_pattern_key, AGE_GRAPH_JOIN_SOURCE_ADJACENCY_EXPANSION,
+        AGE_GRAPH_JOIN_COMPONENT_ADJACENCY_EXPANSION);
+    if (next_node != NULL && next_node->props != NULL)
+        cypher_declare_graph_pattern_source(
+            graph_pattern_key,
+            AGE_GRAPH_JOIN_SOURCE_ADJACENCY_NODE_PROPERTY,
+            AGE_GRAPH_JOIN_COMPONENT_NODE_PROPERTY_SEEK);
 
     cypher_register_adjacency_match_candidate(
         edge_label_oid, index_oid, cpstate->graph_oid, rel->name,
-        graph_pattern_kind, get_entity_name(prev_entity),
-        (Node *)key_expr, "default_custom_path",
+        graph_pattern_key, get_entity_name(prev_entity),
+        (Node *)key_expr,
         index_source != NULL ? index_source : "unknown",
-        index_kind != NULL ? index_kind : "ADJACENCY",
+        index_kind_id,
         index_provider != NULL ? index_provider : "unknown",
-        index_direction != NULL ? index_direction : (outgoing ? "out" : "in"),
+        index_direction_id != AGE_ADJACENCY_MATCH_INDEX_DIRECTION_NONE ?
+        index_direction_id :
+        (outgoing ? AGE_ADJACENCY_MATCH_INDEX_DIRECTION_OUT :
+         AGE_ADJACENCY_MATCH_INDEX_DIRECTION_IN),
         index_property_count,
         index_metadata_backed,
         right_property_key,
@@ -7787,7 +7820,7 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     return NULL;
 }
 
-static char *make_match_graph_pattern_kind(
+static char *make_match_graph_pattern_key(
     cypher_parsestate *cpstate, transform_entity *prev_entity,
     cypher_relationship *rel, cypher_node *next_node, bool outgoing)
 {
@@ -7815,7 +7848,7 @@ static char *make_match_graph_pattern_kind(
                     end_name : "_");
 }
 
-static char *make_node_property_graph_pattern_kind(
+static char *make_node_property_graph_pattern_key(
     cypher_parsestate *cpstate, cypher_node *node)
 {
     const char *node_name;
@@ -11237,7 +11270,8 @@ static bool mark_vle_terminal_label_result(cypher_parsestate *cpstate,
         rel->varlen == NULL ||
         !IsA(rel->varlen, FuncCall) ||
         (rel->dir != CYPHER_REL_DIR_RIGHT &&
-         rel->dir != CYPHER_REL_DIR_LEFT))
+         rel->dir != CYPHER_REL_DIR_LEFT &&
+         rel->dir != CYPHER_REL_DIR_NONE))
     {
         return false;
     }

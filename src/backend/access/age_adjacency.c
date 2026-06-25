@@ -121,6 +121,23 @@ typedef struct AgeAdjacencyMetaPageData
 
 typedef AgeAdjacencyMetaPageData *AgeAdjacencyMetaPage;
 
+typedef enum AgeAdjacencyDeltaMaintenanceAction
+{
+    AGE_ADJACENCY_DELTA_ACTION_NONE = 0,
+    AGE_ADJACENCY_DELTA_ACTION_OBSERVE,
+    AGE_ADJACENCY_DELTA_ACTION_RANGE_SKIP,
+    AGE_ADJACENCY_DELTA_ACTION_REINDEX
+} AgeAdjacencyDeltaMaintenanceAction;
+
+typedef enum AgeAdjacencyDeltaMaintenanceReason
+{
+    AGE_ADJACENCY_DELTA_REASON_NO_DELTA = 0,
+    AGE_ADJACENCY_DELTA_REASON_SINGLE_PAGE_DELTA,
+    AGE_ADJACENCY_DELTA_REASON_MULTI_PAGE_DELTA_RANGE_SUMMARY,
+    AGE_ADJACENCY_DELTA_REASON_DELTA_POSTINGS_THRESHOLD,
+    AGE_ADJACENCY_DELTA_REASON_EMPTY_INDEX
+} AgeAdjacencyDeltaMaintenanceReason;
+
 typedef struct AgeAdjacencyPageOpaqueData
 {
     uint32 magic;
@@ -656,7 +673,7 @@ static bool age_adjacency_directory_entry_may_match_value_summary(
 static bool age_adjacency_directory_entry_may_match_value_posting(
     AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id,
     const AgeAdjacencyVertexSetFilter *filter);
-static const char *age_adjacency_directory_entry_value_posting_source(
+static VLESourceValuePostingKind age_adjacency_directory_entry_value_posting_source(
     AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id);
 static bool age_adjacency_directory_entry_range_rejects(
     AgeAdjacencyDirectoryEntry entry, AgeAdjacencyScanTarget *target);
@@ -700,10 +717,15 @@ static void age_adjacency_probe_main_run(
 static void age_adjacency_probe_delta_pages(
     Relation index_rel, graphid key, const AgeAdjacencyMetaPageData *meta,
     AgeAdjacencyDeltaProbeStats *stats);
-static const char *age_adjacency_delta_maintenance_action(
+static AgeAdjacencyDeltaMaintenanceAction
+age_adjacency_delta_maintenance_action(
     const AgeAdjacencyMetaPageData *meta, BlockNumber index_pages,
     int64 *delta_pages_out, int64 *delta_tuples_per_page_out,
-    const char **reason_out);
+    AgeAdjacencyDeltaMaintenanceReason *reason_out);
+static const char *age_adjacency_delta_maintenance_action_name(
+    AgeAdjacencyDeltaMaintenanceAction action);
+static const char *age_adjacency_delta_maintenance_reason_name(
+    AgeAdjacencyDeltaMaintenanceReason reason);
 static int64 age_adjacency_emit_posting(AgeAdjacencyPosting posting,
                                         AgeAdjacencyScanTarget *target);
 static bool age_adjacency_posting_visible_payload(
@@ -2399,7 +2421,7 @@ age_adjacency_directory_entry_may_match_value_posting(
         entry->value_posting_bloom, filter->value_posting_bloom);
 }
 
-static const char *
+static VLESourceValuePostingKind
 age_adjacency_directory_entry_value_posting_source(
     AgeAdjacencyDirectoryEntry entry, int32 terminal_label_id)
 {
@@ -2412,13 +2434,13 @@ age_adjacency_directory_entry_value_posting_source(
         for (i = 0; i < AGE_ADJACENCY_DIRECTORY_LABEL_BLOOM_SLOTS; i++)
         {
             if (entry->next_vertex_bloom_label_id[i] == terminal_label_id)
-                return "label-slice";
+                return VLE_SOURCE_VALUE_POSTING_LABEL_SLICE;
         }
     }
     if (entry->next_label_count == 1)
-        return "run";
+        return VLE_SOURCE_VALUE_POSTING_RUN;
 
-    return "none";
+    return VLE_SOURCE_VALUE_POSTING_NONE;
 }
 
 static bool
@@ -4158,7 +4180,8 @@ bool
 age_adjacency_estimate_terminal_label_postings(
     Oid index_oid, graphid key, int32 terminal_label_id,
     int64 *run_postings, int64 *terminal_postings, int64 *label_groups,
-    const char **value_posting_source, int64 *main_blocks)
+    VLESourceValuePostingKind *value_posting_source_kind,
+    int64 *main_blocks)
 {
     Relation index_rel;
     AgeAdjacencyMetaPageData meta;
@@ -4171,8 +4194,8 @@ age_adjacency_estimate_terminal_label_postings(
         *terminal_postings = 0;
     if (label_groups != NULL)
         *label_groups = 0;
-    if (value_posting_source != NULL)
-        *value_posting_source = "none";
+    if (value_posting_source_kind != NULL)
+        *value_posting_source_kind = VLE_SOURCE_VALUE_POSTING_NONE;
     if (main_blocks != NULL)
         *main_blocks = 0;
     if (!OidIsValid(index_oid))
@@ -4194,8 +4217,8 @@ age_adjacency_estimate_terminal_label_postings(
         }
         if (label_groups != NULL)
             *label_groups = entry.next_label_count;
-        if (value_posting_source != NULL)
-            *value_posting_source =
+        if (value_posting_source_kind != NULL)
+            *value_posting_source_kind =
                 age_adjacency_directory_entry_value_posting_source(
                     &entry, terminal_label_id);
         if (main_blocks != NULL)
@@ -4225,7 +4248,8 @@ age_adjacency_estimate_terminal_label_postings_batch(
         estimates[i].first_blkno = InvalidBlockNumber;
         estimates[i].first_offnum = InvalidOffsetNumber;
         estimates[i].label_groups = 0;
-        estimates[i].value_posting_source = "none";
+        estimates[i].value_posting_source_kind =
+            VLE_SOURCE_VALUE_POSTING_NONE;
         estimates[i].main_blocks = 0;
         estimates[i].composite_matches = true;
         estimates[i].label_mismatch = false;
@@ -4253,7 +4277,7 @@ age_adjacency_estimate_terminal_label_postings_batch(
             age_adjacency_directory_entry_terminal_label_postings(
                 &entry, terminal_label_id);
         estimates[i].label_groups = entry.next_label_count;
-        estimates[i].value_posting_source =
+        estimates[i].value_posting_source_kind =
             age_adjacency_directory_entry_value_posting_source(
                 &entry, terminal_label_id);
         estimates[i].main_blocks = entry.main_block_count;
@@ -4283,7 +4307,8 @@ age_adjacency_estimate_composite_terminal_postings_batch(
         estimates[i].first_blkno = InvalidBlockNumber;
         estimates[i].first_offnum = InvalidOffsetNumber;
         estimates[i].label_groups = 0;
-        estimates[i].value_posting_source = "none";
+        estimates[i].value_posting_source_kind =
+            VLE_SOURCE_VALUE_POSTING_NONE;
         estimates[i].main_blocks = 0;
         estimates[i].composite_matches = true;
         estimates[i].label_mismatch = false;
@@ -4322,7 +4347,7 @@ age_adjacency_estimate_composite_terminal_postings_batch(
             age_adjacency_directory_entry_terminal_label_postings(
                 &entry, filter->terminal_label_id);
         estimates[i].label_groups = entry.next_label_count;
-        estimates[i].value_posting_source =
+        estimates[i].value_posting_source_kind =
             age_adjacency_directory_entry_value_posting_source(
                 &entry, filter->terminal_label_id);
         estimates[i].main_blocks = entry.main_block_count;
@@ -5162,16 +5187,16 @@ age_adjacency_probe_planner_delta(Oid index_oid, graphid key,
     return true;
 }
 
-static const char *
+static AgeAdjacencyDeltaMaintenanceAction
 age_adjacency_delta_maintenance_action(
     const AgeAdjacencyMetaPageData *meta, BlockNumber index_pages,
     int64 *delta_pages_out, int64 *delta_tuples_per_page_out,
-    const char **reason_out)
+    AgeAdjacencyDeltaMaintenanceReason *reason_out)
 {
     int64 delta_tuples_per_page;
     int64 delta_pages;
-    const char *action;
-    const char *reason;
+    AgeAdjacencyDeltaMaintenanceAction action;
+    AgeAdjacencyDeltaMaintenanceReason reason;
 
     Assert(meta != NULL);
 
@@ -5184,28 +5209,28 @@ age_adjacency_delta_maintenance_action(
 
     if (meta->delta_postings >= AGE_ADJACENCY_DELTA_REINDEX_THRESHOLD)
     {
-        action = "reindex-delta";
-        reason = "delta-postings-threshold";
+        action = AGE_ADJACENCY_DELTA_ACTION_REINDEX;
+        reason = AGE_ADJACENCY_DELTA_REASON_DELTA_POSTINGS_THRESHOLD;
     }
     else if (delta_pages > 1)
     {
-        action = "range-skip-delta";
-        reason = "multi-page-delta-range-summary";
+        action = AGE_ADJACENCY_DELTA_ACTION_RANGE_SKIP;
+        reason = AGE_ADJACENCY_DELTA_REASON_MULTI_PAGE_DELTA_RANGE_SUMMARY;
     }
     else if (meta->delta_postings > 0)
     {
-        action = "observe-delta";
-        reason = "single-page-delta";
+        action = AGE_ADJACENCY_DELTA_ACTION_OBSERVE;
+        reason = AGE_ADJACENCY_DELTA_REASON_SINGLE_PAGE_DELTA;
     }
     else
     {
-        action = "none";
-        reason = "no-delta";
+        action = AGE_ADJACENCY_DELTA_ACTION_NONE;
+        reason = AGE_ADJACENCY_DELTA_REASON_NO_DELTA;
     }
 
     if (index_pages <= AGE_ADJACENCY_METAPAGE_BLKNO)
     {
-        reason = "empty-index";
+        reason = AGE_ADJACENCY_DELTA_REASON_EMPTY_INDEX;
     }
 
     if (delta_pages_out != NULL)
@@ -5222,6 +5247,46 @@ age_adjacency_delta_maintenance_action(
     }
 
     return action;
+}
+
+static const char *
+age_adjacency_delta_maintenance_action_name(
+    AgeAdjacencyDeltaMaintenanceAction action)
+{
+    switch (action)
+    {
+        case AGE_ADJACENCY_DELTA_ACTION_REINDEX:
+            return "reindex-delta";
+        case AGE_ADJACENCY_DELTA_ACTION_RANGE_SKIP:
+            return "range-skip-delta";
+        case AGE_ADJACENCY_DELTA_ACTION_OBSERVE:
+            return "observe-delta";
+        case AGE_ADJACENCY_DELTA_ACTION_NONE:
+            return "none";
+    }
+
+    return "unknown";
+}
+
+static const char *
+age_adjacency_delta_maintenance_reason_name(
+    AgeAdjacencyDeltaMaintenanceReason reason)
+{
+    switch (reason)
+    {
+        case AGE_ADJACENCY_DELTA_REASON_DELTA_POSTINGS_THRESHOLD:
+            return "delta-postings-threshold";
+        case AGE_ADJACENCY_DELTA_REASON_MULTI_PAGE_DELTA_RANGE_SUMMARY:
+            return "multi-page-delta-range-summary";
+        case AGE_ADJACENCY_DELTA_REASON_SINGLE_PAGE_DELTA:
+            return "single-page-delta";
+        case AGE_ADJACENCY_DELTA_REASON_EMPTY_INDEX:
+            return "empty-index";
+        case AGE_ADJACENCY_DELTA_REASON_NO_DELTA:
+            return "no-delta";
+    }
+
+    return "unknown";
 }
 
 static void
@@ -8933,8 +8998,8 @@ age_adjacency_debug_delta_maintenance(PG_FUNCTION_ARGS)
     BlockNumber index_pages;
     int64 delta_pages;
     int64 delta_tuples_per_page;
-    const char *action;
-    const char *reason;
+    AgeAdjacencyDeltaMaintenanceAction action;
+    AgeAdjacencyDeltaMaintenanceReason reason;
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
     Datum values[7];
     bool nulls[7] = {false, false, false, false, false, false, false};
@@ -8958,8 +9023,10 @@ age_adjacency_debug_delta_maintenance(PG_FUNCTION_ARGS)
     action = age_adjacency_delta_maintenance_action(
         &meta, index_pages, &delta_pages, &delta_tuples_per_page, &reason);
 
-    values[0] = CStringGetTextDatum(action);
-    values[1] = CStringGetTextDatum(reason);
+    values[0] = CStringGetTextDatum(
+        age_adjacency_delta_maintenance_action_name(action));
+    values[1] = CStringGetTextDatum(
+        age_adjacency_delta_maintenance_reason_name(reason));
     values[2] = Int64GetDatum((int64) meta.delta_postings);
     values[3] = Int64GetDatum(delta_pages);
     values[4] = Int64GetDatum(delta_tuples_per_page);
@@ -8983,8 +9050,8 @@ age_adjacency_reindex_if_needed(PG_FUNCTION_ARGS)
     BlockNumber index_pages;
     int64 delta_pages;
     int64 delta_tuples_per_page;
-    const char *action;
-    const char *reason;
+    AgeAdjacencyDeltaMaintenanceAction action;
+    AgeAdjacencyDeltaMaintenanceReason reason;
     bool should_reindex;
     ReindexParams params = {0};
     ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
@@ -9011,7 +9078,7 @@ age_adjacency_reindex_if_needed(PG_FUNCTION_ARGS)
     action = age_adjacency_delta_maintenance_action(
         &before_meta, index_pages, &delta_pages, &delta_tuples_per_page,
         &reason);
-    should_reindex = strcmp(action, "reindex-delta") == 0;
+    should_reindex = action == AGE_ADJACENCY_DELTA_ACTION_REINDEX;
 
     if (should_reindex)
     {
@@ -9027,8 +9094,10 @@ age_adjacency_reindex_if_needed(PG_FUNCTION_ARGS)
     index_close(index_rel, AccessShareLock);
 
     values[0] = BoolGetDatum(should_reindex);
-    values[1] = CStringGetTextDatum(action);
-    values[2] = CStringGetTextDatum(reason);
+    values[1] = CStringGetTextDatum(
+        age_adjacency_delta_maintenance_action_name(action));
+    values[2] = CStringGetTextDatum(
+        age_adjacency_delta_maintenance_reason_name(reason));
     values[3] = Int64GetDatum((int64) before_meta.delta_postings);
     values[4] = Int64GetDatum((int64) after_meta.delta_postings);
     values[5] = Int64GetDatum((int64) after_meta.postings);

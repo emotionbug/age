@@ -28,6 +28,15 @@
 typedef struct AgeAdjacencyMatchTerminalPropertyLookup
     AgeAdjacencyMatchTerminalPropertyLookup;
 
+typedef enum AgeAdjacencyMatchTerminalPropertyMode
+{
+    AGE_ADJACENCY_TERMINAL_PROPERTY_NONE = 0,
+    AGE_ADJACENCY_TERMINAL_PROPERTY_SOURCE_PREFETCH,
+    AGE_ADJACENCY_TERMINAL_PROPERTY_DEFERRED_PREFETCH,
+    AGE_ADJACENCY_TERMINAL_PROPERTY_ID_CACHE,
+    AGE_ADJACENCY_TERMINAL_PROPERTY_ID_BTREE
+} AgeAdjacencyMatchTerminalPropertyMode;
+
 typedef struct AgeAdjacencyMatchTerminalPropertyRequest
 {
     Oid graph_oid;
@@ -66,8 +75,11 @@ extern bool age_adjacency_match_terminal_property_prefilter_matches(
 extern bool age_adjacency_match_terminal_property_prefilter_set(
     const AgeAdjacencyMatchTerminalPropertyLookup *lookup,
     AgeAdjacencyVertexSetFilter *filter);
-extern const char *age_adjacency_match_terminal_property_mode(
+extern AgeAdjacencyMatchTerminalPropertyMode
+age_adjacency_match_terminal_property_mode_id(
     const AgeAdjacencyMatchTerminalPropertyLookup *lookup);
+extern const char *age_adjacency_match_terminal_property_mode_name(
+    AgeAdjacencyMatchTerminalPropertyMode mode);
 extern Oid age_adjacency_match_terminal_property_index_oid(
     const AgeAdjacencyMatchTerminalPropertyLookup *lookup);
 extern uint32 age_adjacency_match_terminal_property_filter_id(
