@@ -321,6 +321,109 @@ FROM aggregate_index_benchmark_config;
 
 SET enable_seqscan = on;
 
+-- Bare list/cast projection harness.  A list/cast projection that is the final
+-- output (RETURN [a, b::cast, ...]) lowers onto the AGE Property Projection
+-- custom scan, but an outer aggregate folds agtype_build_list into the aggregate
+-- argument and bypasses the projection.  To actually measure (and EXPLAIN) the
+-- projection we keep the rows as the final output: an OFFSET 0 barrier plus a
+-- predicate on the projected column forces the projection while still returning a
+-- single scalar for clean timing.
+CREATE OR REPLACE FUNCTION public.run_aggregate_index_benchmark_projection_case(
+    graph_name text, row_count int, shape text, query text)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    start_ts timestamptz;
+    finish_ts timestamptz;
+    rows_returned bigint;
+BEGIN
+    start_ts := clock_timestamp();
+    EXECUTE format(
+        'SELECT count(*)
+         FROM (SELECT result
+               FROM ag_catalog.cypher(%L, %L) AS (result ag_catalog.agtype)
+               OFFSET 0) s
+         WHERE s.result IS NOT NULL',
+        graph_name, query)
+    INTO rows_returned;
+    finish_ts := clock_timestamp();
+
+    INSERT INTO aggregate_index_benchmark_results(shape, row_count,
+                                                  rows_returned,
+                                                  elapsed_ms)
+    VALUES (shape, row_count, rows_returned,
+            EXTRACT(MILLISECOND FROM finish_ts - start_ts) +
+            EXTRACT(SECOND FROM finish_ts - start_ts) * 1000);
+END
+$$;
+
+CREATE OR REPLACE FUNCTION public.capture_aggregate_index_benchmark_projection_explain(
+    graph_name text, row_count int, shape text, query text)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE format(
+        'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON)
+         SELECT count(*)
+         FROM (SELECT result
+               FROM ag_catalog.cypher(%L, %L) AS (result ag_catalog.agtype)
+               OFFSET 0) s
+         WHERE s.result IS NOT NULL',
+         graph_name, query)
+    LOOP
+        INSERT INTO aggregate_index_benchmark_explain(shape, row_count,
+                                                      plan_line)
+        VALUES (shape || '-projection', row_count, line);
+    END LOOP;
+END
+$$;
+
+SELECT public.run_aggregate_index_benchmark_projection_case(
+           graph_name,
+           row_count,
+           'bare-list-projection',
+           'MATCH (n:AggNode) RETURN [n.payload.a, n.payload.b]')
+FROM aggregate_index_benchmark_config;
+
+SELECT public.capture_aggregate_index_benchmark_projection_explain(
+           graph_name,
+           row_count,
+           'bare-list-projection',
+           'MATCH (n:AggNode) RETURN [n.payload.a, n.payload.b]')
+FROM aggregate_index_benchmark_config;
+
+SELECT public.run_aggregate_index_benchmark_projection_case(
+           graph_name,
+           row_count,
+           'typed-list-projection',
+           'MATCH (n:AggNode) RETURN [n.payload.a::pg_numeric, n.payload.b::pg_bigint]')
+FROM aggregate_index_benchmark_config;
+
+SELECT public.capture_aggregate_index_benchmark_projection_explain(
+           graph_name,
+           row_count,
+           'typed-list-projection',
+           'MATCH (n:AggNode) RETURN [n.payload.a::pg_numeric, n.payload.b::pg_bigint]')
+FROM aggregate_index_benchmark_config;
+
+SELECT public.run_aggregate_index_benchmark_projection_case(
+           graph_name,
+           row_count,
+           'typed-wide-text-projection',
+           'MATCH (n:AggNode) RETURN [n.payload.a::pg_numeric, n.payload.d::pg_text]')
+FROM aggregate_index_benchmark_config;
+
+SELECT public.capture_aggregate_index_benchmark_projection_explain(
+           graph_name,
+           row_count,
+           'typed-wide-text-projection',
+           'MATCH (n:AggNode) RETURN [n.payload.a::pg_numeric, n.payload.d::pg_text]')
+FROM aggregate_index_benchmark_config;
+
 SELECT public.run_aggregate_index_benchmark_case(
            graph_name,
            row_count,
@@ -456,6 +559,8 @@ SELECT max(row_count) FILTER (
              AND child_uses_index) AS first_forced_child_index_rows
 FROM plan_summary;
 
+DROP FUNCTION public.capture_aggregate_index_benchmark_projection_explain(text, int, text, text);
+DROP FUNCTION public.run_aggregate_index_benchmark_projection_case(text, int, text, text);
 DROP FUNCTION public.capture_aggregate_index_benchmark_explain(text, int, text, text, text);
 DROP FUNCTION public.capture_aggregate_index_benchmark_slot_summary(text, int, text, text, text);
 DROP FUNCTION public.capture_aggregate_index_benchmark_slot_state(text, int, text, text, text);

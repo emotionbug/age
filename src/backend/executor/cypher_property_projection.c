@@ -33,6 +33,14 @@
 #include "utils/numeric.h"
 #include "utils/rel.h"
 
+typedef struct AgeProjectionListElement
+{
+    agtype_value *keys;
+    int key_count;
+    Oid value_type;
+    Oid field_result_type;
+} AgeProjectionListElement;
+
 typedef struct AgePropertyProjectionSlot
 {
     agtype_value *keys;
@@ -41,6 +49,14 @@ typedef struct AgePropertyProjectionSlot
     Oid value_type;
     Oid field_result_type;
     int final_materialization_weight;
+    /*
+     * When is_list is set the output column is an agtype list built from
+     * elements (RETURN [a, b, ...]); the scalar keys/value_type above are
+     * unused and the slot always reads the heap (never reuses another slot).
+     */
+    bool is_list;
+    int element_count;
+    AgeProjectionListElement *elements;
 } AgePropertyProjectionSlot;
 
 typedef struct AgePropertyProjectionScanState
@@ -48,8 +64,15 @@ typedef struct AgePropertyProjectionScanState
     CustomScanState css;
     TableScanDesc scan;
     TupleTableSlot *heap_slot;
-    agtype *value_buffer;
-    Size value_buffer_size;
+    /*
+     * One scalar-agtype materialization buffer per output slot.  A single
+     * shared buffer would alias the agtype output of every column in a
+     * multi-column projection (each column would see the last column's value),
+     * so each slot owns its buffer; buffers are reused across rows, preserving
+     * the single-column fast path.
+     */
+    agtype **value_buffers;
+    Size *value_buffer_sizes;
     agtype *bool_false_value;
     agtype *bool_true_value;
     AgePropertyProjectionSlot *slots;
@@ -74,6 +97,14 @@ static void load_property_projection_slots(AgePropertyProjectionScanState *state
                                            CustomScan *cscan);
 static void load_property_projection_slot(AgePropertyProjectionSlot *slot,
                                           List *descriptor);
+static agtype_value *load_property_projection_keys(List *key_consts,
+                                                   int *key_count);
+static bool property_projection_find_keys(
+    agtype_value *keys, int key_count, agtype *properties, agtype_value *value,
+    bool *value_needs_free);
+static bool build_property_projection_list_datum(
+    AgePropertyProjectionScanState *state, int slot_index, agtype *properties,
+    Datum *result);
 static void link_property_projection_duplicate_slots(
     AgePropertyProjectionScanState *state);
 static bool load_property_projection_slot_value(
@@ -96,7 +127,7 @@ static bool property_projection_find_path(
     AgePropertyProjectionSlot *slot, agtype *properties, agtype_value *value,
     bool *value_needs_free);
 static agtype *property_projection_value_to_agtype(
-    AgePropertyProjectionScanState *state, agtype_value *value);
+    AgePropertyProjectionScanState *state, int slot_index, agtype_value *value);
 static bool property_projection_value_to_datum(
     AgePropertyProjectionScanState *state, AgePropertyProjectionSlot *slot,
     agtype_value *value, Datum *result);
@@ -105,15 +136,15 @@ static Datum property_projection_value_to_float8(agtype_value *value);
 static Datum property_projection_value_to_numeric(agtype_value *value);
 static Datum property_projection_value_to_text(agtype_value *value);
 static agtype *prepare_property_projection_buffer(
-    AgePropertyProjectionScanState *state, Size required_size);
+    AgePropertyProjectionScanState *state, int slot_index, Size required_size);
 static agtype *property_projection_integer_to_agtype(
-    AgePropertyProjectionScanState *state, int64 int_value);
+    AgePropertyProjectionScanState *state, int slot_index, int64 int_value);
 static agtype *property_projection_float_to_agtype(
-    AgePropertyProjectionScanState *state, float8 float_value);
+    AgePropertyProjectionScanState *state, int slot_index, float8 float_value);
 static agtype *property_projection_numeric_to_agtype(
-    AgePropertyProjectionScanState *state, Numeric numeric);
+    AgePropertyProjectionScanState *state, int slot_index, Numeric numeric);
 static agtype *property_projection_string_to_agtype(
-    AgePropertyProjectionScanState *state, const char *string,
+    AgePropertyProjectionScanState *state, int slot_index, const char *string,
     int string_len);
 static agtype *property_projection_bool_to_agtype(bool boolean);
 
@@ -210,6 +241,14 @@ static TupleTableSlot *access_age_property_projection_scan(ScanState *node)
                 bool found;
                 agtype_value *value;
 
+                if (projection_slot->is_list)
+                {
+                    slot->tts_isnull[i] =
+                        !build_property_projection_list_datum(
+                            state, i, properties, &slot->tts_values[i]);
+                    continue;
+                }
+
                 found = load_property_projection_slot_value(state, i,
                                                             properties);
                 value = &state->slot_values[i];
@@ -265,7 +304,11 @@ static void end_age_property_projection_scan(CustomScanState *node)
         int i;
 
         for (i = 0; i < state->slot_count; i++)
+        {
             free_property_projection_slot(&state->slots[i]);
+            if (state->value_buffers != NULL)
+                pfree_if_not_null(state->value_buffers[i]);
+        }
         pfree(state->slots);
         state->slots = NULL;
         state->slot_count = 0;
@@ -274,10 +317,14 @@ static void end_age_property_projection_scan(CustomScanState *node)
     pfree_if_not_null(state->slot_value_ready);
     pfree_if_not_null(state->slot_value_found);
     pfree_if_not_null(state->slot_value_needs_free);
+    pfree_if_not_null(state->value_buffers);
+    pfree_if_not_null(state->value_buffer_sizes);
     state->slot_values = NULL;
     state->slot_value_ready = NULL;
     state->slot_value_found = NULL;
     state->slot_value_needs_free = NULL;
+    state->value_buffers = NULL;
+    state->value_buffer_sizes = NULL;
 }
 
 static void rescan_age_property_projection_scan(CustomScanState *node)
@@ -327,6 +374,8 @@ static void load_property_projection_slots(AgePropertyProjectionScanState *state
     state->slot_value_found = palloc0(sizeof(bool) * state->slot_count);
     state->slot_value_needs_free = palloc0(sizeof(bool) *
                                            state->slot_count);
+    state->value_buffers = palloc0(sizeof(agtype *) * state->slot_count);
+    state->value_buffer_sizes = palloc0(sizeof(Size) * state->slot_count);
 
     foreach(lc, cscan->custom_private)
     {
@@ -337,33 +386,17 @@ static void load_property_projection_slots(AgePropertyProjectionScanState *state
     link_property_projection_duplicate_slots(state);
 }
 
-static void load_property_projection_slot(AgePropertyProjectionSlot *slot,
-                                          List *descriptor)
+static agtype_value *load_property_projection_keys(List *key_consts,
+                                                   int *key_count)
 {
-    List *key_consts;
+    agtype_value *keys;
     ListCell *lc;
-    Const *value_type_const;
-    Const *field_result_type_const;
-    Integer *final_materialization_weight;
     int key_index = 0;
 
-    Assert(list_length(descriptor) == 4);
-    key_consts = linitial_node(List, descriptor);
-    value_type_const = lsecond_node(Const, descriptor);
-    field_result_type_const = list_nth_node(Const, descriptor, 2);
-    final_materialization_weight = list_nth_node(Integer, descriptor, 3);
     Assert(key_consts != NIL);
-    Assert(!value_type_const->constisnull);
-    Assert(!field_result_type_const->constisnull);
 
-    slot->source_slot_index = -1;
-    slot->value_type = DatumGetObjectId(value_type_const->constvalue);
-    slot->field_result_type =
-        DatumGetObjectId(field_result_type_const->constvalue);
-    slot->final_materialization_weight = intVal(final_materialization_weight);
-
-    slot->key_count = list_length(key_consts);
-    slot->keys = palloc0(sizeof(agtype_value) * slot->key_count);
+    *key_count = list_length(key_consts);
+    keys = palloc0(sizeof(agtype_value) * (*key_count));
 
     foreach(lc, key_consts)
     {
@@ -382,12 +415,96 @@ static void load_property_projection_slot(AgePropertyProjectionSlot *slot,
         Assert(key_value.type == AGTV_STRING);
         Assert(!key_needs_free);
 
-        slot->keys[key_index].type = AGTV_STRING;
-        slot->keys[key_index].val.string.len = key_value.val.string.len;
-        slot->keys[key_index].val.string.val =
+        keys[key_index].type = AGTV_STRING;
+        keys[key_index].val.string.len = key_value.val.string.len;
+        keys[key_index].val.string.val =
             pnstrdup(key_value.val.string.val, key_value.val.string.len);
         key_index++;
     }
+
+    return keys;
+}
+
+static void load_property_projection_list_element(
+    AgeProjectionListElement *element, List *descriptor)
+{
+    List *key_consts;
+    Const *value_type_const;
+    Const *field_result_type_const;
+
+    Assert(list_length(descriptor) == 4);
+    key_consts = linitial_node(List, descriptor);
+    value_type_const = lsecond_node(Const, descriptor);
+    field_result_type_const = list_nth_node(Const, descriptor, 2);
+    Assert(!value_type_const->constisnull);
+    Assert(!field_result_type_const->constisnull);
+
+    element->value_type = DatumGetObjectId(value_type_const->constvalue);
+    element->field_result_type =
+        DatumGetObjectId(field_result_type_const->constvalue);
+    element->keys = load_property_projection_keys(key_consts,
+                                                  &element->key_count);
+}
+
+static void load_property_projection_slot(AgePropertyProjectionSlot *slot,
+                                          List *descriptor)
+{
+    List *key_consts;
+    Const *value_type_const;
+    Const *field_result_type_const;
+    Integer *final_materialization_weight;
+    Node *first;
+
+    Assert(descriptor != NIL);
+
+    /*
+     * A list-output slot is tagged with a leading String; everything after it
+     * is one 4-element element descriptor.  A scalar slot's first member is the
+     * key-path List, so dispatch on the node tag.
+     */
+    first = (Node *) linitial(descriptor);
+    if (IsA(first, String))
+    {
+        List *element_descriptors = list_copy_tail(descriptor, 1);
+        ListCell *lc;
+        int element_index = 0;
+
+        Assert(strcmp(strVal(first), AGE_PROPERTY_PROJECTION_LIST_TAG) == 0);
+        Assert(element_descriptors != NIL);
+
+        slot->is_list = true;
+        slot->source_slot_index = -1;
+        slot->element_count = list_length(element_descriptors);
+        slot->elements = palloc0(sizeof(AgeProjectionListElement) *
+                                 slot->element_count);
+        slot->value_type = AGTYPEOID;
+        slot->field_result_type = AGTYPEOID;
+        slot->final_materialization_weight = slot->element_count;
+
+        foreach(lc, element_descriptors)
+        {
+            load_property_projection_list_element(
+                &slot->elements[element_index], lfirst_node(List, lc));
+            element_index++;
+        }
+        return;
+    }
+
+    Assert(list_length(descriptor) == 4);
+    key_consts = linitial_node(List, descriptor);
+    value_type_const = lsecond_node(Const, descriptor);
+    field_result_type_const = list_nth_node(Const, descriptor, 2);
+    final_materialization_weight = list_nth_node(Integer, descriptor, 3);
+    Assert(!value_type_const->constisnull);
+    Assert(!field_result_type_const->constisnull);
+
+    slot->source_slot_index = -1;
+    slot->value_type = DatumGetObjectId(value_type_const->constvalue);
+    slot->field_result_type =
+        DatumGetObjectId(field_result_type_const->constvalue);
+    slot->final_materialization_weight = intVal(final_materialization_weight);
+
+    slot->keys = load_property_projection_keys(key_consts, &slot->key_count);
 }
 
 static void link_property_projection_duplicate_slots(
@@ -467,6 +584,10 @@ static bool property_projection_slots_same_path(
     Assert(left != NULL);
     Assert(right != NULL);
 
+    /* list-output slots always read the heap; never share a cached path */
+    if (left->is_list || right->is_list)
+        return false;
+
     if (left->key_count != right->key_count)
         return false;
 
@@ -486,33 +607,82 @@ static bool property_projection_slots_same_path(
     return true;
 }
 
-static void free_property_projection_slot(AgePropertyProjectionSlot *slot)
+static void free_property_projection_keys(agtype_value *keys, int key_count)
 {
     int i;
 
-    if (slot == NULL || slot->keys == NULL)
+    if (keys == NULL)
         return;
 
-    for (i = 0; i < slot->key_count; i++)
-        pfree_if_not_null(slot->keys[i].val.string.val);
-    pfree(slot->keys);
+    for (i = 0; i < key_count; i++)
+        pfree_if_not_null(keys[i].val.string.val);
+    pfree(keys);
+}
+
+static void free_property_projection_slot(AgePropertyProjectionSlot *slot)
+{
+    if (slot == NULL)
+        return;
+
+    if (slot->is_list)
+    {
+        int i;
+
+        for (i = 0; i < slot->element_count; i++)
+            free_property_projection_keys(slot->elements[i].keys,
+                                          slot->elements[i].key_count);
+        pfree_if_not_null(slot->elements);
+        slot->elements = NULL;
+        slot->element_count = 0;
+        return;
+    }
+
+    if (slot->keys == NULL)
+        return;
+
+    free_property_projection_keys(slot->keys, slot->key_count);
     slot->keys = NULL;
     slot->key_count = 0;
+}
+
+static void append_property_projection_key_path(StringInfo buf,
+                                                agtype_value *keys,
+                                                int key_count)
+{
+    int i;
+
+    for (i = 0; i < key_count; i++)
+    {
+        if (i > 0)
+            appendStringInfoChar(buf, '.');
+        appendBinaryStringInfo(buf, keys[i].val.string.val,
+                               keys[i].val.string.len);
+    }
 }
 
 static char *format_property_projection_key_path(
     AgePropertyProjectionSlot *slot)
 {
     StringInfoData buf;
-    int i;
 
     initStringInfo(&buf);
-    for (i = 0; i < slot->key_count; i++)
+    if (slot->is_list)
     {
-        if (i > 0)
-            appendStringInfoChar(&buf, '.');
-        appendBinaryStringInfo(&buf, slot->keys[i].val.string.val,
-                               slot->keys[i].val.string.len);
+        int i;
+
+        appendStringInfoChar(&buf, '[');
+        for (i = 0; i < slot->element_count; i++)
+        {
+            if (i > 0)
+                appendStringInfoString(&buf, ", ");
+            append_property_projection_key_path(&buf, slot->elements[i].keys,
+                                                slot->elements[i].key_count);
+        }
+        appendStringInfoChar(&buf, ']');
+    }
+    else
+    {
+        append_property_projection_key_path(&buf, slot->keys, slot->key_count);
     }
 
     return buf.data;
@@ -598,8 +768,8 @@ static char *format_property_projection_summary(
                     total_final_weight, heap_final_weight, max_final_weight);
 }
 
-static bool property_projection_find_path(
-    AgePropertyProjectionSlot *slot, agtype *properties, agtype_value *value,
+static bool property_projection_find_keys(
+    agtype_value *keys, int key_count, agtype *properties, agtype_value *value,
     bool *value_needs_free)
 {
     agtype_container *container = &properties->root;
@@ -607,17 +777,17 @@ static bool property_projection_find_path(
     bool current_needs_free = false;
     int i;
 
-    for (i = 0; i < slot->key_count; i++)
+    for (i = 0; i < key_count; i++)
     {
         bool found;
 
         found = find_agtype_value_from_container_no_copy(
-            container, AGT_FOBJECT, &slot->keys[i], &current,
+            container, AGT_FOBJECT, &keys[i], &current,
             &current_needs_free);
         if (!found)
             return false;
 
-        if (i == slot->key_count - 1)
+        if (i == key_count - 1)
         {
             *value = current;
             *value_needs_free = current_needs_free;
@@ -638,27 +808,131 @@ static bool property_projection_find_path(
     return false;
 }
 
+static bool property_projection_find_path(
+    AgePropertyProjectionSlot *slot, agtype *properties, agtype_value *value,
+    bool *value_needs_free)
+{
+    return property_projection_find_keys(slot->keys, slot->key_count,
+                                         properties, value, value_needs_free);
+}
+
+/*
+ * Build the agtype list output for a list-output slot directly from the heap
+ * tuple's properties, mirroring agtype_build_list() semantics: each element is
+ * the (possibly typed/cast) property value, and a missing element becomes an
+ * agtype null rather than nulling the whole column.  The serialized list is
+ * copied into the slot's reusable buffer so steady-state memory stays bounded.
+ */
+static bool build_property_projection_list_datum(
+    AgePropertyProjectionScanState *state, int slot_index, agtype *properties,
+    Datum *result)
+{
+    AgePropertyProjectionSlot *slot = &state->slots[slot_index];
+    agtype_in_state list_state;
+    agtype *built;
+    agtype *buffer;
+    Size built_size;
+    int i;
+
+    memset(&list_state, 0, sizeof(list_state));
+    list_state.res = push_agtype_value(&list_state.parse_state,
+                                       WAGT_BEGIN_ARRAY, NULL);
+
+    for (i = 0; i < slot->element_count; i++)
+    {
+        AgeProjectionListElement *element = &slot->elements[i];
+        agtype_value value;
+        bool needs_free = false;
+        bool found;
+
+        found = property_projection_find_keys(element->keys, element->key_count,
+                                              properties, &value, &needs_free);
+
+        if (!found || value.type == AGTV_NULL)
+        {
+            add_agtype((Datum) 0, true, &list_state, AGTYPEOID, false);
+        }
+        else if (element->field_result_type == AGTYPEOID)
+        {
+            agtype *element_agtype = agtype_value_to_agtype(&value);
+
+            add_agtype(AGTYPE_P_GET_DATUM(element_agtype), false, &list_state,
+                       AGTYPEOID, false);
+            pfree(element_agtype);
+        }
+        else
+        {
+            Datum element_datum = (Datum) 0;
+            bool is_pointer = false;
+
+            switch (element->field_result_type)
+            {
+            case INT8OID:
+                element_datum = property_projection_value_to_int8(&value);
+                break;
+            case FLOAT8OID:
+                element_datum = property_projection_value_to_float8(&value);
+                break;
+            case NUMERICOID:
+                element_datum = property_projection_value_to_numeric(&value);
+                is_pointer = true;
+                break;
+            case TEXTOID:
+                element_datum = property_projection_value_to_text(&value);
+                is_pointer = true;
+                break;
+            default:
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("unsupported cached property list field result "
+                                "type %u", element->field_result_type)));
+            }
+
+            add_agtype(element_datum, false, &list_state,
+                       element->field_result_type, false);
+            if (is_pointer)
+                pfree(DatumGetPointer(element_datum));
+        }
+
+        if (needs_free)
+            pfree_agtype_value_content(&value);
+    }
+
+    list_state.res = push_agtype_value(&list_state.parse_state, WAGT_END_ARRAY,
+                                       NULL);
+    built = agtype_value_to_agtype(list_state.res);
+    pfree_agtype_in_state(&list_state);
+
+    built_size = VARSIZE(built);
+    buffer = prepare_property_projection_buffer(state, slot_index, built_size);
+    memcpy(buffer, built, built_size);
+    pfree(built);
+
+    *result = AGTYPE_P_GET_DATUM(buffer);
+    return true;
+}
+
 static agtype *property_projection_value_to_agtype(
-    AgePropertyProjectionScanState *state, agtype_value *value)
+    AgePropertyProjectionScanState *state, int slot_index, agtype_value *value)
 {
     if (value->type == AGTV_INTEGER)
     {
-        return property_projection_integer_to_agtype(state,
+        return property_projection_integer_to_agtype(state, slot_index,
                                                     value->val.int_value);
     }
     if (value->type == AGTV_FLOAT)
     {
-        return property_projection_float_to_agtype(state,
+        return property_projection_float_to_agtype(state, slot_index,
                                                   value->val.float_value);
     }
     if (value->type == AGTV_NUMERIC)
     {
-        return property_projection_numeric_to_agtype(state,
+        return property_projection_numeric_to_agtype(state, slot_index,
                                                     value->val.numeric);
     }
     if (value->type == AGTV_STRING)
     {
-        return property_projection_string_to_agtype(state,
+        return property_projection_string_to_agtype(state, slot_index,
                                                    value->val.string.val,
                                                    value->val.string.len);
     }
@@ -677,8 +951,11 @@ static bool property_projection_value_to_datum(
 {
     if (slot->field_result_type == AGTYPEOID)
     {
+        int slot_index = (int)(slot - state->slots);
+
+        Assert(slot_index >= 0 && slot_index < state->slot_count);
         *result = AGTYPE_P_GET_DATUM(
-            property_projection_value_to_agtype(state, value));
+            property_projection_value_to_agtype(state, slot_index, value));
         return true;
     }
     if (slot->field_result_type == INT8OID)
@@ -803,24 +1080,27 @@ static Datum property_projection_value_to_text(agtype_value *value)
 }
 
 static agtype *prepare_property_projection_buffer(
-    AgePropertyProjectionScanState *state, Size required_size)
+    AgePropertyProjectionScanState *state, int slot_index, Size required_size)
 {
-    if (state->value_buffer == NULL)
+    Assert(slot_index >= 0 && slot_index < state->slot_count);
+
+    if (state->value_buffers[slot_index] == NULL)
     {
-        state->value_buffer = palloc(required_size);
-        state->value_buffer_size = required_size;
+        state->value_buffers[slot_index] = palloc(required_size);
+        state->value_buffer_sizes[slot_index] = required_size;
     }
-    else if (state->value_buffer_size < required_size)
+    else if (state->value_buffer_sizes[slot_index] < required_size)
     {
-        state->value_buffer = repalloc(state->value_buffer, required_size);
-        state->value_buffer_size = required_size;
+        state->value_buffers[slot_index] =
+            repalloc(state->value_buffers[slot_index], required_size);
+        state->value_buffer_sizes[slot_index] = required_size;
     }
 
-    return state->value_buffer;
+    return state->value_buffers[slot_index];
 }
 
 static agtype *property_projection_integer_to_agtype(
-    AgePropertyProjectionScanState *state, int64 int_value)
+    AgePropertyProjectionScanState *state, int slot_index, int64 int_value)
 {
     agtype *out;
     char *data;
@@ -829,7 +1109,7 @@ static agtype *property_projection_integer_to_agtype(
     uint32 type_header;
 
     out = prepare_property_projection_buffer(
-        state, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+        state, slot_index, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
         sizeof(uint32) + sizeof(int64));
     SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
                 sizeof(uint32) + sizeof(int64));
@@ -850,7 +1130,7 @@ static agtype *property_projection_integer_to_agtype(
 }
 
 static agtype *property_projection_float_to_agtype(
-    AgePropertyProjectionScanState *state, float8 float_value)
+    AgePropertyProjectionScanState *state, int slot_index, float8 float_value)
 {
     agtype *out;
     char *data;
@@ -859,7 +1139,7 @@ static agtype *property_projection_float_to_agtype(
     uint32 type_header;
 
     out = prepare_property_projection_buffer(
-        state, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
+        state, slot_index, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
         sizeof(uint32) + sizeof(float8));
     SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
                 sizeof(uint32) + sizeof(float8));
@@ -880,7 +1160,7 @@ static agtype *property_projection_float_to_agtype(
 }
 
 static agtype *property_projection_numeric_to_agtype(
-    AgePropertyProjectionScanState *state, Numeric numeric)
+    AgePropertyProjectionScanState *state, int slot_index, Numeric numeric)
 {
     agtype *out;
     char *data;
@@ -898,7 +1178,8 @@ static agtype *property_projection_numeric_to_agtype(
     }
 
     out = prepare_property_projection_buffer(
-        state, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) + numeric_len);
+        state, slot_index,
+        VARHDRSZ + sizeof(uint32) + sizeof(agtentry) + numeric_len);
     SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
                 numeric_len);
 
@@ -933,7 +1214,7 @@ static agtype *property_projection_bool_to_agtype(bool boolean)
 }
 
 static agtype *property_projection_string_to_agtype(
-    AgePropertyProjectionScanState *state, const char *string,
+    AgePropertyProjectionScanState *state, int slot_index, const char *string,
                                                     int string_len)
 {
     agtype *out;
@@ -950,7 +1231,8 @@ static agtype *property_projection_string_to_agtype(
     }
 
     out = prepare_property_projection_buffer(
-        state, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) + string_len);
+        state, slot_index,
+        VARHDRSZ + sizeof(uint32) + sizeof(agtentry) + string_len);
     SET_VARSIZE(out, VARHDRSZ + sizeof(uint32) + sizeof(agtentry) +
                 string_len);
 

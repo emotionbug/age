@@ -24,6 +24,14 @@
 
 #define AGE_PROPERTY_PROJECTION_SCAN_NAME "AGE Property Projection"
 
+/*
+ * String tag that marks a list-output projection slot in the CustomScan
+ * custom_private encoding.  A scalar slot is a 4-element descriptor whose first
+ * member is the key-path List; a list-output slot (RETURN [a, b, ...]) is this
+ * tag followed by one descriptor per list element.
+ */
+#define AGE_PROPERTY_PROJECTION_LIST_TAG "agtype_list"
+
 extern const CustomScanMethods age_property_projection_scan_methods;
 
 #endif

@@ -707,6 +707,81 @@ FROM cypher('cypher_match_numeric_path',
          Output: agtype_object_field_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype)
 (4 rows)
 
+-- Bare list/cast projection (no outer aggregate) lowers onto the AGE Property
+-- Projection custom scan instead of the generic agtype_build_list seq scan, and
+-- the built list (including typed casts and missing -> null elements) matches
+-- the generic path value-for-value.
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match_numeric_path',
+    'MATCH (n:NumericPath) RETURN [n.payload.a, n.payload.b]');
+                                                                                          cypher_match_normalized_explain                                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE Property Projection) on cypher_match_numeric_path."NumericPath" n
+   Output: (agtype_build_list(agtype_access_operator(VARIADIC ARRAY[n.properties, '"payload"'::agtype, '"a"'::agtype]), agtype_access_operator(VARIADIC ARRAY[n.properties, '"payload"'::agtype, '"b"'::agtype])))
+   Cached Property Slots: 1:{source=heap-properties, key=[payload.a, payload.b], value=agtype, field=agtype, final-weight=2}
+   Cached Property Slot Count: 1
+   Cached Property Summary: slots=1 heap-lookups=1 reused=0 final-weight=2 heap-final-weight=2 max-final-weight=2
+(5 rows)
+
+SELECT * FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath) RETURN [n.payload.a, n.payload.b]$$)
+     AS (l agtype)
+ORDER BY l;
+    l    
+---------
+ [1, 11]
+ [2, 12]
+(2 rows)
+
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match_numeric_path',
+    'MATCH (n:NumericPath)
+     RETURN [n.payload.a::pg_numeric, n.payload.b::pg_bigint, n.payload.z::pg_text]');
+                                                                                                                                                                 cypher_match_normalized_explain                                                                                                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE Property Projection) on cypher_match_numeric_path."NumericPath" n
+   Output: (agtype_build_list(agtype_object_field_numeric(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"a"'::agtype), agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"b"'::agtype), agtype_object_field_text_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"z"'::agtype)))
+   Cached Property Slots: 1:{source=heap-properties, key=[payload.a, payload.b, payload.z], value=agtype, field=agtype, final-weight=3}
+   Cached Property Slot Count: 1
+   Cached Property Summary: slots=1 heap-lookups=1 reused=0 final-weight=3 heap-final-weight=3 max-final-weight=3
+(5 rows)
+
+SELECT * FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN [n.payload.a::pg_numeric, n.payload.b::pg_bigint,
+                      n.payload.z::pg_text]$$)
+     AS (l agtype)
+ORDER BY l;
+           l            
+------------------------
+ [1::numeric, 11, null]
+ [2::numeric, 12, null]
+(2 rows)
+
+-- The custom-scan list must equal the generic agtype_build_list path; a second
+-- non-property projection column disqualifies the simple-projection custom scan
+-- and forces the generic path, so the EXCEPT must be empty.
+SELECT count(*) AS list_projection_divergences FROM (
+  (SELECT row_number() OVER () AS rn, l
+   FROM cypher('cypher_match_numeric_path',
+               $$MATCH (n:NumericPath)
+                 RETURN [n.payload.a, n.payload.b::pg_bigint,
+                         n.payload.c::pg_numeric, n.payload.z]$$)
+        AS (l agtype))
+  EXCEPT
+  (SELECT row_number() OVER () AS rn, l
+   FROM cypher('cypher_match_numeric_path',
+               $$MATCH (n:NumericPath)
+                 RETURN [n.payload.a, n.payload.b::pg_bigint,
+                         n.payload.c::pg_numeric, n.payload.z],
+                        n.payload.a + 1$$)
+        AS (l agtype, junk agtype))
+) d;
+ list_projection_divergences 
+-----------------------------
+                           0
+(1 row)
+
 DROP FUNCTION cypher_match_normalized_explain(text, text);
 SELECT * FROM cypher('cypher_match_numeric_path', $$
     MATCH (n:NumericPath)

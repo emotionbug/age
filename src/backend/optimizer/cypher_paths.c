@@ -3345,6 +3345,15 @@ static void add_property_projection_custom_path(PlannerInfo *root,
                              "true" : "false")));
 }
 
+static List *make_property_projection_slot_descriptor(
+    CypherCachedPropertySlotDescriptor *slot)
+{
+    return list_make4(copyObject(slot->keys),
+                      make_oid_const(slot->value_type),
+                      make_oid_const(slot->field_result_type),
+                      makeInteger(slot->final_materialization_weight));
+}
+
 static List *make_property_projection_slot_private(List *slots)
 {
     List *slot_private = NIL;
@@ -3354,12 +3363,35 @@ static List *make_property_projection_slot_private(List *slots)
     {
         CypherCachedPropertySlotDescriptor *slot = lfirst(lc);
 
-        slot_private = lappend(
-            slot_private,
-            list_make4(copyObject(slot->keys),
-                       make_oid_const(slot->value_type),
-                       make_oid_const(slot->field_result_type),
-                       makeInteger(slot->final_materialization_weight)));
+        /*
+         * A list-output slot (RETURN [a, b, ...]) is encoded as a String tag
+         * "agtype_list" followed by one 4-element descriptor per list element,
+         * so the executor can tell it apart from a scalar slot (whose first
+         * member is the key-path List) and rebuild the agtype list directly.
+         */
+        if (slot->is_list_output)
+        {
+            List *element_privs = NIL;
+            ListCell *elem_lc;
+
+            foreach(elem_lc, slot->list_elements)
+            {
+                element_privs = lappend(
+                    element_privs,
+                    make_property_projection_slot_descriptor(lfirst(elem_lc)));
+            }
+
+            slot_private = lappend(
+                slot_private,
+                lcons(makeString(AGE_PROPERTY_PROJECTION_LIST_TAG),
+                      element_privs));
+        }
+        else
+        {
+            slot_private = lappend(
+                slot_private,
+                make_property_projection_slot_descriptor(slot));
+        }
     }
 
     return slot_private;

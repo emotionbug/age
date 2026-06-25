@@ -47,6 +47,16 @@ typedef struct CypherCachedPropertySlotDescriptor
     Oid final_func_oid;
     Oid agg_func_oid;
     Node *index_expr;
+    /*
+     * When the projection target is an agtype_build_list() over property
+     * accesses from the same vertex (e.g. RETURN [n.payload.a, n.payload.b]),
+     * the output column is a single agtype list built from list_elements.
+     * Each element is itself a property-access slot descriptor carrying its own
+     * key path and (possibly typed/cast) field result.  Scalar slots leave
+     * is_list_output false and list_elements NIL.
+     */
+    bool is_list_output;
+    List *list_elements;
 } CypherCachedPropertySlotDescriptor;
 
 /*

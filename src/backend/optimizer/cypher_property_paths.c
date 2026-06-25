@@ -183,6 +183,8 @@ static bool detect_simple_property_projection_target(PathTarget *target,
                                                      List **slots);
 static bool is_simple_property_access_target(
     Node *node, CypherCachedPropertySlotDescriptor *slot);
+static bool is_list_property_projection_target(
+    Node *node, CypherCachedPropertySlotDescriptor *slot);
 static bool detect_ordered_property_projection_delay(
     PlannerInfo *root, CypherCachedPropertySlotDescriptor *output_slot,
     CypherCachedPropertySlotDescriptor *sort_slot, bool *reuse_sort_output,
@@ -267,6 +269,52 @@ static Expr *add_or_get_lower_scalar_handoff(
     PathTarget *target, CypherScalarFinalHandoff *handoff,
     Index ressortgroupref);
 static Const *make_agtype_key_array_const(List *keys);
+
+/*
+ * Closed vocabulary of the property array_agg payload forms.  Each form binds
+ * one AGE typed array_agg aggregate to the parser that materializes its
+ * payload slots.  The single variant table is the only authority: the rewrite
+ * side maps form -> aggregate OID, and the handoff matcher maps a recognized
+ * aggregate OID -> payload parser, so the form set lives in exactly one place
+ * (and is the named anchor for the upcoming array_agg payload cost work).
+ */
+typedef enum CypherArrayAggPropertyForm
+{
+    ARRAY_AGG_PROPERTY_FORM_SINGLE = 0,
+    ARRAY_AGG_PROPERTY_FORM_MAP2,
+    ARRAY_AGG_PROPERTY_FORM_MAP,
+    ARRAY_AGG_PROPERTY_FORM_LIST,
+    ARRAY_AGG_PROPERTY_FORM_COUNT
+} CypherArrayAggPropertyForm;
+
+typedef struct CypherArrayAggPropertyVariant
+{
+    Oid (*agg_oid)(void);
+    bool (*make_args)(Aggref *aggref, CypherArrayAggPropertyHandoff *handoff);
+} CypherArrayAggPropertyVariant;
+
+static const CypherArrayAggPropertyVariant
+    array_agg_property_variants[ARRAY_AGG_PROPERTY_FORM_COUNT] = {
+    [ARRAY_AGG_PROPERTY_FORM_SINGLE] = {
+        get_cached_age_array_agg_property_agg_oid,
+        make_array_agg_single_property_args},
+    [ARRAY_AGG_PROPERTY_FORM_MAP2] = {
+        get_cached_age_array_agg_map2_property_agg_oid,
+        make_array_agg_map2_property_args},
+    [ARRAY_AGG_PROPERTY_FORM_MAP] = {
+        get_cached_age_array_agg_map_property_agg_oid,
+        make_array_agg_map_property_args},
+    [ARRAY_AGG_PROPERTY_FORM_LIST] = {
+        get_cached_age_array_agg_list_property_agg_oid,
+        make_array_agg_list_property_args}
+};
+
+static Oid array_agg_property_form_oid(CypherArrayAggPropertyForm form)
+{
+    Assert(form >= 0 && form < ARRAY_AGG_PROPERTY_FORM_COUNT);
+
+    return array_agg_property_variants[form].agg_oid();
+}
 
 bool cypher_rewrite_collect_typed_scalar_expr(Node *node)
 {
@@ -417,7 +465,7 @@ static bool rewrite_array_agg_property_access_expr(Node *node)
         (Expr *)copyObject(properties), 1, NULL, false);
     key_tle = makeTargetEntry((Expr *)copyObject(key), 2, NULL, false);
 
-    aggref->aggfnoid = get_cached_age_array_agg_property_agg_oid();
+    aggref->aggfnoid = array_agg_property_form_oid(ARRAY_AGG_PROPERTY_FORM_SINGLE);
     aggref->aggargtypes = list_make2_oid(AGTYPEOID, AGTYPEOID);
     aggref->args = list_make2(properties_tle, key_tle);
     aggref->aggvariadic = false;
@@ -470,7 +518,7 @@ static bool rewrite_array_agg_map2_property_access_expr(Node *node)
     prop_key2_tle = makeTargetEntry((Expr *)copyObject(prop_key2), 5,
                                     NULL, false);
 
-    aggref->aggfnoid = get_cached_age_array_agg_map2_property_agg_oid();
+    aggref->aggfnoid = array_agg_property_form_oid(ARRAY_AGG_PROPERTY_FORM_MAP2);
     aggref->aggargtypes = list_make5_oid(AGTYPEOID, TEXTOID, AGTYPEOID,
                                          TEXTOID, AGTYPEOID);
     aggref->args = list_make5(properties_tle, out_key1_tle, prop_key1_tle,
@@ -518,7 +566,7 @@ static bool rewrite_array_agg_map_property_access_expr(Node *node)
         (Expr *)make_const_array_const(prop_keys, AGTYPEARRAYOID, AGTYPEOID),
         3, NULL, false);
 
-    aggref->aggfnoid = get_cached_age_array_agg_map_property_agg_oid();
+    aggref->aggfnoid = array_agg_property_form_oid(ARRAY_AGG_PROPERTY_FORM_MAP);
     aggref->aggargtypes = list_make3_oid(AGTYPEOID, TEXTARRAYOID,
                                          AGTYPEARRAYOID);
     aggref->args = list_make3(properties_tle, out_keys_tle, prop_keys_tle);
@@ -560,7 +608,7 @@ static bool rewrite_array_agg_list_property_access_expr(Node *node)
         (Expr *)make_const_array_const(prop_keys, AGTYPEARRAYOID, AGTYPEOID),
         2, NULL, false);
 
-    aggref->aggfnoid = get_cached_age_array_agg_list_property_agg_oid();
+    aggref->aggfnoid = array_agg_property_form_oid(ARRAY_AGG_PROPERTY_FORM_LIST);
     aggref->aggargtypes = list_make2_oid(AGTYPEOID, AGTYPEARRAYOID);
     aggref->args = list_make2(properties_tle, prop_keys_tle);
     aggref->aggvariadic = false;
@@ -2076,6 +2124,8 @@ static Node *rewrite_array_agg_property_target_mutator(Node *node,
 static bool make_array_agg_property_handoff_args(
     Aggref *aggref, CypherArrayAggPropertyHandoff *handoff)
 {
+    int form;
+
     if (aggref == NULL || handoff == NULL)
         return false;
 
@@ -2085,17 +2135,14 @@ static bool make_array_agg_property_handoff_args(
         return true;
     }
 
-    if (aggref->aggfnoid == get_cached_age_array_agg_property_agg_oid())
-        return make_array_agg_single_property_args(aggref, handoff);
+    for (form = 0; form < ARRAY_AGG_PROPERTY_FORM_COUNT; form++)
+    {
+        const CypherArrayAggPropertyVariant *variant =
+            &array_agg_property_variants[form];
 
-    if (aggref->aggfnoid == get_cached_age_array_agg_map2_property_agg_oid())
-        return make_array_agg_map2_property_args(aggref, handoff);
-
-    if (aggref->aggfnoid == get_cached_age_array_agg_map_property_agg_oid())
-        return make_array_agg_map_property_args(aggref, handoff);
-
-    if (aggref->aggfnoid == get_cached_age_array_agg_list_property_agg_oid())
-        return make_array_agg_list_property_args(aggref, handoff);
+        if (aggref->aggfnoid == variant->agg_oid())
+            return variant->make_args(aggref, handoff);
+    }
 
     return false;
 }
@@ -3650,10 +3697,10 @@ static bool detect_simple_property_projection_target(PathTarget *target,
         CypherCachedPropertySlotDescriptor slot;
         CypherCachedPropertySlotDescriptor *slot_copy;
 
-        if (!is_simple_property_access_target(expr, &slot))
+        if (!is_simple_property_access_target(expr, &slot) &&
+            !is_list_property_projection_target(expr, &slot))
             return false;
-        if (multi_slot && slot.field_result_type == AGTYPEOID)
-            return false;
+        (void) multi_slot;
 
         slot_copy = palloc(sizeof(*slot_copy));
         *slot_copy = slot;
@@ -3706,6 +3753,74 @@ static bool is_simple_property_access_target(
     }
 
     *slot = candidate;
+    return true;
+}
+
+/*
+ * Recognize an agtype_build_list() projection target whose every element is a
+ * simple property access from one vertex's properties column, e.g.
+ * RETURN [n.payload.a, n.payload.b::pg_bigint].  The element accesses (with
+ * their own typed/cast field results) become list_elements so the property
+ * projection custom scan can build the output agtype list directly from the
+ * heap tuple instead of leaving it on the generic agtype_build_list path.
+ */
+static bool is_list_property_projection_target(
+    Node *node, CypherCachedPropertySlotDescriptor *slot)
+{
+    FuncExpr *list_expr;
+    List *list_args;
+    List *elements = NIL;
+    Var *shared_var = NULL;
+    int total_weight = 0;
+    ListCell *lc;
+
+    if (node == NULL || slot == NULL || !IsA(node, FuncExpr))
+        return false;
+
+    list_expr = castNode(FuncExpr, node);
+    if (list_expr->funcid != get_cached_agtype_build_list_oid())
+        return false;
+
+    list_args = extract_map_build_args(list_expr);
+    if (list_args == NIL)
+        return false;
+
+    foreach(lc, list_args)
+    {
+        CypherCachedPropertySlotDescriptor element;
+        CypherCachedPropertySlotDescriptor *element_copy;
+        Var *element_var;
+
+        if (!is_simple_property_access_target(lfirst(lc), &element))
+            return false;
+
+        element_var = castNode(Var, element.container);
+        if (shared_var == NULL)
+            shared_var = element_var;
+        else if (!same_property_source((Node *) shared_var,
+                                       (Node *) element_var))
+            return false;
+
+        element_copy = palloc(sizeof(*element_copy));
+        *element_copy = element;
+        elements = lappend(elements, element_copy);
+        total_weight += element.final_materialization_weight;
+    }
+
+    if (elements == NIL)
+        return false;
+
+    memset(slot, 0, sizeof(*slot));
+    slot->is_list_output = true;
+    slot->list_elements = elements;
+    slot->container = (Node *) shared_var;
+    /* keys borrowed from the first element keep path validation/cost happy */
+    slot->keys =
+        ((CypherCachedPropertySlotDescriptor *) linitial(elements))->keys;
+    slot->value_type = AGTYPEOID;
+    slot->field_result_type = AGTYPEOID;
+    slot->final_materialization_weight = Max(1, total_weight);
+
     return true;
 }
 

@@ -346,6 +346,51 @@ FROM cypher('cypher_match_numeric_path',
             $$MATCH (n:NumericPath) RETURN [n.payload.a, n.payload.a]$$)
      AS (l agtype);
 
+-- Bare list/cast projection (no outer aggregate) lowers onto the AGE Property
+-- Projection custom scan instead of the generic agtype_build_list seq scan, and
+-- the built list (including typed casts and missing -> null elements) matches
+-- the generic path value-for-value.
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match_numeric_path',
+    'MATCH (n:NumericPath) RETURN [n.payload.a, n.payload.b]');
+
+SELECT * FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath) RETURN [n.payload.a, n.payload.b]$$)
+     AS (l agtype)
+ORDER BY l;
+
+SELECT * FROM cypher_match_normalized_explain(
+    'cypher_match_numeric_path',
+    'MATCH (n:NumericPath)
+     RETURN [n.payload.a::pg_numeric, n.payload.b::pg_bigint, n.payload.z::pg_text]');
+
+SELECT * FROM cypher('cypher_match_numeric_path',
+            $$MATCH (n:NumericPath)
+              RETURN [n.payload.a::pg_numeric, n.payload.b::pg_bigint,
+                      n.payload.z::pg_text]$$)
+     AS (l agtype)
+ORDER BY l;
+
+-- The custom-scan list must equal the generic agtype_build_list path; a second
+-- non-property projection column disqualifies the simple-projection custom scan
+-- and forces the generic path, so the EXCEPT must be empty.
+SELECT count(*) AS list_projection_divergences FROM (
+  (SELECT row_number() OVER () AS rn, l
+   FROM cypher('cypher_match_numeric_path',
+               $$MATCH (n:NumericPath)
+                 RETURN [n.payload.a, n.payload.b::pg_bigint,
+                         n.payload.c::pg_numeric, n.payload.z]$$)
+        AS (l agtype))
+  EXCEPT
+  (SELECT row_number() OVER () AS rn, l
+   FROM cypher('cypher_match_numeric_path',
+               $$MATCH (n:NumericPath)
+                 RETURN [n.payload.a, n.payload.b::pg_bigint,
+                         n.payload.c::pg_numeric, n.payload.z],
+                        n.payload.a + 1$$)
+        AS (l agtype, junk agtype))
+) d;
+
 DROP FUNCTION cypher_match_normalized_explain(text, text);
 
 SELECT * FROM cypher('cypher_match_numeric_path', $$
