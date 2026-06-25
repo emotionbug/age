@@ -40,13 +40,11 @@ typedef struct AgeGenericRow
 typedef struct AgeGenericProvider
 {
     AgeGenericProviderKind kind;
-    Index rel_rti;
     int var1;
     int var2;
     AttrNumber key1_attno;
     AttrNumber key2_attno;
     AttrNumber edge_id_attno;
-    int output_width;
     PlanState *plan_state;
     TupleTableSlot *tuple_slot;
     AgeGenericRow *rows;
@@ -80,7 +78,6 @@ typedef struct AgeGenericJoinState
     int *enumeration_order;
     graphid *selected_edge_ids;
     bool *selected_edge_id_valid;
-    List *uniqueness_group_descs;
     Bitmapset **uniqueness_groups;
     int uniqueness_group_count;
     bool combination_started;
@@ -95,6 +92,13 @@ typedef struct AgeGenericJoinState
     int64 rescans;
     Size peak_memory;
 } AgeGenericJoinState;
+
+static inline void
+increment_generic_counter(int64 *counter)
+{
+    if (*counter < PG_INT64_MAX)
+        (*counter)++;
+}
 
 static Node *create_age_generic_join_state(CustomScan *cscan);
 static void begin_age_generic_join(CustomScanState *node, EState *estate,
@@ -169,7 +173,6 @@ create_age_generic_join_state(CustomScan *cscan)
     foreach(lc, variable_rtis)
         state->variable_rtis[index++] = (Index)intVal(lfirst(lc));
     state->provider_count = list_length(provider_descs);
-    state->uniqueness_group_descs = uniqueness_group_descs;
 
     return (Node *)state;
 }
@@ -237,8 +240,7 @@ append_generic_row(AgeGenericJoinState *state, AgeGenericProvider *provider,
     provider->row_count++;
     MemoryContextSwitchTo(oldcontext);
 
-    if (state->rows_materialized < PG_INT64_MAX)
-        state->rows_materialized++;
+    increment_generic_counter(&state->rows_materialized);
 }
 
 static void
@@ -567,8 +569,7 @@ prepare_generic_bags(AgeGenericJoinState *state)
     }
     state->combination_started = false;
     state->binding_ready = true;
-    if (state->bindings_completed < PG_INT64_MAX)
-        state->bindings_completed++;
+    increment_generic_counter(&state->bindings_completed);
     return true;
 }
 
@@ -661,8 +662,7 @@ next_generic_combination(AgeGenericJoinState *state)
                 }
                 if (conflict)
                 {
-                    if (state->uniqueness_rejects < PG_INT64_MAX)
-                        state->uniqueness_rejects++;
+                    increment_generic_counter(&state->uniqueness_rejects);
                     local_index++;
                     continue;
                 }
@@ -672,8 +672,7 @@ next_generic_combination(AgeGenericJoinState *state)
 
             if (depth == state->provider_count - 1)
             {
-                if (state->candidate_combinations < PG_INT64_MAX)
-                    state->candidate_combinations++;
+                increment_generic_counter(&state->candidate_combinations);
                 return true;
             }
             depth++;
@@ -759,8 +758,8 @@ exec_age_generic_join(CustomScanState *node)
 
     slot = ExecScan(&node->ss, access_age_generic_join,
                     recheck_age_generic_join);
-    if (!TupIsNull(slot) && state->rows_emitted < PG_INT64_MAX)
-        state->rows_emitted++;
+    if (!TupIsNull(slot))
+        increment_generic_counter(&state->rows_emitted);
     return slot;
 }
 
@@ -773,15 +772,88 @@ recheck_age_generic_join(ScanState *node, TupleTableSlot *slot)
 }
 
 static void
+initialize_generic_uniqueness_groups(AgeGenericJoinState *state,
+                                     List *group_descs)
+{
+    ListCell *group_desc_cell;
+    int provider_index = 0;
+
+    foreach(group_desc_cell, group_descs)
+    {
+        List *group_ids = lfirst(group_desc_cell);
+        ListCell *group_cell;
+
+        foreach(group_cell, group_ids)
+        {
+            int group_id = intVal(lfirst(group_cell));
+
+            if (group_id < 0)
+                elog(ERROR, "invalid AGE Generic Join uniqueness group");
+            state->uniqueness_groups[provider_index] = bms_add_member(
+                state->uniqueness_groups[provider_index], group_id);
+            state->uniqueness_group_count = Max(
+                state->uniqueness_group_count, group_id + 1);
+        }
+        provider_index++;
+    }
+}
+
+static void
+initialize_generic_provider(AgeGenericJoinState *state,
+                            AgeGenericProvider *provider,
+                            PlanState *plan_state, List *desc,
+                            EState *estate)
+{
+    TupleDesc tuple_desc = ExecGetResultType(plan_state);
+
+    if (list_length(desc) != AGE_GENERIC_PROVIDER_DESC_COUNT)
+        elog(ERROR, "invalid AGE Generic Join provider descriptor");
+
+    provider->kind = (AgeGenericProviderKind)intVal(list_nth(
+        desc, AGE_GENERIC_PROVIDER_DESC_KIND));
+    provider->var1 = intVal(list_nth(desc, AGE_GENERIC_PROVIDER_DESC_VAR1));
+    provider->var2 = intVal(list_nth(desc, AGE_GENERIC_PROVIDER_DESC_VAR2));
+    provider->key1_attno = (AttrNumber)intVal(list_nth(
+        desc, AGE_GENERIC_PROVIDER_DESC_KEY1_ATTNO));
+    provider->key2_attno = (AttrNumber)intVal(list_nth(
+        desc, AGE_GENERIC_PROVIDER_DESC_KEY2_ATTNO));
+    provider->edge_id_attno = (AttrNumber)intVal(list_nth(
+        desc, AGE_GENERIC_PROVIDER_DESC_EDGE_ID_ATTNO));
+    provider->plan_state = plan_state;
+
+    if ((provider->kind != AGE_GENERIC_PROVIDER_VERTEX &&
+         provider->kind != AGE_GENERIC_PROVIDER_EDGE) ||
+        provider->var1 < 0 || provider->var1 >= state->variable_count ||
+        provider->key1_attno <= 0 || provider->key1_attno > tuple_desc->natts)
+    {
+        elog(ERROR, "invalid AGE Generic Join provider keys");
+    }
+    if (provider->kind == AGE_GENERIC_PROVIDER_EDGE &&
+        (provider->var2 <= provider->var1 ||
+         provider->var2 >= state->variable_count ||
+         provider->key2_attno <= 0 ||
+         provider->key2_attno > tuple_desc->natts ||
+         provider->edge_id_attno <= 0 ||
+         provider->edge_id_attno > tuple_desc->natts))
+    {
+        elog(ERROR, "invalid AGE Generic Join edge provider");
+    }
+
+    provider->tuple_slot = ExecInitExtraTupleSlot(
+        estate, tuple_desc, &TTSOpsMinimalTuple);
+}
+
+static void
 begin_age_generic_join(CustomScanState *node, EState *estate, int eflags)
 {
     AgeGenericJoinState *state = (AgeGenericJoinState *)node;
     CustomScan *cscan = castNode(CustomScan, node->ss.ps.plan);
     List *provider_descs = list_nth(
         cscan->custom_private, AGE_GENERIC_JOIN_PRIVATE_PROVIDER_DESCS);
+    List *uniqueness_group_descs = list_nth(
+        cscan->custom_private, AGE_GENERIC_JOIN_PRIVATE_UNIQUENESS_GROUPS);
     ListCell *plan_cell;
     ListCell *desc_cell;
-    ListCell *group_desc_cell;
     int provider_index = 0;
     int depth;
 
@@ -793,7 +865,8 @@ begin_age_generic_join(CustomScanState *node, EState *estate, int eflags)
                                   ExecInitNode(subplan, estate, eflags));
     }
     if (list_length(node->custom_ps) != state->provider_count ||
-        list_length(provider_descs) != state->provider_count)
+        list_length(provider_descs) != state->provider_count ||
+        list_length(uniqueness_group_descs) != state->provider_count)
     {
         elog(ERROR, "AGE Generic Join child count does not match providers");
     }
@@ -814,25 +887,7 @@ begin_age_generic_join(CustomScanState *node, EState *estate, int eflags)
         estate->es_query_cxt, "AGE Generic Join provider rows",
         ALLOCSET_DEFAULT_SIZES);
 
-    provider_index = 0;
-    foreach(group_desc_cell, state->uniqueness_group_descs)
-    {
-        List *group_ids = (List *)lfirst(group_desc_cell);
-        ListCell *group_cell;
-
-        foreach(group_cell, group_ids)
-        {
-            int group_id = intVal(lfirst(group_cell));
-
-            if (group_id < 0)
-                elog(ERROR, "invalid AGE Generic Join uniqueness group");
-            state->uniqueness_groups[provider_index] = bms_add_member(
-                state->uniqueness_groups[provider_index], group_id);
-            state->uniqueness_group_count = Max(
-                state->uniqueness_group_count, group_id + 1);
-        }
-        provider_index++;
-    }
+    initialize_generic_uniqueness_groups(state, uniqueness_group_descs);
 
     provider_index = 0;
     forboth(plan_cell, node->custom_ps, desc_cell, provider_descs)
@@ -841,39 +896,7 @@ begin_age_generic_join(CustomScanState *node, EState *estate, int eflags)
         List *desc = lfirst(desc_cell);
         AgeGenericProvider *provider = &state->providers[provider_index];
 
-        if (list_length(desc) != AGE_GENERIC_PROVIDER_DESC_COUNT)
-            elog(ERROR, "invalid AGE Generic Join provider descriptor");
-        provider->kind = (AgeGenericProviderKind)intVal(list_nth(
-            desc, AGE_GENERIC_PROVIDER_DESC_KIND));
-        provider->rel_rti = (Index)intVal(list_nth(
-            desc, AGE_GENERIC_PROVIDER_DESC_REL_RTI));
-        provider->var1 = intVal(list_nth(
-            desc, AGE_GENERIC_PROVIDER_DESC_VAR1));
-        provider->var2 = intVal(list_nth(
-            desc, AGE_GENERIC_PROVIDER_DESC_VAR2));
-        provider->key1_attno = (AttrNumber)intVal(list_nth(
-            desc, AGE_GENERIC_PROVIDER_DESC_KEY1_ATTNO));
-        provider->key2_attno = (AttrNumber)intVal(list_nth(
-            desc, AGE_GENERIC_PROVIDER_DESC_KEY2_ATTNO));
-        provider->edge_id_attno = (AttrNumber)intVal(list_nth(
-            desc, AGE_GENERIC_PROVIDER_DESC_EDGE_ID_ATTNO));
-        provider->output_width = intVal(list_nth(
-            desc, AGE_GENERIC_PROVIDER_DESC_OUTPUT_WIDTH));
-        provider->plan_state = plan_state;
-        if (provider->var1 < 0 || provider->var1 >= state->variable_count ||
-            provider->key1_attno <= 0 || provider->output_width <= 0)
-        {
-            elog(ERROR, "invalid AGE Generic Join provider keys");
-        }
-        if (provider->kind == AGE_GENERIC_PROVIDER_EDGE &&
-            (provider->var2 <= provider->var1 ||
-             provider->var2 >= state->variable_count ||
-             provider->key2_attno <= 0 || provider->edge_id_attno <= 0))
-        {
-            elog(ERROR, "invalid AGE Generic Join edge provider");
-        }
-        provider->tuple_slot = ExecInitExtraTupleSlot(
-            estate, ExecGetResultType(plan_state), &TTSOpsMinimalTuple);
+        initialize_generic_provider(state, provider, plan_state, desc, estate);
         provider_index++;
     }
 
@@ -929,8 +952,7 @@ rescan_age_generic_join(CustomScanState *node)
         ExecReScan(state->providers[provider_index].plan_state);
     }
     reset_age_generic_join_state(state);
-    if (state->rescans < PG_INT64_MAX)
-        state->rescans++;
+    increment_generic_counter(&state->rescans);
 }
 
 static void

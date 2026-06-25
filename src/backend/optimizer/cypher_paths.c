@@ -157,10 +157,8 @@ typedef enum AgeWCOJPathProviderDescField
 {
     AGE_WCOJ_PATH_PROVIDER_KIND = 0,
     AGE_WCOJ_PATH_PROVIDER_EDGE_RTI,
-    AGE_WCOJ_PATH_PROVIDER_EDGE_REL_OID,
     AGE_WCOJ_PATH_PROVIDER_INDEX_OID,
     AGE_WCOJ_PATH_PROVIDER_OUTGOING,
-    AGE_WCOJ_PATH_PROVIDER_TERMINAL_ATTNO,
     AGE_WCOJ_PATH_PROVIDER_TERMINAL_LABEL_ID,
     AGE_WCOJ_PATH_PROVIDER_SOURCE_RTI,
     AGE_WCOJ_PATH_PROVIDER_SOURCE_KEY_EXPR,
@@ -207,6 +205,21 @@ typedef struct AgeGenericEdgeEstimate
     double rows;
 } AgeGenericEdgeEstimate;
 
+typedef struct AgeWCOJPathBuildState
+{
+    List *paths;
+    List *provider_descs;
+    List *estimated_postings;
+    Cost startup_cost;
+    Cost total_cost;
+    int disabled_nodes;
+    Relids required_outer;
+} AgeWCOJPathBuildState;
+
+#define AGE_GENERIC_MIN_PAIR_ROWS 4096.0
+#define AGE_GENERIC_MIN_CYCLE_PRESSURE 8.0
+#define AGE_GENERIC_COMPETING_COST_FACTOR 0.90
+
 typedef struct AgeEdgeUniquenessCollectContext
 {
     List *provider_descs;
@@ -223,7 +236,6 @@ typedef struct CypherWCOJTerminalEntry
     Index edge_rti;
     Index source_rti;
     Index terminal_rti;
-    Oid edge_rel_oid;
     Oid index_oid;
     AttrNumber terminal_attno;
     Node *source_key_expr;
@@ -309,6 +321,10 @@ static AttrNumber adjacency_path_terminal_attno(CustomPath *path);
 static bool rel_has_wcoj_terminal_rti(PlannerInfo *root, Index rti);
 static int count_wcoj_terminal_relids(PlannerInfo *root, Relids relids);
 static bool path_contains_adjacency_rti(Path *path, Index rti);
+static bool path_required_outer_is_compatible(
+    Path *path, Relids forbidden_required_outer);
+static Path *cheapest_compatible_path(
+    RelOptInfo *rel, Relids forbidden_required_outer);
 static CustomPath *find_wcoj_path(RelOptInfo *rel,
                                   Relids forbidden_required_outer);
 static Path *find_wcoj_component_path(RelOptInfo *rel, Index edge_rti,
@@ -346,8 +362,11 @@ static AgeWCOJEngineKind choose_wcoj_engine(List *estimated_postings,
                                              List *provider_descs);
 static Cost estimate_wcoj_kernel_cost(
     AgeWCOJEngineKind engine, List *estimated_postings,
-    List *provider_descs, double output_rows, double *estimated_survivors,
-    double *posting_work, bool *estimates_trusted);
+    List *provider_descs, double output_rows);
+static bool prepare_wcoj_source(
+    PlannerInfo *root, RelOptInfo *joinrel, Path *component_path,
+    Expr *key_expr, List *path_desc, List *restrictinfos, Oid sortop,
+    AgeWCOJPathBuildState *build);
 static Plan *plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
                                      CustomPath *best_path, List *tlist,
                                      List *clauses, List *custom_plans);
@@ -1500,7 +1519,6 @@ register_wcoj_terminal_candidate(
 
     entry->source_rti = candidate->bound_endpoint_rti;
     entry->terminal_rti = terminal_rti;
-    entry->edge_rel_oid = candidate->edge_label_oid;
     entry->index_oid = candidate->index_oid;
     entry->terminal_attno =
         candidate->endpoint_attno == Anum_ag_label_edge_table_start_id ?
@@ -2036,6 +2054,40 @@ path_contains_adjacency_rti(Path *path, Index rti)
     return false;
 }
 
+static bool
+path_required_outer_is_compatible(Path *path,
+                                  Relids forbidden_required_outer)
+{
+    Relids required_outer = PATH_REQ_OUTER(path);
+
+    if (forbidden_required_outer == NULL)
+        return required_outer == NULL;
+    return !bms_overlap(required_outer, forbidden_required_outer);
+}
+
+static Path *
+cheapest_compatible_path(RelOptInfo *rel, Relids forbidden_required_outer)
+{
+    Path *best = NULL;
+    ListCell *lc;
+
+    if (rel == NULL)
+        return NULL;
+    foreach(lc, rel->pathlist)
+    {
+        Path *path = lfirst(lc);
+
+        if (!path_required_outer_is_compatible(path,
+                                               forbidden_required_outer))
+        {
+            continue;
+        }
+        if (best == NULL || path->total_cost < best->total_cost)
+            best = path;
+    }
+    return best;
+}
+
 static CustomPath *
 find_wcoj_path(RelOptInfo *rel, Relids forbidden_required_outer)
 {
@@ -2051,16 +2103,9 @@ find_wcoj_path(RelOptInfo *rel, Relids forbidden_required_outer)
 
         if (!IsA(path, CustomPath))
             continue;
-        if (forbidden_required_outer == NULL)
-        {
-            if (PATH_REQ_OUTER(path) != NULL)
-                continue;
-        }
-        else if (bms_overlap(PATH_REQ_OUTER(path),
-                             forbidden_required_outer))
-        {
+        if (!path_required_outer_is_compatible(path,
+                                               forbidden_required_outer))
             continue;
-        }
         custom_path = (CustomPath *)path;
         if (custom_path->methods != &age_wcoj_join_path_methods)
             continue;
@@ -2075,28 +2120,20 @@ static Path *
 find_wcoj_component_path(RelOptInfo *rel, Index edge_rti,
                          Relids forbidden_required_outer)
 {
-    Path *best = NULL;
+    Path *best;
     Path *best_adjacency = NULL;
     ListCell *lc;
 
     if (rel == NULL)
         return NULL;
+    best = cheapest_compatible_path(rel, forbidden_required_outer);
     foreach(lc, rel->pathlist)
     {
         Path *path = (Path *)lfirst(lc);
 
-        if (forbidden_required_outer == NULL)
-        {
-            if (PATH_REQ_OUTER(path) != NULL)
-                continue;
-        }
-        else if (bms_overlap(PATH_REQ_OUTER(path),
-                             forbidden_required_outer))
-        {
+        if (!path_required_outer_is_compatible(path,
+                                               forbidden_required_outer))
             continue;
-        }
-        if (best == NULL || path->total_cost < best->total_cost)
-            best = path;
         if (path_contains_adjacency_rti(path, edge_rti) &&
             (best_adjacency == NULL ||
              path->total_cost < best_adjacency->total_cost))
@@ -2134,11 +2171,9 @@ make_wcoj_plan_stream_path_desc(void)
 {
     List *desc = list_make5(
         makeInteger(AGE_WCOJ_PROVIDER_PLAN_STREAM),
-        makeInteger(0), make_wcoj_oid_const(InvalidOid),
-        make_wcoj_oid_const(InvalidOid), makeInteger(0));
+        makeInteger(0), make_wcoj_oid_const(InvalidOid), makeInteger(0),
+        makeInteger(-1));
 
-    desc = lappend(desc, makeInteger(0));
-    desc = lappend(desc, makeInteger(-1));
     desc = lappend(desc, makeInteger(0));
     desc = lappend(desc, makeNullConst(GRAPHIDOID, -1, InvalidOid));
     desc = lappend(desc, NIL);
@@ -2146,6 +2181,7 @@ make_wcoj_plan_stream_path_desc(void)
     desc = lappend(desc, makeInteger(0));
     desc = lappend(desc, makeInteger(0));
     desc = lappend(desc, makeInteger(0));
+    Assert(list_length(desc) == AGE_WCOJ_PATH_PROVIDER_COUNT);
     return desc;
 }
 
@@ -2162,11 +2198,9 @@ make_wcoj_adjacency_path_desc(PlannerInfo *root,
     desc = list_make5(
         makeInteger(AGE_WCOJ_PROVIDER_ADJACENCY),
         makeInteger(entry->edge_rti),
-        make_wcoj_oid_const(entry->edge_rel_oid),
         make_wcoj_oid_const(entry->index_oid),
-        makeInteger(entry->outgoing ? 1 : 0));
-    desc = lappend(desc, makeInteger(entry->terminal_attno));
-    desc = lappend(desc, makeInteger(entry->terminal_label_id));
+        makeInteger(entry->outgoing ? 1 : 0),
+        makeInteger(entry->terminal_label_id));
     desc = lappend(desc, makeInteger(entry->source_rti));
     desc = lappend(desc,
                    entry->source_key_expr != NULL ?
@@ -2178,6 +2212,7 @@ make_wcoj_adjacency_path_desc(PlannerInfo *root,
     desc = lappend(desc, makeInteger(entry->estimate_trusted ? 1 : 0));
     desc = lappend(desc,
                    makeInteger(entry->exact_terminal_bound ? 1 : 0));
+    Assert(list_length(desc) == AGE_WCOJ_PATH_PROVIDER_COUNT);
     return desc;
 }
 
@@ -2256,7 +2291,7 @@ prepare_wcoj_adjacency_provider_path(PlannerInfo *root,
     Node *source_key_expr;
     Relids source_relids;
     RelOptInfo *source_rel;
-    Path *source_path = NULL;
+    Path *source_path;
     PathTarget *target;
     ListCell *lc;
 
@@ -2296,16 +2331,7 @@ prepare_wcoj_adjacency_provider_path(PlannerInfo *root,
         bms_free(source_relids);
         return NULL;
     }
-    foreach(lc, source_rel->pathlist)
-    {
-        Path *path = lfirst(lc);
-
-        if (PATH_REQ_OUTER(path) == NULL &&
-            (source_path == NULL || path->total_cost < source_path->total_cost))
-        {
-            source_path = path;
-        }
-    }
+    source_path = cheapest_compatible_path(source_rel, NULL);
     if (source_path == NULL)
     {
         bms_free(source_relids);
@@ -2449,8 +2475,7 @@ collect_wcoj_dimension_side(RelOptInfo *rel,
 {
     Node *stripped_key;
     Var *key_var;
-    Path *best_path = NULL;
-    ListCell *lc;
+    Path *best_path;
 
     if (rel == NULL || bms_membership(rel->relids) != BMS_SINGLETON)
         return false;
@@ -2465,23 +2490,7 @@ collect_wcoj_dimension_side(RelOptInfo *rel,
         return false;
     }
 
-    foreach(lc, rel->pathlist)
-    {
-        Path *path = (Path *)lfirst(lc);
-
-        if (forbidden_required_outer == NULL)
-        {
-            if (PATH_REQ_OUTER(path) != NULL)
-                continue;
-        }
-        else if (bms_overlap(PATH_REQ_OUTER(path),
-                             forbidden_required_outer))
-        {
-            continue;
-        }
-        if (best_path == NULL || path->total_cost < best_path->total_cost)
-            best_path = path;
-    }
+    best_path = cheapest_compatible_path(rel, forbidden_required_outer);
     if (best_path == NULL)
         return false;
 
@@ -2574,8 +2583,8 @@ choose_wcoj_engine(List *estimated_postings, List *provider_descs)
     if (list_length(estimated_postings) != list_length(provider_descs))
         return AGE_WCOJ_ENGINE_MERGE;
 
-    seed_cap = Min(65536.0,
-                   Max(1024.0,
+    seed_cap = Min((double)AGE_WCOJ_PROGRESSIVE_MAX_SEED_POSTINGS,
+                   Max((double)AGE_WCOJ_PROGRESSIVE_MIN_SEED_POSTINGS,
                        ((double)work_mem * 1024.0) /
                        (sizeof(graphid) * 4.0)));
     forboth(estimate_cell, estimated_postings,
@@ -2599,9 +2608,11 @@ choose_wcoj_engine(List *estimated_postings, List *provider_descs)
 
     if (min_postings < 0)
         return AGE_WCOJ_ENGINE_MERGE;
-    if (min_postings <= seed_cap && max_postings / min_postings >= 8.0)
+    if (min_postings <= seed_cap &&
+        max_postings / min_postings >=
+            AGE_WCOJ_PROGRESSIVE_MIN_SKEW_RATIO)
         return AGE_WCOJ_ENGINE_PROGRESSIVE;
-    if (max_postings / min_postings <= 4.0)
+    if (max_postings / min_postings <= AGE_WCOJ_LEAPFROG_MAX_SKEW_RATIO)
         return AGE_WCOJ_ENGINE_LEAPFROG;
     return AGE_WCOJ_ENGINE_MERGE;
 }
@@ -2615,10 +2626,7 @@ choose_wcoj_engine(List *estimated_postings, List *provider_descs)
 static Cost
 estimate_wcoj_kernel_cost(AgeWCOJEngineKind engine,
                           List *estimated_postings,
-                          List *provider_descs, double output_rows,
-                          double *estimated_survivors,
-                          double *posting_work,
-                          bool *estimates_trusted)
+                          List *provider_descs, double output_rows)
 {
     double min_postings = DBL_MAX;
     double max_postings = 0;
@@ -2626,18 +2634,13 @@ estimate_wcoj_kernel_cost(AgeWCOJEngineKind engine,
     double survivors;
     double work;
     double uncertainty_penalty = 1.0;
+    bool estimates_trusted = true;
     int arity = list_length(estimated_postings);
     ListCell *estimate_cell;
     ListCell *desc_cell;
 
-    *estimates_trusted = true;
     if (arity <= 0 || arity != list_length(provider_descs))
-    {
-        *estimated_survivors = Max(output_rows, 1.0);
-        *posting_work = Max(output_rows, 1.0);
-        *estimates_trusted = false;
         return cpu_tuple_cost * Max(output_rows, 1.0);
-    }
 
     forboth(estimate_cell, estimated_postings,
             desc_cell, provider_descs)
@@ -2649,9 +2652,9 @@ estimate_wcoj_kernel_cost(AgeWCOJEngineKind engine,
         if (IsA(value, Float))
             estimate = Max(floatVal(value), 1.0);
         else
-            *estimates_trusted = false;
+            estimates_trusted = false;
         if (!wcoj_provider_estimate_trusted(provider_desc))
-            *estimates_trusted = false;
+            estimates_trusted = false;
         min_postings = Min(min_postings, estimate);
         max_postings = Max(max_postings, estimate);
         total_postings += estimate;
@@ -2663,7 +2666,7 @@ estimate_wcoj_kernel_cost(AgeWCOJEngineKind engine,
      * uncertain data.  This never changes path.rows.
      */
     survivors = min_postings;
-    if (*estimates_trusted)
+    if (estimates_trusted)
         survivors *= pow(0.5, Max(arity - 1, 0));
     survivors = clamp_row_est(Max(Min(survivors, min_postings), 1.0));
 
@@ -2691,10 +2694,8 @@ estimate_wcoj_kernel_cost(AgeWCOJEngineKind engine,
         break;
     }
 
-    if (!*estimates_trusted)
+    if (!estimates_trusted)
         uncertainty_penalty = 1.25;
-    *estimated_survivors = survivors;
-    *posting_work = work;
 
     return cpu_operator_cost * work * uncertainty_penalty +
         cpu_tuple_cost * Min(Max(output_rows, survivors), total_postings);
@@ -2874,7 +2875,7 @@ prepare_generic_provider_path(PlannerInfo *root, RelOptInfo *joinrel,
                               List *restrictinfos)
 {
     RelOptInfo *rel;
-    Path *best_path = NULL;
+    Path *best_path;
     PathTarget *target;
     ListCell *lc;
 
@@ -2883,15 +2884,7 @@ prepare_generic_provider_path(PlannerInfo *root, RelOptInfo *joinrel,
     rel = root->simple_rel_array[rel_rti];
     if (rel == NULL || bms_membership(rel->relids) != BMS_SINGLETON)
         return NULL;
-    foreach(lc, rel->pathlist)
-    {
-        Path *path = lfirst(lc);
-
-        if (PATH_REQ_OUTER(path) != NULL)
-            continue;
-        if (best_path == NULL || path->total_cost < best_path->total_cost)
-            best_path = path;
-    }
+    best_path = cheapest_compatible_path(rel, NULL);
     if (best_path == NULL)
         return NULL;
 
@@ -2919,6 +2912,7 @@ make_generic_vertex_path_desc(Index rti, int variable, Expr *key_expr)
     desc = lappend(desc, makeNullConst(GRAPHIDOID, -1, InvalidOid));
     desc = lappend(desc, makeNullConst(GRAPHIDOID, -1, InvalidOid));
     desc = lappend(desc, NIL);
+    Assert(list_length(desc) == AGE_GENERIC_PATH_PROVIDER_COUNT);
     return desc;
 }
 
@@ -2979,6 +2973,7 @@ make_generic_edge_path_desc(CypherWCOJTerminalEntry *entry,
                            Anum_ag_label_edge_table_id,
                            GRAPHIDOID, -1, InvalidOid, 0));
     desc = lappend(desc, NIL);
+    Assert(list_length(desc) == AGE_GENERIC_PATH_PROVIDER_COUNT);
     return desc;
 }
 
@@ -3063,6 +3058,63 @@ cheapest_generic_competing_path(RelOptInfo *joinrel)
     return best;
 }
 
+static CustomPath *
+find_generic_join_path(RelOptInfo *joinrel)
+{
+    ListCell *lc;
+
+    foreach(lc, joinrel->pathlist)
+    {
+        Path *path = lfirst(lc);
+
+        if (IsA(path, CustomPath) &&
+            castNode(CustomPath, path)->methods ==
+                &age_generic_join_path_methods)
+        {
+            return castNode(CustomPath, path);
+        }
+    }
+    return NULL;
+}
+
+static bool
+generic_join_path_is_risk_adjusted(CustomPath *path)
+{
+    return path != NULL &&
+        list_length(path->custom_private) == AGE_GENERIC_PATH_PRIVATE_COUNT &&
+        intVal(list_nth(path->custom_private,
+                        AGE_GENERIC_PATH_PRIVATE_RISK_ADJUSTED)) != 0;
+}
+
+static bool
+generic_join_needs_risk_adjustment(Path *competing_path,
+                                   double max_pair_rows,
+                                   double cycle_pressure)
+{
+    return competing_path != NULL &&
+        max_pair_rows >= AGE_GENERIC_MIN_PAIR_ROWS &&
+        cycle_pressure >= AGE_GENERIC_MIN_CYCLE_PRESSURE;
+}
+
+static void
+normalize_generic_competing_rows(RelOptInfo *joinrel, Path *generic_path)
+{
+    ListCell *lc;
+
+    foreach(lc, joinrel->pathlist)
+    {
+        Path *path = lfirst(lc);
+
+        if (PATH_REQ_OUTER(path) == NULL && path != generic_path &&
+            !(IsA(path, CustomPath) &&
+              castNode(CustomPath, path)->methods ==
+                  &age_generic_join_path_methods))
+        {
+            path->rows = Max(path->rows, generic_path->rows);
+        }
+    }
+}
+
 static void
 add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
                       JoinType jointype, JoinPathExtraData *extra)
@@ -3075,6 +3127,7 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     Relids covered_relids = NULL;
     ListCell *lc;
     CustomPath *custom_path;
+    CustomPath *existing_path;
     Path *competing_path;
     AgeGenericEdgeEstimate *edge_estimates;
     double *vertex_rows;
@@ -3083,6 +3136,7 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     double input_rows = 0;
     double max_pair_rows = 0;
     double cycle_pressure;
+    bool risk_adjusted;
     int edge_count = 0;
     int variable_count;
     int disabled_nodes = 0;
@@ -3091,39 +3145,14 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
         extra == NULL || jointype != JOIN_INNER)
         return;
 
-    foreach(lc, joinrel->pathlist)
+    existing_path = find_generic_join_path(joinrel);
+    if (existing_path != NULL)
     {
-        Path *path = lfirst(lc);
-
-        if (IsA(path, CustomPath) &&
-            castNode(CustomPath, path)->methods ==
-                &age_generic_join_path_methods)
-        {
-            CustomPath *existing = castNode(CustomPath, path);
-
-            if (list_length(existing->custom_private) ==
-                    AGE_GENERIC_PATH_PRIVATE_COUNT &&
-                intVal(list_nth(
-                    existing->custom_private,
-                    AGE_GENERIC_PATH_PRIVATE_RISK_ADJUSTED)) != 0)
-            {
-                ListCell *path_cell;
-
-                /* Normalize paths added by later join-order alternatives. */
-                foreach(path_cell, joinrel->pathlist)
-                {
-                    Path *competing = lfirst(path_cell);
-
-                    if (PATH_REQ_OUTER(competing) == NULL &&
-                        competing != path)
-                    {
-                        competing->rows = Max(competing->rows,
-                                              path->rows);
-                    }
-                }
-            }
-            return;
-        }
+        /* Normalize paths added by later join-order alternatives. */
+        if (generic_join_path_is_risk_adjusted(existing_path))
+            normalize_generic_competing_rows(joinrel,
+                                             &existing_path->path);
+        return;
     }
 
     foreach(lc, wcoj_terminal_registry)
@@ -3235,6 +3264,8 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     cycle_pressure = estimate_generic_cycle_pressure(
         vertex_rows, variable_count, edge_estimates, edge_count,
         input_rows, &max_pair_rows);
+    risk_adjusted = generic_join_needs_risk_adjustment(
+        competing_path, max_pair_rows, cycle_pressure);
 
     custom_path = makeNode(CustomPath);
     custom_path->path.pathtype = T_CustomScan;
@@ -3262,17 +3293,15 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
      * remains bounded by provider rows plus complete bindings, while patterns
      * below the threshold retain normal PostgreSQL path competition.
      */
-    if (competing_path != NULL && max_pair_rows >= 4096.0 &&
-        cycle_pressure >= 8.0)
+    if (risk_adjusted)
     {
         Cost risk_adjusted_startup = Min(
             custom_path->path.startup_cost,
             competing_path->startup_cost);
         Cost risk_adjusted_total = Min(
             custom_path->path.total_cost,
-            competing_path->total_cost * 0.90);
-
-        ListCell *path_cell;
+            competing_path->total_cost *
+                AGE_GENERIC_COMPETING_COST_FACTOR);
 
         custom_path->path.startup_cost = risk_adjusted_startup;
         custom_path->path.total_cost = Max(
@@ -3287,29 +3316,110 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
          * cycle-pressure evidence above is strong enough to justify the risk
          * correction.
          */
-        foreach(path_cell, joinrel->pathlist)
-        {
-            Path *path = lfirst(path_cell);
-
-            if (PATH_REQ_OUTER(path) == NULL &&
-                !(IsA(path, CustomPath) &&
-                  castNode(CustomPath, path)->methods ==
-                      &age_generic_join_path_methods))
-            {
-                path->rows = Max(path->rows, custom_path->path.rows);
-            }
-        }
+        normalize_generic_competing_rows(joinrel, &custom_path->path);
     }
     custom_path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
     custom_path->custom_paths = provider_paths;
     custom_path->custom_restrictinfo = restrictinfos;
     custom_path->custom_private = list_make3(
         copyObject(variable_rtis), copyObject(provider_descs),
-        makeInteger(competing_path != NULL && max_pair_rows >= 4096.0 &&
-                    cycle_pressure >= 8.0));
+        makeInteger(risk_adjusted));
     custom_path->methods = &age_generic_join_path_methods;
 
     add_path(joinrel, (Path *)custom_path);
+}
+
+static double
+wcoj_provider_posting_estimate(PlannerInfo *root, Path *cost_path,
+                               List *provider_desc)
+{
+    double estimate = cost_path->rows;
+
+    if (intVal(list_nth(provider_desc, AGE_WCOJ_PATH_PROVIDER_KIND)) ==
+        AGE_WCOJ_PROVIDER_ADJACENCY)
+    {
+        Index edge_rti = intVal(list_nth(
+            provider_desc, AGE_WCOJ_PATH_PROVIDER_EDGE_RTI));
+        CypherWCOJTerminalEntry *entry =
+            find_wcoj_terminal_entry(root, edge_rti);
+
+        if (entry != NULL && entry->estimated_postings > 0)
+            estimate = entry->estimated_postings;
+    }
+    return estimate;
+}
+
+static bool
+prepare_wcoj_source(PlannerInfo *root, RelOptInfo *joinrel,
+                    Path *component_path, Expr *key_expr, List *path_desc,
+                    List *restrictinfos, Oid sortop,
+                    AgeWCOJPathBuildState *build)
+{
+    List *provider_desc = copyObject(path_desc);
+    List *output_exprs = list_nth(
+        provider_desc, AGE_WCOJ_PATH_PROVIDER_OUTPUT_EXPRS);
+    Path *prepared_path = component_path;
+    Path *cost_path = component_path;
+    double posting_estimate;
+
+    if (output_exprs == NIL)
+    {
+        int provider_kind = intVal(list_nth(
+            provider_desc, AGE_WCOJ_PATH_PROVIDER_KIND));
+        Path *full_path = prepare_wcoj_component_path(
+            root, joinrel, component_path, key_expr, restrictinfos, sortop);
+
+        if (full_path == NULL)
+            return false;
+
+        output_exprs = copyObject(full_path->pathtarget->exprs);
+        lfirst(list_nth_cell(
+            provider_desc, AGE_WCOJ_PATH_PROVIDER_OUTPUT_EXPRS)) =
+            output_exprs;
+        prepared_path = full_path;
+        cost_path = full_path;
+
+        if (provider_kind == AGE_WCOJ_PROVIDER_ADJACENCY)
+        {
+            List *local_quals = list_nth(
+                provider_desc, AGE_WCOJ_PATH_PROVIDER_LOCAL_QUALS);
+            Index edge_rti = intVal(list_nth(
+                provider_desc, AGE_WCOJ_PATH_PROVIDER_EDGE_RTI));
+            int payload_mask = wcoj_edge_payload_mask(
+                output_exprs, local_quals, edge_rti);
+            Path *source_path;
+
+            lfirst(list_nth_cell(
+                provider_desc, AGE_WCOJ_PATH_PROVIDER_PAYLOAD_MASK)) =
+                makeInteger(payload_mask);
+            source_path = prepare_wcoj_adjacency_provider_path(
+                root, component_path, provider_desc, output_exprs);
+            if (source_path != NULL)
+            {
+                prepared_path = source_path;
+            }
+            else
+            {
+                lfirst(list_nth_cell(
+                    provider_desc, AGE_WCOJ_PATH_PROVIDER_KIND)) =
+                    makeInteger(AGE_WCOJ_PROVIDER_PLAN_STREAM);
+            }
+        }
+    }
+
+    posting_estimate = wcoj_provider_posting_estimate(
+        root, cost_path, provider_desc);
+    build->paths = lappend(build->paths, prepared_path);
+    build->provider_descs = lappend(build->provider_descs, provider_desc);
+    build->estimated_postings = lappend(
+        build->estimated_postings,
+        makeFloat(psprintf("%.17g", posting_estimate)));
+    build->startup_cost += prepared_path->startup_cost;
+    build->total_cost += prepared_path->total_cost;
+    build->disabled_nodes += prepared_path->disabled_nodes;
+    build->required_outer = bms_add_members(
+        build->required_outer, PATH_REQ_OUTER(prepared_path));
+    return true;
 }
 
 static void
@@ -3322,27 +3432,16 @@ add_wcoj_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     List *component_paths = NIL;
     List *key_exprs = NIL;
     List *provider_descs = NIL;
-    List *estimated_postings = NIL;
     List *restrictinfos = NIL;
-    List *prepared_paths = NIL;
-    List *prepared_provider_descs = NIL;
     ListCell *path_cell;
     ListCell *key_cell;
     ListCell *desc_cell;
+    AgeWCOJPathBuildState build = {0};
     CustomPath *custom_path;
     Oid sortop = InvalidOid;
-    Cost startup_cost = 0;
-    Cost total_cost = 0;
-    double input_rows = 0;
-    double costed_output_rows;
-    double estimated_survivors = 0;
-    double posting_work = 0;
-    bool estimates_trusted = false;
     AgeWCOJEngineKind planned_engine;
     Cost kernel_cost;
-    Relids required_outer = NULL;
     ParamPathInfo *param_info = NULL;
-    int disabled_nodes = 0;
     bool dimension_extension = false;
     bool outer_is_dimension = false;
 
@@ -3397,102 +3496,14 @@ add_wcoj_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     {
         Path *component_path = (Path *)lfirst(path_cell);
         Expr *key_expr = (Expr *)lfirst(key_cell);
-        List *provider_desc = copyObject(lfirst(desc_cell));
-        Path *cost_path;
-        Path *prepared_path;
-        List *output_exprs;
-        int provider_kind;
-        double posting_estimate;
+        List *provider_desc = lfirst(desc_cell);
 
-        provider_kind = intVal(list_nth(
-            provider_desc, AGE_WCOJ_PATH_PROVIDER_KIND));
-        output_exprs = list_nth(provider_desc,
-                                AGE_WCOJ_PATH_PROVIDER_OUTPUT_EXPRS);
-        if (output_exprs != NIL)
+        if (!prepare_wcoj_source(root, joinrel, component_path, key_expr,
+                                 provider_desc, restrictinfos, sortop,
+                                 &build))
         {
-            /* A flattened WCOJ source is already projected for this kernel. */
-            prepared_path = component_path;
-            cost_path = component_path;
+            return;
         }
-        else
-        {
-            Path *full_path;
-
-            full_path = prepare_wcoj_component_path(
-                root, joinrel, component_path, key_expr, restrictinfos,
-                sortop);
-            if (full_path == NULL)
-                return;
-            output_exprs = copyObject(full_path->pathtarget->exprs);
-            lfirst(list_nth_cell(
-                provider_desc,
-                AGE_WCOJ_PATH_PROVIDER_OUTPUT_EXPRS)) = output_exprs;
-            cost_path = full_path;
-            prepared_path = full_path;
-
-            if (provider_kind == AGE_WCOJ_PROVIDER_ADJACENCY)
-            {
-                List *local_quals = list_nth(
-                    provider_desc,
-                    AGE_WCOJ_PATH_PROVIDER_LOCAL_QUALS);
-                Index edge_rti = intVal(list_nth(
-                    provider_desc,
-                    AGE_WCOJ_PATH_PROVIDER_EDGE_RTI));
-                int payload_mask = wcoj_edge_payload_mask(
-                    output_exprs, local_quals, edge_rti);
-                Path *source_path;
-
-                lfirst(list_nth_cell(
-                    provider_desc,
-                    AGE_WCOJ_PATH_PROVIDER_PAYLOAD_MASK)) =
-                    makeInteger(payload_mask);
-                source_path = prepare_wcoj_adjacency_provider_path(
-                    root, component_path, provider_desc, output_exprs);
-                if (source_path != NULL)
-                {
-                    prepared_path = source_path;
-                }
-                else
-                {
-                    lfirst(list_nth_cell(
-                        provider_desc,
-                        AGE_WCOJ_PATH_PROVIDER_KIND)) =
-                        makeInteger(AGE_WCOJ_PROVIDER_PLAN_STREAM);
-                }
-            }
-            else
-            {
-                lfirst(list_nth_cell(
-                    provider_desc,
-                    AGE_WCOJ_PATH_PROVIDER_OUTPUT_EXPRS)) =
-                    copyObject(output_exprs);
-            }
-        }
-        prepared_paths = lappend(prepared_paths, prepared_path);
-        prepared_provider_descs = lappend(prepared_provider_descs,
-                                          provider_desc);
-        posting_estimate = cost_path->rows;
-        if (intVal(list_nth(provider_desc,
-                            AGE_WCOJ_PATH_PROVIDER_KIND)) ==
-            AGE_WCOJ_PROVIDER_ADJACENCY)
-        {
-            Index edge_rti = intVal(list_nth(
-                provider_desc, AGE_WCOJ_PATH_PROVIDER_EDGE_RTI));
-            CypherWCOJTerminalEntry *entry =
-                find_wcoj_terminal_entry(root, edge_rti);
-
-            if (entry != NULL && entry->estimated_postings > 0)
-                posting_estimate = entry->estimated_postings;
-        }
-        estimated_postings = lappend(
-            estimated_postings,
-            makeFloat(psprintf("%.17g", posting_estimate)));
-        startup_cost += prepared_path->startup_cost;
-        total_cost += prepared_path->total_cost;
-        input_rows += posting_estimate;
-        disabled_nodes += prepared_path->disabled_nodes;
-        required_outer = bms_add_members(required_outer,
-                                         PATH_REQ_OUTER(prepared_path));
     }
 
     /*
@@ -3501,11 +3512,11 @@ add_wcoj_join_path(PlannerInfo *root, RelOptInfo *joinrel,
      * dependency on a sibling component cannot be satisfied by independent
      * CustomScan children and must be rejected.
      */
-    if (bms_overlap(required_outer, joinrel->relids))
+    if (bms_overlap(build.required_outer, joinrel->relids))
         return;
-    required_outer = bms_add_members(required_outer,
-                                     joinrel->lateral_relids);
-    if (!bms_is_empty(required_outer))
+    build.required_outer = bms_add_members(build.required_outer,
+                                           joinrel->lateral_relids);
+    if (!bms_is_empty(build.required_outer))
     {
         Path *outer_input = outerrel->cheapest_total_path;
         Path *inner_input = innerrel->cheapest_total_path;
@@ -3515,7 +3526,7 @@ add_wcoj_join_path(PlannerInfo *root, RelOptInfo *joinrel,
             return;
         param_info = get_joinrel_parampathinfo(
             root, joinrel, outer_input, inner_input, extra->sjinfo,
-            required_outer, &param_restrictinfos);
+            build.required_outer, &param_restrictinfos);
         restrictinfos = param_restrictinfos;
     }
 
@@ -3529,51 +3540,32 @@ add_wcoj_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     custom_path->path.parallel_workers = 0;
     custom_path->path.rows = clamp_row_est(
         param_info != NULL ? param_info->ppi_rows : joinrel->rows);
-    custom_path->path.disabled_nodes = disabled_nodes;
-    custom_path->path.startup_cost = startup_cost +
-        cpu_operator_cost * list_length(prepared_paths);
-    planned_engine = choose_wcoj_engine(estimated_postings,
-                                        prepared_provider_descs);
+    custom_path->path.disabled_nodes = build.disabled_nodes;
+    custom_path->path.startup_cost = build.startup_cost +
+        cpu_operator_cost * list_length(build.paths);
+    planned_engine = choose_wcoj_engine(build.estimated_postings,
+                                        build.provider_descs);
     kernel_cost = estimate_wcoj_kernel_cost(
-        planned_engine, estimated_postings, prepared_provider_descs,
-        custom_path->path.rows, &estimated_survivors, &posting_work,
-        &estimates_trusted);
+        planned_engine, build.estimated_postings, build.provider_descs,
+        custom_path->path.rows);
     /*
      * path.rows remains the final multiset cardinality.  Only the executor's
      * internal work is priced from distinct terminal survivors and delayed
      * payload rows, preventing sparse late-rejection plans from being charged
      * as though every binary intermediate survived.
      */
-    costed_output_rows = Min(custom_path->path.rows, input_rows);
-    custom_path->path.total_cost = total_cost + kernel_cost;
+    custom_path->path.total_cost = build.total_cost + kernel_cost;
     custom_path->path.pathkeys = wcoj_graphid_pathkeys(
         root, linitial(key_exprs), joinrel->relids, sortop);
     custom_path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
-    custom_path->custom_paths = prepared_paths;
+    custom_path->custom_paths = build.paths;
     custom_path->custom_restrictinfo = restrictinfos;
     custom_path->custom_private = list_make3(
-        copyObject(key_exprs), copyObject(estimated_postings),
-        copyObject(prepared_provider_descs));
+        copyObject(key_exprs), copyObject(build.estimated_postings),
+        copyObject(build.provider_descs));
     custom_path->methods = &age_wcoj_join_path_methods;
 
     add_path(joinrel, (Path *)custom_path);
-    ereport(DEBUG2,
-            (errmsg_internal("AGE WCOJ planner lowering added: "
-                             "arity=%d dimension=%s joinrelids=%s rows=%.0f "
-                             "input_rows=%.0f costed_output_rows=%.0f "
-                             "survivors=%.0f posting_work=%.0f trusted=%s "
-                             "engine=%s total_cost=%.2f required_outer=%s",
-                             list_length(prepared_paths),
-                             dimension_extension ? "yes" : "no",
-                             bmsToString(joinrel->relids),
-                             custom_path->path.rows, input_rows,
-                             costed_output_rows, estimated_survivors,
-                             posting_work,
-                             estimates_trusted ? "yes" : "no",
-                             age_wcoj_engine_name(planned_engine),
-                             custom_path->path.total_cost,
-                             bms_is_empty(required_outer) ? "none" :
-                             bmsToString(required_outer))));
 }
 
 static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
@@ -13283,32 +13275,114 @@ find_wcoj_plan_expr_attno(Plan *plan, Node *expr)
 
 static List *
 build_wcoj_exec_provider_desc(List *path_desc, int source_key_attno,
-                              List *output_map, int output_width,
-                              int output_offset, int edge_id_output_attno)
+                              List *output_map, int edge_id_output_attno)
 {
     List *desc;
+    int payload_mask;
 
     desc = list_make5(
         copyObject(list_nth(path_desc, AGE_WCOJ_PATH_PROVIDER_KIND)),
-        copyObject(list_nth(path_desc, AGE_WCOJ_PATH_PROVIDER_EDGE_RTI)),
-        copyObject(list_nth(path_desc, AGE_WCOJ_PATH_PROVIDER_EDGE_REL_OID)),
         copyObject(list_nth(path_desc, AGE_WCOJ_PATH_PROVIDER_INDEX_OID)),
-        copyObject(list_nth(path_desc, AGE_WCOJ_PATH_PROVIDER_OUTGOING)));
-    desc = lappend(desc, copyObject(list_nth(
-        path_desc, AGE_WCOJ_PATH_PROVIDER_TERMINAL_ATTNO)));
-    desc = lappend(desc, copyObject(list_nth(
-        path_desc, AGE_WCOJ_PATH_PROVIDER_TERMINAL_LABEL_ID)));
-    desc = lappend(desc, makeInteger(source_key_attno));
+        copyObject(list_nth(path_desc, AGE_WCOJ_PATH_PROVIDER_OUTGOING)),
+        copyObject(list_nth(path_desc,
+                            AGE_WCOJ_PATH_PROVIDER_TERMINAL_LABEL_ID)),
+        makeInteger(source_key_attno));
     desc = lappend(desc, copyObject(output_map));
-    desc = lappend(desc, makeInteger(output_width));
-    desc = lappend(desc, makeInteger(output_offset));
-    desc = lappend(desc, copyObject(list_nth(
-        path_desc, AGE_WCOJ_PATH_PROVIDER_PAYLOAD_MASK)));
+    payload_mask = intVal(list_nth(
+        path_desc, AGE_WCOJ_PATH_PROVIDER_PAYLOAD_MASK));
+    desc = lappend(desc, makeInteger(
+        (payload_mask &
+         (1 << (Anum_ag_label_edge_table_properties - 1))) != 0));
     desc = lappend(desc, makeInteger(edge_id_output_attno));
-    desc = lappend(desc, copyObject(list_nth(
-        path_desc, AGE_WCOJ_PATH_PROVIDER_ESTIMATE_TRUSTED)));
     Assert(list_length(desc) == AGE_WCOJ_PROVIDER_DESC_COUNT);
     return desc;
+}
+
+static int
+append_wcoj_plan_stream_tlist(Plan *child_plan, Node *key_expr,
+                              Index edge_rti, List **scan_tlist,
+                              int *scan_resno, int *edge_id_output_attno)
+{
+    Node *stripped_key = strip_implicit_coercions(key_expr);
+    ListCell *tle_cell;
+    int key_attno = 0;
+    int local_attno = 1;
+
+    foreach(tle_cell, child_plan->targetlist)
+    {
+        TargetEntry *source_tle = lfirst_node(TargetEntry, tle_cell);
+        TargetEntry *scan_tle = copyObject(source_tle);
+        Node *source_expr = strip_implicit_coercions(
+            (Node *)source_tle->expr);
+
+        if (key_attno == 0 && equal(source_expr, stripped_key))
+            key_attno = local_attno;
+        if (edge_rti > 0 && IsA(source_expr, Var) &&
+            castNode(Var, source_expr)->varno == edge_rti &&
+            castNode(Var, source_expr)->varattno ==
+                Anum_ag_label_edge_table_id)
+        {
+            *edge_id_output_attno = local_attno;
+        }
+        scan_tle->resno = (*scan_resno)++;
+        *scan_tlist = lappend(*scan_tlist, scan_tle);
+        local_attno++;
+    }
+    if (key_attno == 0)
+        elog(ERROR, "AGE WCOJ child plan does not expose its join key");
+    return key_attno;
+}
+
+static int
+append_wcoj_adjacency_tlist(Plan *child_plan, List *path_desc,
+                            List *output_exprs, Index edge_rti,
+                            List **scan_tlist, int *scan_resno,
+                            List **output_map,
+                            int *edge_id_output_attno)
+{
+    Node *source_key_expr = list_nth(
+        path_desc, AGE_WCOJ_PATH_PROVIDER_SOURCE_KEY_EXPR);
+    ListCell *expr_cell;
+    int source_key_attno;
+    int local_attno = 1;
+
+    source_key_attno = find_wcoj_plan_expr_attno(child_plan,
+                                                 source_key_expr);
+    if (source_key_attno <= 0)
+        elog(ERROR, "AGE WCOJ adjacency source does not expose its key");
+
+    foreach(expr_cell, output_exprs)
+    {
+        Expr *expr = lfirst(expr_cell);
+        Node *stripped = strip_implicit_coercions((Node *)expr);
+        TargetEntry *scan_tle;
+        int map_attno;
+
+        if (IsA(stripped, Var) &&
+            castNode(Var, stripped)->varlevelsup == 0 &&
+            castNode(Var, stripped)->varno == edge_rti)
+        {
+            map_attno = -castNode(Var, stripped)->varattno;
+            if (castNode(Var, stripped)->varattno ==
+                Anum_ag_label_edge_table_id)
+            {
+                *edge_id_output_attno = local_attno;
+            }
+        }
+        else
+        {
+            map_attno = find_wcoj_plan_expr_attno(child_plan,
+                                                  (Node *)expr);
+            if (map_attno <= 0)
+                elog(ERROR, "AGE WCOJ source output is not projectable");
+        }
+        *output_map = lappend(*output_map, makeInteger(map_attno));
+        scan_tle = makeTargetEntry((Expr *)copyObject(expr),
+                                   (*scan_resno)++, NULL, false);
+        *scan_tlist = lappend(*scan_tlist, scan_tle);
+        local_attno++;
+    }
+    return source_key_attno;
 }
 
 static List *
@@ -13342,12 +13416,9 @@ build_wcoj_custom_scan_tlist(List *custom_plans, List *key_exprs,
         int edge_rti;
         int source_key_attno;
         int local_key_attno = 0;
-        int output_offset = scan_resno;
-        int output_width = 0;
         int edge_id_output_attno = 0;
         List *output_map = NIL;
         List *output_exprs;
-        ListCell *expr_cell;
 
         if (list_length(path_desc) != AGE_WCOJ_PATH_PROVIDER_COUNT)
             elog(ERROR, "invalid AGE WCOJ path provider descriptor");
@@ -13362,79 +13433,17 @@ build_wcoj_custom_scan_tlist(List *custom_plans, List *key_exprs,
 
         if (provider_kind == AGE_WCOJ_PROVIDER_PLAN_STREAM)
         {
-            ListCell *tle_cell;
-            int local_index = 1;
-
-            foreach(tle_cell, child_plan->targetlist)
-            {
-                TargetEntry *source_tle = lfirst_node(TargetEntry, tle_cell);
-                TargetEntry *scan_tle = copyObject(source_tle);
-                Node *source_expr = strip_implicit_coercions(
-                    (Node *)source_tle->expr);
-                Node *stripped_key = strip_implicit_coercions(key_expr);
-
-                if (local_key_attno == 0 && equal(source_expr, stripped_key))
-                    local_key_attno = local_index;
-                if (edge_rti > 0 && IsA(source_expr, Var) &&
-                    castNode(Var, source_expr)->varno == edge_rti &&
-                    castNode(Var, source_expr)->varattno ==
-                        Anum_ag_label_edge_table_id)
-                {
-                    edge_id_output_attno = local_index;
-                }
-                scan_tle->resno = scan_resno++;
-                scan_tlist = lappend(scan_tlist, scan_tle);
-                output_width++;
-                local_index++;
-            }
-            if (local_key_attno == 0)
-                elog(ERROR, "AGE WCOJ child plan does not expose its join key");
+            local_key_attno = append_wcoj_plan_stream_tlist(
+                child_plan, key_expr, edge_rti, &scan_tlist, &scan_resno,
+                &edge_id_output_attno);
             source_key_attno = local_key_attno;
         }
         else if (provider_kind == AGE_WCOJ_PROVIDER_ADJACENCY)
         {
-            Node *source_key_expr = list_nth(
-                path_desc, AGE_WCOJ_PATH_PROVIDER_SOURCE_KEY_EXPR);
-            int local_index = 1;
-
-            source_key_attno = find_wcoj_plan_expr_attno(child_plan,
-                                                         source_key_expr);
-            if (source_key_attno <= 0)
-                elog(ERROR, "AGE WCOJ adjacency source does not expose its key");
-
-            foreach(expr_cell, output_exprs)
-            {
-                Expr *expr = lfirst(expr_cell);
-                Node *stripped = strip_implicit_coercions((Node *)expr);
-                int map_attno;
-                TargetEntry *scan_tle;
-
-                if (IsA(stripped, Var) &&
-                    castNode(Var, stripped)->varlevelsup == 0 &&
-                    castNode(Var, stripped)->varno == edge_rti)
-                {
-                    map_attno = -castNode(Var, stripped)->varattno;
-                    if (castNode(Var, stripped)->varattno ==
-                        Anum_ag_label_edge_table_id)
-                    {
-                        edge_id_output_attno = local_index;
-                    }
-                }
-                else
-                {
-                    map_attno = find_wcoj_plan_expr_attno(child_plan,
-                                                          (Node *)expr);
-                    if (map_attno <= 0)
-                        elog(ERROR, "AGE WCOJ source output is not projectable");
-                }
-                output_map = lappend(output_map, makeInteger(map_attno));
-                scan_tle = makeTargetEntry((Expr *)copyObject(expr),
-                                           scan_resno++, NULL, false);
-                scan_tlist = lappend(scan_tlist, scan_tle);
-                output_width++;
-                local_index++;
-            }
-            local_key_attno = 0;
+            source_key_attno = append_wcoj_adjacency_tlist(
+                child_plan, path_desc, output_exprs, edge_rti,
+                &scan_tlist, &scan_resno, &output_map,
+                &edge_id_output_attno);
         }
         else
         {
@@ -13446,8 +13455,7 @@ build_wcoj_custom_scan_tlist(List *custom_plans, List *key_exprs,
         *exec_provider_descs = lappend(
             *exec_provider_descs,
             build_wcoj_exec_provider_desc(path_desc, source_key_attno,
-                                          output_map, output_width,
-                                          output_offset,
+                                          output_map,
                                           edge_id_output_attno));
         *provider_local_quals = lappend(
             *provider_local_quals,
@@ -13479,8 +13487,6 @@ build_generic_custom_scan_tlist(List *custom_plans, List *provider_descs,
         int key1_attno;
         int key2_attno = 0;
         int edge_id_attno = 0;
-        int output_width = 0;
-        int output_offset = scan_resno;
         List *exec_desc;
         ListCell *tle_cell;
 
@@ -13522,25 +13528,19 @@ build_generic_custom_scan_tlist(List *custom_plans, List *provider_descs,
 
             scan_tle->resno = scan_resno++;
             scan_tlist = lappend(scan_tlist, scan_tle);
-            output_width++;
         }
-        if (output_width <= 0)
+        if (child_plan->targetlist == NIL)
             elog(ERROR, "AGE Generic Join provider has no output columns");
 
         exec_desc = list_make5(
             copyObject(list_nth(path_desc,
                                 AGE_GENERIC_PATH_PROVIDER_KIND)),
             copyObject(list_nth(path_desc,
-                                AGE_GENERIC_PATH_PROVIDER_REL_RTI)),
-            copyObject(list_nth(path_desc,
                                 AGE_GENERIC_PATH_PROVIDER_VAR1)),
             copyObject(list_nth(path_desc,
                                 AGE_GENERIC_PATH_PROVIDER_VAR2)),
-            makeInteger(key1_attno));
-        exec_desc = lappend(exec_desc, makeInteger(key2_attno));
+            makeInteger(key1_attno), makeInteger(key2_attno));
         exec_desc = lappend(exec_desc, makeInteger(edge_id_attno));
-        exec_desc = lappend(exec_desc, makeInteger(output_width));
-        exec_desc = lappend(exec_desc, makeInteger(output_offset));
         Assert(list_length(exec_desc) == AGE_GENERIC_PROVIDER_DESC_COUNT);
         *exec_provider_descs = lappend(*exec_provider_descs, exec_desc);
     }

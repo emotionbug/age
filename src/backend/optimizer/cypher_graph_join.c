@@ -1725,47 +1725,27 @@ static AgeGraphJoinCandidate *graph_join_copy_candidate(
 
     Assert(source != NULL);
 
-    candidate = palloc0(sizeof(*candidate));
+    candidate = palloc(sizeof(*candidate));
+    *candidate = *source;
+
     if (source->component.display_name != NULL)
         candidate->component.display_name =
             pstrdup(source->component.display_name);
-    candidate->component.family_kind = source->component.family_kind;
     candidate->component.solved_relids =
         bms_copy(source->component.solved_relids);
     candidate->component.required_outer =
         bms_copy(source->component.required_outer);
     candidate->component.provided_relids =
         bms_copy(source->component.provided_relids);
-    candidate->component.estimated_rows = source->component.estimated_rows;
-    candidate->component.output_width = source->component.output_width;
-    candidate->component.parallel_safe = source->component.parallel_safe;
-    candidate->component.parallel_aware = source->component.parallel_aware;
-    candidate->component.parallel_workers = source->component.parallel_workers;
-    candidate->component.gather_cost = source->component.gather_cost;
-    candidate->component.order_preserving =
-        source->component.order_preserving;
-    candidate->component.shared_state_required =
-        source->component.shared_state_required;
-
-    candidate->connector.kind_id = source->connector.kind_id;
-    candidate->connector.bound_kind = source->connector.bound_kind;
-    candidate->connector.order_property_kind =
-        source->connector.order_property_kind;
-    candidate->connector.source_evidence_kind =
-        source->connector.source_evidence_kind;
     candidate->connector.solved_relids =
         bms_copy(source->connector.solved_relids);
     candidate->connector.required_outer =
         bms_copy(source->connector.required_outer);
     candidate->connector.provided_relids =
         bms_copy(source->connector.provided_relids);
-    candidate->connector.rows = source->connector.rows;
-    candidate->connector.startup_cost = source->connector.startup_cost;
-    candidate->connector.total_cost = source->connector.total_cost;
 
     if (source->pattern_key != NULL)
         candidate->pattern_key = pstrdup(source->pattern_key);
-    candidate->source_kind_id = source->source_kind_id;
 
     return candidate;
 }
