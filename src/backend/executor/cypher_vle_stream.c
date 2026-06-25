@@ -52,6 +52,11 @@ typedef struct AgeVLEStreamScanState
     char *join_order_connector;
     char *join_order_bound;
     char *join_order_property;
+    char *join_order_source_evidence;
+    int64 join_order_candidate_count;
+    char *join_order_next_connector;
+    char *join_order_next_property;
+    char *join_order_next_source_evidence;
     AgeVLESourceStats source_stats;
     AgeVLESourceStats current_source_stats;
     AgeVLESourceStats total_source_stats;
@@ -206,6 +211,20 @@ static void initialize_age_vle_stream_graph_join_descriptor(
         descriptor, AGE_GRAPH_JOIN_DESC_BOUND);
     state->join_order_property = (char *)age_graph_join_descriptor_text_field(
         descriptor, AGE_GRAPH_JOIN_DESC_ORDER_PROPERTY);
+    state->join_order_source_evidence =
+        (char *)age_graph_join_descriptor_text_field(
+            descriptor, AGE_GRAPH_JOIN_DESC_SOURCE_EVIDENCE);
+    state->join_order_candidate_count = age_graph_join_descriptor_int_field(
+        descriptor, AGE_GRAPH_JOIN_DESC_CANDIDATE_COUNT, 1);
+    state->join_order_next_connector =
+        (char *)age_graph_join_descriptor_text_field(
+            descriptor, AGE_GRAPH_JOIN_DESC_NEXT_CONNECTOR);
+    state->join_order_next_property =
+        (char *)age_graph_join_descriptor_text_field(
+            descriptor, AGE_GRAPH_JOIN_DESC_NEXT_ORDER_PROPERTY);
+    state->join_order_next_source_evidence =
+        (char *)age_graph_join_descriptor_text_field(
+            descriptor, AGE_GRAPH_JOIN_DESC_NEXT_SOURCE_EVIDENCE);
 }
 
 static void initialize_age_vle_stream_input_descriptor(
@@ -597,7 +616,8 @@ static char *format_age_vle_stream_join_order(
 
     return psprintf("component=%s connector=%s bound=%s property=%s "
                     "rows=%ld fanout=start:%ld/end:%ld "
-                    "consumer=%s class=%s",
+                    "consumer=%s class=%s source=%s candidates=%ld "
+                    "next=%s/%s/%s",
                     state->join_order_component != NULL ?
                     state->join_order_component : "vle",
                     state->join_order_connector != NULL ?
@@ -616,7 +636,16 @@ static char *format_age_vle_stream_join_order(
                     source->policy_consumer != NULL ?
                     source->policy_consumer : "unknown",
                     source->policy_consumer_class != NULL ?
-                    source->policy_consumer_class : "unknown");
+                    source->policy_consumer_class : "unknown",
+                    state->join_order_source_evidence != NULL ?
+                    state->join_order_source_evidence : "unknown",
+                    (long)Max(state->join_order_candidate_count, 1),
+                    state->join_order_next_connector != NULL ?
+                    state->join_order_next_connector : "none",
+                    state->join_order_next_property != NULL ?
+                    state->join_order_next_property : "none",
+                    state->join_order_next_source_evidence != NULL ?
+                    state->join_order_next_source_evidence : "none");
 }
 
 static char *format_age_vle_stream_matrix_frontier(

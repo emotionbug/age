@@ -1910,7 +1910,7 @@ $plan$);
                VLE Edge: label=e1, properties=0
                VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
                VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-               VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+               VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=endpoint-direct candidates=1 next=none/none/none
                VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
                VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2018,7 +2018,7 @@ $plan$);
          VLE Edge: label=e1, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=endpoint-direct candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2053,7 +2053,7 @@ $plan$);
          VLE Edge: label=e1, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=endpoint-direct candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2089,7 +2089,7 @@ $plan$);
          VLE Edge: label=e1, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=endpoint-direct candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2125,7 +2125,7 @@ $plan$);
          VLE Edge: label=e1, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=endpoint-direct candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2160,7 +2160,7 @@ $plan$);
          VLE Edge: label=e1, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=endpoint-direct candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2180,8 +2180,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
               RETURN relationships(p)$$) AS (r agtype)
 $plan$);
-                                                                                                                   plan                                                                                                                    
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                         plan                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_edges(_age_default_alias_0.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_vle_function_end_var_2
@@ -2199,7 +2199,7 @@ $plan$);
                VLE Edge: label=e1, properties=0
                VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
                VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-               VLE Join Order: component=vle connector=vle-expand-into bound=out property=expand-into-verification rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+               VLE Join Order: component=vle connector=vle-expand-into bound=out property=expand-into-verification rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=expand-into-verification candidates=1 next=none/none/none
                VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
                VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2244,7 +2244,7 @@ $plan$);
                            VLE Edge: label=e1, properties=0
                            VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
                            VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-                           VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+                           VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=endpoint-direct candidates=1 next=none/none/none
                            VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
                            VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                            VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2289,7 +2289,7 @@ $plan$);
                            VLE Edge: label=e1, properties=0
                            VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
                            VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-                           VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+                           VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=endpoint-direct candidates=1 next=none/none/none
                            VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
                            VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                            VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2309,8 +2309,8 @@ FROM cypher('cypher_match',
             $$MATCH p=(:v1)-[:e1*1..2]->(:v1)
               RETURN p$$) AS (p agtype)
 $plan$);
-                                                                                                                   plan                                                                                                                    
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                         plan                                                                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
    ->  Seq Scan on cypher_match.v1 _age_default_vle_function_end_var_7
@@ -2328,7 +2328,7 @@ $plan$);
                VLE Edge: label=e1, properties=0
                VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
                VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-               VLE Join Order: component=vle connector=vle-expand-into bound=out property=expand-into-verification rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+               VLE Join Order: component=vle connector=vle-expand-into bound=out property=expand-into-verification rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=expand-into-verification candidates=1 next=none/none/none
                VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
                VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none

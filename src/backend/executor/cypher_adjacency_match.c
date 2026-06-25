@@ -86,6 +86,11 @@ typedef struct AgeAdjacencyMatchScanState
     char *join_order_connector;
     char *join_order_bound;
     char *join_order_property;
+    char *join_order_source_evidence;
+    int64 join_order_candidate_count;
+    char *join_order_next_connector;
+    char *join_order_next_property;
+    char *join_order_next_source_evidence;
     Datum right_property_value;
     bool right_property_value_isnull;
     AgeAdjacencyMatchTerminalPropertyLookup *terminal_property_lookup;
@@ -730,6 +735,19 @@ static void load_age_adjacency_match_descriptor(
         descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_BOUND);
     state->join_order_property = adjacency_match_descriptor_text(
         descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_PROPERTY);
+    state->join_order_source_evidence = adjacency_match_descriptor_text(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_SOURCE_EVIDENCE);
+    state->join_order_candidate_count =
+        adjacency_match_descriptor_int64(
+            descriptor,
+            AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_CANDIDATE_COUNT);
+    state->join_order_next_connector = adjacency_match_descriptor_text(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_NEXT_CONNECTOR);
+    state->join_order_next_property = adjacency_match_descriptor_text(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_NEXT_PROPERTY);
+    state->join_order_next_source_evidence = adjacency_match_descriptor_text(
+        descriptor,
+        AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_NEXT_SOURCE_EVIDENCE);
     {
         Const *value_const;
 
@@ -906,7 +924,8 @@ static char *format_age_adjacency_match_join_order(
 {
     return psprintf("component=%s connector=%s bound=%s property=%s "
                     "rows=%ld fanout=%ld terminal-fanout=%ld "
-                    "composite-fanout=%ld source=%s",
+                    "composite-fanout=%ld source=%s candidates=%ld "
+                    "next=%s/%s/%s",
                     state->join_order_component != NULL ?
                     state->join_order_component : "edge",
                     state->join_order_connector != NULL ?
@@ -919,8 +938,17 @@ static char *format_age_adjacency_match_join_order(
                     (long)state->estimated_endpoint_fanout,
                     (long)state->estimated_terminal_fanout,
                     (long)state->estimated_composite_fanout,
-                    state->fanout_source != NULL ?
-                    state->fanout_source : "unknown");
+                    state->join_order_source_evidence != NULL ?
+                    state->join_order_source_evidence :
+                    (state->fanout_source != NULL ?
+                     state->fanout_source : "unknown"),
+                    (long)Max(state->join_order_candidate_count, 1),
+                    state->join_order_next_connector != NULL ?
+                    state->join_order_next_connector : "none",
+                    state->join_order_next_property != NULL ?
+                    state->join_order_next_property : "none",
+                    state->join_order_next_source_evidence != NULL ?
+                    state->join_order_next_source_evidence : "none");
 }
 
 static char *format_age_adjacency_match_composite_source(

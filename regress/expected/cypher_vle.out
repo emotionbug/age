@@ -354,7 +354,7 @@ SELECT * FROM cypher('cypher_vle', $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:begin)
                VLE Edge: label=edge, properties=0
                VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
                VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-               VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+               VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=endpoint-direct candidates=1 next=none/none/none
                VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
                VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2244,7 +2244,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=endpoint-direct candidates=1 next=none/none/none
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=ineligible reason=missing-terminal-label property-tuples=0 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=4 composite=0 planned=none basis=missing-terminal-label
@@ -2285,7 +2285,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=endpoint-direct candidates=1 next=none/none/none
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=ineligible reason=missing-terminal-label property-tuples=0 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=4 composite=0 planned=none basis=missing-terminal-label
@@ -2338,7 +2338,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-work candidates=1 next=none/none/none
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=ineligible reason=missing-terminal-label property-tuples=0 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=4 composite=0 planned=none basis=missing-terminal-label
@@ -2366,8 +2366,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_index_probe',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                              QUERY PLAN                                                                                                              
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                               QUERY PLAN                                                                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Index Scan using "N_pkey" on vle_index_probe."N" s
@@ -2382,7 +2382,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:7/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=7 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=7 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-work candidates=1 next=none/none/none
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=10 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=7 composite=7 planned=metadata-only basis=terminal-label-property
@@ -2419,7 +2419,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:7/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-composite-prefilter candidates=2 next=vle-expand/vle-frontier-anchored/edge-source-fallback
          VLE Terminal Property Source: label=N source=graph-metadata:n_rare_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=10 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=7 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.150000 selectivity-source=fallback-mcv-ceiling
@@ -2457,7 +2457,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:7/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-composite-prefilter candidates=2 next=vle-expand/vle-frontier-anchored/edge-source-fallback
          VLE Terminal Property Source: label=N source=graph-metadata:n_rare_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=10 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=7 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.150000 selectivity-source=fallback-mcv-ceiling
@@ -2502,7 +2502,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:7/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-composite-prefilter candidates=2 next=vle-expand/vle-frontier-anchored/edge-source-fallback
          VLE Terminal Property Source: label=N source=graph-metadata:n_isolated_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=10 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=7 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.150000 selectivity-source=fallback-ceiling
@@ -2546,7 +2546,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:7/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=7 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=7 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-composite-prefilter candidates=2 next=vle-expand/vle-frontier-anchored/edge-source-fallback
          VLE Terminal Property Source: label=N source=graph-metadata:n_rare_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=10 predicate=runtime-slot prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=7 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.150000 selectivity-source=fallback
@@ -2584,7 +2584,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:7/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=7 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=7 fanout=start:7/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-composite-prefilter candidates=2 next=vle-expand/vle-frontier-anchored/edge-source-fallback
          VLE Terminal Property Source: label=N source=graph-metadata:n_rare_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=10 predicate=runtime-slot prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=7 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.150000 selectivity-source=fallback
@@ -2630,7 +2630,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=path class=path-materialized source=adjacency-work candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2665,7 +2665,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=none/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=in property=query-order rows=1 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=in property=query-order rows=1 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=endpoint-direct candidates=1 next=none/none/none
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=ineligible reason=missing-terminal-label property-tuples=0 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=1 composite=0 planned=none basis=missing-terminal-label
@@ -2704,7 +2704,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-vertex class=terminal-object
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-vertex class=terminal-object source=adjacency-work candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-vertex class=terminal-object active=out budget=1 weight=2 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2741,7 +2741,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-vertex class=terminal-object
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-vertex class=terminal-object source=adjacency-work candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-vertex class=terminal-object active=out budget=1 weight=2 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2783,7 +2783,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-properties class=terminal-object
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-properties class=terminal-object source=adjacency-work candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-properties class=terminal-object active=out budget=1 weight=2 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -2818,7 +2818,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=4 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-work candidates=1 next=none/none/none
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=ineligible reason=missing-terminal-label property-tuples=0 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=4 composite=0 planned=none basis=missing-terminal-label
@@ -2866,7 +2866,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=11 fanout=start:4/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=8 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=8 fanout=start:4/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-cache-seeded candidates=1 next=none/none/none
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=ineligible reason=missing-terminal-label property-tuples=0 predicate=none prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=4 composite=0 planned=none basis=missing-terminal-label
@@ -2926,8 +2926,8 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_directory_label_cost',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930131969 MATCH (s)-[:R*1..1]->(n:N) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                             QUERY PLAN                                                                                                             
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                QUERY PLAN                                                                                                                
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Index Scan using "N_pkey" on vle_directory_label_cost."N" s
@@ -2942,7 +2942,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=2 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=1 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=1 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar source=endpoint-direct candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3025,7 +3025,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=3 fanout=start:3/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=6 fanout=start:3/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=6 fanout=start:3/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-cache-seeded candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3061,7 +3061,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=3 fanout=start:3/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=9 fanout=start:3/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=9 fanout=start:3/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-cache-seeded candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:14
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3144,7 +3144,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=none/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=in property=query-order rows=1 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=in property=query-order rows=1 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar source=endpoint-direct candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=in budget=2 weight=1 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3180,7 +3180,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=none/in=age-adjacency, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=in property=query-order rows=1 fanout=start:1/end:1 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=in property=query-order rows=1 fanout=start:1/end:1 consumer=path class=path-materialized source=adjacency-materialized-tie candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=in budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3215,7 +3215,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=none/in=age-adjacency, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=in property=query-order rows=1 fanout=start:1/end:1 consumer=terminal-vertex class=terminal-object
+         VLE Join Order: component=vle connector=vle-expand bound=in property=query-order rows=1 fanout=start:1/end:1 consumer=terminal-vertex class=terminal-object source=adjacency-materialized-tie candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-vertex class=terminal-object active=in budget=1 weight=2 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3305,7 +3305,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=7 fanout=start:2/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=4 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=4 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-cache-seeded candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3386,7 +3386,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:8/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized source=adjacency-cache-seeded candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:9
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3428,7 +3428,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:8/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized source=adjacency-empty-batch candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:18
          VLE Source Threshold Input: source=runtime-cache headroom=35 batch=18 direction=out reason=root-empty-saturated class=adjacency-empty-batch observed=1 saturated=1 relaxed=0
          VLE Source Payload Input: source=runtime-cache headroom=50 scan-runs=1 replay-runs=0 seed-runs=1 replay-percent=0 seed-percent=100 observed=1 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
@@ -3465,7 +3465,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:8/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized source=adjacency-empty-batch candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:18
          VLE Source Threshold Input: source=runtime-cache headroom=35 batch=18 direction=out reason=root-empty-saturated class=adjacency-empty-batch observed=1 saturated=1 relaxed=0
          VLE Source Payload Input: source=runtime-cache headroom=50 scan-runs=1 replay-runs=0 seed-runs=1 replay-percent=0 seed-percent=100 observed=1 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
@@ -3507,7 +3507,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=8 fanout=start:8/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=24 fanout=start:8/end:1 consumer=path class=path-materialized source=adjacency-empty-lifecycle candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.30 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:18
          VLE Source Threshold Input: source=runtime-cache headroom=30 batch=18 direction=out reason=root-empty-repeat-observed class=adjacency-empty-lifecycle observed=2 saturated=1 relaxed=1
          VLE Source Payload Input: source=runtime-cache headroom=50 scan-runs=2 replay-runs=0 seed-runs=2 replay-percent=0 seed-percent=100 observed=2 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
@@ -3528,14 +3528,14 @@ AS (plan agtype);
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
-   Join Filter: age_match_vle_terminal_edge(_age_default_vle_function_start_var_315.id, n.id, _age_default_alias_0.edges)
+   ->  Bitmap Heap Scan on vle_empty_cache_policy."N" _age_default_vle_function_start_var_315
+         Output: _age_default_vle_function_start_var_315.id, _age_default_vle_function_start_var_315.properties
+         Recheck Cond: (_age_default_vle_function_start_var_315.properties @> '{"i": 0}'::agtype)
+         ->  Bitmap Index Scan on vle_empty_cache_policy_n_properties_gin_idx
+               Index Cond: (_age_default_vle_function_start_var_315.properties @> '{"i": 0}'::agtype)
    ->  Nested Loop
-         Output: _age_default_vle_function_start_var_315.id, _age_default_alias_0.edges
-         ->  Bitmap Heap Scan on vle_empty_cache_policy."N" _age_default_vle_function_start_var_315
-               Output: _age_default_vle_function_start_var_315.id, _age_default_vle_function_start_var_315.properties
-               Recheck Cond: (_age_default_vle_function_start_var_315.properties @> '{"i": 0}'::agtype)
-               ->  Bitmap Index Scan on vle_empty_cache_policy_n_properties_gin_idx
-                     Index Cond: (_age_default_vle_function_start_var_315.properties @> '{"i": 0}'::agtype)
+         Output: _age_default_alias_0.edges, n.id
+         Join Filter: age_match_vle_terminal_edge(_age_default_vle_function_start_var_315.id, n.id, _age_default_alias_0.edges)
          ->  Custom Scan (AGE VLE Stream)
                Output: _age_default_alias_0.edges
                VLE Shape: cypher
@@ -3545,7 +3545,7 @@ AS (plan agtype);
                VLE Edge: label=R, properties=0
                VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=endpoint-btree, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
                VLE Source Cost: reltuples=8 fanout=start:8/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-               VLE Join Order: component=vle connector=vle-bidirectional-expand bound=both property=vle-frontier-anchored rows=27 fanout=start:8/end:1 consumer=path class=path-materialized
+               VLE Join Order: component=vle connector=vle-bidirectional-expand bound=both property=vle-frontier-anchored rows=27 fanout=start:8/end:1 consumer=path class=path-materialized source=adjacency-empty-lifecycle candidates=1 next=none/none/none
                VLE Source Profile: consumer=path class=path-materialized active=both budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.40 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:18
                VLE Source Threshold Input: source=runtime-cache headroom=40 batch=18 direction=out reason=root-empty-repeat-observed class=adjacency-empty-lifecycle observed=2 saturated=1 relaxed=1
                VLE Source Payload Input: source=runtime-cache headroom=50 scan-runs=2 replay-runs=0 seed-runs=2 replay-percent=0 seed-percent=100 observed=2 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
@@ -3557,12 +3557,14 @@ AS (plan agtype);
                VLE Materialization: path-container, vertex-prefetch=label-batch(min-rel-candidates=8), object-source=label-row-fallback
                ->  Values Scan on _age_default_alias_0
                      Output: _age_default_alias_0.edges
-   ->  Append
-         ->  Index Only Scan using _ag_label_vertex_pkey on vle_empty_cache_policy._ag_label_vertex n_1
-               Output: n_1.id
-         ->  Index Only Scan using "N_pkey" on vle_empty_cache_policy."N" n_2
-               Output: n_2.id
-(36 rows)
+         ->  Materialize
+               Output: n.id
+               ->  Append
+                     ->  Index Only Scan using _ag_label_vertex_pkey on vle_empty_cache_policy._ag_label_vertex n_1
+                           Output: n_1.id
+                     ->  Index Only Scan using "N_pkey" on vle_empty_cache_policy."N" n_2
+                           Output: n_2.id
+(38 rows)
 
 SET enable_seqscan = on;
 SELECT drop_graph('vle_empty_cache_policy', true);
@@ -3612,17 +3614,17 @@ AS (plan agtype);
 --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=6.00 loops=1)
    Output: age_materialize_vle_path(_age_default_alias_0.edges)
-   Join Filter: age_match_vle_terminal_edge(_age_default_vle_function_start_var_317.id, n.id, _age_default_alias_0.edges)
-   Rows Removed by Join Filter: 36
+   ->  Bitmap Heap Scan on vle_directional_feedback_policy."N" _age_default_vle_function_start_var_317 (actual rows=1.00 loops=1)
+         Output: _age_default_vle_function_start_var_317.id, _age_default_vle_function_start_var_317.properties
+         Recheck Cond: (_age_default_vle_function_start_var_317.properties @> '{"i": 0}'::agtype)
+         Heap Blocks: exact=1
+         ->  Bitmap Index Scan on vle_directional_feedback_policy_n_properties_gin_idx (actual rows=1.00 loops=1)
+               Index Cond: (_age_default_vle_function_start_var_317.properties @> '{"i": 0}'::agtype)
+               Index Searches: 1
    ->  Nested Loop (actual rows=6.00 loops=1)
-         Output: _age_default_vle_function_start_var_317.id, _age_default_alias_0.edges
-         ->  Bitmap Heap Scan on vle_directional_feedback_policy."N" _age_default_vle_function_start_var_317 (actual rows=1.00 loops=1)
-               Output: _age_default_vle_function_start_var_317.id, _age_default_vle_function_start_var_317.properties
-               Recheck Cond: (_age_default_vle_function_start_var_317.properties @> '{"i": 0}'::agtype)
-               Heap Blocks: exact=1
-               ->  Bitmap Index Scan on vle_directional_feedback_policy_n_properties_gin_idx (actual rows=1.00 loops=1)
-                     Index Cond: (_age_default_vle_function_start_var_317.properties @> '{"i": 0}'::agtype)
-                     Index Searches: 1
+         Output: _age_default_alias_0.edges, n.id
+         Join Filter: age_match_vle_terminal_edge(_age_default_vle_function_start_var_317.id, n.id, _age_default_alias_0.edges)
+         Rows Removed by Join Filter: 36
          ->  Custom Scan (AGE VLE Stream) (actual rows=6.00 loops=1)
                Output: _age_default_alias_0.edges
                VLE Shape: cypher
@@ -3632,7 +3634,7 @@ AS (plan agtype);
                VLE Edge: label=R, properties=0
                VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=age-adjacency, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
                VLE Source Cost: reltuples=6 fanout=start:6/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-               VLE Join Order: component=vle connector=vle-bidirectional-expand bound=both property=vle-frontier-anchored rows=21 fanout=start:6/end:1 consumer=path class=path-materialized
+               VLE Join Order: component=vle connector=vle-bidirectional-expand bound=both property=vle-frontier-anchored rows=21 fanout=start:6/end:1 consumer=path class=path-materialized source=adjacency-cache-seeded candidates=1 next=none/none/none
                VLE Source Profile: consumer=path class=path-materialized active=both budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:9
                VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3651,16 +3653,19 @@ AS (plan agtype);
                VLE Runtime Feedback: recommendation=prefer-age-adjacency-depth planned=prefer-age-adjacency-depth root-empty=completion:13/out:12/in:1/batch:9/saturated-roots:1 threshold=eligible/headroom:35/batch:18/source:both/reason:root-empty-saturated yield=12/7 push=6/12
                ->  Values Scan on _age_default_alias_0 (never executed)
                      Output: _age_default_alias_0.edges
-   ->  Append (actual rows=7.00 loops=6)
-         ->  Index Only Scan using _ag_label_vertex_pkey on vle_directional_feedback_policy._ag_label_vertex n_1 (actual rows=0.00 loops=6)
-               Output: n_1.id
-               Heap Fetches: 0
-               Index Searches: 6
-         ->  Index Only Scan using "N_pkey" on vle_directional_feedback_policy."N" n_2 (actual rows=7.00 loops=6)
-               Output: n_2.id
-               Heap Fetches: 42
-               Index Searches: 6
-(50 rows)
+         ->  Materialize (actual rows=7.00 loops=6)
+               Output: n.id
+               Storage: Memory  Maximum Storage: 17kB
+               ->  Append (actual rows=7.00 loops=1)
+                     ->  Index Only Scan using _ag_label_vertex_pkey on vle_directional_feedback_policy._ag_label_vertex n_1 (actual rows=0.00 loops=1)
+                           Output: n_1.id
+                           Heap Fetches: 0
+                           Index Searches: 1
+                     ->  Index Only Scan using "N_pkey" on vle_directional_feedback_policy."N" n_2 (actual rows=7.00 loops=1)
+                           Output: n_2.id
+                           Heap Fetches: 7
+                           Index Searches: 1
+(53 rows)
 
 SELECT * FROM cypher('vle_directional_feedback_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH p=(:N {i: 0})-[:R*1..3]->(n) RETURN p$$)
@@ -3683,7 +3688,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:6/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=18 fanout=start:6/end:1 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=18 fanout=start:6/end:1 consumer=path class=path-materialized source=adjacency-empty-batch candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:18
          VLE Source Threshold Input: source=runtime-cache headroom=35 batch=18 direction=out reason=root-empty-saturated class=adjacency-empty-batch observed=1 saturated=1 relaxed=0
          VLE Source Payload Input: source=runtime-cache headroom=50 scan-runs=7 replay-runs=0 seed-runs=1 replay-percent=0 seed-percent=14 observed=1 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
@@ -3760,7 +3765,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=path class=path-materialized source=adjacency-cache-seeded candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:9
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3802,7 +3807,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=path class=path-materialized source=adjacency-replay candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.18 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:16
          VLE Source Threshold Input: source=runtime-cache headroom=50 batch=8 direction=out reason=root-empty-observed class=adjacency-cache-seeded observed=1 saturated=0 relaxed=1
          VLE Source Payload Input: source=runtime-cache headroom=18 scan-runs=4 replay-runs=1 seed-runs=2 replay-percent=25 seed-percent=50 observed=1 value-posting=none/observed:0 reason=payload-replay-ratio-observed class=adjacency-replay
@@ -3837,7 +3842,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=terminal-vertex class=terminal-object
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=terminal-vertex class=terminal-object source=adjacency-replay candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-vertex class=terminal-object active=out budget=1 weight=2 cache-seed=eligible endpoint-headroom=0.20 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:12
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=runtime-cache headroom=20 scan-runs=4 replay-runs=1 seed-runs=2 replay-percent=25 seed-percent=50 observed=1 value-posting=none/observed:0 reason=payload-replay-ratio-observed class=adjacency-replay
@@ -3874,7 +3879,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-cache-seeded candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:14
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -3917,7 +3922,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=6 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=3 fanout=start:1/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-replay candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:14
          VLE Source Threshold Input: source=runtime-cache headroom=35 batch=8 direction=out reason=root-empty-observed class=adjacency-cache-seeded observed=1 saturated=0 relaxed=1
          VLE Source Payload Input: source=runtime-cache headroom=35 scan-runs=4 replay-runs=1 seed-runs=2 replay-percent=25 seed-percent=50 observed=1 value-posting=none/observed:0 reason=payload-replay-observed class=adjacency-replay-observed
@@ -3976,8 +3981,8 @@ SET enable_seqscan = off;
 SELECT * FROM cypher('vle_adjacency_only_policy',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (:N {i: 0})-[:R*1..2]->(n) RETURN n.i$$)
 AS (plan agtype);
-                                                                                                               QUERY PLAN                                                                                                               
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                QUERY PLAN                                                                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Bitmap Heap Scan on vle_adjacency_only_policy."N" _age_default_vle_function_start_var_331
@@ -3994,7 +3999,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=3 fanout=start:0/end:0 stats=rel:known/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=1 fanout=start:0/end:0 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=1 fanout=start:0/end:0 consumer=terminal-property class=terminal-scalar source=adjacency-stream candidates=1 next=none/none/none
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -4074,7 +4079,7 @@ AS (plan agtype);
          VLE Edge: label=, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:known/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=adjacency-stream candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -4487,7 +4492,7 @@ AS (plan agtype);
          VLE Edge: label=edge, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=endpoint-btree/in=none, candidates=age_adjacency=-/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=0 fanout=start:0/end:0 stats=rel:unknown/start:unknown/end:unknown source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=query-order rows=1 fanout=start:0/end:0 consumer=path class=path-materialized source=endpoint-direct candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=ineligible endpoint-headroom=0.75 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -4831,7 +4836,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=2 fanout=start:1/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=2 fanout=start:1/end:1 consumer=path class=path-materialized
+         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=2 fanout=start:1/end:1 consumer=path class=path-materialized source=adjacency-cache-seeded candidates=1 next=none/none/none
          VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.50 empty-lifecycle=eligible/depth:2 empty-batch=eligible/size:8
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -4921,7 +4926,7 @@ AS (plan agtype);
                VLE Edge: label=e1, properties=0
                VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
                VLE Source Cost: reltuples=13 fanout=start:2/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-               VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=8 fanout=start:2/end:1 consumer=path class=path-materialized
+               VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=8 fanout=start:2/end:1 consumer=path class=path-materialized source=adjacency-cache-seeded candidates=1 next=none/none/none
                VLE Source Profile: consumer=path class=path-materialized active=out budget=1 weight=3 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:5 empty-batch=eligible/size:15
                VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
                VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
@@ -4960,7 +4965,7 @@ AS (plan agtype);
          VLE Edge: label=e1, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=13 fanout=start:2/end:1 stats=rel:known/start:known/end:known source=start:statistics/end:statistics value-posting=start:none/end:none
-         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=4 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=4 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-composite-prefilter candidates=2 next=vle-expand/vle-frontier-anchored/edge-source-fallback
          VLE Terminal Property Source: label=v1 source=graph-metadata:v1_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=12 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=2 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.083333 selectivity-source=typed-distinct
@@ -5091,7 +5096,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/in endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=19 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=2 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=2 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-composite-prefilter candidates=2 next=vle-expand/vle-frontier-anchored/edge-source-fallback
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=20 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=19 composite=2 planned=property-prefilter basis=terminal-label-property selectivity=0.100000 selectivity-source=typed-mcv
@@ -5229,7 +5234,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-composite-prefilter candidates=2 next=vle-expand/vle-frontier-anchored/edge-source-fallback
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=36 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=19 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.027778 selectivity-source=typed-distinct
@@ -5276,7 +5281,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-composite-value-posting candidates=2 next=vle-expand/vle-frontier-anchored/edge-source-fallback
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=36 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=19 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.027778 selectivity-source=typed-distinct
@@ -5313,7 +5318,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-composite-prefilter candidates=2 next=vle-expand/vle-frontier-anchored/edge-source-fallback
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=36 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=19 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.027778 selectivity-source=typed-distinct
@@ -5334,8 +5339,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_value_posting_feedback',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..3]->(n:N) WHERE n.i = 59 RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                    QUERY PLAN                                                                                                                                    
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                             QUERY PLAN                                                                                                                                                              
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=4.00 loops=1)
    Output: _age_default_alias_0.edges
    Buffers: shared hit=173
@@ -5353,7 +5358,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=matrix-frontier-expand bound=out property=matrix-frontier-anchored rows=57 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=matrix-frontier-expand bound=out property=matrix-frontier-anchored rows=10 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=matrix-frontier:native,terminal-posting-schedule candidates=2 next=vle-expand/vle-frontier-anchored/adjacency-cache-seeded
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=endpoint-label-acceptance property-tuples=36 predicate=const prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=19 composite=19 planned=metadata-only basis=endpoint-label-acceptance
@@ -5385,8 +5390,8 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_value_posting_feedback',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..3]->(n:N) WHERE n.i = 59 RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                   QUERY PLAN                                                                                                                   
-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                             QUERY PLAN                                                                                                                                                             
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: _age_default_alias_0.edges
    ->  Seq Scan on vle_value_posting_feedback."N" s
@@ -5401,7 +5406,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=matrix-frontier-expand bound=out property=matrix-frontier-anchored rows=57 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=matrix-frontier-expand bound=out property=matrix-frontier-anchored rows=10 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar source=matrix-frontier:native,terminal-posting-schedule candidates=2 next=vle-expand/vle-frontier-anchored/adjacency-empty-batch
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=endpoint-label-acceptance property-tuples=36 predicate=const prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=19 composite=19 planned=metadata-only basis=endpoint-label-acceptance
@@ -5539,7 +5544,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=50 fanout=start:2/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=3 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=3 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-composite-prefilter candidates=2 next=vle-expand/vle-frontier-anchored/edge-source-fallback
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=34 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=2 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.029412 selectivity-source=typed-distinct
@@ -5586,7 +5591,7 @@ AS (plan agtype);
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
          VLE Source Cost: reltuples=50 fanout=start:2/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=3 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=3 fanout=start:2/end:1 consumer=terminal-property class=terminal-scalar source=adjacency-composite-value-posting candidates=2 next=vle-expand/vle-frontier-anchored/edge-source-fallback
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=34 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=2 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.029412 selectivity-source=typed-distinct
