@@ -75,6 +75,8 @@ typedef struct AgeAdjacencyCompositeTerminalFilter
 } AgeAdjacencyCompositeTerminalFilter;
 
 typedef struct AgeAdjacencyVisiblePayloadScan AgeAdjacencyVisiblePayloadScan;
+typedef struct AgeAdjacencyVisiblePayloadRunScan
+    AgeAdjacencyVisiblePayloadRunScan;
 
 extern uint32 age_adjacency_property_filter_id(Oid property_index_oid,
                                                Datum property_value,
@@ -112,6 +114,15 @@ extern bool age_adjacency_visible_payload_scan_key_known_empty(
     AgeAdjacencyVisiblePayloadScan *scan, graphid key);
 extern bool age_adjacency_visible_payload_scan_next(
     AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyPayload *payload);
+extern AgeAdjacencyVisiblePayloadRunScan *
+age_adjacency_begin_visible_payload_run_scan(
+    Oid index_oid, Snapshot snapshot, bool fetch_properties,
+    int32 terminal_label_id, const graphid *keys, int64 key_count);
+extern bool age_adjacency_visible_payload_run_scan_next(
+    AgeAdjacencyVisiblePayloadRunScan *scan, AgeAdjacencyPayload *payload,
+    int64 *key_index);
+extern void age_adjacency_end_visible_payload_run_scan(
+    AgeAdjacencyVisiblePayloadRunScan *scan);
 extern int64 age_adjacency_visible_payload_scan_label_filtered(
     AgeAdjacencyVisiblePayloadScan *scan);
 extern int64 age_adjacency_visible_payload_scan_directory_label_filtered(

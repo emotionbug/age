@@ -43,23 +43,29 @@ struct VLEContextEndpointIndexSource
 
 struct VLEContextAgeAdjacencyPayloadSource
 {
+    VLEMatrixFrontierCacheKey matrix_key;
     graphid source_vertex_id;
     Oid index_oid;
     int32 terminal_label_id;
     AgeAdjacencyVisiblePayloadScan *payload_scan;
     VLEAdjacencyPayloadCacheEntry *cache_entry;
+    VLEMatrixFrontierCacheEntry *matrix_entry;
     graphid *frontier_empty_keys;
     int64 scanned;
     int64 replay_index;
+    int64 matrix_replay_index;
     int64 frontier_empty_count;
     int64 frontier_empty_capacity;
     bool use_payload_cache;
+    bool use_matrix_frontier_cache;
     bool replay_payload_cache;
+    bool replay_matrix_frontier_cache;
     bool empty_suppressed;
     bool outgoing;
     uint32 terminal_property_filter_id;
     bool pending_payload_valid;
     bool cache_seed_run_recorded;
+    bool batch_visible_scan;
     AgeAdjacencyPayload pending_payload;
 };
 
@@ -95,6 +101,16 @@ static AgeAdjacencyVisiblePayloadScan *age_vle_context_get_payload_scan(
 static VLEAdjacencyPayloadCacheEntry *age_vle_context_get_payload_cache_entry(
     VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
     uint32 terminal_property_filter_id, bool *found);
+static void age_vle_context_init_matrix_frontier_key(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
+    uint32 terminal_property_filter_id, VLEMatrixFrontierCacheKey *key);
+static bool age_vle_context_matrix_frontier_cache_lookup(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
+static void age_vle_context_matrix_frontier_cache_seed(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    const AgeAdjacencyPayload *payload);
+static void age_vle_context_matrix_frontier_cache_mark_empty(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
 static uint32 age_vle_context_terminal_property_filter_id(
     VLE_local_context *vlelctx);
 static bool age_vle_context_path_length_targets_terminal_depth(
@@ -136,6 +152,11 @@ static AgeAdjacencyMatchTerminalPropertyLookup *
 age_vle_context_get_terminal_property_lookup(VLE_local_context *vlelctx);
 static void age_vle_context_prepare_terminal_property_prefilter(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
+static VLEContextAgeAdjacencyPayloadSource *
+age_vle_context_begin_age_adjacency_payload_source_internal(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
+    const VLEMatrixFrontierCacheKey *matrix_key, bool record_matrix_block,
+    bool defer_visible_scan);
 
 void age_vle_context_apply_base(
     VLE_local_context *vlelctx,
@@ -199,6 +220,14 @@ void age_vle_context_apply_base(
         context_apply->empty_lifecycle_depth;
     vlelctx->empty_lifecycle_batch_size =
         context_apply->empty_lifecycle_batch_size;
+    vlelctx->matrix_frontier_policy_known =
+        context_apply->matrix_frontier_policy_known;
+    vlelctx->matrix_frontier_eligible =
+        context_apply->matrix_frontier_eligible;
+    vlelctx->matrix_frontier_depth =
+        context_apply->matrix_frontier_depth;
+    vlelctx->matrix_frontier_batch_size =
+        context_apply->matrix_frontier_batch_size;
 
     vlelctx->root.lidx = context_apply->lower;
     vlelctx->root.uidx = context_apply->upper;
@@ -232,6 +261,7 @@ void age_vle_context_apply_base(
     vlelctx->output.terminal_property_prefetch_budget =
         context_apply->terminal_property_prefetch_budget;
     age_vle_context_record_empty_lifecycle_policy(vlelctx);
+    age_vle_context_record_matrix_frontier_policy(vlelctx);
 }
 
 static void cache_edge_property_constraints(VLE_local_context *vlelctx)
@@ -432,6 +462,7 @@ void age_vle_context_free_adjacency_payload_cache(
 
     age_vle_adjacency_payload_cache_free(
         &vlelctx->root.age_adjacency_payload_cache);
+    age_vle_matrix_frontier_cache_free(&vlelctx->root.matrix_frontier_cache);
 }
 
 void age_vle_context_release_runtime_resources(VLE_local_context *vlelctx)
@@ -590,6 +621,42 @@ void age_vle_context_record_empty_lifecycle_policy(
             Max(vlelctx->source_stats.empty_lifecycle_batch_capacity,
                 vlelctx->empty_lifecycle_batch_size);
     }
+}
+
+void age_vle_context_record_matrix_frontier_policy(
+    VLE_local_context *vlelctx)
+{
+    Assert(vlelctx != NULL);
+
+    if (!vlelctx->matrix_frontier_policy_known)
+        return;
+
+    vlelctx->source_stats.matrix_frontier_context_runs++;
+    if (vlelctx->matrix_frontier_eligible)
+    {
+        vlelctx->source_stats.matrix_frontier_context_eligible_runs++;
+        vlelctx->source_stats.matrix_frontier_context_depth =
+            Max(vlelctx->source_stats.matrix_frontier_context_depth,
+                vlelctx->matrix_frontier_depth);
+        vlelctx->source_stats.matrix_frontier_batch_capacity =
+            Max(vlelctx->source_stats.matrix_frontier_batch_capacity,
+                vlelctx->matrix_frontier_batch_size);
+    }
+}
+
+void age_vle_context_record_matrix_frontier_source_run(
+    VLE_local_context *vlelctx, int64 source_count)
+{
+    Assert(vlelctx != NULL);
+
+    if (source_count <= 0)
+        return;
+
+    vlelctx->source_stats.matrix_frontier_source_runs++;
+    vlelctx->source_stats.matrix_frontier_source_run_sources += source_count;
+    vlelctx->source_stats.matrix_frontier_source_run_max =
+        Max(vlelctx->source_stats.matrix_frontier_source_run_max,
+            source_count);
 }
 
 int64 age_vle_context_empty_lifecycle_batch_size(VLE_local_context *vlelctx)
@@ -1629,6 +1696,7 @@ bool age_vle_context_init_expansion_source_cursor(
     VLEContextSourceCursor *cursor, bool outgoing)
 {
     bool skip_self_loops;
+    bool initialized;
 
     Assert(vlelctx != NULL);
     Assert(run != NULL);
@@ -1646,8 +1714,17 @@ bool age_vle_context_init_expansion_source_cursor(
         skip_self_loops = !outgoing && run->used_out_source;
     }
 
-    return age_vle_context_init_source_cursor(
+    initialized = age_vle_context_init_source_cursor(
         vlelctx, cursor, run->source_vertex_id, outgoing, skip_self_loops);
+    if (!initialized)
+        return false;
+
+    cursor->target_path_length = run->source_path_length + 1;
+    cursor->terminal_label_id =
+        age_vle_context_label_id_for_target_path_length(
+            vlelctx, cursor->target_path_length);
+
+    return true;
 }
 
 bool age_vle_context_expansion_source_cursor_known_empty(
@@ -1986,6 +2063,203 @@ static VLEAdjacencyPayloadCacheEntry *age_vle_context_get_payload_cache_entry(
         terminal_property_filter_id, found);
 }
 
+static void age_vle_context_init_matrix_frontier_key(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
+    uint32 terminal_property_filter_id, VLEMatrixFrontierCacheKey *key)
+{
+    Assert(vlelctx != NULL);
+    Assert(cursor != NULL);
+    Assert(key != NULL);
+
+    age_vle_matrix_frontier_cache_init_single_source_key(
+        key, vlelctx->graph_oid, cursor->edge_label_oid, cursor->index_oid,
+        cursor->source_vertex_id, cursor->terminal_label_id,
+        cursor->target_path_length, cursor->outgoing,
+        terminal_property_filter_id);
+}
+
+bool age_vle_context_init_matrix_frontier_block_key(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursors,
+    int64 cursor_count, VLEMatrixFrontierCacheKey *key)
+{
+    const VLEContextSourceCursor **cursor_array;
+    bool initialized;
+    int64 i;
+
+    Assert(cursors != NULL);
+    Assert(cursor_count > 0);
+
+    cursor_array = palloc(sizeof(VLEContextSourceCursor *) * cursor_count);
+    for (i = 0; i < cursor_count; i++)
+        cursor_array[i] = &cursors[i];
+
+    initialized = age_vle_context_init_matrix_frontier_cursor_array_key(
+        vlelctx, cursor_array, cursor_count, key);
+    pfree(cursor_array);
+
+    return initialized;
+}
+
+bool age_vle_context_init_matrix_frontier_cursor_array_key(
+    VLE_local_context *vlelctx,
+    const VLEContextSourceCursor *const *cursors, int64 cursor_count,
+    VLEMatrixFrontierCacheKey *key)
+{
+    graphid *source_vertex_ids;
+    const VLEContextSourceCursor *first;
+    uint32 terminal_property_filter_id;
+    int64 i;
+
+    Assert(vlelctx != NULL);
+    Assert(cursors != NULL);
+    Assert(cursor_count > 0);
+    Assert(key != NULL);
+
+    if (!vlelctx->matrix_frontier_policy_known ||
+        !vlelctx->matrix_frontier_eligible)
+        return false;
+
+    first = cursors[0];
+    if (first->source_kind != VLE_TRAVERSAL_SOURCE_AGE_ADJACENCY ||
+        !OidIsValid(first->index_oid) ||
+        first->has_property_constraints)
+        return false;
+
+    terminal_property_filter_id =
+        age_vle_context_cursor_targets_terminal_property_depth(vlelctx,
+                                                               first) ?
+        age_vle_context_terminal_property_filter_id(vlelctx) :
+        0;
+
+    source_vertex_ids = palloc_array(graphid, cursor_count);
+    for (i = 0; i < cursor_count; i++)
+    {
+        const VLEContextSourceCursor *cursor = cursors[i];
+
+        if (cursor->source_kind != VLE_TRAVERSAL_SOURCE_AGE_ADJACENCY ||
+            !OidIsValid(cursor->index_oid) ||
+            cursor->has_property_constraints ||
+            cursor->index_oid != first->index_oid ||
+            cursor->edge_label_oid != first->edge_label_oid ||
+            cursor->terminal_label_id != first->terminal_label_id ||
+            cursor->target_path_length != first->target_path_length ||
+            cursor->outgoing != first->outgoing)
+        {
+            pfree(source_vertex_ids);
+            return false;
+        }
+
+        if ((age_vle_context_cursor_targets_terminal_property_depth(
+                 vlelctx, cursor) ?
+             age_vle_context_terminal_property_filter_id(vlelctx) : 0) !=
+            terminal_property_filter_id)
+        {
+            pfree(source_vertex_ids);
+            return false;
+        }
+        source_vertex_ids[i] = cursor->source_vertex_id;
+    }
+
+    age_vle_matrix_frontier_cache_init_block_key(
+        key, vlelctx->graph_oid, first->edge_label_oid, first->index_oid,
+        source_vertex_ids, cursor_count, first->terminal_label_id,
+        first->target_path_length, first->outgoing,
+        terminal_property_filter_id);
+    pfree(source_vertex_ids);
+
+    return true;
+}
+
+static bool age_vle_context_matrix_frontier_cache_lookup(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source)
+{
+    VLEMatrixFrontierCacheEntry *entry;
+
+    Assert(vlelctx != NULL);
+    Assert(source != NULL);
+
+    if (!source->use_matrix_frontier_cache)
+        return false;
+
+    entry = age_vle_matrix_frontier_cache_lookup(
+        vlelctx->root.matrix_frontier_cache, &source->matrix_key);
+    if (entry == NULL)
+    {
+        vlelctx->source_stats.matrix_frontier_cache_misses++;
+        return false;
+    }
+
+    if (entry->known_empty)
+    {
+        source->matrix_entry = entry;
+        vlelctx->source_stats.matrix_frontier_cache_hits++;
+        vlelctx->source_stats.matrix_frontier_cache_empty_hits++;
+        source->empty_suppressed = true;
+        return true;
+    }
+    if (entry->payloads != NULL)
+    {
+        source->matrix_entry = entry;
+        vlelctx->source_stats.matrix_frontier_cache_hits++;
+        source->replay_matrix_frontier_cache = true;
+        return true;
+    }
+
+    vlelctx->source_stats.matrix_frontier_cache_misses++;
+    return false;
+}
+
+static void age_vle_context_matrix_frontier_cache_seed(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    const AgeAdjacencyPayload *payload)
+{
+    bool found;
+
+    Assert(vlelctx != NULL);
+    Assert(source != NULL);
+    Assert(payload != NULL);
+
+    if (!source->use_matrix_frontier_cache)
+        return;
+
+    if (source->matrix_entry == NULL)
+    {
+        source->matrix_entry = age_vle_matrix_frontier_cache_get(
+            &vlelctx->root.matrix_frontier_cache, &source->matrix_key,
+            &found);
+        if (found)
+            age_vle_matrix_frontier_cache_discard(source->matrix_entry);
+        vlelctx->source_stats.matrix_frontier_cache_seeds++;
+    }
+
+    age_vle_matrix_frontier_cache_append(
+        source->matrix_entry, source->source_vertex_id, payload);
+}
+
+static void age_vle_context_matrix_frontier_cache_mark_empty(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source)
+{
+    bool found;
+
+    Assert(vlelctx != NULL);
+    Assert(source != NULL);
+
+    if (!source->use_matrix_frontier_cache)
+        return;
+
+    if (source->matrix_entry == NULL)
+    {
+        source->matrix_entry = age_vle_matrix_frontier_cache_get(
+            &vlelctx->root.matrix_frontier_cache, &source->matrix_key,
+            &found);
+        if (found && source->matrix_entry->known_empty)
+            return;
+    }
+
+    age_vle_matrix_frontier_cache_mark_empty(source->matrix_entry);
+    vlelctx->source_stats.matrix_frontier_cache_empty_marks++;
+}
+
 static uint32 age_vle_context_terminal_property_filter_id(
     VLE_local_context *vlelctx)
 {
@@ -2188,6 +2462,34 @@ VLEContextAgeAdjacencyPayloadSource *
 age_vle_context_begin_age_adjacency_payload_source(
     VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor)
 {
+    return age_vle_context_begin_age_adjacency_payload_source_with_matrix_key(
+        vlelctx, cursor, NULL, true);
+}
+
+VLEContextAgeAdjacencyPayloadSource *
+age_vle_context_begin_age_adjacency_payload_source_with_matrix_key(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
+    const VLEMatrixFrontierCacheKey *matrix_key, bool record_matrix_block)
+{
+    return age_vle_context_begin_age_adjacency_payload_source_internal(
+        vlelctx, cursor, matrix_key, record_matrix_block, false);
+}
+
+VLEContextAgeAdjacencyPayloadSource *
+age_vle_context_begin_age_adjacency_payload_source_batch(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
+    const VLEMatrixFrontierCacheKey *matrix_key, bool record_matrix_block)
+{
+    return age_vle_context_begin_age_adjacency_payload_source_internal(
+        vlelctx, cursor, matrix_key, record_matrix_block, true);
+}
+
+static VLEContextAgeAdjacencyPayloadSource *
+age_vle_context_begin_age_adjacency_payload_source_internal(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
+    const VLEMatrixFrontierCacheKey *matrix_key, bool record_matrix_block,
+    bool defer_visible_scan)
+{
     bool found;
     VLEContextAgeAdjacencyPayloadSource *source;
 
@@ -2211,9 +2513,38 @@ age_vle_context_begin_age_adjacency_payload_source(
     source->use_payload_cache =
         age_vle_context_uses_local_edge_state(vlelctx) &&
         !cursor->has_property_constraints;
+    source->use_matrix_frontier_cache =
+        vlelctx->matrix_frontier_policy_known &&
+        vlelctx->matrix_frontier_eligible &&
+        source->use_payload_cache;
+    if (source->use_matrix_frontier_cache)
+    {
+        if (matrix_key != NULL)
+            source->matrix_key = *matrix_key;
+        else
+            age_vle_context_init_matrix_frontier_key(
+                vlelctx, cursor, source->terminal_property_filter_id,
+                &source->matrix_key);
+        if (record_matrix_block)
+        {
+            vlelctx->source_stats.matrix_frontier_block_keys++;
+            vlelctx->source_stats.matrix_frontier_block_sources +=
+                source->matrix_key.frontier_source_count;
+        }
+        if (age_vle_context_matrix_frontier_cache_lookup(vlelctx, source))
+            return source;
+    }
 
     if (source->use_payload_cache)
     {
+        if (age_vle_context_cursor_known_empty(vlelctx, cursor))
+        {
+            age_vle_context_record_age_adjacency_empty_source_cache_hit(
+                vlelctx, cursor->outgoing);
+            source->empty_suppressed = true;
+            return source;
+        }
+
         source->cache_entry = age_vle_context_get_payload_cache_entry(
             vlelctx, cursor, source->terminal_property_filter_id, &found);
         if (found && source->cache_entry->payloads != NULL)
@@ -2230,6 +2561,12 @@ age_vle_context_begin_age_adjacency_payload_source(
             return source;
         }
         age_vle_adjacency_payload_cache_discard(source->cache_entry);
+    }
+
+    if (defer_visible_scan)
+    {
+        source->batch_visible_scan = true;
+        return source;
     }
 
     source->payload_scan = age_vle_context_get_payload_scan(vlelctx, cursor);
@@ -2253,6 +2590,7 @@ age_vle_context_begin_age_adjacency_payload_source(
         {
             age_vle_adjacency_payload_cache_mark_empty(source->cache_entry);
         }
+        age_vle_context_matrix_frontier_cache_mark_empty(vlelctx, source);
         source->empty_suppressed = true;
     }
     else
@@ -2265,6 +2603,8 @@ age_vle_context_begin_age_adjacency_payload_source(
             if (source->use_payload_cache)
                 age_vle_adjacency_payload_cache_mark_empty(
                     source->cache_entry);
+            age_vle_context_matrix_frontier_cache_mark_empty(vlelctx,
+                                                             source);
             return source;
         }
         age_vle_context_record_age_adjacency_payload_scan_run(vlelctx);
@@ -2294,9 +2634,58 @@ bool age_vle_context_age_adjacency_payload_next(
         return true;
     }
 
+    if (source->replay_matrix_frontier_cache)
+    {
+        VLEMatrixFrontierPayload *matrix_payload;
+
+        while (source->matrix_replay_index < source->matrix_entry->count)
+        {
+            matrix_payload =
+                &source->matrix_entry->payloads[source->matrix_replay_index++];
+            if (matrix_payload->source_vertex_id != source->source_vertex_id)
+                continue;
+
+            *payload = matrix_payload->payload;
+            vlelctx->source_stats.matrix_frontier_cache_replays++;
+            age_vle_context_record_age_adjacency_payload_replay(vlelctx);
+            return true;
+        }
+
+        return false;
+    }
+
     if (!age_adjacency_visible_payload_scan_next(source->payload_scan,
                                                  payload))
         return false;
+
+    age_vle_context_age_adjacency_payload_source_accept_scanned_payload(
+        vlelctx, source, payload);
+
+    return true;
+}
+
+bool
+age_vle_context_age_adjacency_payload_source_uses_visible_scan(
+    VLEContextAgeAdjacencyPayloadSource *source)
+{
+    Assert(source != NULL);
+
+    return !source->empty_suppressed &&
+           !source->replay_payload_cache &&
+           !source->replay_matrix_frontier_cache &&
+           (source->payload_scan != NULL || source->batch_visible_scan);
+}
+
+void
+age_vle_context_age_adjacency_payload_source_accept_scanned_payload(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    const AgeAdjacencyPayload *payload)
+{
+    Assert(vlelctx != NULL);
+    Assert(source != NULL);
+    Assert(payload != NULL);
+
+    age_vle_context_matrix_frontier_cache_seed(vlelctx, source, payload);
 
     if (source->use_payload_cache)
     {
@@ -2326,8 +2715,24 @@ bool age_vle_context_age_adjacency_payload_next(
     }
     source->scanned++;
     age_vle_context_record_age_adjacency_payload_scan(vlelctx);
+}
 
-    return true;
+void
+age_vle_context_age_adjacency_payload_source_mark_empty(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source)
+{
+    Assert(vlelctx != NULL);
+    Assert(source != NULL);
+
+    if (source->empty_suppressed || source->scanned > 0)
+        return;
+
+    age_vle_context_record_age_adjacency_empty_source_skip(vlelctx,
+                                                           source->outgoing);
+    if (source->use_payload_cache)
+        age_vle_adjacency_payload_cache_mark_empty(source->cache_entry);
+    age_vle_context_matrix_frontier_cache_mark_empty(vlelctx, source);
+    source->empty_suppressed = true;
 }
 
 void age_vle_context_maybe_mark_age_adjacency_frontier_empty(
@@ -2411,8 +2816,6 @@ static void age_vle_context_queue_age_adjacency_frontier_empty(
 
     source->frontier_empty_keys[source->frontier_empty_count++] =
         source_vertex_id;
-    age_vle_context_mark_age_adjacency_frontier_empty(
-        vlelctx, source, source_vertex_id);
 }
 
 static void

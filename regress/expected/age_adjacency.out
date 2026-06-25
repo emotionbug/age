@@ -906,7 +906,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 residual=2 label-groups=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 connector=adjacency-value-join bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=statistics
+               Adjacency Join Order: component=_age_default_alias_1 connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=statistics
                Adjacency Composite Source: strategy=label-block+property-source label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache
                Adjacency Terminal Property: key=i index=graph-metadata:n_i_source provider=btree domain=agtype metadata=yes value=const prefetch=eligible precheck=yes mode=deferred-prefetch
@@ -985,7 +985,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 residual=2 label-groups=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 connector=adjacency-value-join bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=statistics
+               Adjacency Join Order: component=_age_default_alias_1 connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=statistics
                Adjacency Composite Source: strategy=label-block+property-source label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache runtime-class=adjacency-composite-id-cache runtime-recommendation=keep-id-cache class-match=true
                Adjacency Terminal Property: key=i index=graph-metadata:n_i_source provider=btree domain=agtype metadata=yes value=const prefetch=eligible precheck=yes mode=id-btree-cache
@@ -1030,7 +1030,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 residual=2 label-groups=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 connector=adjacency-value-join bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=statistics
+               Adjacency Join Order: component=_age_default_alias_1 connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=statistics
                Adjacency Composite Source: strategy=label-block+property-source label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache runtime-class=adjacency-composite-id-cache runtime-recommendation=keep-id-cache class-match=true
                Adjacency Terminal Property: key=i index=graph-metadata:m_i_int8_source provider=btree domain=int8 metadata=yes value=const prefetch=eligible precheck=yes mode=id-btree-cache
@@ -1119,7 +1119,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 residual=2 label-groups=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 connector=adjacency-value-join bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=statistics
+               Adjacency Join Order: component=_age_default_alias_1 connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=statistics
                Adjacency Composite Source: strategy=label-block+property-source label=yes property=source value=runtime-slot candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache runtime-class=adjacency-composite-id-cache runtime-recommendation=keep-id-cache class-match=true
                Adjacency Terminal Property: key=i index=graph-metadata:n_i_source provider=btree domain=agtype metadata=yes value=runtime-slot prefetch=eligible precheck=yes mode=id-btree-cache
@@ -1160,7 +1160,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id,properties terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=3 residual=edge:yes/right-label:yes/right-props:join-verify edge-var:yes
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 residual=3 label-groups=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=205% index-credit=80% prefetch-threshold=2 reason=edge-payload-required payload=edge-row
-               Adjacency Join Order: component=e connector=adjacency-value-join bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=statistics
+               Adjacency Join Order: component=e connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=statistics
                Adjacency Composite Source: strategy=label-block+property-source label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=2 reason=edge-payload-required
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache
                Adjacency Terminal Property: key=i index=graph-metadata:n_i_source provider=btree domain=agtype metadata=yes value=const prefetch=eligible precheck=yes mode=deferred-prefetch
@@ -1275,7 +1275,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=1 terminal-fanout=1 composite-fanout=1 residual=2 label-groups=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 connector=adjacency-value-join bound=start-bound property=index-anchored rows=1 fanout=1 terminal-fanout=1 composite-fanout=1 source=statistics
+               Adjacency Join Order: component=_age_default_alias_1 connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=1 terminal-fanout=1 composite-fanout=1 source=statistics
                Adjacency Composite Source: strategy=label-block+property-source label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache runtime-class=adjacency-composite-id-cache runtime-recommendation=keep-id-cache class-match=true
                Adjacency Terminal Property: key=i index=graph-metadata:n_i_source provider=btree domain=agtype metadata=yes value=const prefetch=eligible precheck=yes mode=id-btree-cache

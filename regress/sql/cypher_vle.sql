@@ -1208,7 +1208,13 @@ SELECT _graphid(_label_id('vle_value_posting_feedback', 'R'), g + 3000),
        _graphid(_label_id('vle_value_posting_feedback', 'M'), g + 10),
        _graphid(_label_id('vle_value_posting_feedback', 'N'), 62),
        '{}'::agtype
-FROM generate_series(1, 4) g;
+FROM generate_series(1, 4) g
+UNION ALL
+SELECT _graphid(_label_id('vle_value_posting_feedback', 'R'), g + 4000),
+       _graphid(_label_id('vle_value_posting_feedback', 'N'), g + 219),
+       _graphid(_label_id('vle_value_posting_feedback', 'M'), 10),
+       '{}'::agtype
+FROM generate_series(1, 14) g;
 
 SELECT * FROM cypher('vle_value_posting_feedback', $$
     CREATE INDEX n_i_source FOR (n:N) ON (n.i)

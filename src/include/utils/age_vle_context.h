@@ -28,6 +28,7 @@
 #include "utils/age_vle.h"
 #include "utils/age_vle_adjacency_cache.h"
 #include "utils/age_vle_container.h"
+#include "utils/age_vle_matrix_frontier_cache.h"
 #include "utils/age_vle_root.h"
 #include "utils/age_vle_terminal_property_batch.h"
 #include "utils/age_vle_traversal.h"
@@ -65,6 +66,7 @@ typedef struct VLEContextTraversalRootState
     AgeAdjacencyVisiblePayloadScan *age_adjacency_out_scan;
     AgeAdjacencyVisiblePayloadScan *age_adjacency_in_scan;
     HTAB *age_adjacency_payload_cache;
+    HTAB *matrix_frontier_cache;
     VLE_path_function path_function; /* which path function to use */
     bool reverse_paths_to;         /* traverse paths-to from the bound end */
     bool reverse_output_path;      /* reverse traversal result before return */
@@ -194,6 +196,10 @@ typedef struct VLE_local_context
     bool empty_lifecycle_eligible;
     int64 empty_lifecycle_depth;
     int64 empty_lifecycle_batch_size;
+    bool matrix_frontier_policy_known;
+    bool matrix_frontier_eligible;
+    int64 matrix_frontier_depth;
+    int64 matrix_frontier_batch_size;
     VLEContextTraversalRootState root; /* root, bounds, source scan state */
     VLETraversalState traversal;   /* DFS frames, path stacks, edge state */
     graphid cached_vertex_id;      /* most recent vertex entry loaded by DFS */
@@ -237,6 +243,10 @@ typedef struct VLETraversalContextApply
     bool empty_lifecycle_eligible;
     int64 empty_lifecycle_depth;
     int64 empty_lifecycle_batch_size;
+    bool matrix_frontier_policy_known;
+    bool matrix_frontier_eligible;
+    int64 matrix_frontier_depth;
+    int64 matrix_frontier_batch_size;
     int64 lower;
     int64 upper;
     bool upper_infinite;
@@ -338,6 +348,10 @@ extern void age_vle_context_get_source_stats(
     VLE_local_context *vlelctx, AgeVLESourceStats *stats);
 extern void age_vle_context_record_empty_lifecycle_policy(
     VLE_local_context *vlelctx);
+extern void age_vle_context_record_matrix_frontier_policy(
+    VLE_local_context *vlelctx);
+extern void age_vle_context_record_matrix_frontier_source_run(
+    VLE_local_context *vlelctx, int64 source_count);
 extern int64 age_vle_context_empty_lifecycle_batch_size(
     VLE_local_context *vlelctx);
 extern void age_vle_context_record_source_scan(
@@ -522,9 +536,31 @@ extern void age_vle_context_end_packed_adjacency_source(
 extern VLEContextAgeAdjacencyPayloadSource *
 age_vle_context_begin_age_adjacency_payload_source(
     VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor);
+extern bool age_vle_context_init_matrix_frontier_block_key(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursors,
+    int64 cursor_count, VLEMatrixFrontierCacheKey *key);
+extern bool age_vle_context_init_matrix_frontier_cursor_array_key(
+    VLE_local_context *vlelctx,
+    const VLEContextSourceCursor *const *cursors, int64 cursor_count,
+    VLEMatrixFrontierCacheKey *key);
+extern VLEContextAgeAdjacencyPayloadSource *
+age_vle_context_begin_age_adjacency_payload_source_with_matrix_key(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
+    const VLEMatrixFrontierCacheKey *matrix_key, bool record_matrix_block);
+extern VLEContextAgeAdjacencyPayloadSource *
+age_vle_context_begin_age_adjacency_payload_source_batch(
+    VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
+    const VLEMatrixFrontierCacheKey *matrix_key, bool record_matrix_block);
 extern bool age_vle_context_age_adjacency_payload_next(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
     AgeAdjacencyPayload *payload);
+extern bool age_vle_context_age_adjacency_payload_source_uses_visible_scan(
+    VLEContextAgeAdjacencyPayloadSource *source);
+extern void age_vle_context_age_adjacency_payload_source_accept_scanned_payload(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    const AgeAdjacencyPayload *payload);
+extern void age_vle_context_age_adjacency_payload_source_mark_empty(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
 extern void age_vle_context_maybe_mark_age_adjacency_frontier_empty(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
     graphid next_source_vertex_id);

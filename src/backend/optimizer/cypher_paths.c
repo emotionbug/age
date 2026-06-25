@@ -341,10 +341,8 @@ static void cost_age_vle_stream_custom_path(CustomPath *cp,
                                             List *edge_source);
 static AgeGraphJoinCandidateTable *make_vle_stream_graph_join_table(
     RelOptInfo *rel, CustomPath *cp, List *func_args, List *edge_source);
-static const char *vle_stream_join_order_connector(List *func_args,
-                                                   List *edge_source);
-static const char *vle_stream_join_order_property(List *func_args,
-                                                  List *edge_source);
+static const char *vle_stream_base_join_order_property(List *func_args,
+                                                       List *edge_source);
 static bool vle_stream_func_args_have_bound_endpoints(List *func_args);
 static List *make_age_vle_stream_const_flags(List *func_args);
 static List *make_age_vle_stream_graph(List *func_args);
@@ -2229,12 +2227,22 @@ static AgeGraphJoinCandidateTable *make_vle_stream_graph_join_table(
     RelOptInfo *rel, CustomPath *cp, List *func_args, List *edge_source)
 {
     AgeGraphJoinCandidateTable *table;
-    AgeGraphJoinCandidate *fallback_candidate;
-    const char *connector;
+    AgeGraphJoinCandidateRequest request;
+    const char *base_connector;
+    const char *composite_connector;
     const char *bound;
-    const char *order_property;
+    const char *base_order_property;
     const char *source_evidence;
+    const char *composite_planned;
     bool has_bound_endpoints;
+    bool has_composite_prefilter;
+    bool has_matrix_frontier;
+    double start_fanout;
+    double end_fanout;
+    double base_fanout;
+    double composite_fanout;
+    double materialization_weight;
+    const double matrix_frontier_min_fanout = 16.0;
 
     (void)rel;
 
@@ -2245,81 +2253,154 @@ static AgeGraphJoinCandidateTable *make_vle_stream_graph_join_table(
     if (source_evidence == NULL)
         source_evidence = vle_stream_edge_source_text_field(
             edge_source, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_ACTIVE_DIRECTION);
-    connector = vle_stream_join_order_connector(func_args, edge_source);
     bound = vle_stream_edge_source_text_field(
         edge_source, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_ACTIVE_DIRECTION);
-    order_property = vle_stream_join_order_property(func_args, edge_source);
-
-    age_graph_join_table_add_path_candidate(
-        table, &cp->path, "vle", connector, bound, order_property,
-        source_evidence != NULL ? source_evidence : "edge-source",
-        true);
     has_bound_endpoints = vle_stream_func_args_have_bound_endpoints(
         func_args);
     if (has_bound_endpoints)
+        base_connector = "vle-expand-into";
+    else if (bound != NULL && strcmp(bound, "both") == 0)
+        base_connector = "vle-bidirectional-expand";
+    else
+        base_connector = "vle-expand";
+    base_order_property = vle_stream_base_join_order_property(func_args,
+                                                             edge_source);
+    start_fanout = (double)vle_stream_descriptor_int8_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_START_FANOUT, 0);
+    end_fanout = (double)vle_stream_descriptor_int8_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_END_FANOUT, 0);
+    materialization_weight = (double)vle_stream_descriptor_int8_field(
+        edge_source,
+        AGE_VLE_STREAM_EDGE_SOURCE_POLICY_MATERIALIZATION_WEIGHT, 1);
+    if (bound != NULL && strcmp(bound, "in") == 0)
+        base_fanout = end_fanout;
+    else if (bound != NULL && strcmp(bound, "both") == 0)
+        base_fanout = start_fanout + end_fanout;
+    else
+        base_fanout = start_fanout;
+    if (base_fanout <= 0.0)
+        base_fanout = Max(cp->path.rows, 1.0);
+    if (materialization_weight <= 0.0)
+        materialization_weight = 1.0;
+    composite_planned = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_PLANNED);
+    has_composite_prefilter = vle_stream_edge_source_bool_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_KNOWN) &&
+        composite_planned != NULL &&
+        strcmp(composite_planned, "property-prefilter") == 0;
+    has_matrix_frontier = !has_bound_endpoints &&
+        !has_composite_prefilter &&
+        base_fanout >= matrix_frontier_min_fanout &&
+        (strcmp(base_order_property, "vle-frontier-anchored") == 0 ||
+         bound == NULL ||
+         strcmp(bound, "both") != 0);
+
+    if (!has_composite_prefilter)
     {
-        const char *fallback_connector;
+        age_graph_join_table_add_path_candidate(
+            table, &cp->path, "vle", base_connector, bound,
+            base_order_property,
+            source_evidence != NULL ? source_evidence : "edge-source",
+            true);
+        if (has_matrix_frontier)
+        {
+            memset(&request, 0, sizeof(request));
+            request.component = "vle";
+            request.connector = "matrix-frontier-expand";
+            request.bound = bound;
+            request.order_property = "matrix-frontier-anchored";
+            request.source_evidence = "matrix-frontier:native";
+            request.required_outer = PATH_REQ_OUTER(&cp->path);
+            request.provided_relids =
+                cp->path.parent != NULL ? cp->path.parent->relids : NULL;
+            request.rows = cp->path.rows;
+            request.startup_cost = cp->path.startup_cost;
+            request.total_cost = cp->path.startup_cost +
+                base_fanout * cpu_operator_cost * 0.25 +
+                Max(cp->path.rows, 1.0) * cpu_tuple_cost * 0.10;
+            request.output_width =
+                cp->path.pathtarget != NULL ? cp->path.pathtarget->width : 0;
+            request.parallel_safe = cp->path.parallel_safe;
+            request.parallel_aware = cp->path.parallel_aware;
+            request.parallel_workers = cp->path.parallel_workers;
+            request.gather_cost = 0;
+            request.order_preserving = cp->path.pathkeys != NIL;
+            request.shared_state_required = true;
+            age_graph_join_table_add_candidate(table, &request);
+        }
+    }
 
-        if (strcmp(connector, "vle-composite-expand-into") == 0)
-            fallback_connector = "vle-composite-expand";
+    if (has_composite_prefilter)
+    {
+        composite_fanout = (double)vle_stream_descriptor_int8_field(
+            edge_source, AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_FANOUT,
+            0);
+
+        if (composite_fanout <= 0.0)
+            composite_fanout = Max(cp->path.rows, 1.0);
+
+        if (has_bound_endpoints)
+            composite_connector = "vle-composite-expand-into";
         else
-            fallback_connector = "vle-expand";
+            composite_connector = "vle-composite-expand";
 
-        fallback_candidate = age_graph_join_table_add_path_candidate(
-            table, &cp->path, "vle", fallback_connector, bound,
-            order_property, "edge-source-fallback", true);
-        fallback_candidate->connector.total_cost +=
-            Max(cp->path.rows, 1.0) * cpu_tuple_cost;
+        memset(&request, 0, sizeof(request));
+        request.component = "vle";
+        request.connector = composite_connector;
+        request.bound = bound;
+        request.order_property = "index-anchored";
+        request.source_evidence =
+            source_evidence != NULL ? source_evidence : "composite-source";
+        request.required_outer = PATH_REQ_OUTER(&cp->path);
+        request.provided_relids =
+            cp->path.parent != NULL ? cp->path.parent->relids : NULL;
+        request.rows = cp->path.rows;
+        request.startup_cost = cp->path.startup_cost;
+        request.total_cost = cp->path.startup_cost;
+        request.output_width =
+            cp->path.pathtarget != NULL ? cp->path.pathtarget->width : 0;
+        request.parallel_safe = cp->path.parallel_safe;
+        request.parallel_aware = cp->path.parallel_aware;
+        request.parallel_workers = cp->path.parallel_workers;
+        request.gather_cost = 0;
+        request.order_preserving = cp->path.pathkeys != NIL;
+        request.shared_state_required = true;
+        age_graph_join_table_add_candidate(table, &request);
+
+        memset(&request, 0, sizeof(request));
+        request.component = "vle";
+        request.connector = has_bound_endpoints ? "vle-expand" :
+            base_connector;
+        request.bound = bound;
+        request.order_property = base_order_property;
+        request.source_evidence = "edge-source-fallback";
+        request.required_outer = PATH_REQ_OUTER(&cp->path);
+        request.provided_relids =
+            cp->path.parent != NULL ? cp->path.parent->relids : NULL;
+        request.rows = clamp_row_est(base_fanout);
+        request.startup_cost = cp->path.startup_cost;
+        request.total_cost = cp->path.startup_cost +
+            base_fanout * materialization_weight * cpu_tuple_cost +
+            Max(base_fanout - composite_fanout, 1.0) * cpu_operator_cost;
+        request.output_width =
+            cp->path.pathtarget != NULL ? cp->path.pathtarget->width : 0;
+        request.parallel_safe = cp->path.parallel_safe;
+        request.parallel_aware = cp->path.parallel_aware;
+        request.parallel_workers = cp->path.parallel_workers;
+        request.gather_cost = 0;
+        request.order_preserving = cp->path.pathkeys != NIL;
+        request.shared_state_required = true;
+        age_graph_join_table_add_candidate(table, &request);
     }
 
     return table;
 }
 
-static const char *vle_stream_join_order_connector(List *func_args,
-                                                   List *edge_source)
+static const char *vle_stream_base_join_order_property(List *func_args,
+                                                       List *edge_source)
 {
-    const char *composite_planned;
-    const char *active_direction;
-
-    composite_planned = vle_stream_edge_source_text_field(
-        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_PLANNED);
-    if (vle_stream_edge_source_bool_field(
-            edge_source,
-            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_KNOWN) &&
-        composite_planned != NULL &&
-        strcmp(composite_planned, "property-prefilter") == 0)
-    {
-        if (vle_stream_func_args_have_bound_endpoints(func_args))
-            return "vle-composite-expand-into";
-        return "vle-composite-expand";
-    }
-
-    if (vle_stream_func_args_have_bound_endpoints(func_args))
-        return "vle-expand-into";
-
-    active_direction = vle_stream_edge_source_text_field(
-        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_ACTIVE_DIRECTION);
-    if (active_direction != NULL && strcmp(active_direction, "both") == 0)
-        return "vle-bidirectional-expand";
-
-    return "vle-expand";
-}
-
-static const char *vle_stream_join_order_property(List *func_args,
-                                                  List *edge_source)
-{
-    const char *composite_planned;
     const char *start_fanout_source;
     const char *end_fanout_source;
-
-    composite_planned = vle_stream_edge_source_text_field(
-        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_PLANNED);
-    if (vle_stream_edge_source_bool_field(
-            edge_source,
-            AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_KNOWN) &&
-        composite_planned != NULL &&
-        strcmp(composite_planned, "property-prefilter") == 0)
-        return "index-anchored";
 
     start_fanout_source = vle_stream_edge_source_text_field(
         edge_source, AGE_VLE_STREAM_EDGE_SOURCE_START_FANOUT_SOURCE);
@@ -2379,9 +2460,11 @@ static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
     List *range_direction;
     List *output;
     List *edge_source;
+    List *graph_join_descriptor = NIL;
     Node *terminal_property_predicate_expr;
     Node *plan_terminal_property_predicate_expr = NULL;
     List *scan_quals;
+    AgeGraphJoinCandidateTable *graph_join_table;
 
     func_args = linitial_node(List, best_path->custom_private);
     nargs_value = lsecond_node(Integer, best_path->custom_private);
@@ -2397,6 +2480,11 @@ static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
         &plan_terminal_property_predicate_expr, root);
     if (plan_terminal_property_predicate_expr != NULL)
         terminal_property_predicate_expr = plan_terminal_property_predicate_expr;
+    graph_join_table =
+        make_vle_stream_graph_join_table(rel, best_path, func_args,
+                                         edge_source);
+    graph_join_descriptor = age_graph_join_table_selected_private(
+        graph_join_table);
 
     cs = makeNode(CustomScan);
     cs->scan.plan.startup_cost = best_path->path.startup_cost;
@@ -2438,6 +2526,8 @@ static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
                                  copyObject(edge_source));
     cs->custom_private = lappend(
         cs->custom_private, copyObject(terminal_property_predicate_expr));
+    cs->custom_private = lappend(cs->custom_private,
+                                 copyObject(graph_join_descriptor));
     cs->custom_scan_tlist = copyObject(tlist);
     cs->custom_relids = bms_make_singleton(rel->relid);
     cs->methods = &age_vle_stream_scan_methods;
@@ -4732,11 +4822,11 @@ static const char *custom_path_vle_join_order_property(
     }
 
     if (list_length(custom_path->custom_private) >
-        AGE_VLE_STREAM_PRIVATE_COUNT + 1)
+        AGE_VLE_STREAM_PRIVATE_GRAPH_JOIN + 1)
     {
         graph_join_descriptor = list_nth_node(
             List, custom_path->custom_private,
-            AGE_VLE_STREAM_PRIVATE_COUNT + 1);
+            AGE_VLE_STREAM_PRIVATE_GRAPH_JOIN + 1);
         if (list_length(graph_join_descriptor) ==
             AGE_GRAPH_JOIN_DESC_COUNT)
         {
@@ -5614,10 +5704,40 @@ static AgeGraphJoinCandidateTable *make_adjacency_match_graph_join_table(
     const AdjacencyMatchPayloadRequest *payload_request)
 {
     AgeGraphJoinCandidateTable *table;
+    AgeGraphJoinCandidateRequest request;
 
     (void)rel;
 
     table = age_graph_join_make_candidate_table();
+    if (adjacency_match_has_terminal_property_prefetch(candidate))
+    {
+        memset(&request, 0, sizeof(request));
+        request.component = candidate->edge_alias != NULL ?
+            candidate->edge_alias : "edge";
+        request.connector = "node-property-index-seek";
+        request.bound = adjacency_match_join_order_bound(candidate);
+        request.order_property = "index-anchored";
+        request.source_evidence =
+            candidate->right_property_index_source != NULL ?
+            candidate->right_property_index_source : "property-source";
+        request.required_outer = PATH_REQ_OUTER(&cp->path);
+        request.provided_relids =
+            cp->path.parent != NULL ? cp->path.parent->relids : NULL;
+        request.rows = cp->path.rows;
+        request.startup_cost = cp->path.startup_cost;
+        request.total_cost = cp->path.startup_cost +
+            Max(candidate->estimated_composite_fanout, 1.0) *
+            cpu_operator_cost * 0.10;
+        request.output_width =
+            cp->path.pathtarget != NULL ? cp->path.pathtarget->width : 0;
+        request.parallel_safe = cp->path.parallel_safe;
+        request.parallel_aware = cp->path.parallel_aware;
+        request.parallel_workers = cp->path.parallel_workers;
+        request.gather_cost = 0;
+        request.order_preserving = cp->path.pathkeys != NIL;
+        request.shared_state_required = false;
+        age_graph_join_table_add_candidate(table, &request);
+    }
     if (adjacency_match_has_terminal_property_prefetch(candidate))
     {
         age_graph_join_table_add_path_candidate(

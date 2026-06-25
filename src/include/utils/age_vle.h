@@ -113,6 +113,10 @@ typedef struct AgeVLEInput
     bool empty_lifecycle_eligible;
     int64 empty_lifecycle_depth;
     int64 empty_lifecycle_batch_size;
+    bool matrix_frontier_policy_known;
+    bool matrix_frontier_eligible;
+    int64 matrix_frontier_depth;
+    int64 matrix_frontier_batch_size;
 } AgeVLEInput;
 
 typedef struct AgeVLEInputEdgePrototype
@@ -198,6 +202,21 @@ typedef struct AgeVLESourceStats
     int64 empty_lifecycle_context_eligible_runs;
     int64 empty_lifecycle_context_depth;
     int64 empty_lifecycle_batch_capacity;
+    int64 matrix_frontier_context_runs;
+    int64 matrix_frontier_context_eligible_runs;
+    int64 matrix_frontier_context_depth;
+    int64 matrix_frontier_batch_capacity;
+    int64 matrix_frontier_cache_hits;
+    int64 matrix_frontier_cache_misses;
+    int64 matrix_frontier_cache_seeds;
+    int64 matrix_frontier_cache_replays;
+    int64 matrix_frontier_cache_empty_hits;
+    int64 matrix_frontier_cache_empty_marks;
+    int64 matrix_frontier_block_keys;
+    int64 matrix_frontier_block_sources;
+    int64 matrix_frontier_source_runs;
+    int64 matrix_frontier_source_run_sources;
+    int64 matrix_frontier_source_run_max;
     int64 root_empty_completion_count;
     int64 root_empty_completion_out;
     int64 root_empty_completion_in;

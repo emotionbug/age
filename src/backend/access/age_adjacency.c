@@ -354,6 +354,31 @@ struct AgeAdjacencyVisiblePayloadScan
     OffsetNumber delta_offnum;
 };
 
+typedef struct AgeAdjacencyVisiblePayloadKeyCursor
+{
+    graphid active_key;
+    bool key_active;
+    bool main_active;
+    uint32 main_remaining;
+    int64 main_label_candidate_count;
+    bool main_composite_estimate_recorded;
+    BlockNumber main_blkno;
+    OffsetNumber main_offnum;
+    uint16 main_posting_index;
+    int main_cache_index;
+    BlockNumber delta_blkno;
+    OffsetNumber delta_offnum;
+    AgeAdjacencyPayload payload;
+    bool payload_valid;
+} AgeAdjacencyVisiblePayloadKeyCursor;
+
+struct AgeAdjacencyVisiblePayloadRunScan
+{
+    AgeAdjacencyVisiblePayloadScan *scan;
+    AgeAdjacencyVisiblePayloadKeyCursor *cursors;
+    int64 cursor_count;
+};
+
 typedef struct AgeAdjacencyCandidateStore
 {
     Tuplestorestate *tupstore;
@@ -607,6 +632,21 @@ static bool age_adjacency_visible_payload_scan_next_main(
     AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyPayload *payload);
 static bool age_adjacency_visible_payload_scan_next_delta(
     AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyPayload *payload);
+static bool age_adjacency_visible_payload_key_cursor_begin(
+    AgeAdjacencyVisiblePayloadScan *scan,
+    AgeAdjacencyVisiblePayloadKeyCursor *cursor, graphid key);
+static bool age_adjacency_visible_payload_key_cursor_next(
+    AgeAdjacencyVisiblePayloadScan *scan,
+    AgeAdjacencyVisiblePayloadKeyCursor *cursor,
+    AgeAdjacencyPayload *payload);
+static bool age_adjacency_visible_payload_key_cursor_next_main(
+    AgeAdjacencyVisiblePayloadScan *scan,
+    AgeAdjacencyVisiblePayloadKeyCursor *cursor,
+    AgeAdjacencyPayload *payload);
+static bool age_adjacency_visible_payload_key_cursor_next_delta(
+    AgeAdjacencyVisiblePayloadScan *scan,
+    AgeAdjacencyVisiblePayloadKeyCursor *cursor,
+    AgeAdjacencyPayload *payload);
 static bool age_adjacency_store_candidate(const AgeAdjacencyPayload *payload,
                                           void *callback_state);
 static bool age_adjacency_store_candidate_row(const AgeAdjacencyPayload *payload,
@@ -5109,7 +5149,7 @@ bool
 age_adjacency_visible_payload_scan_begin_key(
     AgeAdjacencyVisiblePayloadScan *scan, graphid key)
 {
-    AgeAdjacencyDirectoryEntryData entry;
+    AgeAdjacencyVisiblePayloadKeyCursor cursor;
 
     if (scan == NULL)
     {
@@ -5118,113 +5158,24 @@ age_adjacency_visible_payload_scan_begin_key(
                  errmsg("age_adjacency visible payload scan is required")));
     }
 
-    scan->active_key = key;
-    scan->key_active = true;
-    scan->main_active = false;
-    scan->main_remaining = 0;
-    scan->main_label_candidate_count = 0;
-    scan->main_blkno = InvalidBlockNumber;
-    scan->main_offnum = FirstOffsetNumber;
-    scan->main_posting_index = 0;
-    scan->main_cache_index = 0;
-    scan->main_composite_estimate_recorded = false;
-    scan->main_cache.valid = false;
-    scan->delta_blkno = scan->meta.first_delta_blkno;
-    scan->delta_offnum = FirstOffsetNumber;
-    scan->target.callback = NULL;
-    scan->target.callback_state = NULL;
+    if (!age_adjacency_visible_payload_key_cursor_begin(scan, &cursor, key))
+        return false;
 
-    if (age_adjacency_find_directory_entry_cached(scan, key, &entry))
-    {
-        bool label_mismatch;
-        bool property_mismatch;
+    scan->active_key = cursor.active_key;
+    scan->key_active = cursor.key_active;
+    scan->main_active = cursor.main_active;
+    scan->main_remaining = cursor.main_remaining;
+    scan->main_label_candidate_count = cursor.main_label_candidate_count;
+    scan->main_composite_estimate_recorded =
+        cursor.main_composite_estimate_recorded;
+    scan->main_blkno = cursor.main_blkno;
+    scan->main_offnum = cursor.main_offnum;
+    scan->main_posting_index = cursor.main_posting_index;
+    scan->main_cache_index = cursor.main_cache_index;
+    scan->delta_blkno = cursor.delta_blkno;
+    scan->delta_offnum = cursor.delta_offnum;
 
-        if (age_adjacency_directory_entry_matches_composite_target(
-                &entry, &scan->target, &label_mismatch,
-                &property_mismatch))
-        {
-            age_adjacency_visible_payload_scan_record_composite_estimate(
-                scan, &entry);
-            scan->main_active = true;
-            scan->main_remaining = entry.posting_count;
-            scan->main_label_candidate_count =
-                age_adjacency_directory_entry_terminal_label_postings(
-                    &entry, scan->target.terminal_label_id);
-            scan->main_blkno = entry.first_blkno;
-            scan->main_offnum = entry.first_offnum;
-            scan->main_posting_index = 0;
-        }
-        else
-        {
-            if (!label_mismatch)
-                age_adjacency_visible_payload_scan_record_composite_estimate(
-                    scan, &entry);
-            if (label_mismatch)
-            {
-                scan->target.terminal_label_filtered += entry.posting_count;
-                scan->target.terminal_directory_label_filtered +=
-                    entry.posting_count;
-                scan->target.terminal_cache_label_filtered +=
-                    entry.posting_count;
-            }
-            else if (property_mismatch)
-            {
-                scan->target.terminal_property_filtered += entry.posting_count;
-                scan->target.terminal_vertex_set_directory_filtered +=
-                    entry.posting_count;
-                if (age_adjacency_directory_entry_range_rejects(
-                        &entry, &scan->target))
-                {
-                    scan->target.terminal_vertex_set_directory_range_filtered +=
-                        entry.posting_count;
-                }
-                if (age_adjacency_directory_entry_exact_rejects(
-                        &entry, &scan->target))
-                {
-                    scan->target.terminal_vertex_set_directory_exact_filtered +=
-                        entry.posting_count;
-                }
-                if (age_adjacency_directory_entry_label_bloom_rejects(
-                        &entry, &scan->target))
-                {
-                    scan->target.terminal_vertex_set_directory_label_bloom_filtered +=
-                        entry.posting_count;
-                }
-                if (age_adjacency_directory_entry_compressed_rejects(
-                        &entry, &scan->target))
-                {
-                    scan->target.terminal_vertex_set_directory_compressed_filtered +=
-                        entry.posting_count;
-                }
-                if (age_adjacency_directory_entry_value_summary_rejects(
-                        &entry, &scan->target))
-                {
-                    scan->target.terminal_vertex_set_directory_value_filtered +=
-                        entry.posting_count;
-                }
-                if (age_adjacency_directory_entry_value_posting_rejects(
-                        &entry, &scan->target))
-                {
-                    scan->target.terminal_vertex_set_directory_value_posting_filtered +=
-                        entry.posting_count;
-                }
-                if (age_adjacency_directory_entry_wide_bloom_rejects(
-                        &entry, &scan->target))
-                {
-                    scan->target.terminal_vertex_set_directory_wide_bloom_filtered +=
-                        entry.posting_count;
-                }
-                scan->target.terminal_cache_property_filtered +=
-                    entry.posting_count;
-                if (scan->target.has_terminal_property_summary)
-                    scan->target.terminal_composite_directory_filtered +=
-                        entry.posting_count;
-            }
-            scan->target.terminal_cache_filtered += entry.posting_count;
-        }
-    }
-
-    return scan->main_active || BlockNumberIsValid(scan->delta_blkno);
+    return true;
 }
 
 int64
@@ -5305,6 +5256,104 @@ age_adjacency_visible_payload_scan_next(
 
     scan->key_active = false;
     return false;
+}
+
+AgeAdjacencyVisiblePayloadRunScan *
+age_adjacency_begin_visible_payload_run_scan(
+    Oid index_oid, Snapshot snapshot, bool fetch_properties,
+    int32 terminal_label_id, const graphid *keys, int64 key_count)
+{
+    AgeAdjacencyVisiblePayloadRunScan *run_scan;
+    int64 i;
+
+    if (keys == NULL || key_count <= 0)
+        return NULL;
+
+    run_scan = palloc0(sizeof(*run_scan));
+    run_scan->scan = age_adjacency_begin_visible_payload_scan(
+        index_oid, snapshot, fetch_properties);
+    age_adjacency_visible_payload_scan_set_terminal_label(run_scan->scan,
+                                                          terminal_label_id);
+    run_scan->cursors = palloc0_array(AgeAdjacencyVisiblePayloadKeyCursor,
+                                      key_count);
+    run_scan->cursor_count = key_count;
+
+    for (i = 0; i < key_count; i++)
+    {
+        AgeAdjacencyVisiblePayloadKeyCursor *cursor;
+
+        cursor = &run_scan->cursors[i];
+        if (!age_adjacency_visible_payload_key_cursor_begin(
+                run_scan->scan, cursor, keys[i]))
+            continue;
+        cursor->payload_valid =
+            age_adjacency_visible_payload_key_cursor_next(
+                run_scan->scan, cursor, &cursor->payload);
+    }
+
+    return run_scan;
+}
+
+bool
+age_adjacency_visible_payload_run_scan_next(
+    AgeAdjacencyVisiblePayloadRunScan *scan, AgeAdjacencyPayload *payload,
+    int64 *key_index)
+{
+    AgeAdjacencyVisiblePayloadKeyCursor *selected;
+    int64 selected_index;
+    int64 i;
+
+    if (scan == NULL || payload == NULL || key_index == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload run scan next requires "
+                        "scan, payload, and key_index")));
+    }
+
+    selected = NULL;
+    selected_index = -1;
+    for (i = 0; i < scan->cursor_count; i++)
+    {
+        AgeAdjacencyVisiblePayloadKeyCursor *candidate;
+
+        candidate = &scan->cursors[i];
+        if (!candidate->payload_valid)
+            continue;
+        if (selected == NULL ||
+            candidate->payload.next_vertex_id <
+            selected->payload.next_vertex_id ||
+            (candidate->payload.next_vertex_id ==
+             selected->payload.next_vertex_id &&
+             candidate->payload.edge_id < selected->payload.edge_id))
+        {
+            selected = candidate;
+            selected_index = i;
+        }
+    }
+
+    if (selected == NULL)
+        return false;
+
+    *payload = selected->payload;
+    *key_index = selected_index;
+    selected->payload_valid = age_adjacency_visible_payload_key_cursor_next(
+        scan->scan, selected, &selected->payload);
+
+    return true;
+}
+
+void
+age_adjacency_end_visible_payload_run_scan(
+    AgeAdjacencyVisiblePayloadRunScan *scan)
+{
+    if (scan == NULL)
+        return;
+
+    age_adjacency_end_visible_payload_scan(scan->scan);
+    if (scan->cursors != NULL)
+        pfree(scan->cursors);
+    pfree(scan);
 }
 
 int64
@@ -5621,6 +5670,285 @@ age_adjacency_visible_payload_scan_foreach(
     }
 
     return matches;
+}
+
+static bool
+age_adjacency_visible_payload_key_cursor_begin(
+    AgeAdjacencyVisiblePayloadScan *scan,
+    AgeAdjacencyVisiblePayloadKeyCursor *cursor, graphid key)
+{
+    AgeAdjacencyDirectoryEntryData entry;
+
+    Assert(scan != NULL);
+    Assert(cursor != NULL);
+
+    memset(cursor, 0, sizeof(*cursor));
+    cursor->active_key = key;
+    cursor->key_active = true;
+    cursor->main_active = false;
+    cursor->main_remaining = 0;
+    cursor->main_label_candidate_count = 0;
+    cursor->main_blkno = InvalidBlockNumber;
+    cursor->main_offnum = FirstOffsetNumber;
+    cursor->main_posting_index = 0;
+    cursor->main_cache_index = 0;
+    cursor->main_composite_estimate_recorded = false;
+    cursor->delta_blkno = scan->meta.first_delta_blkno;
+    cursor->delta_offnum = FirstOffsetNumber;
+    scan->main_cache.valid = false;
+    scan->target.callback = NULL;
+    scan->target.callback_state = NULL;
+
+    if (age_adjacency_find_directory_entry_cached(scan, key, &entry))
+    {
+        bool label_mismatch;
+        bool property_mismatch;
+
+        if (age_adjacency_directory_entry_matches_composite_target(
+                &entry, &scan->target, &label_mismatch,
+                &property_mismatch))
+        {
+            age_adjacency_visible_payload_scan_record_composite_estimate(
+                scan, &entry);
+            cursor->main_active = true;
+            cursor->main_remaining = entry.posting_count;
+            cursor->main_label_candidate_count =
+                age_adjacency_directory_entry_terminal_label_postings(
+                    &entry, scan->target.terminal_label_id);
+            cursor->main_blkno = entry.first_blkno;
+            cursor->main_offnum = entry.first_offnum;
+            cursor->main_posting_index = 0;
+        }
+        else
+        {
+            if (!label_mismatch)
+                age_adjacency_visible_payload_scan_record_composite_estimate(
+                    scan, &entry);
+            if (label_mismatch)
+            {
+                scan->target.terminal_label_filtered += entry.posting_count;
+                scan->target.terminal_directory_label_filtered +=
+                    entry.posting_count;
+                scan->target.terminal_cache_label_filtered +=
+                    entry.posting_count;
+            }
+            else if (property_mismatch)
+            {
+                scan->target.terminal_property_filtered += entry.posting_count;
+                scan->target.terminal_vertex_set_directory_filtered +=
+                    entry.posting_count;
+                if (age_adjacency_directory_entry_range_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_range_filtered +=
+                        entry.posting_count;
+                }
+                if (age_adjacency_directory_entry_exact_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_exact_filtered +=
+                        entry.posting_count;
+                }
+                if (age_adjacency_directory_entry_label_bloom_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_label_bloom_filtered +=
+                        entry.posting_count;
+                }
+                if (age_adjacency_directory_entry_compressed_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_compressed_filtered +=
+                        entry.posting_count;
+                }
+                if (age_adjacency_directory_entry_value_summary_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_value_filtered +=
+                        entry.posting_count;
+                }
+                if (age_adjacency_directory_entry_value_posting_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_value_posting_filtered +=
+                        entry.posting_count;
+                }
+                if (age_adjacency_directory_entry_wide_bloom_rejects(
+                        &entry, &scan->target))
+                {
+                    scan->target.terminal_vertex_set_directory_wide_bloom_filtered +=
+                        entry.posting_count;
+                }
+                scan->target.terminal_cache_property_filtered +=
+                    entry.posting_count;
+                if (scan->target.has_terminal_property_summary)
+                    scan->target.terminal_composite_directory_filtered +=
+                        entry.posting_count;
+            }
+            scan->target.terminal_cache_filtered += entry.posting_count;
+        }
+    }
+
+    return cursor->main_active || BlockNumberIsValid(cursor->delta_blkno);
+}
+
+static bool
+age_adjacency_visible_payload_key_cursor_next(
+    AgeAdjacencyVisiblePayloadScan *scan,
+    AgeAdjacencyVisiblePayloadKeyCursor *cursor,
+    AgeAdjacencyPayload *payload)
+{
+    Assert(scan != NULL);
+    Assert(cursor != NULL);
+    Assert(payload != NULL);
+
+    if (!cursor->key_active)
+        return false;
+
+    if (age_adjacency_visible_payload_key_cursor_next_main(scan, cursor,
+                                                           payload))
+        return true;
+
+    if (age_adjacency_visible_payload_key_cursor_next_delta(scan, cursor,
+                                                            payload))
+        return true;
+
+    cursor->key_active = false;
+    return false;
+}
+
+static bool
+age_adjacency_visible_payload_key_cursor_next_main(
+    AgeAdjacencyVisiblePayloadScan *scan,
+    AgeAdjacencyVisiblePayloadKeyCursor *cursor,
+    AgeAdjacencyPayload *payload)
+{
+    Assert(scan != NULL);
+    Assert(cursor != NULL);
+    Assert(payload != NULL);
+
+    while (cursor->main_active && cursor->main_remaining > 0 &&
+           BlockNumberIsValid(cursor->main_blkno))
+    {
+        scan->main_remaining = cursor->main_remaining;
+        scan->main_offnum = cursor->main_offnum;
+        scan->main_posting_index = cursor->main_posting_index;
+        age_adjacency_load_main_cache(scan, cursor->main_blkno);
+        cursor->main_remaining = scan->main_remaining;
+        while (cursor->main_cache_index < scan->main_cache.count &&
+               cursor->main_remaining > 0)
+        {
+            AgeAdjacencyCachedPosting *cached =
+                &scan->main_cache.postings[cursor->main_cache_index++];
+            AgeAdjacencyPostingData posting;
+
+            cursor->main_remaining--;
+            posting.key = cursor->active_key;
+            ItemPointerCopy(&cached->posting.heap_tid, &posting.heap_tid);
+            posting.edge_id = cached->posting.edge_id;
+            posting.next_vertex_id = cached->posting.next_vertex_id;
+
+            if (age_adjacency_posting_visible_payload(&posting,
+                                                      &scan->target,
+                                                      payload))
+                return true;
+        }
+
+        cursor->main_blkno = scan->main_cache.next_blkno;
+        cursor->main_offnum = scan->main_cache.next_offnum;
+        cursor->main_posting_index = scan->main_cache.next_posting_index;
+        cursor->main_cache_index = 0;
+        scan->main_cache.valid = false;
+    }
+
+    cursor->main_active = false;
+    return false;
+}
+
+static bool
+age_adjacency_visible_payload_key_cursor_next_delta(
+    AgeAdjacencyVisiblePayloadScan *scan,
+    AgeAdjacencyVisiblePayloadKeyCursor *cursor,
+    AgeAdjacencyPayload *payload)
+{
+    Assert(scan != NULL);
+    Assert(cursor != NULL);
+    Assert(payload != NULL);
+
+    while (BlockNumberIsValid(cursor->delta_blkno))
+    {
+        Buffer buf;
+        Page page;
+        AgeAdjacencyPageOpaque opaque;
+        BlockNumber next_blkno;
+        OffsetNumber maxoff;
+        OffsetNumber offnum;
+
+        buf = ReadBuffer(scan->index_rel, cursor->delta_blkno);
+        LockBuffer(buf, BUFFER_LOCK_SHARE);
+        page = BufferGetPage(buf);
+
+        opaque = (AgeAdjacencyPageOpaque) PageGetSpecialPointer(page);
+        if (opaque->magic != AGE_ADJACENCY_MAGIC ||
+            opaque->version != AGE_ADJACENCY_VERSION ||
+            opaque->page_type != AGE_ADJACENCY_PAGE_DELTA)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INDEX_CORRUPTED),
+                     errmsg("age_adjacency delta page %u is invalid",
+                            cursor->delta_blkno)));
+        }
+
+        next_blkno = opaque->next_blkno;
+        if (!age_adjacency_delta_page_may_contain_key(opaque,
+                                                      cursor->active_key))
+        {
+            cursor->delta_blkno = next_blkno;
+            cursor->delta_offnum = FirstOffsetNumber;
+            UnlockReleaseBuffer(buf);
+            continue;
+        }
+
+        maxoff = PageGetMaxOffsetNumber(page);
+        for (offnum = cursor->delta_offnum;
+             offnum <= maxoff;
+             offnum = OffsetNumberNext(offnum))
+        {
+            ItemId item_id = PageGetItemId(page, offnum);
+            AgeAdjacencyDeltaCompactPosting delta_posting;
+            AgeAdjacencyPostingData posting;
+
+            if (!ItemIdIsNormal(item_id))
+                continue;
+
+            delta_posting = (AgeAdjacencyDeltaCompactPosting) PageGetItem(
+                page, item_id);
+            age_adjacency_delta_posting_get_posting(delta_posting, opaque,
+                                                    &posting);
+            if (posting.key != cursor->active_key)
+                continue;
+
+            cursor->delta_offnum = OffsetNumberNext(offnum);
+            if (cursor->delta_offnum > maxoff)
+            {
+                cursor->delta_blkno = next_blkno;
+                cursor->delta_offnum = FirstOffsetNumber;
+            }
+            if (age_adjacency_posting_visible_payload(&posting,
+                                                      &scan->target,
+                                                      payload))
+            {
+                UnlockReleaseBuffer(buf);
+                return true;
+            }
+        }
+
+        cursor->delta_blkno = next_blkno;
+        cursor->delta_offnum = FirstOffsetNumber;
+        UnlockReleaseBuffer(buf);
+    }
+
+    return false;
 }
 
 static bool

@@ -109,6 +109,9 @@ OBJS = src/backend/age.o \
        src/backend/utils/adt/age_vle_container.o \
        src/backend/utils/adt/age_vle_input.o \
        src/backend/utils/adt/age_vle_iterator_materialization.o \
+       src/backend/utils/adt/age_vle_matrix_frontier_cache.o \
+       src/backend/utils/adt/age_vle_matrix_frontier_prefetch.o \
+       src/backend/utils/adt/age_vle_matrix_frontier_source.o \
        src/backend/utils/adt/age_vle_materializer_cache.o \
        src/backend/utils/adt/age_vle_root.o \
        src/backend/utils/adt/age_vle_setup.o \

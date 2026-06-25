@@ -238,6 +238,14 @@ static void init_vle_traversal_context_apply(
         apply->input->empty_lifecycle_depth;
     context_apply->empty_lifecycle_batch_size =
         apply->input->empty_lifecycle_batch_size;
+    context_apply->matrix_frontier_policy_known =
+        apply->input->matrix_frontier_policy_known;
+    context_apply->matrix_frontier_eligible =
+        apply->input->matrix_frontier_eligible;
+    context_apply->matrix_frontier_depth =
+        apply->input->matrix_frontier_depth;
+    context_apply->matrix_frontier_batch_size =
+        apply->input->matrix_frontier_batch_size;
     context_apply->lower = shape->lower;
     context_apply->upper = shape->upper;
     context_apply->upper_infinite = shape->upper_infinite;
@@ -655,6 +663,11 @@ void init_vle_context_refresh_input(AgeVLEInput *input,
     refresh->empty_lifecycle_depth = input->empty_lifecycle_depth;
     refresh->empty_lifecycle_batch_size =
         input->empty_lifecycle_batch_size;
+    refresh->matrix_frontier_policy_known =
+        input->matrix_frontier_policy_known;
+    refresh->matrix_frontier_eligible = input->matrix_frontier_eligible;
+    refresh->matrix_frontier_depth = input->matrix_frontier_depth;
+    refresh->matrix_frontier_batch_size = input->matrix_frontier_batch_size;
 }
 
 bool apply_cached_vle_context_refresh(
@@ -681,7 +694,14 @@ bool apply_cached_vle_context_refresh(
     vlelctx->empty_lifecycle_depth = refresh->empty_lifecycle_depth;
     vlelctx->empty_lifecycle_batch_size =
         refresh->empty_lifecycle_batch_size;
+    vlelctx->matrix_frontier_policy_known =
+        refresh->matrix_frontier_policy_known;
+    vlelctx->matrix_frontier_eligible = refresh->matrix_frontier_eligible;
+    vlelctx->matrix_frontier_depth = refresh->matrix_frontier_depth;
+    vlelctx->matrix_frontier_batch_size =
+        refresh->matrix_frontier_batch_size;
     age_vle_context_record_empty_lifecycle_policy(vlelctx);
+    age_vle_context_record_matrix_frontier_policy(vlelctx);
 
     if (!init_vle_traversal_cached_reuse_apply(&reuse_apply, vlelctx,
                                                refresh))

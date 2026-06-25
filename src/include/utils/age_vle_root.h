@@ -120,6 +120,10 @@ typedef struct VLEContextRefreshInput
     bool empty_lifecycle_eligible;
     int64 empty_lifecycle_depth;
     int64 empty_lifecycle_batch_size;
+    bool matrix_frontier_policy_known;
+    bool matrix_frontier_eligible;
+    int64 matrix_frontier_depth;
+    int64 matrix_frontier_batch_size;
 } VLEContextRefreshInput;
 
 typedef struct VLETraversalRootDescriptor

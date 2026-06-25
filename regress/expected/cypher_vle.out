@@ -5188,7 +5188,13 @@ SELECT _graphid(_label_id('vle_value_posting_feedback', 'R'), g + 3000),
        _graphid(_label_id('vle_value_posting_feedback', 'M'), g + 10),
        _graphid(_label_id('vle_value_posting_feedback', 'N'), 62),
        '{}'::agtype
-FROM generate_series(1, 4) g;
+FROM generate_series(1, 4) g
+UNION ALL
+SELECT _graphid(_label_id('vle_value_posting_feedback', 'R'), g + 4000),
+       _graphid(_label_id('vle_value_posting_feedback', 'N'), g + 219),
+       _graphid(_label_id('vle_value_posting_feedback', 'M'), 10),
+       '{}'::agtype
+FROM generate_series(1, 14) g;
 SELECT * FROM cypher('vle_value_posting_feedback', $$
     CREATE INDEX n_i_source FOR (n:N) ON (n.i)
 $$) AS (create_index text);
@@ -5208,7 +5214,7 @@ AS (plan agtype);
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=0.00 loops=1)
    Output: _age_default_alias_0.edges
-   Buffers: shared hit=94
+   Buffers: shared hit=59
    ->  Seq Scan on vle_value_posting_feedback."N" s (actual rows=1.00 loops=1)
          Output: s.id, s.properties
          Filter: (s.id = '844424930132167'::graphid)
@@ -5222,7 +5228,7 @@ AS (plan agtype);
          VLE Graph: vle_value_posting_feedback
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
-         VLE Source Cost: reltuples=46 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
+         VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
          VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=36 predicate=const prefilter=eligible threshold=2
@@ -5239,12 +5245,12 @@ AS (plan agtype);
          VLE Terminal Output Slot: property-key, source=const
          VLE Source Runtime: dominant=age-adjacency class=adjacency-composite-value-posting pressure=adjacency-composite-value-posting action=keep-value-posting
          VLE Source Plan: planned=out:age-adjacency/in:none source-match=true planned-class=adjacency-composite-prefilter class-match=true
-         VLE Source Counters: age_adjacency=scans:1/candidates:30 endpoint-btree=scans:0/candidates:0 packed=scans:0/candidates:0/empty:0/policy:0 density=age_adjacency:30.00/endpoint-btree:0.00/packed:0.00 candidates=30/30
-         VLE Payload Runtime: runs=scan:1/replay:0/seed:1 property-prefilter=0/0/0 cache-filter=8/8/0 tuples=scan:30/replay:0/seeds:1 replay=0/30
-         VLE Empty Evidence: scans=age_adjacency:0/endpoint-btree:0 evidence=empty-frontier missing-vertex=1/1 suppressed=out:age-adjacency/in:none match=true cache=0/0/0 frontier=30/30/0 run=0/0/0
-         VLE Empty Lifecycle: plan=ineligible/depth:0 match=false context=ineligible/depth:0/runs:1 match=true batch=ineligible/size:0/capacity:0 match=true frontier-batch=flushes:1/keys:30/max:30 packed-suppressed=out:0/in:0/self:0
-         VLE Runtime Feedback: recommendation=keep-value-posting planned=keep-property-prefilter root-empty=completion:0/out:0/in:0/batch:0/saturated-roots:0 threshold=ineligible/headroom:0/batch:0/source:none/reason:none yield=30/1 push=30/30
-         Buffers: shared hit=93
+         VLE Source Counters: age_adjacency=scans:1/candidates:18 endpoint-btree=scans:0/candidates:0 packed=scans:0/candidates:0/empty:0/policy:0 density=age_adjacency:18.00/endpoint-btree:0.00/packed:0.00 candidates=18/18
+         VLE Payload Runtime: runs=scan:1/replay:0/seed:1 property-prefilter=0/0/0 cache-filter=20/20/0 tuples=scan:18/replay:0/seeds:1 replay=0/18
+         VLE Empty Evidence: scans=age_adjacency:0/endpoint-btree:0 evidence=empty-frontier missing-vertex=1/1 suppressed=out:age-adjacency/in:none match=true cache=0/0/0 frontier=18/18/0 run=0/0/0
+         VLE Empty Lifecycle: plan=ineligible/depth:0 match=false context=ineligible/depth:0/runs:1 match=true batch=ineligible/size:0/capacity:0 match=true frontier-batch=flushes:1/keys:18/max:18 packed-suppressed=out:0/in:0/self:0
+         VLE Runtime Feedback: recommendation=keep-value-posting planned=keep-property-prefilter root-empty=completion:0/out:0/in:0/batch:0/saturated-roots:0 threshold=ineligible/headroom:0/batch:0/source:none/reason:none yield=18/1 push=18/18
+         Buffers: shared hit=58
          ->  Values Scan on _age_default_alias_0 (never executed)
                Output: _age_default_alias_0.edges
  Planning:
@@ -5269,14 +5275,14 @@ AS (plan agtype);
          VLE Graph: vle_value_posting_feedback
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
-         VLE Source Cost: reltuples=46 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
+         VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
          VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=36 predicate=const prefilter=eligible threshold=2
          VLE Composite Fanout: candidate=19 composite=1 planned=property-prefilter basis=terminal-label-property selectivity=0.027778 selectivity-source=typed-distinct
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=ineligible endpoint-headroom=0.25 empty-lifecycle=ineligible/depth:0 empty-batch=ineligible/size:0
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
-         VLE Source Payload Input: source=runtime-cache headroom=25 scan-runs=1 replay-runs=0 seed-runs=1 replay-percent=0 seed-percent=100 observed=1 value-posting=label-slice/observed:8 reason=payload-value-posting-observed class=adjacency-composite-value-posting
+         VLE Source Payload Input: source=runtime-cache headroom=25 scan-runs=1 replay-runs=0 seed-runs=1 replay-percent=0 seed-percent=100 observed=1 value-posting=label-slice/observed:20 reason=payload-value-posting-observed class=adjacency-composite-value-posting
          VLE Source Policy: out=age-adjacency/in=none depth=costed endpoint-work=sum(out:19/2,in:1/2) combined-work=all:0/0 composite-work=planned(out:1,in:0) value-posting=out:label-slice/in:none reason=out:composite-value-posting/in:inactive-direction class=adjacency-composite-value-posting recommendation=keep-value-posting
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..1
@@ -5306,7 +5312,7 @@ AS (plan agtype);
          VLE Graph: vle_value_posting_feedback
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
-         VLE Source Cost: reltuples=46 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
+         VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
          VLE Join Order: component=vle connector=vle-composite-expand bound=out property=index-anchored rows=1 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=terminal-label-property property-tuples=36 predicate=const prefilter=eligible threshold=2
@@ -5328,11 +5334,11 @@ AS (plan agtype);
 SELECT * FROM cypher('vle_value_posting_feedback',
                     $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..3]->(n:N) WHERE n.i = 59 RETURN n.i$$)
 AS (plan agtype);
-                                                                                                                                   QUERY PLAN                                                                                                                                    
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                    QUERY PLAN                                                                                                                                    
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=4.00 loops=1)
    Output: _age_default_alias_0.edges
-   Buffers: shared hit=70
+   Buffers: shared hit=185
    ->  Seq Scan on vle_value_posting_feedback."N" s (actual rows=1.00 loops=1)
          Output: s.id, s.properties
          Filter: (s.id = '844424930132167'::graphid)
@@ -5346,15 +5352,16 @@ AS (plan agtype);
          VLE Graph: vle_value_posting_feedback
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
-         VLE Source Cost: reltuples=46 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=57 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
+         VLE Join Order: component=vle connector=matrix-frontier-expand bound=out property=matrix-frontier-anchored rows=57 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=endpoint-label-acceptance property-tuples=36 predicate=const prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=19 composite=19 planned=metadata-only basis=endpoint-label-acceptance
          VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:14
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
-         VLE Source Policy: out=age-adjacency/in=none depth=costed endpoint-work=sum(out:7239/14,in:3/14) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-cache-seeded recommendation=prefer-age-adjacency-depth
+         VLE Source Policy: out=age-adjacency/in=none depth=costed endpoint-work=sum(out:7239/14,in:6/14) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-cache-seeded recommendation=prefer-age-adjacency-depth
+         VLE Matrix Frontier: plan=eligible backend=native depth:3 batch:14 key=graph,edge-label,direction,depth,frontier,terminal-filter context=eligible/runs:1/depth:3 capacity:14 block=37/24 mrun=24/37/14 cache=h:0/m:37/s:36/r:0/e:0/0
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..3
          VLE Direction: right
@@ -5363,17 +5370,17 @@ AS (plan agtype);
          VLE Terminal Output Slot: property-key, source=const
          VLE Source Runtime: dominant=age-adjacency class=adjacency-cache-seeded pressure=adjacency-empty-run action=keep-empty-run-batch:out
          VLE Source Plan: planned=out:age-adjacency/in:none source-match=true planned-class=adjacency-cache-seeded class-match=true
-         VLE Source Counters: age_adjacency=scans:9/candidates:46 endpoint-btree=scans:0/candidates:0 packed=scans:0/candidates:0/empty:0/policy:42 density=age_adjacency:5.11/endpoint-btree:0.00/packed:0.00 candidates=46/46
-         VLE Payload Runtime: runs=scan:9/replay:0/seed:1 property-prefilter=0/0/0 tuples=scan:46/replay:0/seeds:1 replay=0/46
-         VLE Empty Evidence: scans=age_adjacency:0/endpoint-btree:0 evidence=empty-run missing-vertex=1/1 suppressed=out:age-adjacency/in:none match=true cache=0/0/0 frontier=35/35/0 run=34/34/0
-         VLE Empty Lifecycle: plan=eligible/depth:3 match=true context=eligible/depth:3/runs:1 match=true batch=eligible/size:14/capacity:14 match=true frontier-batch=flushes:5/keys:38/max:34 packed-suppressed=out:0/in:0/self:0
-         VLE Runtime Feedback: recommendation=prefer-age-adjacency-depth planned=prefer-age-adjacency-depth root-empty=completion:69/out:69/in:0/batch:14/saturated-roots:1 threshold=eligible/headroom:35/batch:69/source:out/reason:root-empty-saturated yield=46/9 push=46/46
-         Buffers: shared hit=69
+         VLE Source Counters: age_adjacency=scans:23/candidates:60 endpoint-btree=scans:0/candidates:0 packed=scans:0/candidates:0/empty:0/policy:56 density=age_adjacency:2.61/endpoint-btree:0.00/packed:0.00 candidates=60/60
+         VLE Payload Runtime: runs=scan:23/replay:0/seed:1 property-prefilter=0/0/0 tuples=scan:73/replay:0/seeds:1 replay=0/73
+         VLE Empty Evidence: scans=age_adjacency:0/endpoint-btree:0 evidence=empty-run missing-vertex=1/1 suppressed=out:age-adjacency/in:none match=true cache=1/1/0 frontier=22/22/0 run=34/34/0
+         VLE Empty Lifecycle: plan=eligible/depth:3 match=true context=eligible/depth:3/runs:1 match=true batch=eligible/size:14/capacity:14 match=true frontier-batch=flushes:19/keys:38/max:20 packed-suppressed=out:0/in:0/self:0
+         VLE Runtime Feedback: recommendation=prefer-age-adjacency-depth planned=prefer-age-adjacency-depth root-empty=completion:57/out:57/in:0/batch:14/saturated-roots:1 threshold=eligible/headroom:35/batch:57/source:out/reason:root-empty-saturated yield=60/23 push=60/60
+         Buffers: shared hit=184
          ->  Values Scan on _age_default_alias_0 (never executed)
                Output: _age_default_alias_0.edges
  Planning:
    Buffers: shared hit=10
-(43 rows)
+(44 rows)
 
 SELECT * FROM cypher('vle_value_posting_feedback',
                     $$EXPLAIN (VERBOSE, COSTS OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..3]->(n:N) WHERE n.i = 59 RETURN n.i$$)
@@ -5393,15 +5400,16 @@ AS (plan agtype);
          VLE Graph: vle_value_posting_feedback
          VLE Edge: label=R, properties=0
          VLE Edge Source: local-index-candidate, fixed-source=out=age-adjacency/in=none, candidates=age_adjacency=out/- endpoint-btree=start/end, state=dense-local
-         VLE Source Cost: reltuples=46 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
-         VLE Join Order: component=vle connector=vle-expand bound=out property=vle-frontier-anchored rows=57 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
+         VLE Source Cost: reltuples=60 fanout=start:19/end:1 stats=rel:known/start:known/end:known source=start:directory-label/end:statistics value-posting=start:label-slice/end:none
+         VLE Join Order: component=vle connector=matrix-frontier-expand bound=out property=matrix-frontier-anchored rows=57 fanout=start:19/end:1 consumer=terminal-property class=terminal-scalar
          VLE Terminal Property Source: label=N source=graph-metadata:n_i_source provider=btree type=agtype candidates=1
          VLE Composite Source: status=eligible reason=endpoint-label-acceptance property-tuples=36 predicate=const prefilter=ineligible threshold=0
          VLE Composite Fanout: candidate=19 composite=19 planned=metadata-only basis=endpoint-label-acceptance
-         VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:69
-         VLE Source Threshold Input: source=runtime-cache headroom=35 batch=69 direction=out reason=root-empty-saturated class=adjacency-empty-batch observed=1 saturated=1 relaxed=0
-         VLE Source Payload Input: source=runtime-cache headroom=65 scan-runs=9 replay-runs=0 seed-runs=1 replay-percent=0 seed-percent=11 observed=1 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
-         VLE Source Policy: out=age-adjacency/in=none depth=costed endpoint-work=sum(out:7239/14,in:3/14) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-empty-batch recommendation=keep-empty-batch
+         VLE Source Profile: consumer=terminal-property class=terminal-scalar active=out budget=2 weight=1 cache-seed=eligible endpoint-headroom=0.35 empty-lifecycle=eligible/depth:3 empty-batch=eligible/size:57
+         VLE Source Threshold Input: source=runtime-cache headroom=35 batch=57 direction=out reason=root-empty-saturated class=adjacency-empty-batch observed=1 saturated=1 relaxed=0
+         VLE Source Payload Input: source=runtime-cache headroom=65 scan-runs=23 replay-runs=0 seed-runs=1 replay-percent=0 seed-percent=4 observed=1 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
+         VLE Source Policy: out=age-adjacency/in=none depth=costed endpoint-work=sum(out:7239/14,in:6/14) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-empty-batch recommendation=keep-empty-batch
+         VLE Matrix Frontier: plan=eligible backend=native depth:3 batch:57 key=graph,edge-label,direction,depth,frontier,terminal-filter context=ineligible/runs:0/depth:0 capacity:0 block=0/0 mrun=0/0/0 cache=h:0/m:0/s:0/r:0/e:0/0
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..3
          VLE Direction: right
@@ -5410,7 +5418,7 @@ AS (plan agtype);
          VLE Terminal Output Slot: property-key, source=const
          ->  Values Scan on _age_default_alias_0
                Output: _age_default_alias_0.edges
-(30 rows)
+(31 rows)
 
 SELECT drop_graph('vle_value_posting_feedback', true);
 NOTICE:  drop cascades to 5 other objects

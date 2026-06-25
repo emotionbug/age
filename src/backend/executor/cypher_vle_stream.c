@@ -25,6 +25,7 @@
 #include "executor/executor.h"
 #include "funcapi.h"
 #include "nodes/execnodes.h"
+#include "optimizer/cypher_graph_join.h"
 #include "utils/age_vle.h"
 #include "utils/age_vle_source_cost.h"
 #include "utils/agtype.h"
@@ -47,6 +48,10 @@ typedef struct AgeVLEStreamScanState
     AgeVLEStreamRangeDirection range_direction;
     AgeVLEStreamOutput output;
     AgeVLEStreamEdgeSource edge_source;
+    char *join_order_component;
+    char *join_order_connector;
+    char *join_order_bound;
+    char *join_order_property;
     AgeVLESourceStats source_stats;
     AgeVLESourceStats current_source_stats;
     AgeVLESourceStats total_source_stats;
@@ -70,6 +75,8 @@ static void explain_age_vle_stream_scan(CustomScanState *node,
                                         ExplainState *es);
 static char *format_age_vle_stream_join_order(
     AgeVLEStreamScanState *state);
+static char *format_age_vle_stream_matrix_frontier(
+    AgeVLEStreamScanState *state);
 static const char *age_vle_stream_join_order_connector(
     AgeVLEStreamScanState *state);
 static const char *age_vle_stream_join_order_property(
@@ -79,6 +86,8 @@ static bool age_vle_stream_has_bound_endpoints(
 static void initialize_age_vle_stream_descriptor(AgeVLEStreamScanState *state,
                                                 CustomScan *cscan,
                                                 PlanState *parent);
+static void initialize_age_vle_stream_graph_join_descriptor(
+    AgeVLEStreamScanState *state, CustomScan *cscan);
 static void initialize_age_vle_stream_input_descriptor(
     AgeVLEStreamScanState *state);
 static int age_vle_stream_source_kind_to_input(
@@ -160,6 +169,7 @@ static void begin_age_vle_stream_scan(CustomScanState *node, EState *estate,
     read_age_vle_stream_range_direction(cscan, &state->range_direction);
     read_age_vle_stream_output(cscan, &state->output);
     read_age_vle_stream_edge_source(cscan, &state->edge_source);
+    initialize_age_vle_stream_graph_join_descriptor(state, cscan);
     initialize_age_vle_stream_input_descriptor(state);
     initialize_age_vle_stream_descriptor(state, cscan, &node->ss.ps);
     state->argcontext = AllocSetContextCreate(CurrentMemoryContext,
@@ -168,6 +178,34 @@ static void begin_age_vle_stream_scan(CustomScanState *node, EState *estate,
     state->scancontext = CurrentMemoryContext;
     state->exhausted = false;
     state->source_stats_accumulated = false;
+}
+
+static void initialize_age_vle_stream_graph_join_descriptor(
+    AgeVLEStreamScanState *state, CustomScan *cscan)
+{
+    Node *private_node;
+    List *descriptor;
+
+    Assert(state != NULL);
+    Assert(cscan != NULL);
+
+    private_node = list_nth(cscan->custom_private,
+                            AGE_VLE_STREAM_PRIVATE_GRAPH_JOIN);
+    if (private_node == NULL || !IsA(private_node, List))
+        return;
+
+    descriptor = castNode(List, private_node);
+    if (list_length(descriptor) != AGE_GRAPH_JOIN_DESC_COUNT)
+        return;
+
+    state->join_order_component = (char *)age_graph_join_descriptor_text_field(
+        descriptor, AGE_GRAPH_JOIN_DESC_COMPONENT);
+    state->join_order_connector = (char *)age_graph_join_descriptor_text_field(
+        descriptor, AGE_GRAPH_JOIN_DESC_CONNECTOR);
+    state->join_order_bound = (char *)age_graph_join_descriptor_text_field(
+        descriptor, AGE_GRAPH_JOIN_DESC_BOUND);
+    state->join_order_property = (char *)age_graph_join_descriptor_text_field(
+        descriptor, AGE_GRAPH_JOIN_DESC_ORDER_PROPERTY);
 }
 
 static void initialize_age_vle_stream_input_descriptor(
@@ -260,6 +298,20 @@ static void initialize_age_vle_stream_input_descriptor(
         state->edge_source.empty_lifecycle_depth;
     state->input.empty_lifecycle_batch_size =
         state->edge_source.empty_lifecycle_batch_size;
+    state->input.matrix_frontier_policy_known =
+        state->join_order_connector != NULL &&
+        strcmp(state->join_order_connector, "matrix-frontier-expand") == 0;
+    state->input.matrix_frontier_eligible =
+        state->input.matrix_frontier_policy_known;
+    state->input.matrix_frontier_depth =
+        state->range_direction.upper_null ? 0 :
+        state->range_direction.upper_value;
+    state->input.matrix_frontier_batch_size =
+        state->edge_source.empty_lifecycle_batch_size > 0 ?
+        state->edge_source.empty_lifecycle_batch_size :
+        Max(state->edge_source.start_fanout, state->edge_source.end_fanout);
+    if (state->input.matrix_frontier_batch_size <= 0)
+        state->input.matrix_frontier_batch_size = 1;
 }
 
 static int age_vle_stream_source_kind_to_input(
@@ -473,6 +525,10 @@ static void explain_age_vle_stream_scan(CustomScanState *node,
                             format_vle_stream_edge_source_policy(
                                 &state->edge_source),
                             es);
+        if (state->input.matrix_frontier_policy_known)
+            ExplainPropertyText("VLE Matrix Frontier",
+                                format_age_vle_stream_matrix_frontier(state),
+                                es);
     }
     ExplainPropertyText("VLE Endpoints",
                         format_age_vle_stream_endpoints(cscan),
@@ -539,12 +595,20 @@ static char *format_age_vle_stream_join_order(
 {
     AgeVLEStreamEdgeSource *source = &state->edge_source;
 
-    return psprintf("component=vle connector=%s bound=%s property=%s "
+    return psprintf("component=%s connector=%s bound=%s property=%s "
                     "rows=%ld fanout=start:%ld/end:%ld "
                     "consumer=%s class=%s",
+                    state->join_order_component != NULL ?
+                    state->join_order_component : "vle",
+                    state->join_order_connector != NULL ?
+                    state->join_order_connector :
                     age_vle_stream_join_order_connector(state),
-                    source->policy_active_direction != NULL ?
-                    source->policy_active_direction : "unknown",
+                    state->join_order_bound != NULL ?
+                    state->join_order_bound :
+                    (source->policy_active_direction != NULL ?
+                    source->policy_active_direction : "unknown"),
+                    state->join_order_property != NULL ?
+                    state->join_order_property :
                     age_vle_stream_join_order_property(state),
                     (long)state->css.ss.ps.plan->plan_rows,
                     (long)source->start_fanout,
@@ -553,6 +617,39 @@ static char *format_age_vle_stream_join_order(
                     source->policy_consumer : "unknown",
                     source->policy_consumer_class != NULL ?
                     source->policy_consumer_class : "unknown");
+}
+
+static char *format_age_vle_stream_matrix_frontier(
+    AgeVLEStreamScanState *state)
+{
+    AgeVLEInput *input = &state->input;
+    AgeVLESourceStats *stats = &state->source_stats;
+
+    return psprintf("plan=%s backend=native depth:%lld batch:%lld "
+                    "key=graph,edge-label,direction,depth,frontier,"
+                    "terminal-filter context=%s/runs:%lld/depth:%lld "
+                    "capacity:%lld block=%lld/%lld mrun=%lld/%lld/%lld "
+                    "cache=h:%lld/m:%lld/s:%lld/r:%lld/e:%lld/%lld",
+                    input->matrix_frontier_eligible ?
+                    "eligible" : "ineligible",
+                    (long long)input->matrix_frontier_depth,
+                    (long long)input->matrix_frontier_batch_size,
+                    stats->matrix_frontier_context_eligible_runs > 0 ?
+                    "eligible" : "ineligible",
+                    (long long)stats->matrix_frontier_context_runs,
+                    (long long)stats->matrix_frontier_context_depth,
+                    (long long)stats->matrix_frontier_batch_capacity,
+                    (long long)stats->matrix_frontier_block_sources,
+                    (long long)stats->matrix_frontier_block_keys,
+                    (long long)stats->matrix_frontier_source_runs,
+                    (long long)stats->matrix_frontier_source_run_sources,
+                    (long long)stats->matrix_frontier_source_run_max,
+                    (long long)stats->matrix_frontier_cache_hits,
+                    (long long)stats->matrix_frontier_cache_misses,
+                    (long long)stats->matrix_frontier_cache_seeds,
+                    (long long)stats->matrix_frontier_cache_replays,
+                    (long long)stats->matrix_frontier_cache_empty_hits,
+                    (long long)stats->matrix_frontier_cache_empty_marks);
 }
 
 static const char *age_vle_stream_join_order_connector(
@@ -950,6 +1047,39 @@ static void accumulate_age_vle_stream_source_stats(
     total->empty_lifecycle_batch_capacity =
         Max(total->empty_lifecycle_batch_capacity,
             current->empty_lifecycle_batch_capacity);
+    total->matrix_frontier_context_runs +=
+        current->matrix_frontier_context_runs;
+    total->matrix_frontier_context_eligible_runs +=
+        current->matrix_frontier_context_eligible_runs;
+    total->matrix_frontier_context_depth =
+        Max(total->matrix_frontier_context_depth,
+            current->matrix_frontier_context_depth);
+    total->matrix_frontier_batch_capacity =
+        Max(total->matrix_frontier_batch_capacity,
+            current->matrix_frontier_batch_capacity);
+    total->matrix_frontier_cache_hits +=
+        current->matrix_frontier_cache_hits;
+    total->matrix_frontier_cache_misses +=
+        current->matrix_frontier_cache_misses;
+    total->matrix_frontier_cache_seeds +=
+        current->matrix_frontier_cache_seeds;
+    total->matrix_frontier_cache_replays +=
+        current->matrix_frontier_cache_replays;
+    total->matrix_frontier_cache_empty_hits +=
+        current->matrix_frontier_cache_empty_hits;
+    total->matrix_frontier_cache_empty_marks +=
+        current->matrix_frontier_cache_empty_marks;
+    total->matrix_frontier_block_keys +=
+        current->matrix_frontier_block_keys;
+    total->matrix_frontier_block_sources +=
+        current->matrix_frontier_block_sources;
+    total->matrix_frontier_source_runs +=
+        current->matrix_frontier_source_runs;
+    total->matrix_frontier_source_run_sources +=
+        current->matrix_frontier_source_run_sources;
+    total->matrix_frontier_source_run_max =
+        Max(total->matrix_frontier_source_run_max,
+            current->matrix_frontier_source_run_max);
     total->root_empty_completion_count +=
         current->root_empty_completion_count;
     total->root_empty_completion_out +=
