@@ -403,6 +403,9 @@ DO $wcoj_direct_provider_telemetry$
 DECLARE
     plan_text text;
     property_direct boolean := false;
+    property_batched boolean := false;
+    property_survivor_block boolean := false;
+    property_payload_batches boolean := false;
     property_rejects boolean := false;
     property_combinations boolean := false;
     factorized_source_rows boolean := false;
@@ -430,6 +433,12 @@ BEGIN
     LOOP
         property_direct := property_direct OR
             plan_text LIKE '%Adjacency Providers: 3%';
+        property_batched := property_batched OR
+            plan_text LIKE '%Batched Payload Materialization: true%';
+        property_survivor_block := property_survivor_block OR
+            plan_text LIKE '%Survivor Blocks: 1%';
+        property_payload_batches := property_payload_batches OR
+            plan_text LIKE '%Payload Scan Batches: 3%';
         property_rejects := property_rejects OR
             plan_text LIKE '%Local Predicate Rejects: 3%';
         property_combinations := property_combinations OR
@@ -460,8 +469,9 @@ BEGIN
             plan_text LIKE '%Candidate Bag Combinations: 72%';
     END LOOP;
 
-    IF NOT property_direct OR NOT property_rejects OR
-       NOT property_combinations THEN
+    IF NOT property_direct OR NOT property_batched OR
+       NOT property_survivor_block OR NOT property_payload_batches OR
+       NOT property_rejects OR NOT property_combinations THEN
         RAISE EXCEPTION 'direct provider did not filter edge payloads early';
     END IF;
     IF NOT factorized_source_rows OR NOT factorized_keys OR
@@ -670,6 +680,114 @@ $$) AS (total agtype);
  0
 (1 row)
 
+-- A dense direct-provider star exercises survivor-block payload retrieval with
+-- more than one terminal.  Three source postings contain the same 17
+-- terminals, so batching replaces 51 survivor-local scan restarts with three
+-- tagged source-key scans while preserving one output row per terminal.
+INSERT INTO wcoj_lowering."S" (id, properties)
+SELECT _graphid(_label_id('wcoj_lowering', 'S'), source_no),
+       format('{"id":%s}', source_no)::agtype
+FROM generate_series(7, 9) source_no;
+INSERT INTO wcoj_lowering."T" (id, properties)
+SELECT _graphid(_label_id('wcoj_lowering', 'T'), target_no), '{}'::agtype
+FROM generate_series(100, 116) target_no;
+INSERT INTO wcoj_lowering."E" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('wcoj_lowering', 'E'),
+                10000 + (source_no - 7) * 17 + (target_no - 100)),
+       _graphid(_label_id('wcoj_lowering', 'S'), source_no),
+       _graphid(_label_id('wcoj_lowering', 'T'), target_no),
+       '{}'::agtype
+FROM generate_series(7, 9) source_no,
+     generate_series(100, 116) target_no;
+ANALYZE wcoj_lowering."S";
+ANALYZE wcoj_lowering."T";
+ANALYZE wcoj_lowering."E";
+DO $wcoj_survivor_batch_telemetry$
+DECLARE
+    plan_text text;
+    has_one_block boolean := false;
+    has_three_batches boolean := false;
+    has_three_source_keys boolean := false;
+    has_forty_eight_restarts_avoided boolean := false;
+    has_fifty_one_payload_rows boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('wcoj_lowering', $cypher$
+            MATCH (s7:S {id: 7})-[e7:E]->(t:T),
+                  (s8:S {id: 8})-[e8:E]->(t),
+                  (s9:S {id: 9})-[e9:E]->(t)
+            RETURN id(e7), id(e8), id(e9), id(t)
+        $cypher$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype)
+    $plan$
+    LOOP
+        has_one_block := has_one_block OR
+            plan_text LIKE '%Survivor Blocks: 1%';
+        has_three_batches := has_three_batches OR
+            plan_text LIKE '%Payload Scan Batches: 3%';
+        has_three_source_keys := has_three_source_keys OR
+            plan_text LIKE '%Payload Source Keys Scanned: 3%';
+        has_forty_eight_restarts_avoided :=
+            has_forty_eight_restarts_avoided OR
+            plan_text LIKE '%Payload Scan Restarts Avoided: 48%';
+        has_fifty_one_payload_rows := has_fifty_one_payload_rows OR
+            plan_text LIKE '%Payload Rows Matched: 51%';
+    END LOOP;
+
+    IF NOT has_one_block OR NOT has_three_batches OR
+       NOT has_three_source_keys OR NOT has_forty_eight_restarts_avoided OR
+       NOT has_fifty_one_payload_rows THEN
+        RAISE EXCEPTION 'survivor payload batching telemetry was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj survivor payload batching verified';
+END
+$wcoj_survivor_batch_telemetry$;
+NOTICE:  wcoj survivor payload batching verified
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_survivor_batch_binary ON COMMIT DROP AS
+SELECT eid7, eid8, eid9, tid
+FROM cypher('wcoj_lowering', $$
+    MATCH (s7:S {id: 7})-[e7:E]->(t:T),
+          (s8:S {id: 8})-[e8:E]->(t),
+          (s9:S {id: 9})-[e9:E]->(t)
+    RETURN id(e7), id(e8), id(e9), id(t)
+$$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype);
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_survivor_batch_direct ON COMMIT DROP AS
+SELECT eid7, eid8, eid9, tid
+FROM cypher('wcoj_lowering', $$
+    MATCH (s7:S {id: 7})-[e7:E]->(t:T),
+          (s8:S {id: 8})-[e8:E]->(t),
+          (s9:S {id: 9})-[e9:E]->(t)
+    RETURN id(e7), id(e8), id(e9), id(t)
+$$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype);
+SELECT (SELECT count(*) FROM wcoj_survivor_batch_binary) AS binary_rows,
+       (SELECT count(*) FROM wcoj_survivor_batch_direct) AS direct_rows,
+       (SELECT count(*) FROM (
+           (TABLE wcoj_survivor_batch_binary
+            EXCEPT ALL TABLE wcoj_survivor_batch_direct)
+           UNION ALL
+           (TABLE wcoj_survivor_batch_direct
+            EXCEPT ALL TABLE wcoj_survivor_batch_binary)
+       ) diff) AS diff_rows;
+ binary_rows | direct_rows | diff_rows 
+-------------+-------------+-----------
+          17 |          17 |         0
+(1 row)
+
+ROLLBACK;
 SELECT drop_graph('wcoj_lowering', true);
 NOTICE:  drop cascades to 6 other objects
 DETAIL:  drop cascades to table wcoj_lowering._ag_label_vertex

@@ -26,14 +26,19 @@
 #include "executor/cypher_wcoj_join.h"
 #include "executor/executor.h"
 #include "lib/stringinfo.h"
+#include "miscadmin.h"
 #include "nodes/pg_list.h"
 #include "utils/ag_guc.h"
+#include "utils/datum.h"
 #include "utils/graphid.h"
 #include "utils/memutils.h"
 
 #define AGE_WCOJ_PROGRESSIVE_DENSE_SAMPLE 1024
 #define AGE_WCOJ_PROGRESSIVE_DENSE_NUMERATOR 3
 #define AGE_WCOJ_PROGRESSIVE_DENSE_DENOMINATOR 4
+#define AGE_WCOJ_SURVIVOR_BLOCK_MIN 16
+#define AGE_WCOJ_SURVIVOR_BLOCK_MAX 4096
+#define AGE_WCOJ_SURVIVOR_BLOCK_BUDGET_DIVISOR 4
 
 /*
  * One duplicate group per input stream.  Rows are copied because every child
@@ -63,6 +68,19 @@ typedef struct AgeWCOJSourceKeyBag
     int first_row;
     int row_count;
 } AgeWCOJSourceKeyBag;
+
+typedef struct AgeWCOJBatchPayload
+{
+    AgeAdjacencyPayload payload;
+    int survivor_index;
+    int source_bag_index;
+} AgeWCOJBatchPayload;
+
+typedef struct AgeWCOJBatchPayloadRange
+{
+    int first_payload;
+    int payload_count;
+} AgeWCOJBatchPayloadRange;
 
 typedef enum AgeWCOJAdjacencyBuildResult
 {
@@ -128,6 +146,11 @@ struct AgeWCOJPostingProvider
     int terminal_index;
     AgeAdjacencyVisiblePayloadScan *terminal_scan;
     AgeAdjacencyVisiblePayloadScan *payload_scan;
+    AgeWCOJTupleGroup *batch_groups;
+    AgeWCOJBatchPayload *batch_payloads;
+    AgeWCOJBatchPayloadRange *batch_payload_ranges;
+    int batch_payload_count;
+    int batch_payload_capacity;
     bool fetch_properties;
     bool built;
     int64 rows_scanned;
@@ -151,6 +174,13 @@ struct AgeWCOJJoinScanState
     bool enumeration_started;
     int64 *stage_survivors;
     MemoryContext group_context;
+    MemoryContext batch_context;
+    graphid *survivor_block;
+    int survivor_block_count;
+    int survivor_block_index;
+    int survivor_block_capacity;
+    int active_survivor_index;
+    Size batch_memory_budget;
     AgeWCOJEngineKind requested_engine;
     AgeWCOJEngineKind planned_engine;
     AgeWCOJEngineKind actual_engine;
@@ -158,12 +188,20 @@ struct AgeWCOJJoinScanState
     int seed_index;
     bool group_active;
     bool exhausted;
+    bool batch_payload_enabled;
+    bool survivor_input_exhausted;
     int64 groups_matched;
     int64 candidate_combinations;
     int64 cursor_advances;
     int64 seek_calls;
     int64 posting_rows_scanned;
+    int64 payload_rows_scanned;
+    int64 payload_rows_matched;
     int64 payload_rows_fetched;
+    int64 payload_scan_batches;
+    int64 payload_source_keys_scanned;
+    int64 payload_scan_restarts_avoided;
+    int64 survivor_blocks;
     int64 uniqueness_rejects;
     int64 rows_emitted;
     int64 rescans;
@@ -214,6 +252,9 @@ static bool plan_stream_seek_ge(AgeWCOJPostingProvider *provider,
                                 graphid target);
 static bool plan_stream_materialize_group(AgeWCOJPostingProvider *provider,
                                           graphid terminal);
+static bool plan_stream_buffer_group(AgeWCOJPostingProvider *provider,
+                                     graphid terminal,
+                                     int survivor_index);
 static void plan_stream_rescan(AgeWCOJPostingProvider *provider);
 static void plan_stream_close(AgeWCOJPostingProvider *provider);
 static bool adjacency_first_distinct(AgeWCOJPostingProvider *provider);
@@ -236,6 +277,14 @@ static void rescan_age_wcoj_providers(AgeWCOJJoinScanState *state);
 static bool prepare_age_wcoj_progressive_exact_set(
     AgeWCOJJoinScanState *state);
 static void update_age_wcoj_peak_memory(AgeWCOJJoinScanState *state);
+static void reset_age_wcoj_survivor_block(AgeWCOJJoinScanState *state);
+static int compare_age_wcoj_batch_payloads(const void *left,
+                                           const void *right);
+static int find_age_wcoj_survivor_index(AgeWCOJJoinScanState *state,
+                                        graphid terminal);
+static void append_age_wcoj_batch_payload(
+    AgeWCOJPostingProvider *provider, int survivor_index,
+    int source_bag_index, const AgeAdjacencyPayload *payload);
 static void clear_age_wcoj_group(AgeWCOJJoinScanState *state);
 static bool align_age_wcoj_leapfrog(AgeWCOJJoinScanState *state,
                                     graphid *matched_key);
@@ -250,6 +299,9 @@ static void append_age_wcoj_group_tuple(AgeWCOJJoinScanState *state,
                                         graphid edge_id);
 static bool collect_age_wcoj_group(AgeWCOJJoinScanState *state,
                                    graphid matched_key);
+static bool find_next_age_wcoj_survivor(AgeWCOJJoinScanState *state,
+                                        graphid *matched_key);
+static bool prepare_age_wcoj_survivor_block(AgeWCOJJoinScanState *state);
 static bool prepare_age_wcoj_group(AgeWCOJJoinScanState *state);
 static bool next_age_wcoj_combination(AgeWCOJJoinScanState *state);
 static TupleTableSlot *materialize_age_wcoj_combination(
@@ -438,6 +490,7 @@ static void
 initialize_wcoj_runtime_state(AgeWCOJJoinScanState *state, EState *estate)
 {
     int arity = state->arity;
+    uint64 budget;
 
     state->providers = palloc0(sizeof(AgeWCOJPostingProvider) * arity);
     state->group_slots = palloc0(sizeof(TupleTableSlot *) * arity);
@@ -451,6 +504,15 @@ initialize_wcoj_runtime_state(AgeWCOJJoinScanState *state, EState *estate)
     state->group_context = AllocSetContextCreate(
         estate->es_query_cxt, "AGE WCOJ duplicate group",
         ALLOCSET_DEFAULT_SIZES);
+    state->batch_context = AllocSetContextCreate(
+        estate->es_query_cxt, "AGE WCOJ survivor block",
+        ALLOCSET_DEFAULT_SIZES);
+
+    budget = ((uint64)Max(work_mem, 64) * 1024) /
+        AGE_WCOJ_SURVIVOR_BLOCK_BUDGET_DIVISOR;
+    budget = Max(budget, (uint64)64 * 1024);
+    budget = Min(budget, (uint64)MaxAllocSize);
+    state->batch_memory_budget = (Size)budget;
 }
 
 static void
@@ -599,6 +661,7 @@ begin_age_wcoj_join_scan(CustomScanState *node, EState *estate, int eflags)
     ListCell *desc_cell;
     ListCell *qual_cell;
     int child_index;
+    int adjacency_provider_count = 0;
     int output_offset = 1;
 
     foreach(plan_cell, cscan->custom_plans)
@@ -633,8 +696,21 @@ begin_age_wcoj_join_scan(CustomScanState *node, EState *estate, int eflags)
         output_offset += initialize_wcoj_provider(
             state, node, cscan, estate, child_state, desc, local_quals,
             child_index, key_attno, output_offset);
+        if (state->providers[child_index].kind ==
+            AGE_WCOJ_PROVIDER_ADJACENCY)
+        {
+            adjacency_provider_count++;
+        }
         child_index++;
     }
+
+    /*
+     * A survivor block is useful whenever at least one direct adjacency
+     * provider is present.  Plan-stream providers are buffered by duplicate
+     * group while adjacency providers defer payload retrieval to one tagged
+     * run scan per block.
+     */
+    state->batch_payload_enabled = adjacency_provider_count > 0;
 
     if (state->actual_engine == AGE_WCOJ_ENGINE_LEAPFROG)
     {
@@ -778,6 +854,11 @@ update_age_wcoj_peak_memory(AgeWCOJJoinScanState *state)
         current_memory += MemoryContextMemAllocated(state->group_context,
                                                     true);
     }
+    if (state->batch_context != NULL)
+    {
+        current_memory += MemoryContextMemAllocated(state->batch_context,
+                                                    true);
+    }
     for (source_index = 0; source_index < state->arity; source_index++)
     {
         MemoryContext provider_context =
@@ -791,6 +872,221 @@ update_age_wcoj_peak_memory(AgeWCOJJoinScanState *state)
     }
     if (current_memory > state->peak_memory)
         state->peak_memory = current_memory;
+}
+
+static void
+reset_age_wcoj_survivor_block(AgeWCOJJoinScanState *state)
+{
+    int source_index;
+
+    if (state->batch_context != NULL)
+        MemoryContextReset(state->batch_context);
+    state->survivor_block = NULL;
+    state->survivor_block_count = 0;
+    state->survivor_block_index = 0;
+    state->survivor_block_capacity = 0;
+    state->active_survivor_index = -1;
+
+    if (state->providers == NULL)
+        return;
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        AgeWCOJPostingProvider *provider = &state->providers[source_index];
+
+        provider->batch_groups = NULL;
+        provider->batch_payloads = NULL;
+        provider->batch_payload_ranges = NULL;
+        provider->batch_payload_count = 0;
+        provider->batch_payload_capacity = 0;
+    }
+}
+
+static int
+age_wcoj_survivor_block_capacity(AgeWCOJJoinScanState *state)
+{
+    double bytes_per_survivor = sizeof(graphid);
+    double capacity;
+    int source_index;
+
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        AgeWCOJPostingProvider *provider = &state->providers[source_index];
+
+        if (provider->kind == AGE_WCOJ_PROVIDER_PLAN_STREAM)
+        {
+            bytes_per_survivor += sizeof(AgeWCOJTupleGroup) + 128.0;
+        }
+        else
+        {
+            double multiplicity = 1.0;
+
+            if (provider->terminal_count > 0 && provider->rows_scanned > 0)
+            {
+                multiplicity = Max(
+                    1.0,
+                    (double)provider->rows_scanned /
+                        (double)provider->terminal_count);
+            }
+            bytes_per_survivor += sizeof(AgeWCOJBatchPayloadRange) +
+                multiplicity * sizeof(AgeWCOJBatchPayload);
+        }
+    }
+
+    capacity = (double)state->batch_memory_budget /
+        Max(bytes_per_survivor, 1.0);
+    if (capacity < AGE_WCOJ_SURVIVOR_BLOCK_MIN)
+        capacity = AGE_WCOJ_SURVIVOR_BLOCK_MIN;
+    if (capacity > AGE_WCOJ_SURVIVOR_BLOCK_MAX)
+        capacity = AGE_WCOJ_SURVIVOR_BLOCK_MAX;
+    return Max((int)capacity, 1);
+}
+
+static void
+allocate_age_wcoj_survivor_block(AgeWCOJJoinScanState *state, int capacity)
+{
+    MemoryContext oldcontext;
+    int source_index;
+
+    if (capacity <= 0)
+        elog(ERROR, "invalid AGE WCOJ survivor block capacity");
+
+    oldcontext = MemoryContextSwitchTo(state->batch_context);
+    state->survivor_block = palloc(sizeof(graphid) * capacity);
+    state->survivor_block_capacity = capacity;
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        AgeWCOJPostingProvider *provider = &state->providers[source_index];
+
+        if (provider->kind == AGE_WCOJ_PROVIDER_PLAN_STREAM)
+        {
+            provider->batch_groups = palloc0(
+                sizeof(AgeWCOJTupleGroup) * capacity);
+        }
+        else
+        {
+            provider->batch_payload_ranges = palloc0(
+                sizeof(AgeWCOJBatchPayloadRange) * capacity);
+        }
+    }
+    MemoryContextSwitchTo(oldcontext);
+}
+
+static void
+prepare_age_wcoj_survivor_filter(
+    AgeWCOJJoinScanState *state, AgeAdjacencyCompositeTerminalFilter *filter,
+    int32 terminal_label_id)
+{
+    memset(filter, 0, sizeof(*filter));
+    filter->terminal_label_id = terminal_label_id;
+    filter->source = "wcoj-survivor-block";
+    filter->has_vertex_set_filter = true;
+    filter->vertex_set_filter.sorted_vertex_ids = state->survivor_block;
+    filter->vertex_set_filter.source = "wcoj-survivor-block";
+    filter->vertex_set_filter.matches = state->survivor_block_count;
+    filter->vertex_set_filter.sorted_vertex_count =
+        state->survivor_block_count;
+    filter->vertex_set_filter.min_vertex_id = state->survivor_block[0];
+    filter->vertex_set_filter.max_vertex_id =
+        state->survivor_block[state->survivor_block_count - 1];
+    filter->vertex_set_filter.has_range = true;
+    filter->vertex_set_filter.has_sorted_vertex_ids = true;
+}
+
+static void
+prefetch_age_wcoj_adjacency_payloads(AgeWCOJPostingProvider *provider)
+{
+    AgeWCOJJoinScanState *state = provider->owner;
+    AgeAdjacencyVisiblePayloadRunKey *keys;
+    AgeAdjacencyVisiblePayloadRunOptions options;
+    AgeAdjacencyCompositeTerminalFilter filter;
+    AgeAdjacencyVisiblePayloadRunScan *run_scan;
+    AgeAdjacencyPayload payload;
+    MemoryContext oldcontext;
+    void *tag;
+    int bag_index;
+    int payload_index;
+    int64 old_restart_count;
+
+    if (state->survivor_block_count <= 0 || provider->source_bag_count <= 0)
+        return;
+
+    oldcontext = MemoryContextSwitchTo(state->batch_context);
+    keys = palloc(sizeof(AgeAdjacencyVisiblePayloadRunKey) *
+                   provider->source_bag_count);
+    for (bag_index = 0; bag_index < provider->source_bag_count; bag_index++)
+    {
+        keys[bag_index].key = provider->source_bags[bag_index].key;
+        keys[bag_index].tag = &provider->source_bags[bag_index];
+    }
+
+    prepare_age_wcoj_survivor_filter(state, &filter,
+                                     provider->terminal_label_id);
+    memset(&options, 0, sizeof(options));
+    options.terminal_label_id = provider->terminal_label_id;
+    options.prepared_filter = &filter;
+    options.prepared_filter_valid = true;
+    run_scan = age_adjacency_begin_visible_payload_run_scan_with_options(
+        provider->index_oid, state->css.ss.ps.state->es_snapshot,
+        provider->fetch_properties, &options, keys,
+        provider->source_bag_count);
+    increment_wcoj_counter(&state->payload_scan_batches);
+    add_wcoj_counter(&state->payload_source_keys_scanned,
+                     provider->source_bag_count);
+    old_restart_count =
+        (int64)state->survivor_block_count * provider->source_bag_count;
+    if (old_restart_count > provider->source_bag_count)
+    {
+        add_wcoj_counter(&state->payload_scan_restarts_avoided,
+                         old_restart_count - provider->source_bag_count);
+    }
+
+    while (run_scan != NULL &&
+           age_adjacency_visible_payload_run_scan_next_tag(
+               run_scan, &payload, &tag))
+    {
+        AgeWCOJSourceKeyBag *bag = tag;
+        int survivor_index;
+
+        increment_wcoj_counter(&state->payload_rows_scanned);
+        if (bag < provider->source_bags ||
+            bag >= provider->source_bags + provider->source_bag_count)
+        {
+            elog(ERROR, "invalid AGE WCOJ payload source tag");
+        }
+        survivor_index = find_age_wcoj_survivor_index(
+            state, payload.next_vertex_id);
+        if (survivor_index < 0)
+            continue;
+
+        increment_wcoj_counter(&state->payload_rows_matched);
+        increment_wcoj_counter(&state->payload_rows_fetched);
+        append_age_wcoj_batch_payload(
+            provider, survivor_index, (int)(bag - provider->source_bags),
+            &payload);
+    }
+    if (run_scan != NULL)
+        age_adjacency_end_visible_payload_run_scan(run_scan);
+
+    if (provider->batch_payload_count > 1)
+    {
+        qsort(provider->batch_payloads, provider->batch_payload_count,
+              sizeof(AgeWCOJBatchPayload),
+              compare_age_wcoj_batch_payloads);
+    }
+    for (payload_index = 0;
+         payload_index < provider->batch_payload_count;
+         payload_index++)
+    {
+        AgeWCOJBatchPayload *entry =
+            &provider->batch_payloads[payload_index];
+        AgeWCOJBatchPayloadRange *range =
+            &provider->batch_payload_ranges[entry->survivor_index];
+
+        if (range->payload_count == 0)
+            range->first_payload = payload_index;
+        range->payload_count++;
+    }
+    MemoryContextSwitchTo(oldcontext);
 }
 
 static void
@@ -821,14 +1117,14 @@ clear_age_wcoj_group(AgeWCOJJoinScanState *state)
 }
 
 static void
-append_age_wcoj_group_tuple(AgeWCOJJoinScanState *state, int child_index,
+append_age_wcoj_tuple_group(AgeWCOJTupleGroup *group,
+                            MemoryContext tuple_context,
                             TupleTableSlot *slot, bool edge_id_valid,
                             graphid edge_id)
 {
-    AgeWCOJTupleGroup *group = &state->groups[child_index];
     MemoryContext old_context;
 
-    old_context = MemoryContextSwitchTo(state->group_context);
+    old_context = MemoryContextSwitchTo(tuple_context);
     if (group->count == group->capacity)
     {
         int new_capacity;
@@ -861,12 +1157,40 @@ append_age_wcoj_group_tuple(AgeWCOJJoinScanState *state, int child_index,
     MemoryContextSwitchTo(old_context);
 }
 
+static void
+append_age_wcoj_group_tuple(AgeWCOJJoinScanState *state, int child_index,
+                            TupleTableSlot *slot, bool edge_id_valid,
+                            graphid edge_id)
+{
+    append_age_wcoj_tuple_group(&state->groups[child_index],
+                                state->group_context, slot,
+                                edge_id_valid, edge_id);
+}
+
 static bool
 plan_stream_materialize_group(AgeWCOJPostingProvider *provider,
                               graphid terminal)
 {
     AgeWCOJJoinScanState *state = provider->owner;
     int source_index = provider->source_index;
+
+    if (state->batch_payload_enabled)
+    {
+        AgeWCOJTupleGroup *cached_group;
+
+        if (provider->batch_groups == NULL ||
+            state->active_survivor_index < 0 ||
+            state->active_survivor_index >= state->survivor_block_count)
+        {
+            elog(ERROR, "invalid AGE WCOJ buffered plan-stream group");
+        }
+        cached_group = &provider->batch_groups[
+            state->active_survivor_index];
+        if (cached_group->count <= 0)
+            return false;
+        state->groups[source_index] = *cached_group;
+        return true;
+    }
 
     if (!plan_stream_first_distinct(provider) ||
         provider->current_key != terminal)
@@ -909,6 +1233,62 @@ plan_stream_materialize_group(AgeWCOJPostingProvider *provider,
     }
 
     return state->groups[source_index].count > 0;
+}
+
+static bool
+plan_stream_buffer_group(AgeWCOJPostingProvider *provider,
+                         graphid terminal, int survivor_index)
+{
+    AgeWCOJJoinScanState *state = provider->owner;
+    AgeWCOJTupleGroup *group;
+
+    if (provider->batch_groups == NULL || survivor_index < 0 ||
+        survivor_index >= state->survivor_block_capacity)
+    {
+        elog(ERROR, "invalid AGE WCOJ survivor block group index");
+    }
+    if (!plan_stream_first_distinct(provider) ||
+        provider->current_key != terminal)
+    {
+        return false;
+    }
+
+    group = &provider->batch_groups[survivor_index];
+    for (;;)
+    {
+        graphid edge_id = 0;
+        bool edge_id_valid = false;
+
+        if (provider->edge_id_output_attno > 0)
+        {
+            Datum edge_value;
+            bool edge_isnull;
+
+            edge_value = slot_getattr(provider->current_slot,
+                                      provider->edge_id_output_attno,
+                                      &edge_isnull);
+            if (!edge_isnull)
+            {
+                edge_id = DATUM_GET_GRAPHID(edge_value);
+                edge_id_valid = true;
+            }
+        }
+        append_age_wcoj_tuple_group(group, state->batch_context,
+                                    provider->current_slot,
+                                    edge_id_valid, edge_id);
+        if (!plan_stream_fetch_row(provider))
+        {
+            record_provider_advance(provider);
+            break;
+        }
+        if (provider->current_key != terminal)
+        {
+            record_provider_advance(provider);
+            break;
+        }
+    }
+
+    return group->count > 0;
 }
 
 static void
@@ -954,6 +1334,93 @@ compare_age_wcoj_graphids(const void *left, const void *right)
     if (a > b)
         return 1;
     return 0;
+}
+
+static int
+compare_age_wcoj_batch_payloads(const void *left, const void *right)
+{
+    const AgeWCOJBatchPayload *a = left;
+    const AgeWCOJBatchPayload *b = right;
+
+    if (a->survivor_index != b->survivor_index)
+        return a->survivor_index < b->survivor_index ? -1 : 1;
+    if (a->source_bag_index != b->source_bag_index)
+        return a->source_bag_index < b->source_bag_index ? -1 : 1;
+    if (a->payload.edge_id < b->payload.edge_id)
+        return -1;
+    if (a->payload.edge_id > b->payload.edge_id)
+        return 1;
+    return 0;
+}
+
+static int
+find_age_wcoj_survivor_index(AgeWCOJJoinScanState *state, graphid terminal)
+{
+    int low = 0;
+    int high = state->survivor_block_count;
+
+    while (low < high)
+    {
+        int middle = low + (high - low) / 2;
+        graphid candidate = state->survivor_block[middle];
+
+        if (candidate < terminal)
+            low = middle + 1;
+        else
+            high = middle;
+    }
+    if (low < state->survivor_block_count &&
+        state->survivor_block[low] == terminal)
+    {
+        return low;
+    }
+    return -1;
+}
+
+static void
+append_age_wcoj_batch_payload(AgeWCOJPostingProvider *provider,
+                              int survivor_index, int source_bag_index,
+                              const AgeAdjacencyPayload *payload)
+{
+    AgeWCOJBatchPayload *entry;
+    MemoryContext oldcontext;
+
+    oldcontext = MemoryContextSwitchTo(provider->owner->batch_context);
+    if (provider->batch_payload_count == provider->batch_payload_capacity)
+    {
+        int new_capacity = provider->batch_payload_capacity == 0 ? 64 :
+            provider->batch_payload_capacity * 2;
+
+        if (new_capacity <= provider->batch_payload_capacity ||
+            (Size)new_capacity > MaxAllocSize / sizeof(AgeWCOJBatchPayload))
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                     errmsg("AGE WCOJ payload block is too large")));
+        }
+        if (provider->batch_payloads == NULL)
+        {
+            provider->batch_payloads = palloc(
+                sizeof(AgeWCOJBatchPayload) * new_capacity);
+        }
+        else
+        {
+            provider->batch_payloads = repalloc(
+                provider->batch_payloads,
+                sizeof(AgeWCOJBatchPayload) * new_capacity);
+        }
+        provider->batch_payload_capacity = new_capacity;
+    }
+
+    entry = &provider->batch_payloads[provider->batch_payload_count++];
+    entry->payload = *payload;
+    if (provider->fetch_properties && !payload->properties_isnull)
+    {
+        entry->payload.properties = datumCopy(payload->properties, false, -1);
+    }
+    entry->survivor_index = survivor_index;
+    entry->source_bag_index = source_bag_index;
+    MemoryContextSwitchTo(oldcontext);
 }
 
 static void
@@ -1529,6 +1996,35 @@ age_wcoj_adjacency_local_qual(AgeWCOJPostingProvider *provider)
     return result;
 }
 
+static void
+materialize_age_wcoj_adjacency_payload(
+    AgeWCOJPostingProvider *provider, int bag_index,
+    const AgeAdjacencyPayload *payload)
+{
+    AgeWCOJJoinScanState *state = provider->owner;
+    AgeWCOJSourceKeyBag *bag = &provider->source_bags[bag_index];
+    int source_row_index = bag->first_row;
+
+    fill_age_wcoj_adjacency_output(provider, bag_index,
+                                   source_row_index, payload);
+    if (!age_wcoj_adjacency_local_qual(provider))
+    {
+        increment_wcoj_counter(&state->local_predicate_rejects);
+        return;
+    }
+
+    for (source_row_index = bag->first_row;
+         source_row_index < bag->first_row + bag->row_count;
+         source_row_index++)
+    {
+        fill_age_wcoj_adjacency_output(provider, bag_index,
+                                       source_row_index, payload);
+        append_age_wcoj_group_tuple(state, provider->source_index,
+                                    provider->output_slot, true,
+                                    payload->edge_id);
+    }
+}
+
 static bool
 adjacency_materialize_group(AgeWCOJPostingProvider *provider,
                             graphid terminal)
@@ -1536,6 +2032,32 @@ adjacency_materialize_group(AgeWCOJPostingProvider *provider,
     AgeWCOJJoinScanState *state = provider->owner;
     int source_index = provider->source_index;
     int bag_index;
+
+    if (state->batch_payload_enabled)
+    {
+        AgeWCOJBatchPayloadRange *range;
+        int payload_index;
+
+        if (provider->batch_payload_ranges == NULL ||
+            state->active_survivor_index < 0 ||
+            state->active_survivor_index >= state->survivor_block_count)
+        {
+            elog(ERROR, "invalid AGE WCOJ buffered adjacency group");
+        }
+        range = &provider->batch_payload_ranges[
+            state->active_survivor_index];
+        for (payload_index = range->first_payload;
+             payload_index < range->first_payload + range->payload_count;
+             payload_index++)
+        {
+            AgeWCOJBatchPayload *entry =
+                &provider->batch_payloads[payload_index];
+
+            materialize_age_wcoj_adjacency_payload(
+                provider, entry->source_bag_index, &entry->payload);
+        }
+        return state->groups[source_index].count > 0;
+    }
 
     if (!adjacency_first_distinct(provider) ||
         provider->current_key != terminal)
@@ -1551,34 +2073,18 @@ adjacency_materialize_group(AgeWCOJPostingProvider *provider,
 
         active = age_adjacency_visible_payload_scan_begin_key(
             provider->payload_scan, bag->key);
+        increment_wcoj_counter(&state->payload_scan_batches);
+        increment_wcoj_counter(&state->payload_source_keys_scanned);
         while (active && age_adjacency_visible_payload_scan_next(
                              provider->payload_scan, &payload))
         {
-            int source_row_index;
-
+            increment_wcoj_counter(&state->payload_rows_scanned);
             if (payload.next_vertex_id != terminal)
                 continue;
+            increment_wcoj_counter(&state->payload_rows_matched);
             increment_wcoj_counter(&state->payload_rows_fetched);
-
-            source_row_index = bag->first_row;
-            fill_age_wcoj_adjacency_output(provider, bag_index,
-                                           source_row_index, &payload);
-            if (!age_wcoj_adjacency_local_qual(provider))
-            {
-                increment_wcoj_counter(&state->local_predicate_rejects);
-                continue;
-            }
-
-            for (source_row_index = bag->first_row;
-                 source_row_index < bag->first_row + bag->row_count;
-                 source_row_index++)
-            {
-                fill_age_wcoj_adjacency_output(provider, bag_index,
-                                               source_row_index, &payload);
-                append_age_wcoj_group_tuple(state, source_index,
-                                            provider->output_slot, true,
-                                            payload.edge_id);
-            }
+            materialize_age_wcoj_adjacency_payload(
+                provider, bag_index, &payload);
         }
     }
 
@@ -1876,36 +2382,139 @@ maybe_fallback_from_progressive(AgeWCOJJoinScanState *state)
 }
 
 static bool
+find_next_age_wcoj_survivor(AgeWCOJJoinScanState *state,
+                            graphid *matched_key)
+{
+    maybe_fallback_from_progressive(state);
+    switch (state->actual_engine)
+    {
+    case AGE_WCOJ_ENGINE_PROGRESSIVE:
+        return align_age_wcoj_progressive(state, matched_key);
+    case AGE_WCOJ_ENGINE_LEAPFROG:
+        return align_age_wcoj_leapfrog(state, matched_key);
+    case AGE_WCOJ_ENGINE_MERGE:
+        return align_age_wcoj_merge(state, matched_key);
+    case AGE_WCOJ_ENGINE_AUTO:
+    default:
+        elog(ERROR, "invalid AGE WCOJ execution engine");
+        return false;
+    }
+}
+
+static bool
+buffer_age_wcoj_survivor(AgeWCOJJoinScanState *state, graphid matched_key,
+                         int survivor_index)
+{
+    bool can_continue = true;
+    int source_index;
+
+    state->survivor_block[survivor_index] = matched_key;
+    state->survivor_block_count = survivor_index + 1;
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        AgeWCOJPostingProvider *provider = &state->providers[source_index];
+
+        if (!provider->has_current || provider->current_key != matched_key)
+        {
+            elog(ERROR, "AGE WCOJ provider lost an aligned survivor");
+        }
+        if (provider->kind == AGE_WCOJ_PROVIDER_PLAN_STREAM)
+        {
+            if (!plan_stream_buffer_group(provider, matched_key,
+                                          survivor_index))
+            {
+                elog(ERROR, "AGE WCOJ could not buffer a plan-stream group");
+            }
+            if (provider->exhausted)
+                can_continue = false;
+        }
+        else if (!provider->ops->next_distinct(provider))
+        {
+            can_continue = false;
+        }
+    }
+    return can_continue;
+}
+
+static bool
+prepare_age_wcoj_survivor_block(AgeWCOJJoinScanState *state)
+{
+    graphid matched_key;
+    bool can_continue;
+    int capacity;
+    int source_index;
+
+    reset_age_wcoj_survivor_block(state);
+    if (state->survivor_input_exhausted ||
+        !find_next_age_wcoj_survivor(state, &matched_key))
+    {
+        state->survivor_input_exhausted = true;
+        return false;
+    }
+
+    capacity = age_wcoj_survivor_block_capacity(state);
+    allocate_age_wcoj_survivor_block(state, capacity);
+    for (;;)
+    {
+        int survivor_index = state->survivor_block_count;
+
+        can_continue = buffer_age_wcoj_survivor(
+            state, matched_key, survivor_index);
+        if (!can_continue)
+        {
+            state->survivor_input_exhausted = true;
+            break;
+        }
+        if (state->survivor_block_count >= capacity ||
+            MemoryContextMemAllocated(state->batch_context, true) >=
+                state->batch_memory_budget)
+        {
+            break;
+        }
+        if (!find_next_age_wcoj_survivor(state, &matched_key))
+        {
+            state->survivor_input_exhausted = true;
+            break;
+        }
+    }
+
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        AgeWCOJPostingProvider *provider = &state->providers[source_index];
+
+        if (provider->kind == AGE_WCOJ_PROVIDER_ADJACENCY)
+            prefetch_age_wcoj_adjacency_payloads(provider);
+    }
+    increment_wcoj_counter(&state->survivor_blocks);
+    state->survivor_block_index = 0;
+    update_age_wcoj_peak_memory(state);
+    return state->survivor_block_count > 0;
+}
+
+static bool
 prepare_age_wcoj_group(AgeWCOJJoinScanState *state)
 {
     for (;;)
     {
         graphid matched_key;
-        bool matched;
 
         clear_age_wcoj_group(state);
         if (state->exhausted)
             return false;
 
-        maybe_fallback_from_progressive(state);
-        switch (state->actual_engine)
+        if (state->batch_payload_enabled)
         {
-        case AGE_WCOJ_ENGINE_PROGRESSIVE:
-            matched = align_age_wcoj_progressive(state, &matched_key);
-            break;
-        case AGE_WCOJ_ENGINE_LEAPFROG:
-            matched = align_age_wcoj_leapfrog(state, &matched_key);
-            break;
-        case AGE_WCOJ_ENGINE_MERGE:
-            matched = align_age_wcoj_merge(state, &matched_key);
-            break;
-        case AGE_WCOJ_ENGINE_AUTO:
-        default:
-            elog(ERROR, "invalid AGE WCOJ execution engine");
-            matched = false;
-            break;
+            if (state->survivor_block_index >= state->survivor_block_count &&
+                !prepare_age_wcoj_survivor_block(state))
+            {
+                state->exhausted = true;
+                return false;
+            }
+            state->active_survivor_index = state->survivor_block_index;
+            matched_key = state->survivor_block[
+                state->survivor_block_index++];
         }
-        if (!matched)
+        else if (!find_next_age_wcoj_survivor(state, &matched_key))
         {
             state->exhausted = true;
             return false;
@@ -2079,6 +2688,11 @@ end_age_wcoj_join_scan(CustomScanState *node)
         MemoryContextDelete(state->group_context);
         state->group_context = NULL;
     }
+    if (state->batch_context != NULL)
+    {
+        MemoryContextDelete(state->batch_context);
+        state->batch_context = NULL;
+    }
 }
 
 static void
@@ -2091,9 +2705,11 @@ rescan_age_wcoj_join_scan(CustomScanState *node)
     for (source_index = 0; source_index < state->arity; source_index++)
         state->providers[source_index].ops->rescan(
             &state->providers[source_index]);
+    reset_age_wcoj_survivor_block(state);
     state->actual_engine = state->planned_engine;
     state->fallback_reason = "none";
     state->exhausted = false;
+    state->survivor_input_exhausted = false;
     state->progressive_setup_done = false;
     increment_wcoj_counter(&state->rescans);
 }
@@ -2190,6 +2806,8 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
     ExplainPropertyInteger("Source Count", NULL, state->arity, es);
     ExplainPropertyInteger("Adjacency Providers", NULL,
                            adjacency_provider_count, es);
+    ExplainPropertyBool("Batched Payload Materialization",
+                        state->batch_payload_enabled, es);
     ExplainPropertyInteger("WCOJ Arity", NULL, state->arity, es);
     ExplainPropertyInteger("Seed Source", NULL, state->seed_index + 1, es);
     ExplainPropertyText("Estimated Postings", estimated_postings, es);
@@ -2206,6 +2824,18 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
         ExplainPropertyInteger("Seek Calls", NULL, state->seek_calls, es);
         ExplainPropertyInteger("Posting Rows Scanned", NULL,
                                state->posting_rows_scanned, es);
+        ExplainPropertyInteger("Survivor Blocks", NULL,
+                               state->survivor_blocks, es);
+        ExplainPropertyInteger("Payload Scan Batches", NULL,
+                               state->payload_scan_batches, es);
+        ExplainPropertyInteger("Payload Source Keys Scanned", NULL,
+                               state->payload_source_keys_scanned, es);
+        ExplainPropertyInteger("Payload Scan Restarts Avoided", NULL,
+                               state->payload_scan_restarts_avoided, es);
+        ExplainPropertyInteger("Payload Rows Scanned", NULL,
+                               state->payload_rows_scanned, es);
+        ExplainPropertyInteger("Payload Rows Matched", NULL,
+                               state->payload_rows_matched, es);
         ExplainPropertyInteger("Payload Rows Fetched", NULL,
                                state->payload_rows_fetched, es);
         ExplainPropertyInteger("Progressive Probes", NULL,
