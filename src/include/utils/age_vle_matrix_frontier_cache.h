@@ -42,6 +42,7 @@ typedef struct VLEMatrixFrontierCacheKey
 typedef struct VLEMatrixFrontierPayload
 {
     graphid source_vertex_id;
+    int64 source_count;
     AgeAdjacencyPayload payload;
 } VLEMatrixFrontierPayload;
 
@@ -73,6 +74,11 @@ extern VLEMatrixFrontierCacheEntry *age_vle_matrix_frontier_cache_lookup(
 extern void age_vle_matrix_frontier_cache_append(
     VLEMatrixFrontierCacheEntry *cache_entry, graphid source_vertex_id,
     const AgeAdjacencyPayload *payload);
+extern void age_vle_matrix_frontier_cache_append_reserved(
+    VLEMatrixFrontierCacheEntry *cache_entry, graphid source_vertex_id,
+    const AgeAdjacencyPayload *payload, int64 source_count);
+extern void age_vle_matrix_frontier_cache_reserve(
+    VLEMatrixFrontierCacheEntry *cache_entry, int64 additional_payloads);
 extern void age_vle_matrix_frontier_cache_discard(
     VLEMatrixFrontierCacheEntry *cache_entry);
 extern void age_vle_matrix_frontier_cache_mark_empty(

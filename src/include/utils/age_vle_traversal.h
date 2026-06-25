@@ -149,6 +149,10 @@ extern void age_vle_traversal_candidate_mark_match(
 extern bool age_vle_traversal_push_candidate_if_matched(
     VLETraversalState *state, const VLETraversalCandidate *candidate,
     const char *caller);
+extern int64 age_vle_traversal_push_candidate_batch_if_matched(
+    VLETraversalState *state, const VLETraversalCandidate *candidates,
+    int candidate_count, int32 target_label_id, const char *caller,
+    bool *pushed);
 extern bool age_vle_consume_next_frame(VLETraversalState *state,
                                        const char *caller,
                                        VLETraversalStep *step);

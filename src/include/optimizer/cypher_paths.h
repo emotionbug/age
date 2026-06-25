@@ -51,7 +51,9 @@ typedef struct CypherAdjacencyMatchCandidate
     char *right_property_value_kind;
     Const *right_property_value;
     Node *right_property_value_expr;
+    Index edge_rti;
     Index bound_endpoint_rti;
+    Relids solved_relids;
     Relids required_outer;
     bool outgoing;
     bool has_edge_variable_projection;

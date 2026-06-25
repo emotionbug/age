@@ -94,6 +94,7 @@ typedef struct AgeAdjacencyMatchScanState
     char *join_order_bound;
     char *join_order_property;
     char *join_order_source_evidence;
+    char *join_order_solved_relids;
     int64 join_order_candidate_count;
     char *join_order_next_connector;
     char *join_order_next_property;
@@ -795,6 +796,8 @@ static void load_age_adjacency_match_descriptor(
         descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_PROPERTY);
     state->join_order_source_evidence = adjacency_match_descriptor_text(
         descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_SOURCE_EVIDENCE);
+    state->join_order_solved_relids = adjacency_match_descriptor_text(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_SOLVED_RELIDS);
     state->join_order_candidate_count =
         adjacency_match_descriptor_int64(
             descriptor,
@@ -1114,12 +1117,14 @@ static char *format_age_adjacency_match_cost_input(
 static char *format_age_adjacency_match_join_order(
     AgeAdjacencyMatchScanState *state)
 {
-    return psprintf("component=%s connector=%s bound=%s property=%s "
+    return psprintf("component=%s solved=%s connector=%s bound=%s property=%s "
                     "rows=%ld fanout=%ld terminal-fanout=%ld "
                     "composite-fanout=%ld source=%s candidates=%ld "
                     "next=%s/%s/%s",
                     state->join_order_component != NULL ?
                     state->join_order_component : "edge",
+                    state->join_order_solved_relids != NULL ?
+                    state->join_order_solved_relids : "(b)",
                     state->join_order_connector != NULL ?
                     state->join_order_connector : "unknown",
                     state->join_order_bound != NULL ?

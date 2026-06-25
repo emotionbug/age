@@ -32,23 +32,78 @@ typedef enum VLEMatrixFrontierRunInputKind
     VLE_MATRIX_FRONTIER_RUN_INPUT_CURSOR
 } VLEMatrixFrontierRunInputKind;
 
+typedef enum VLEMatrixFrontierPayloadBatchKind
+{
+    VLE_MATRIX_FRONTIER_PAYLOAD_BATCH_NONE,
+    VLE_MATRIX_FRONTIER_PAYLOAD_BATCH_REPLAY_SOURCE,
+    VLE_MATRIX_FRONTIER_PAYLOAD_BATCH_RAW_RUN_BLOCK
+} VLEMatrixFrontierPayloadBatchKind;
+
+typedef struct VLEMatrixFrontierRunInput VLEMatrixFrontierRunInput;
+
+typedef struct VLEMatrixFrontierReplayInputIndex
+{
+    graphid source_vertex_id;
+    VLEMatrixFrontierRunInput *input;
+} VLEMatrixFrontierReplayInputIndex;
+
 typedef struct VLEMatrixFrontierRunInputState
 {
     VLEMatrixFrontierCacheEntry *matrix_replay_entry;
     AgeAdjacencyVisiblePayloadRunScan *raw_run_scan;
+    VLEMatrixFrontierReplayInputIndex *matrix_replay_inputs;
+    VLEMatrixFrontierRunInput *matrix_replay_batch_input;
     int64 matrix_payload_index;
+    int64 matrix_replay_batch_start_index;
+    int64 matrix_replay_batch_end_index;
+    int64 matrix_replay_input_count;
+    int64 matrix_replay_input_capacity;
+    graphid matrix_replay_batch_source_vertex_id;
+    bool matrix_replay_inputs_sorted;
+    bool matrix_replay_batch_valid;
 } VLEMatrixFrontierRunInputState;
 
-typedef struct VLEMatrixFrontierRunInput
+typedef struct VLEMatrixFrontierPayloadBatch
+{
+    VLEMatrixFrontierPayloadBatchKind kind;
+    const VLEContextSourceCursor *source_cursor;
+    BlockNumber blkno;
+    OffsetNumber offnum;
+    int64 batch_index;
+    int64 batch_count;
+    int64 source_count;
+    uint16 position_index;
+    uint16 position_count;
+    bool valid;
+} VLEMatrixFrontierPayloadBatch;
+
+typedef struct VLEMatrixFrontierPayloadBatchItem
+{
+    AgeAdjacencyPayload payload;
+    VLEContextAgeAdjacencyPayloadSource *payload_source;
+    const VLEContextSourceCursor *source_cursor;
+    VLEMatrixFrontierPayloadBatch payload_batch;
+} VLEMatrixFrontierPayloadBatchItem;
+
+typedef struct VLEMatrixFrontierPendingPayload
+{
+    VLEMatrixFrontierPayloadBatchItem item;
+    bool valid;
+} VLEMatrixFrontierPendingPayload;
+
+struct VLEMatrixFrontierRunInput
 {
     VLEMatrixFrontierRunInputKind kind;
     VLEContextAgeAdjacencyPayloadSource *source;
     const VLEContextSourceCursor *cursor;
     VLEMatrixFrontierRunInputState *state;
+    AgeAdjacencyTerminalLabelPostingEstimate raw_estimate;
     AgeAdjacencyPayload payload;
+    int64 order;
     bool payload_valid;
+    bool raw_estimate_valid;
     bool state_owner;
-} VLEMatrixFrontierRunInput;
+};
 
 typedef struct VLEMatrixFrontierSourceBlock
 {
@@ -63,12 +118,17 @@ typedef struct VLEMatrixFrontierSourceBlock
     VLEContextAgeAdjacencyPayloadSource *active_source;
     VLEContextAgeAdjacencyPayloadSource **run_sources;
     VLEMatrixFrontierRunInput *run_inputs;
+    VLEMatrixFrontierRunInput **cursor_input_heap;
+    AgeAdjacencyVisiblePayloadRunNextItem *raw_batch_items;
     AgeAdjacencyVisiblePayloadRunKey *raw_keys;
+    AgeAdjacencyTerminalLabelPostingEstimate *raw_estimates;
     AgeAdjacencyCompositeTerminalFilter raw_filter;
     int64 run_source_count;
     int64 run_source_capacity;
     int64 run_input_count;
     int64 run_input_capacity;
+    int64 cursor_input_heap_count;
+    int raw_batch_item_capacity;
     int64 raw_source_count;
     int64 raw_prefiltered_source_count;
     VLEMatrixFrontierCacheKey matrix_key;
@@ -77,7 +137,9 @@ typedef struct VLEMatrixFrontierSourceBlock
     bool active_empty_suppressed;
     bool raw_filter_prepared;
     bool raw_filter_known_empty;
+    bool raw_estimates_prepared;
     bool run_batch_active;
+    VLEMatrixFrontierPendingPayload pending_payload;
 } VLEMatrixFrontierSourceBlock;
 
 extern bool age_vle_matrix_frontier_source_block_begin(
@@ -88,7 +150,12 @@ extern bool age_vle_matrix_frontier_source_block_empty_suppressed(
 extern bool age_vle_matrix_frontier_source_block_next(
     VLEMatrixFrontierSourceBlock *block, AgeAdjacencyPayload *payload,
     VLEContextAgeAdjacencyPayloadSource **payload_source,
-    const VLEContextSourceCursor **source_cursor);
+    const VLEContextSourceCursor **source_cursor,
+    VLEMatrixFrontierPayloadBatch *payload_batch);
+extern int age_vle_matrix_frontier_source_block_next_payload_batch(
+    VLEMatrixFrontierSourceBlock *block,
+    const VLEMatrixFrontierPayloadBatch *seed_batch,
+    VLEMatrixFrontierPayloadBatchItem *items, int item_capacity);
 extern void age_vle_matrix_frontier_source_block_end(
     VLEMatrixFrontierSourceBlock *block);
 

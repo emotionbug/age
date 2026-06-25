@@ -31,6 +31,7 @@ typedef enum AgeGraphJoinDescriptorField
     AGE_GRAPH_JOIN_DESC_BOUND,
     AGE_GRAPH_JOIN_DESC_ORDER_PROPERTY,
     AGE_GRAPH_JOIN_DESC_SOURCE_EVIDENCE,
+    AGE_GRAPH_JOIN_DESC_SOLVED_RELIDS,
     AGE_GRAPH_JOIN_DESC_REQUIRED_OUTER,
     AGE_GRAPH_JOIN_DESC_PROVIDED_RELIDS,
     AGE_GRAPH_JOIN_DESC_ROWS,
@@ -59,6 +60,7 @@ typedef struct AgeGraphJoinCandidateRequest
     const char *bound;
     const char *order_property;
     const char *source_evidence;
+    Relids solved_relids;
     Relids required_outer;
     Relids provided_relids;
     double rows;
@@ -76,6 +78,7 @@ typedef struct AgeGraphJoinCandidateRequest
 typedef struct AgeGraphJoinComponent
 {
     char *name;
+    Relids solved_relids;
     Relids required_outer;
     Relids provided_relids;
     double estimated_rows;
@@ -94,6 +97,7 @@ typedef struct AgeGraphJoinConnector
     char *bound;
     char *order_property;
     char *source_evidence;
+    Relids solved_relids;
     Relids required_outer;
     Relids provided_relids;
     double rows;
@@ -117,6 +121,7 @@ typedef struct AgeGraphJoinPathEvidence
     const char *connector;
     const char *order_property;
     const char *source_evidence;
+    Relids solved_relids;
     Relids required_outer;
     Relids provided_relids;
     int64 candidate_count;

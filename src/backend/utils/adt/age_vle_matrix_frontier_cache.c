@@ -155,31 +155,70 @@ void age_vle_matrix_frontier_cache_append(
 
     if (cache_entry->count == cache_entry->capacity)
     {
-        int64 new_capacity = cache_entry->capacity == 0 ? 8 :
-                             cache_entry->capacity * 2;
-        MemoryContext oldctx;
-
-        oldctx = MemoryContextSwitchTo(TopMemoryContext);
-        if (cache_entry->payloads == NULL)
-        {
-            cache_entry->payloads = palloc_array(VLEMatrixFrontierPayload,
-                                                 new_capacity);
-        }
-        else
-        {
-            cache_entry->payloads = repalloc_array(cache_entry->payloads,
-                                                   VLEMatrixFrontierPayload,
-                                                   new_capacity);
-        }
-        MemoryContextSwitchTo(oldctx);
-        cache_entry->capacity = new_capacity;
+        age_vle_matrix_frontier_cache_reserve(
+            cache_entry, Max(cache_entry->capacity, 8));
     }
 
     cache_entry->known_empty = false;
     cache_entry->payloads[cache_entry->count].source_vertex_id =
         source_vertex_id;
+    cache_entry->payloads[cache_entry->count].source_count = 1;
     cache_entry->payloads[cache_entry->count].payload = *payload;
     cache_entry->count++;
+}
+
+void age_vle_matrix_frontier_cache_append_reserved(
+    VLEMatrixFrontierCacheEntry *cache_entry, graphid source_vertex_id,
+    const AgeAdjacencyPayload *payload, int64 source_count)
+{
+    Assert(cache_entry != NULL);
+    Assert(payload != NULL);
+    Assert(cache_entry->count < cache_entry->capacity);
+    Assert(cache_entry->payloads != NULL);
+    Assert(source_count > 0);
+
+    cache_entry->known_empty = false;
+    cache_entry->payloads[cache_entry->count].source_vertex_id =
+        source_vertex_id;
+    cache_entry->payloads[cache_entry->count].source_count = source_count;
+    cache_entry->payloads[cache_entry->count].payload = *payload;
+    cache_entry->count++;
+}
+
+void age_vle_matrix_frontier_cache_reserve(
+    VLEMatrixFrontierCacheEntry *cache_entry, int64 additional_payloads)
+{
+    int64 required_capacity;
+    int64 new_capacity;
+    MemoryContext oldctx;
+
+    Assert(cache_entry != NULL);
+
+    if (additional_payloads <= 0)
+        return;
+
+    required_capacity = cache_entry->count + additional_payloads;
+    if (required_capacity <= cache_entry->capacity)
+        return;
+
+    new_capacity = cache_entry->capacity == 0 ? 8 : cache_entry->capacity;
+    while (new_capacity < required_capacity)
+        new_capacity *= 2;
+
+    oldctx = MemoryContextSwitchTo(TopMemoryContext);
+    if (cache_entry->payloads == NULL)
+    {
+        cache_entry->payloads = palloc_array(VLEMatrixFrontierPayload,
+                                             new_capacity);
+    }
+    else
+    {
+        cache_entry->payloads = repalloc_array(cache_entry->payloads,
+                                               VLEMatrixFrontierPayload,
+                                               new_capacity);
+    }
+    MemoryContextSwitchTo(oldctx);
+    cache_entry->capacity = new_capacity;
 }
 
 void age_vle_matrix_frontier_cache_discard(

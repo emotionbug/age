@@ -92,9 +92,51 @@ typedef struct AgeAdjacencyVisiblePayloadRunKeyEvidence
     bool known_empty;
 } AgeAdjacencyVisiblePayloadRunKeyEvidence;
 
+typedef struct AgeAdjacencyVisiblePayloadRunGroupEvidence
+{
+    int64 seed_groups;
+    int64 seed_group_cursors;
+    int64 shared_page_seed_groups;
+    int64 shared_page_seed_cursors;
+    int64 shared_page_run_block_groups;
+    int64 shared_page_run_block_cursors;
+    int64 shared_page_run_block_intersections;
+    int64 shared_page_run_block_intersection_cursors;
+    int64 shared_page_run_block_intersection_skips;
+    int64 shared_page_run_block_direct_seeds;
+    int64 shared_page_run_block_direct_seed_cursors;
+    int64 shared_page_run_block_streams;
+    int64 shared_page_run_block_stream_cursors;
+    int64 shared_page_run_block_stream_positions;
+    int64 shared_page_run_block_full_group_drains;
+    int64 shared_page_run_block_full_group_drain_cursors;
+    int64 shared_page_fallbacks;
+    int64 shared_page_fallback_regroups;
+    int64 shared_page_fallback_regroup_cursors;
+} AgeAdjacencyVisiblePayloadRunGroupEvidence;
+
+typedef struct AgeAdjacencyVisiblePayloadRunNextBatch
+{
+    BlockNumber blkno;
+    OffsetNumber offnum;
+    uint16 position_index;
+    uint16 position_count;
+    int64 source_count;
+    bool shared_run_block_stream;
+} AgeAdjacencyVisiblePayloadRunNextBatch;
+
+typedef struct AgeAdjacencyVisiblePayloadRunNextItem
+{
+    AgeAdjacencyPayload payload;
+    void *tag;
+    AgeAdjacencyVisiblePayloadRunNextBatch batch;
+} AgeAdjacencyVisiblePayloadRunNextItem;
+
 typedef struct AgeAdjacencyTerminalLabelPostingEstimate
 {
     graphid key;
+    BlockNumber first_blkno;
+    OffsetNumber first_offnum;
     int64 run_postings;
     int64 terminal_postings;
     int64 label_groups;
@@ -114,16 +156,29 @@ typedef void (*AgeAdjacencyVisiblePayloadRunPayloadCallback) (
     void *tag, const AgeAdjacencyPayload *payload, void *callback_state);
 typedef void (*AgeAdjacencyVisiblePayloadRunFilteredKeyCallback) (
     void *tag, void *callback_state);
+typedef void (*AgeAdjacencyVisiblePayloadRunBlockBatchCallback) (
+    void *const *tags, int64 tag_count, BlockNumber blkno,
+    OffsetNumber offnum, const uint16 *positions, uint16 position_count,
+    void *callback_state);
 
 typedef struct AgeAdjacencyVisiblePayloadRunOptions
 {
     int32 terminal_label_id;
+    const AgeAdjacencyCompositeTerminalFilter *prepared_filter;
+    const AgeAdjacencyTerminalLabelPostingEstimate *prepared_estimates;
+    int64 prepared_estimate_count;
+    bool prepared_filter_valid;
+    bool prepared_known_empty;
+    bool prepared_estimates_valid;
+    bool prepared_seed_ordered;
     AgeAdjacencyVisiblePayloadRunFilterCallback filter_callback;
     void *filter_callback_state;
     AgeAdjacencyVisiblePayloadRunPayloadCallback payload_callback;
     void *payload_callback_state;
     AgeAdjacencyVisiblePayloadRunFilteredKeyCallback filtered_key_callback;
     void *filtered_key_callback_state;
+    AgeAdjacencyVisiblePayloadRunBlockBatchCallback block_batch_callback;
+    void *block_batch_callback_state;
 } AgeAdjacencyVisiblePayloadRunOptions;
 
 extern uint32 age_adjacency_property_filter_id(Oid property_index_oid,
@@ -193,11 +248,21 @@ extern bool age_adjacency_visible_payload_run_scan_next(
 extern bool age_adjacency_visible_payload_run_scan_next_tag(
     AgeAdjacencyVisiblePayloadRunScan *scan, AgeAdjacencyPayload *payload,
     void **tag);
+extern bool age_adjacency_visible_payload_run_scan_next_tag_batch(
+    AgeAdjacencyVisiblePayloadRunScan *scan, AgeAdjacencyPayload *payload,
+    void **tag, AgeAdjacencyVisiblePayloadRunNextBatch *batch);
+extern int age_adjacency_visible_payload_run_scan_next_tag_batch_array(
+    AgeAdjacencyVisiblePayloadRunScan *scan,
+    const AgeAdjacencyVisiblePayloadRunNextBatch *seed_batch,
+    AgeAdjacencyVisiblePayloadRunNextItem *items, int item_capacity);
 extern bool age_adjacency_visible_payload_run_scan_key_seen(
     AgeAdjacencyVisiblePayloadRunScan *scan, int64 key_index);
 extern bool age_adjacency_visible_payload_run_scan_key_evidence(
     AgeAdjacencyVisiblePayloadRunScan *scan, int64 key_index,
     AgeAdjacencyVisiblePayloadRunKeyEvidence *evidence);
+extern bool age_adjacency_visible_payload_run_scan_group_evidence(
+    AgeAdjacencyVisiblePayloadRunScan *scan,
+    AgeAdjacencyVisiblePayloadRunGroupEvidence *evidence);
 extern int64 age_adjacency_visible_payload_run_scan_active_keys(
     AgeAdjacencyVisiblePayloadRunScan *scan);
 extern void age_adjacency_end_visible_payload_run_scan(

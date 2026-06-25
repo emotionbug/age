@@ -54,6 +54,8 @@ struct VLEContextAgeAdjacencyPayloadSource
     int64 scanned;
     int64 replay_index;
     int64 matrix_replay_index;
+    int64 matrix_batch_reserved_payloads;
+    int64 matrix_batch_reserved_source_count;
     int64 frontier_empty_count;
     int64 frontier_empty_capacity;
     bool use_payload_cache;
@@ -705,6 +707,148 @@ void age_vle_context_record_matrix_frontier_source_run_prefiltered_keys(
             prefiltered_keys;
 }
 
+void age_vle_context_record_matrix_frontier_source_run_raw_block_batches(
+    VLE_local_context *vlelctx, int64 block_batches,
+    int64 block_batch_cursors)
+{
+    Assert(vlelctx != NULL);
+
+    if (block_batches > 0)
+        vlelctx->source_stats.matrix_frontier_source_run_raw_block_batches +=
+            block_batches;
+    if (block_batch_cursors > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_raw_block_batch_cursors +=
+            block_batch_cursors;
+}
+
+void age_vle_context_record_matrix_frontier_source_run_block_tag_batch(
+    VLE_local_context *vlelctx, int64 block_batches,
+    int64 block_batch_cursors, int64 block_batch_positions)
+{
+    Assert(vlelctx != NULL);
+
+    if (block_batches > 0)
+        vlelctx->source_stats.matrix_frontier_source_run_block_tag_batches +=
+            block_batches;
+    if (block_batch_cursors > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_block_tag_batch_cursors +=
+            block_batch_cursors;
+    if (block_batch_positions > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_block_tag_batch_positions +=
+            block_batch_positions;
+}
+
+void age_vle_context_record_matrix_frontier_source_run_replay_segment(
+    VLE_local_context *vlelctx, int64 source_count)
+{
+    Assert(vlelctx != NULL);
+
+    if (source_count <= 0)
+        return;
+
+    vlelctx->source_stats.matrix_frontier_source_run_replay_segments++;
+    vlelctx->source_stats.matrix_frontier_source_run_replay_segment_sources +=
+        source_count;
+    vlelctx->source_stats.matrix_frontier_source_run_replay_segment_max =
+        Max(vlelctx->source_stats.
+            matrix_frontier_source_run_replay_segment_max,
+            source_count);
+}
+
+void age_vle_context_record_matrix_frontier_source_run_groups(
+    VLE_local_context *vlelctx, int64 seed_groups, int64 seed_group_cursors,
+    int64 shared_page_groups, int64 shared_page_cursors,
+    int64 shared_page_run_block_groups, int64 shared_page_run_block_cursors,
+    int64 shared_page_run_block_intersections,
+    int64 shared_page_run_block_intersection_cursors,
+    int64 shared_page_run_block_intersection_skips,
+    int64 shared_page_run_block_direct_seeds,
+    int64 shared_page_run_block_direct_seed_cursors,
+    int64 shared_page_run_block_streams,
+    int64 shared_page_run_block_stream_cursors,
+    int64 shared_page_run_block_stream_positions,
+    int64 shared_page_run_block_full_group_drains,
+    int64 shared_page_run_block_full_group_drain_cursors,
+    int64 shared_page_fallbacks, int64 fallback_regroups,
+    int64 fallback_regroup_cursors)
+{
+    Assert(vlelctx != NULL);
+
+    if (seed_groups > 0)
+        vlelctx->source_stats.matrix_frontier_source_run_seed_groups +=
+            seed_groups;
+    if (seed_group_cursors > 0)
+        vlelctx->source_stats.matrix_frontier_source_run_seed_group_cursors +=
+            seed_group_cursors;
+    if (shared_page_groups > 0)
+        vlelctx->source_stats.matrix_frontier_source_run_shared_page_groups +=
+            shared_page_groups;
+    if (shared_page_cursors > 0)
+        vlelctx->source_stats.matrix_frontier_source_run_shared_page_cursors +=
+            shared_page_cursors;
+    if (shared_page_run_block_groups > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_shared_page_run_block_groups +=
+            shared_page_run_block_groups;
+    if (shared_page_run_block_cursors > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_shared_page_run_block_cursors +=
+            shared_page_run_block_cursors;
+    if (shared_page_run_block_intersections > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_shared_page_run_block_intersections +=
+            shared_page_run_block_intersections;
+    if (shared_page_run_block_intersection_cursors > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_shared_page_run_block_intersection_cursors +=
+            shared_page_run_block_intersection_cursors;
+    if (shared_page_run_block_intersection_skips > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_shared_page_run_block_intersection_skips +=
+            shared_page_run_block_intersection_skips;
+    if (shared_page_run_block_direct_seeds > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_shared_page_run_block_direct_seeds +=
+            shared_page_run_block_direct_seeds;
+    if (shared_page_run_block_direct_seed_cursors > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_shared_page_run_block_direct_seed_cursors +=
+            shared_page_run_block_direct_seed_cursors;
+    if (shared_page_run_block_streams > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_shared_page_run_block_streams +=
+            shared_page_run_block_streams;
+    if (shared_page_run_block_stream_cursors > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_shared_page_run_block_stream_cursors +=
+            shared_page_run_block_stream_cursors;
+    if (shared_page_run_block_stream_positions > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_shared_page_run_block_stream_positions +=
+            shared_page_run_block_stream_positions;
+    if (shared_page_run_block_full_group_drains > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_shared_page_run_block_full_group_drains +=
+            shared_page_run_block_full_group_drains;
+    if (shared_page_run_block_full_group_drain_cursors > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_shared_page_run_block_full_group_drain_cursors +=
+            shared_page_run_block_full_group_drain_cursors;
+    if (shared_page_fallbacks > 0)
+        vlelctx->source_stats.matrix_frontier_source_run_shared_page_fallbacks +=
+            shared_page_fallbacks;
+    if (fallback_regroups > 0)
+        vlelctx->source_stats.matrix_frontier_source_run_fallback_regroups +=
+            fallback_regroups;
+    if (fallback_regroup_cursors > 0)
+        vlelctx->source_stats.
+            matrix_frontier_source_run_fallback_regroup_cursors +=
+            fallback_regroup_cursors;
+}
+
 int64 age_vle_context_empty_lifecycle_batch_size(VLE_local_context *vlelctx)
 {
     Assert(vlelctx != NULL);
@@ -753,6 +897,33 @@ void age_vle_context_record_source_candidate(
             break;
         case VLE_CONTEXT_SOURCE_STATS_PACKED_ADJACENCY:
             vlelctx->source_stats.packed_candidates++;
+            break;
+    }
+}
+
+void age_vle_context_record_source_candidate_batch(
+    VLE_local_context *vlelctx, VLEContextSourceStatsKind kind,
+    int64 candidate_count)
+{
+    Assert(vlelctx != NULL);
+    Assert(candidate_count >= 0);
+
+    if (candidate_count == 0)
+        return;
+
+    vlelctx->source_stats.candidates_yielded += candidate_count;
+    switch (kind)
+    {
+        case VLE_CONTEXT_SOURCE_STATS_AGE_ADJACENCY:
+            vlelctx->source_stats.age_adjacency_candidates +=
+                candidate_count;
+            break;
+        case VLE_CONTEXT_SOURCE_STATS_ENDPOINT_BTREE:
+            vlelctx->source_stats.endpoint_btree_candidates +=
+                candidate_count;
+            break;
+        case VLE_CONTEXT_SOURCE_STATS_PACKED_ADJACENCY:
+            vlelctx->source_stats.packed_candidates += candidate_count;
             break;
     }
 }
@@ -869,6 +1040,15 @@ void age_vle_context_record_source_push(VLE_local_context *vlelctx)
     Assert(vlelctx != NULL);
 
     vlelctx->source_stats.candidates_pushed++;
+}
+
+void age_vle_context_record_source_push_batch(
+    VLE_local_context *vlelctx, int64 push_count)
+{
+    Assert(vlelctx != NULL);
+    Assert(push_count >= 0);
+
+    vlelctx->source_stats.candidates_pushed += push_count;
 }
 
 void age_vle_context_record_missing_vertex_attempt(
@@ -1035,6 +1215,25 @@ bool age_vle_context_push_candidate_if_matched(
 
     return age_vle_traversal_push_candidate_if_matched(
         &vlelctx->traversal, candidate, caller);
+}
+
+int64 age_vle_context_push_candidate_batch_if_matched(
+    VLE_local_context *vlelctx, const VLETraversalCandidate *candidates,
+    int candidate_count, const char *caller, bool *pushed)
+{
+    int32 target_label_id;
+
+    Assert(vlelctx != NULL);
+    Assert(candidates != NULL);
+    Assert(candidate_count >= 0);
+    Assert(pushed != NULL);
+
+    target_label_id = age_vle_context_label_id_for_target_path_length(
+        vlelctx, vlelctx->traversal.path_depth + 1);
+
+    return age_vle_traversal_push_candidate_batch_if_matched(
+        &vlelctx->traversal, candidates, candidate_count, target_label_id,
+        caller, pushed);
 }
 
 void age_vle_context_refresh_source_indexes(VLE_local_context *vlelctx)
@@ -2269,8 +2468,22 @@ static void age_vle_context_matrix_frontier_cache_seed(
     (void) age_vle_context_prepare_age_adjacency_matrix_seed_entry(
         vlelctx, source);
 
-    age_vle_matrix_frontier_cache_append(
-        source->matrix_entry, source->source_vertex_id, payload);
+    if (source->matrix_batch_reserved_payloads > 0 &&
+        source->matrix_entry->count < source->matrix_entry->capacity)
+    {
+        age_vle_matrix_frontier_cache_append_reserved(
+            source->matrix_entry, source->source_vertex_id, payload,
+            source->matrix_batch_reserved_source_count > 0 ?
+            source->matrix_batch_reserved_source_count : 1);
+        source->matrix_batch_reserved_payloads--;
+        if (source->matrix_batch_reserved_payloads == 0)
+            source->matrix_batch_reserved_source_count = 0;
+    }
+    else
+    {
+        age_vle_matrix_frontier_cache_append(
+            source->matrix_entry, source->source_vertex_id, payload);
+    }
 }
 
 static void age_vle_context_matrix_frontier_cache_mark_empty(
@@ -2772,6 +2985,26 @@ age_vle_context_age_adjacency_payload_source_accept_scanned_payload(
     }
     source->scanned++;
     age_vle_context_record_age_adjacency_payload_scan(vlelctx);
+}
+
+void
+age_vle_context_age_adjacency_payload_source_reserve_matrix_batch(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    int64 position_count, int64 source_count)
+{
+    Assert(vlelctx != NULL);
+    Assert(source != NULL);
+
+    if (!source->use_matrix_frontier_cache || position_count <= 0 ||
+        source_count <= 0)
+        return;
+
+    (void) age_vle_context_prepare_age_adjacency_matrix_seed_entry(
+        vlelctx, source);
+    age_vle_matrix_frontier_cache_reserve(source->matrix_entry,
+                                          position_count);
+    source->matrix_batch_reserved_payloads += position_count;
+    source->matrix_batch_reserved_source_count = source_count;
 }
 
 void

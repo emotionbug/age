@@ -177,6 +177,12 @@ typedef enum AgeVLEStreamEdgeSourceIndex
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_SEED_PERCENT,
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_OBSERVED_COUNT,
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_VALUE_POSTING_OBSERVED_COUNT,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_ACTIVE_PERCENT,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_FILTER_PERCENT,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_PRESCAN_PERCENT,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_REPLAY_SOURCE_PERCENT,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_RUN_BLOCK_PERCENT,
+    AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_REGROUP_PERCENT,
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_REASON,
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_CLASS,
     AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_VALUE_POSTING_SOURCE,
@@ -311,6 +317,12 @@ typedef struct AgeVLEStreamEdgeSource
     int64 payload_input_seed_percent;
     int64 payload_input_observed_count;
     int64 payload_input_value_posting_observed_count;
+    int64 payload_input_matrix_active_percent;
+    int64 payload_input_matrix_filter_percent;
+    int64 payload_input_matrix_prescan_percent;
+    int64 payload_input_matrix_replay_source_percent;
+    int64 payload_input_matrix_run_block_percent;
+    int64 payload_input_matrix_regroup_percent;
     char *payload_input_reason;
     char *payload_input_class;
     char *payload_input_value_posting_source;

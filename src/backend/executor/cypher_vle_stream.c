@@ -53,6 +53,7 @@ typedef struct AgeVLEStreamScanState
     char *join_order_bound;
     char *join_order_property;
     char *join_order_source_evidence;
+    char *join_order_solved_relids;
     int64 join_order_candidate_count;
     char *join_order_next_connector;
     char *join_order_next_property;
@@ -214,6 +215,9 @@ static void initialize_age_vle_stream_graph_join_descriptor(
     state->join_order_source_evidence =
         (char *)age_graph_join_descriptor_text_field(
             descriptor, AGE_GRAPH_JOIN_DESC_SOURCE_EVIDENCE);
+    state->join_order_solved_relids =
+        (char *)age_graph_join_descriptor_text_field(
+            descriptor, AGE_GRAPH_JOIN_DESC_SOLVED_RELIDS);
     state->join_order_candidate_count = age_graph_join_descriptor_int_field(
         descriptor, AGE_GRAPH_JOIN_DESC_CANDIDATE_COUNT, 1);
     state->join_order_next_connector =
@@ -614,12 +618,14 @@ static char *format_age_vle_stream_join_order(
 {
     AgeVLEStreamEdgeSource *source = &state->edge_source;
 
-    return psprintf("component=%s connector=%s bound=%s property=%s "
+    return psprintf("component=%s solved=%s connector=%s bound=%s property=%s "
                     "rows=%ld fanout=start:%ld/end:%ld "
                     "consumer=%s class=%s source=%s candidates=%ld "
                     "next=%s/%s/%s",
                     state->join_order_component != NULL ?
                     state->join_order_component : "vle",
+                    state->join_order_solved_relids != NULL ?
+                    state->join_order_solved_relids : "(b)",
                     state->join_order_connector != NULL ?
                     state->join_order_connector :
                     age_vle_stream_join_order_connector(state),
@@ -1124,6 +1130,54 @@ static void accumulate_age_vle_stream_source_stats(
         current->matrix_frontier_source_run_filtered_keys;
     total->matrix_frontier_source_run_prefiltered_keys +=
         current->matrix_frontier_source_run_prefiltered_keys;
+    total->matrix_frontier_source_run_raw_block_batches +=
+        current->matrix_frontier_source_run_raw_block_batches;
+    total->matrix_frontier_source_run_raw_block_batch_cursors +=
+        current->matrix_frontier_source_run_raw_block_batch_cursors;
+    total->matrix_frontier_source_run_block_tag_batches +=
+        current->matrix_frontier_source_run_block_tag_batches;
+    total->matrix_frontier_source_run_block_tag_batch_cursors +=
+        current->matrix_frontier_source_run_block_tag_batch_cursors;
+    total->matrix_frontier_source_run_block_tag_batch_positions +=
+        current->matrix_frontier_source_run_block_tag_batch_positions;
+    total->matrix_frontier_source_run_seed_groups +=
+        current->matrix_frontier_source_run_seed_groups;
+    total->matrix_frontier_source_run_seed_group_cursors +=
+        current->matrix_frontier_source_run_seed_group_cursors;
+    total->matrix_frontier_source_run_shared_page_groups +=
+        current->matrix_frontier_source_run_shared_page_groups;
+    total->matrix_frontier_source_run_shared_page_cursors +=
+        current->matrix_frontier_source_run_shared_page_cursors;
+    total->matrix_frontier_source_run_shared_page_run_block_groups +=
+        current->matrix_frontier_source_run_shared_page_run_block_groups;
+    total->matrix_frontier_source_run_shared_page_run_block_cursors +=
+        current->matrix_frontier_source_run_shared_page_run_block_cursors;
+    total->matrix_frontier_source_run_shared_page_run_block_intersections +=
+        current->matrix_frontier_source_run_shared_page_run_block_intersections;
+    total->matrix_frontier_source_run_shared_page_run_block_intersection_cursors +=
+        current->matrix_frontier_source_run_shared_page_run_block_intersection_cursors;
+    total->matrix_frontier_source_run_shared_page_run_block_intersection_skips +=
+        current->matrix_frontier_source_run_shared_page_run_block_intersection_skips;
+    total->matrix_frontier_source_run_shared_page_run_block_direct_seeds +=
+        current->matrix_frontier_source_run_shared_page_run_block_direct_seeds;
+    total->matrix_frontier_source_run_shared_page_run_block_direct_seed_cursors +=
+        current->matrix_frontier_source_run_shared_page_run_block_direct_seed_cursors;
+    total->matrix_frontier_source_run_shared_page_run_block_streams +=
+        current->matrix_frontier_source_run_shared_page_run_block_streams;
+    total->matrix_frontier_source_run_shared_page_run_block_stream_cursors +=
+        current->matrix_frontier_source_run_shared_page_run_block_stream_cursors;
+    total->matrix_frontier_source_run_shared_page_run_block_stream_positions +=
+        current->matrix_frontier_source_run_shared_page_run_block_stream_positions;
+    total->matrix_frontier_source_run_shared_page_run_block_full_group_drains +=
+        current->matrix_frontier_source_run_shared_page_run_block_full_group_drains;
+    total->matrix_frontier_source_run_shared_page_run_block_full_group_drain_cursors +=
+        current->matrix_frontier_source_run_shared_page_run_block_full_group_drain_cursors;
+    total->matrix_frontier_source_run_shared_page_fallbacks +=
+        current->matrix_frontier_source_run_shared_page_fallbacks;
+    total->matrix_frontier_source_run_fallback_regroups +=
+        current->matrix_frontier_source_run_fallback_regroups;
+    total->matrix_frontier_source_run_fallback_regroup_cursors +=
+        current->matrix_frontier_source_run_fallback_regroup_cursors;
     total->root_empty_completion_count +=
         current->root_empty_completion_count;
     total->root_empty_completion_out +=

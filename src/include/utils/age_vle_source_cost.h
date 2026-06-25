@@ -108,6 +108,12 @@ typedef struct VLEStreamSourceCostDecision
     int64 payload_input_seed_percent;
     int64 payload_input_observed_count;
     int64 payload_input_value_posting_observed_count;
+    int64 payload_input_matrix_active_percent;
+    int64 payload_input_matrix_filter_percent;
+    int64 payload_input_matrix_prescan_percent;
+    int64 payload_input_matrix_replay_source_percent;
+    int64 payload_input_matrix_run_block_percent;
+    int64 payload_input_matrix_regroup_percent;
     const char *payload_input_reason;
     const char *payload_input_class;
     const char *payload_input_value_posting_source;
@@ -140,6 +146,12 @@ typedef struct VLESourceRuntimeThresholdFeedback
     int64 payload_observed_count;
     int64 payload_endpoint_headroom_percent;
     int64 payload_value_posting_observed_count;
+    int64 payload_matrix_active_percent;
+    int64 payload_matrix_filter_percent;
+    int64 payload_matrix_prescan_percent;
+    int64 payload_matrix_replay_source_percent;
+    int64 payload_matrix_run_block_percent;
+    int64 payload_matrix_regroup_percent;
     const char *source_direction;
     const char *reason;
     const char *feedback_class;

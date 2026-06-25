@@ -34,6 +34,13 @@ typedef struct VLEMatrixFrontierPrefetchCollector
     bool enabled;
 } VLEMatrixFrontierPrefetchCollector;
 
+typedef struct VLEAcceptedCandidateSpan
+{
+    const VLETraversalCandidate *candidates;
+    const bool *accepted;
+    int candidate_count;
+} VLEAcceptedCandidateSpan;
+
 extern void age_vle_matrix_frontier_prefetch_collector_init(
     VLEMatrixFrontierPrefetchCollector *collector,
     VLE_local_context *vlelctx, const VLEContextSourceCursor *source_cursors,
@@ -42,6 +49,10 @@ extern void age_vle_matrix_frontier_prefetch_collector_add(
     VLEMatrixFrontierPrefetchCollector *collector,
     VLE_local_context *vlelctx,
     const VLETraversalCandidate *candidate);
+extern void age_vle_matrix_frontier_prefetch_collector_add_span(
+    VLEMatrixFrontierPrefetchCollector *collector,
+    VLE_local_context *vlelctx,
+    const VLEAcceptedCandidateSpan *span);
 extern void age_vle_matrix_frontier_prefetch_collector_flush(
     VLEMatrixFrontierPrefetchCollector *collector,
     VLE_local_context *vlelctx);

@@ -834,27 +834,27 @@ SELECT * FROM cypher('age_adj_match_descriptor', $$
     MATCH (:N {i: 0})-[:R]->(n:N {i: m.i})
     RETURN n.i
 $$) AS (plan agtype);
-                                                                                                                                    QUERY PLAN                                                                                                                                    
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                           QUERY PLAN                                                                                                                                            
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=1.00 loops=1)
    Output: agtype_object_field_agtype(n.properties, '"i"'::agtype)
+   Join Filter: (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = agtype_access_operator(VARIADIC ARRAY[m.properties, '"i"'::agtype]))
+   Rows Removed by Join Filter: 1
    Buffers: shared hit=9
-   ->  Seq Scan on age_adj_match_descriptor."N" _age_default_alias_0 (actual rows=1.00 loops=1)
-         Output: _age_default_alias_0.id, _age_default_alias_0.properties
-         Filter: ((_age_default_alias_0.properties @> '{"i": 0}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '0'::agtype))
-         Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Nested Loop (actual rows=1.00 loops=1)
-         Output: n.properties, _age_default_alias_1.start_id
-         Join Filter: (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = agtype_access_operator(VARIADIC ARRAY[m.properties, '"i"'::agtype]))
-         Rows Removed by Join Filter: 1
-         Buffers: shared hit=8
+   ->  Nested Loop (actual rows=2.00 loops=1)
+         Output: n.properties
+         Inner Unique: true
+         Join Filter: (_age_default_alias_1.end_id = n.id)
+         Rows Removed by Join Filter: 3
+         Buffers: shared hit=7
          ->  Nested Loop (actual rows=2.00 loops=1)
-               Output: _age_default_alias_1.start_id, n.properties
-               Inner Unique: true
-               Join Filter: (_age_default_alias_1.end_id = n.id)
-               Rows Removed by Join Filter: 3
-               Buffers: shared hit=6
+               Output: _age_default_alias_1.end_id
+               Buffers: shared hit=5
+               ->  Seq Scan on age_adj_match_descriptor."N" _age_default_alias_0 (actual rows=1.00 loops=1)
+                     Output: _age_default_alias_0.id, _age_default_alias_0.properties
+                     Filter: ((_age_default_alias_0.properties @> '{"i": 0}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '0'::agtype))
+                     Rows Removed by Filter: 2
+                     Buffers: shared hit=1
                ->  Custom Scan (AGE Adjacency Match) on age_adj_match_descriptor."R" _age_default_alias_1 (actual rows=2.00 loops=1)
                      Output: _age_default_alias_1.start_id, _age_default_alias_1.end_id
                      Filter: (_age_default_alias_0.id = _age_default_alias_1.start_id)
@@ -862,7 +862,7 @@ $$) AS (plan agtype);
                      Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                      Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
                      Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 residual=2 label-groups=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
-                     Adjacency Join Order: component=_age_default_alias_1 connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-index-id-only candidates=1 next=none/none/none
+                     Adjacency Join Order: component=_age_default_alias_1 solved=(b 5 6) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-index-id-only candidates=1 next=none/none/none
                      Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false slice=serial-only active=serial
                      Adjacency Composite Source: strategy=label-block label=yes property=recheck value=none candidate-fanout=1 composite-fanout=1 value-posting=none planned=none threshold=0 reason=not-indexable
                      Adjacency Composite Policy: class=adjacency-composite-recheck recommendation=keep-recheck runtime-class=adjacency-composite-recheck runtime-recommendation=keep-recheck class-match=true
@@ -872,14 +872,14 @@ $$) AS (plan agtype);
                      Adjacency Payload Columns: mode=id-only columns=start_id,end_id
                      Adjacency Payload Runtime: visible=2 label-filtered=1 directory-label=0 property-filtered=0 cache-filtered=1 cache-label=1 cache-property=0 emitted=2
                      Buffers: shared hit=4
-               ->  Seq Scan on age_adj_match_descriptor."N" n (actual rows=2.50 loops=2)
-                     Output: n.id, n.properties
-                     Buffers: shared hit=2
-         ->  Seq Scan on age_adj_match_descriptor."N" m (actual rows=1.00 loops=2)
-               Output: m.id, m.properties
-               Filter: ((m.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[m.properties, '"i"'::agtype]) = '1'::agtype))
-               Rows Removed by Filter: 2
+         ->  Seq Scan on age_adj_match_descriptor."N" n (actual rows=2.50 loops=2)
+               Output: n.id, n.properties
                Buffers: shared hit=2
+   ->  Seq Scan on age_adj_match_descriptor."N" m (actual rows=1.00 loops=2)
+         Output: m.id, m.properties
+         Filter: ((m.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[m.properties, '"i"'::agtype]) = '1'::agtype))
+         Rows Removed by Filter: 2
+         Buffers: shared hit=2
  Planning:
    Buffers: shared hit=18
 (46 rows)
@@ -889,17 +889,17 @@ SELECT * FROM cypher('age_adj_match_descriptor', $$
     MATCH (:N {i: 0})-[:R]->(n:N {i: 1})
     RETURN n.i
 $$) AS (plan agtype);
-                                                                                                                                                        QUERY PLAN                                                                                                                                                         
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                QUERY PLAN                                                                                                                                                                
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: agtype_object_field_agtype(n.properties, '"i"'::agtype)
-   ->  Seq Scan on age_adj_match_descriptor."N" _age_default_alias_0
-         Output: _age_default_alias_0.id, _age_default_alias_0.properties
-         Filter: ((_age_default_alias_0.properties @> '{"i": 0}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '0'::agtype))
+   Inner Unique: true
+   Join Filter: (_age_default_alias_1.end_id = n.id)
    ->  Nested Loop
-         Output: _age_default_alias_1.start_id, n.properties
-         Inner Unique: true
-         Join Filter: (_age_default_alias_1.end_id = n.id)
+         Output: _age_default_alias_1.end_id
+         ->  Seq Scan on age_adj_match_descriptor."N" _age_default_alias_0
+               Output: _age_default_alias_0.id, _age_default_alias_0.properties
+               Filter: ((_age_default_alias_0.properties @> '{"i": 0}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '0'::agtype))
          ->  Custom Scan (AGE Adjacency Match) on age_adj_match_descriptor."R" _age_default_alias_1
                Output: _age_default_alias_1.start_id, _age_default_alias_1.end_id
                Filter: (_age_default_alias_0.id = _age_default_alias_1.start_id)
@@ -907,15 +907,15 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 residual=2 label-groups=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=graph-metadata:n_i_source candidates=3 next=adjacency-composite-expand/index-anchored/adjacency-index-id-only
+               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=graph-metadata:n_i_source candidates=3 next=adjacency-composite-expand/index-anchored/adjacency-index-id-only
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache
                Adjacency Terminal Property: key=i index=graph-metadata:n_i_source provider=btree domain=agtype metadata=yes value=const prefetch=eligible precheck=yes mode=deferred-prefetch
                Adjacency Payload Columns: mode=id-only columns=start_id,end_id
-         ->  Seq Scan on age_adj_match_descriptor."N" n
-               Output: n.id, n.properties
-               Filter: ((n.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '1'::agtype))
+   ->  Seq Scan on age_adj_match_descriptor."N" n
+         Output: n.id, n.properties
+         Filter: ((n.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '1'::agtype))
 (25 rows)
 
 SET enable_seqscan = off;
@@ -928,14 +928,18 @@ SELECT * FROM cypher('age_adj_match_descriptor', $$
     MATCH (s)-[:R]->(n:N)
     RETURN n.i
 $$) AS (plan agtype);
-                                                                                                                                          QUERY PLAN                                                                                                                                          
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                 QUERY PLAN                                                                                                                                                  
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: agtype_object_field_agtype(n.properties, '"i"'::agtype)
+   Inner Unique: true
+   Join Filter: (_age_default_alias_0.end_id = n.id)
    ->  Nested Loop
-         Output: _age_default_alias_0.start_id, n.properties
-         Inner Unique: true
-         Join Filter: (_age_default_alias_0.end_id = n.id)
+         Output: _age_default_alias_0.end_id
+         ->  Seq Scan on age_adj_match_descriptor."N" s
+               Disabled: true
+               Output: s.id, s.properties
+               Filter: (s.id = '844424930131969'::graphid)
          ->  Custom Scan (AGE Adjacency Match) on age_adj_match_descriptor."R" _age_default_alias_0
                Output: _age_default_alias_0.start_id, _age_default_alias_0.end_id
                Filter: (_age_default_alias_0.start_id = '844424930131969'::graphid)
@@ -943,18 +947,14 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=2 composite-fanout=2 residual=1 label-groups=2 fanout-source=directory value-posting=label-slice index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
-               Adjacency Join Order: component=_age_default_alias_0 connector=adjacency-composite-expand bound=start-bound property=adjacency-directory-anchored rows=1 fanout=3 terminal-fanout=2 composite-fanout=2 source=directory-value-posting-id-only candidates=1 next=none/none/none
+               Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-directory-anchored rows=1 fanout=3 terminal-fanout=2 composite-fanout=2 source=directory-value-posting-id-only candidates=1 next=none/none/none
                Adjacency Parallel: safe=true aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false slice=worker-local-ready active=serial
                Adjacency Composite Source: strategy=label-block label=yes property=none value=none candidate-fanout=2 composite-fanout=2 value-posting=label-slice planned=none threshold=0 reason=not-indexable
                Adjacency Terminal Property: none
                Adjacency Payload Columns: mode=id-only columns=start_id,end_id
-         ->  Seq Scan on age_adj_match_descriptor."N" n
-               Disabled: true
-               Output: n.id, n.properties
-   ->  Seq Scan on age_adj_match_descriptor."N" s
+   ->  Seq Scan on age_adj_match_descriptor."N" n
          Disabled: true
-         Output: s.id, s.properties
-         Filter: (s.id = '844424930131969'::graphid)
+         Output: n.id, n.properties
 (25 rows)
 
 RESET enable_bitmapscan;
@@ -965,21 +965,21 @@ SELECT * FROM cypher('age_adj_match_descriptor', $$
     MATCH (:N {i: 0})-[:R]->(n:N {i: 1})
     RETURN n.i
 $$) AS (plan agtype);
-                                                                                                                                                        QUERY PLAN                                                                                                                                                         
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                QUERY PLAN                                                                                                                                                                
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=1.00 loops=1)
    Output: agtype_object_field_agtype(n.properties, '"i"'::agtype)
+   Inner Unique: true
+   Join Filter: (_age_default_alias_1.end_id = n.id)
    Buffers: shared hit=10
-   ->  Seq Scan on age_adj_match_descriptor."N" _age_default_alias_0 (actual rows=1.00 loops=1)
-         Output: _age_default_alias_0.id, _age_default_alias_0.properties
-         Filter: ((_age_default_alias_0.properties @> '{"i": 0}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '0'::agtype))
-         Rows Removed by Filter: 2
-         Buffers: shared hit=1
    ->  Nested Loop (actual rows=1.00 loops=1)
-         Output: _age_default_alias_1.start_id, n.properties
-         Inner Unique: true
-         Join Filter: (_age_default_alias_1.end_id = n.id)
+         Output: _age_default_alias_1.end_id
          Buffers: shared hit=9
+         ->  Seq Scan on age_adj_match_descriptor."N" _age_default_alias_0 (actual rows=1.00 loops=1)
+               Output: _age_default_alias_0.id, _age_default_alias_0.properties
+               Filter: ((_age_default_alias_0.properties @> '{"i": 0}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '0'::agtype))
+               Rows Removed by Filter: 2
+               Buffers: shared hit=1
          ->  Custom Scan (AGE Adjacency Match) on age_adj_match_descriptor."R" _age_default_alias_1 (actual rows=1.00 loops=1)
                Output: _age_default_alias_1.start_id, _age_default_alias_1.end_id
                Filter: (_age_default_alias_0.id = _age_default_alias_1.start_id)
@@ -987,7 +987,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 residual=2 label-groups=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=graph-metadata:n_i_source candidates=3 next=adjacency-composite-expand/index-anchored/adjacency-index-id-only
+               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=graph-metadata:n_i_source candidates=3 next=adjacency-composite-expand/index-anchored/adjacency-index-id-only
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache runtime-class=adjacency-composite-id-cache runtime-recommendation=keep-id-cache class-match=true
@@ -997,11 +997,11 @@ $$) AS (plan agtype);
                Adjacency Payload Columns: mode=id-only columns=start_id,end_id
                Adjacency Payload Runtime: visible=2 label-filtered=1 directory-label=0 property-filtered=0 cache-filtered=1 cache-label=1 cache-property=0 emitted=1
                Buffers: shared hit=8
-         ->  Seq Scan on age_adj_match_descriptor."N" n (actual rows=1.00 loops=1)
-               Output: n.id, n.properties
-               Filter: ((n.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '1'::agtype))
-               Rows Removed by Filter: 1
-               Buffers: shared hit=1
+   ->  Seq Scan on age_adj_match_descriptor."N" n (actual rows=1.00 loops=1)
+         Output: n.id, n.properties
+         Filter: ((n.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '1'::agtype))
+         Rows Removed by Filter: 1
+         Buffers: shared hit=1
  Planning:
    Buffers: shared hit=18
 (37 rows)
@@ -1011,8 +1011,8 @@ SELECT * FROM cypher('age_adj_match_descriptor', $$
     MATCH (:N {i: 0})-[:R]->(m:M {i: 1})
     RETURN m.i
 $$) AS (plan agtype);
-                                                                                                                                                           QUERY PLAN                                                                                                                                                           
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                  QUERY PLAN                                                                                                                                                                   
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=1.00 loops=1)
    Output: agtype_object_field_agtype(m.properties, '"i"'::agtype)
    Inner Unique: true
@@ -1033,7 +1033,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 residual=2 label-groups=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=graph-metadata:m_i_int8_source candidates=3 next=adjacency-composite-expand/index-anchored/adjacency-index-id-only
+               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=graph-metadata:m_i_int8_source candidates=3 next=adjacency-composite-expand/index-anchored/adjacency-index-id-only
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache runtime-class=adjacency-composite-id-cache runtime-recommendation=keep-id-cache class-match=true
@@ -1056,8 +1056,8 @@ SELECT * FROM cypher('age_adj_match_descriptor', $$
     MATCH (:N {i: 0})-[:R]->(:Z)
     RETURN count(*)
 $$) AS (plan agtype);
-                                                                                                                                    QUERY PLAN                                                                                                                                    
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                           QUERY PLAN                                                                                                                                            
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate (actual rows=1.00 loops=1)
    Output: (count(*))::agtype
    Buffers: shared hit=2
@@ -1079,7 +1079,7 @@ $$) AS (plan agtype);
                      Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                      Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:no
                      Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 residual=1 label-groups=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
-                     Adjacency Join Order: component=_age_default_alias_1 connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-index-id-only candidates=1 next=none/none/none
+                     Adjacency Join Order: component=_age_default_alias_1 solved=(b 2 3) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-index-id-only candidates=1 next=none/none/none
                      Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false slice=serial-only active=serial
                      Adjacency Composite Source: strategy=label-block label=yes property=none value=none candidate-fanout=1 composite-fanout=1 value-posting=none planned=none threshold=0 reason=not-indexable
                      Adjacency Terminal Property: none
@@ -1172,21 +1172,21 @@ SELECT * FROM cypher('age_adj_match_descriptor', $$
     MATCH (:N {i: 0})-[:R]->(n:N {i: 1 + 0})
     RETURN n.i
 $$) AS (plan agtype);
-                                                                                                                                                        QUERY PLAN                                                                                                                                                         
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                QUERY PLAN                                                                                                                                                                
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=1.00 loops=1)
    Output: agtype_object_field_agtype(n.properties, '"i"'::agtype)
+   Inner Unique: true
+   Join Filter: (_age_default_alias_1.end_id = n.id)
    Buffers: shared hit=10
-   ->  Seq Scan on age_adj_match_descriptor."N" _age_default_alias_0 (actual rows=1.00 loops=1)
-         Output: _age_default_alias_0.id, _age_default_alias_0.properties
-         Filter: ((_age_default_alias_0.properties @> '{"i": 0}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '0'::agtype))
-         Rows Removed by Filter: 2
-         Buffers: shared hit=1
    ->  Nested Loop (actual rows=1.00 loops=1)
-         Output: _age_default_alias_1.start_id, n.properties
-         Inner Unique: true
-         Join Filter: (_age_default_alias_1.end_id = n.id)
+         Output: _age_default_alias_1.end_id
          Buffers: shared hit=9
+         ->  Seq Scan on age_adj_match_descriptor."N" _age_default_alias_0 (actual rows=1.00 loops=1)
+               Output: _age_default_alias_0.id, _age_default_alias_0.properties
+               Filter: ((_age_default_alias_0.properties @> '{"i": 0}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '0'::agtype))
+               Rows Removed by Filter: 2
+               Buffers: shared hit=1
          ->  Custom Scan (AGE Adjacency Match) on age_adj_match_descriptor."R" _age_default_alias_1 (actual rows=1.00 loops=1)
                Output: _age_default_alias_1.start_id, _age_default_alias_1.end_id
                Filter: (_age_default_alias_0.id = _age_default_alias_1.start_id)
@@ -1194,7 +1194,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 residual=2 label-groups=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=graph-metadata:n_i_source candidates=3 next=adjacency-composite-expand/index-anchored/adjacency-index-id-only
+               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=graph-metadata:n_i_source candidates=3 next=adjacency-composite-expand/index-anchored/adjacency-index-id-only
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source label=yes property=source value=runtime-slot candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache runtime-class=adjacency-composite-id-cache runtime-recommendation=keep-id-cache class-match=true
@@ -1204,11 +1204,11 @@ $$) AS (plan agtype);
                Adjacency Payload Columns: mode=id-only columns=start_id,end_id
                Adjacency Payload Runtime: visible=2 label-filtered=1 directory-label=0 property-filtered=0 cache-filtered=1 cache-label=1 cache-property=0 emitted=1
                Buffers: shared hit=8
-         ->  Seq Scan on age_adj_match_descriptor."N" n (actual rows=1.00 loops=1)
-               Output: n.id, n.properties
-               Filter: (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = ('1'::agtype + '0'::agtype))
-               Rows Removed by Filter: 1
-               Buffers: shared hit=1
+   ->  Seq Scan on age_adj_match_descriptor."N" n (actual rows=1.00 loops=1)
+         Output: n.id, n.properties
+         Filter: (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = ('1'::agtype + '0'::agtype))
+         Rows Removed by Filter: 1
+         Buffers: shared hit=1
  Planning:
    Buffers: shared hit=16
 (37 rows)
@@ -1218,17 +1218,17 @@ SELECT * FROM cypher('age_adj_match_descriptor', $$
     MATCH (:N {i: 0})-[e:R {kind: "keep"}]->(n:N {i: 1})
     RETURN n.i
 $$) AS (plan agtype);
-                                                                                                                                               QUERY PLAN                                                                                                                                                
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                       QUERY PLAN                                                                                                                                                       
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
    Output: agtype_object_field_agtype(n.properties, '"i"'::agtype)
-   ->  Seq Scan on age_adj_match_descriptor."N" _age_default_alias_0
-         Output: _age_default_alias_0.id, _age_default_alias_0.properties
-         Filter: ((_age_default_alias_0.properties @> '{"i": 0}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '0'::agtype))
+   Inner Unique: true
+   Join Filter: (e.end_id = n.id)
    ->  Nested Loop
-         Output: e.start_id, n.properties
-         Inner Unique: true
-         Join Filter: (e.end_id = n.id)
+         Output: e.end_id
+         ->  Seq Scan on age_adj_match_descriptor."N" _age_default_alias_0
+               Output: _age_default_alias_0.id, _age_default_alias_0.properties
+               Filter: ((_age_default_alias_0.properties @> '{"i": 0}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '0'::agtype))
          ->  Custom Scan (AGE Adjacency Match) on age_adj_match_descriptor."R" e
                Output: e.start_id, e.end_id
                Filter: ((_age_default_alias_0.id = e.start_id) AND agtype_object_field_equals(e.properties, '"kind"'::agtype, '"keep"'::agtype))
@@ -1236,15 +1236,15 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id,properties terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=3 residual=edge:yes/right-label:yes/right-props:join-verify edge-var:yes
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 residual=3 label-groups=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=205% index-credit=80% prefetch-threshold=2 reason=edge-payload-required payload=edge-row
-               Adjacency Join Order: component=e connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=graph-metadata:n_i_source candidates=3 next=adjacency-composite-expand/index-anchored/adjacency-index-edge-row
+               Adjacency Join Order: component=e solved=(b 4 5) connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=graph-metadata:n_i_source candidates=3 next=adjacency-composite-expand/index-anchored/adjacency-index-edge-row
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=2 reason=edge-payload-required
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache
                Adjacency Terminal Property: key=i index=graph-metadata:n_i_source provider=btree domain=agtype metadata=yes value=const prefetch=eligible precheck=yes mode=deferred-prefetch
                Adjacency Payload Columns: mode=edge-row columns=start_id,end_id,properties
-         ->  Seq Scan on age_adj_match_descriptor."N" n
-               Output: n.id, n.properties
-               Filter: ((n.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '1'::agtype))
+   ->  Seq Scan on age_adj_match_descriptor."N" n
+         Output: n.id, n.properties
+         Filter: ((n.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '1'::agtype))
 (25 rows)
 
 SELECT * FROM cypher('age_adj_match_descriptor', $$
@@ -1330,21 +1330,21 @@ SELECT * FROM cypher('age_adj_match_prefetch_gate', $$
     MATCH (:N {i: 10})-[:R]->(n:N {i: 11})
     RETURN n.i
 $$) AS (plan agtype);
-                                                                                                                                                        QUERY PLAN                                                                                                                                                         
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                QUERY PLAN                                                                                                                                                                
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=1.00 loops=1)
    Output: agtype_object_field_agtype(n.properties, '"i"'::agtype)
+   Inner Unique: true
+   Join Filter: (_age_default_alias_1.end_id = n.id)
    Buffers: shared hit=7
-   ->  Seq Scan on age_adj_match_prefetch_gate."N" _age_default_alias_0 (actual rows=1.00 loops=1)
-         Output: _age_default_alias_0.id, _age_default_alias_0.properties
-         Filter: ((_age_default_alias_0.properties @> '{"i": 10}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '10'::agtype))
-         Rows Removed by Filter: 1
-         Buffers: shared hit=1
    ->  Nested Loop (actual rows=1.00 loops=1)
-         Output: _age_default_alias_1.start_id, n.properties
-         Inner Unique: true
-         Join Filter: (_age_default_alias_1.end_id = n.id)
+         Output: _age_default_alias_1.end_id
          Buffers: shared hit=6
+         ->  Seq Scan on age_adj_match_prefetch_gate."N" _age_default_alias_0 (actual rows=1.00 loops=1)
+               Output: _age_default_alias_0.id, _age_default_alias_0.properties
+               Filter: ((_age_default_alias_0.properties @> '{"i": 10}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[_age_default_alias_0.properties, '"i"'::agtype]) = '10'::agtype))
+               Rows Removed by Filter: 1
+               Buffers: shared hit=1
          ->  Custom Scan (AGE Adjacency Match) on age_adj_match_prefetch_gate."R" _age_default_alias_1 (actual rows=1.00 loops=1)
                Output: _age_default_alias_1.start_id, _age_default_alias_1.end_id
                Filter: (_age_default_alias_0.id = _age_default_alias_1.start_id)
@@ -1352,7 +1352,7 @@ $$) AS (plan agtype);
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
                Adjacency Cost Input: fanout=1 terminal-fanout=1 composite-fanout=1 residual=2 label-groups=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
-               Adjacency Join Order: component=_age_default_alias_1 connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=1 terminal-fanout=1 composite-fanout=1 source=graph-metadata:n_i_source candidates=3 next=adjacency-composite-expand/index-anchored/adjacency-index-id-only
+               Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=node-property-index-seek bound=start-bound property=index-anchored rows=1 fanout=1 terminal-fanout=1 composite-fanout=1 source=graph-metadata:n_i_source candidates=3 next=adjacency-composite-expand/index-anchored/adjacency-index-id-only
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false slice=serial-only active=serial
                Adjacency Composite Source: strategy=label-block+property-source label=yes property=source value=const candidate-fanout=1 composite-fanout=1 value-posting=none planned=id-cache-small threshold=3 reason=small-terminal-fanout
                Adjacency Composite Policy: class=adjacency-composite-id-cache recommendation=keep-id-cache runtime-class=adjacency-composite-id-cache runtime-recommendation=keep-id-cache class-match=true
@@ -1362,11 +1362,11 @@ $$) AS (plan agtype);
                Adjacency Payload Columns: mode=id-only columns=start_id,end_id
                Adjacency Payload Runtime: visible=1 label-filtered=0 directory-label=0 property-filtered=0 cache-filtered=0 cache-label=0 cache-property=0 emitted=1
                Buffers: shared hit=5
-         ->  Seq Scan on age_adj_match_prefetch_gate."N" n (actual rows=1.00 loops=1)
-               Output: n.id, n.properties
-               Filter: ((n.properties @> '{"i": 11}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '11'::agtype))
-               Rows Removed by Filter: 1
-               Buffers: shared hit=1
+   ->  Seq Scan on age_adj_match_prefetch_gate."N" n (actual rows=1.00 loops=1)
+         Output: n.id, n.properties
+         Filter: ((n.properties @> '{"i": 11}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '11'::agtype))
+         Rows Removed by Filter: 1
+         Buffers: shared hit=1
  Planning:
    Buffers: shared hit=30 read=1
 (37 rows)

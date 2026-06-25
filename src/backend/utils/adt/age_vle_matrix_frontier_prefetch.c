@@ -31,6 +31,10 @@ static bool matrix_frontier_prefetch_label_sources_for_direction(
     VLE_local_context *vlelctx, bool outgoing);
 static void matrix_frontier_prefetch_collector_drain(
     VLEMatrixFrontierPrefetchCollector *collector, VLE_local_context *vlelctx);
+static int matrix_frontier_prefetch_graphid_cmp(const void *left,
+                                                const void *right);
+static bool matrix_frontier_prefetch_sorted_contains(
+    const graphid *values, int64 value_count, graphid value);
 static void matrix_frontier_prefetch_age_adjacency_cursors(
     VLE_local_context *vlelctx, VLEContextSourceCursor *source_cursors,
     int64 source_cursor_count);
@@ -98,6 +102,74 @@ void age_vle_matrix_frontier_prefetch_collector_add(
         candidate->next_vertex_id;
 }
 
+void age_vle_matrix_frontier_prefetch_collector_add_span(
+    VLEMatrixFrontierPrefetchCollector *collector,
+    VLE_local_context *vlelctx,
+    const VLEAcceptedCandidateSpan *span)
+{
+    graphid *accepted_source_ids;
+    int accepted_source_count = 0;
+    int64 sorted_existing_count;
+    int i;
+
+    if (collector == NULL || !collector->enabled || vlelctx == NULL ||
+        span == NULL || span->candidates == NULL || span->accepted == NULL)
+    {
+        return;
+    }
+
+    accepted_source_ids = palloc_array(graphid, span->candidate_count);
+    for (i = 0; i < span->candidate_count; i++)
+    {
+        if (!span->accepted[i])
+            continue;
+
+        accepted_source_ids[accepted_source_count++] =
+            span->candidates[i].next_vertex_id;
+    }
+
+    if (accepted_source_count == 0)
+    {
+        pfree(accepted_source_ids);
+        return;
+    }
+
+    qsort(accepted_source_ids, accepted_source_count, sizeof(graphid),
+          matrix_frontier_prefetch_graphid_cmp);
+    sorted_existing_count = collector->source_count;
+    if (sorted_existing_count > 1)
+    {
+        qsort(collector->source_vertex_ids, sorted_existing_count,
+              sizeof(graphid), matrix_frontier_prefetch_graphid_cmp);
+    }
+
+    for (i = 0; i < accepted_source_count; i++)
+    {
+        graphid source_vertex_id;
+
+        source_vertex_id = accepted_source_ids[i];
+        if (i > 0 && accepted_source_ids[i - 1] == source_vertex_id)
+            continue;
+        if (matrix_frontier_prefetch_sorted_contains(
+                collector->source_vertex_ids, sorted_existing_count,
+                source_vertex_id))
+        {
+            continue;
+        }
+
+        if (collector->source_count >= collector->source_capacity)
+        {
+            matrix_frontier_prefetch_collector_drain(collector, vlelctx);
+            sorted_existing_count = 0;
+        }
+
+        collector->source_vertex_ids[collector->source_count++] =
+            source_vertex_id;
+    }
+
+    pfree(accepted_source_ids);
+}
+
 void age_vle_matrix_frontier_prefetch_collector_flush(
     VLEMatrixFrontierPrefetchCollector *collector,
     VLE_local_context *vlelctx)
@@ -129,6 +201,40 @@ static void matrix_frontier_prefetch_collector_drain(
     }
 
     collector->source_count = 0;
+}
+
+static int matrix_frontier_prefetch_graphid_cmp(const void *left,
+                                                const void *right)
+{
+    graphid left_value = *((const graphid *) left);
+    graphid right_value = *((const graphid *) right);
+
+    if (left_value < right_value)
+        return -1;
+    if (left_value > right_value)
+        return 1;
+    return 0;
+}
+
+static bool matrix_frontier_prefetch_sorted_contains(
+    const graphid *values, int64 value_count, graphid value)
+{
+    int64 low = 0;
+    int64 high = value_count;
+
+    while (low < high)
+    {
+        int64 mid = low + (high - low) / 2;
+
+        if (values[mid] == value)
+            return true;
+        if (values[mid] < value)
+            low = mid + 1;
+        else
+            high = mid;
+    }
+
+    return false;
 }
 
 static bool matrix_frontier_prefetch_sources_for_direction(
@@ -286,7 +392,8 @@ static void matrix_frontier_prefetch_age_adjacency_cursors(
     }
 
     while (age_vle_matrix_frontier_source_block_next(
-               &source_block, &payload, &payload_source, &payload_cursor))
+               &source_block, &payload, &payload_source, &payload_cursor,
+               NULL))
     {
         (void) payload_cursor;
         age_vle_context_maybe_mark_age_adjacency_frontier_empty(

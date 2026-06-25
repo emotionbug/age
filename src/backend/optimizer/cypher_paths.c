@@ -152,7 +152,7 @@ static bool adjacency_match_can_add_partial_path(
     RelOptInfo *rel, CypherAdjacencyMatchCandidate *candidate,
     const AdjacencyMatchPayloadRequest *payload_request,
     Relids path_required_outer, int *parallel_workers);
-static void add_adjacency_match_partial_custom_path(
+static CustomPath *add_adjacency_match_partial_custom_path(
     RelOptInfo *rel, CustomPath *serial_path, int parallel_workers);
 static void set_adjacency_match_descriptor_value(List *descriptor, int index,
                                                  Node *value);
@@ -215,6 +215,12 @@ static AgeGraphJoinCandidateTable *make_adjacency_match_graph_join_table(
     RelOptInfo *rel, CustomPath *cp,
     CypherAdjacencyMatchCandidate *candidate,
     const AdjacencyMatchPayloadRequest *payload_request);
+static void apply_adjacency_match_graph_join_solved_relids(
+    AgeGraphJoinCandidateTable *table,
+    const CypherAdjacencyMatchCandidate *candidate);
+static void apply_adjacency_match_graph_join_parallel_properties(
+    AgeGraphJoinCandidateTable *table, bool parallel_safe,
+    bool parallel_aware, int parallel_workers, Cost gather_cost);
 static double adjacency_match_connector_scheduled_work(
     const CypherAdjacencyMatchCandidate *candidate);
 static Cost adjacency_match_connector_scheduled_cost(
@@ -271,6 +277,9 @@ static void graph_join_consider_nestloop_candidate_pair(
     const AgeGraphJoinPathEvidence *outer_evidence,
     const AgeGraphJoinPathEvidence *inner_evidence,
     GraphJoinNestLoopCandidate *component_candidates);
+static bool graph_join_candidate_evidence_fits_pair(
+    Path *outer_path, Path *inner_path,
+    const AgeGraphJoinPathEvidence *evidence);
 static void adjust_graph_expansion_join_rows(RelOptInfo *joinrel,
                                              JoinType jointype);
 static AgeGraphJoinCandidateTable *make_graph_expansion_join_candidate_table(
@@ -287,6 +296,8 @@ static Relids graph_join_required_outer_from_paths(Path *outer_path,
                                                    Relids provided_relids);
 static int graph_join_output_width_from_paths(Path *outer_path,
                                               Path *inner_path);
+static bool graph_join_paths_are_parallel_safe(Path *outer_path,
+                                               Path *inner_path);
 static bool graph_join_candidate_nestloop_pair_is_legal(
     RelOptInfo *outerrel, RelOptInfo *innerrel, Path *outer_path,
     Path *inner_path);
@@ -420,7 +431,13 @@ static void cost_age_vle_stream_custom_path(CustomPath *cp,
                                             List *range_direction,
                                             List *edge_source);
 static AgeGraphJoinCandidateTable *make_vle_stream_graph_join_table(
-    RelOptInfo *rel, CustomPath *cp, List *func_args, List *edge_source);
+    PlannerInfo *root, RelOptInfo *rel, CustomPath *cp, List *func_args,
+    List *edge_source);
+static Relids vle_stream_graph_join_solved_relids(PlannerInfo *root,
+                                                  RelOptInfo *rel,
+                                                  List *func_args);
+static void apply_vle_stream_graph_join_solved_relids(
+    AgeGraphJoinCandidateTable *table, Relids solved_relids);
 static void add_vle_stream_expand_candidate(
     AgeGraphJoinCandidateTable *table, CustomPath *cp,
     const char *connector, const char *bound, const char *order_property,
@@ -429,6 +446,11 @@ static void add_vle_stream_expand_candidate(
 static double vle_stream_matrix_frontier_scheduled_work(
     List *edge_source, const char *bound, double base_fanout,
     double path_rows, double composite_fanout,
+    const char *composite_planned);
+static bool vle_stream_matrix_frontier_has_prescan_compact(
+    List *edge_source, double *compact_fanout);
+static const char *vle_stream_matrix_frontier_source_evidence(
+    List *edge_source, double composite_fanout,
     const char *composite_planned);
 static const char *vle_stream_base_join_order_property(List *func_args,
                                                        List *edge_source);
@@ -1178,6 +1200,13 @@ static void graph_join_consider_nestloop_candidate_pair(
     {
         return;
     }
+    if (!graph_join_candidate_evidence_fits_pair(
+            outer_path, inner_path, outer_evidence) ||
+        !graph_join_candidate_evidence_fits_pair(
+            outer_path, inner_path, inner_evidence))
+    {
+        return;
+    }
 
     candidate_table = make_graph_expansion_join_candidate_table(
         outer_path, inner_path, outer_evidence, inner_evidence);
@@ -1231,6 +1260,8 @@ static void add_graph_join_candidate_nestloop_alternative(
 {
     JoinCostWorkspace workspace;
     Relids required_outer;
+    Path *outer_path;
+    Path *inner_path;
     NestPath *nest_path;
     double adjusted_rows;
     double row_ratio;
@@ -1247,15 +1278,23 @@ static void add_graph_join_candidate_nestloop_alternative(
         return;
     }
 
+    outer_path = candidate_slot->outer_path;
+    inner_path = candidate_slot->inner_path;
+    if (path_contains_graph_expansion(outer_path) &&
+        !path_contains_graph_expansion(inner_path) &&
+        !IsA(inner_path, MaterialPath) &&
+        outer_path->rows > 1.0)
+    {
+        inner_path = (Path *)create_material_path(innerrel, inner_path);
+    }
+
     required_outer = calc_nestloop_required_outer(
-        outerrel->relids, PATH_REQ_OUTER(candidate_slot->outer_path),
-        innerrel->relids, PATH_REQ_OUTER(candidate_slot->inner_path));
+        outerrel->relids, PATH_REQ_OUTER(outer_path),
+        innerrel->relids, PATH_REQ_OUTER(inner_path));
     initial_cost_nestloop(root, &workspace, jointype,
-                          candidate_slot->outer_path,
-                          candidate_slot->inner_path, extra);
+                          outer_path, inner_path, extra);
     nest_path = create_nestloop_path(root, joinrel, jointype, &workspace,
-                                     extra, candidate_slot->outer_path,
-                                     candidate_slot->inner_path,
+                                     extra, outer_path, inner_path,
                                      extra->restrictlist, NIL,
                                      required_outer);
 
@@ -1280,6 +1319,10 @@ static void add_graph_join_candidate_nestloop_alternative(
         candidate_slot->candidate->connector.order_property;
     join_evidence.source_evidence =
         candidate_slot->candidate->connector.source_evidence;
+    join_evidence.solved_relids = bms_copy(
+        candidate_slot->candidate->connector.solved_relids);
+    join_evidence.required_outer = required_outer;
+    join_evidence.provided_relids = joinrel->relids;
     join_evidence.candidate_count =
         age_graph_join_table_candidate_count(candidate_slot->table);
     join_evidence.selected_total_cost = nest_path->jpath.path.total_cost;
@@ -1287,8 +1330,24 @@ static void add_graph_join_candidate_nestloop_alternative(
         candidate_slot->table, candidate_slot->candidate);
     join_evidence.next_total_cost = next_best != NULL ?
         next_best->connector.total_cost : 0;
+    if (joinrel->reltarget != NULL)
+        join_evidence.output_width = joinrel->reltarget->width;
+    join_evidence.parallel_safe =
+        nest_path->jpath.path.parallel_safe &&
+        candidate_slot->candidate->component.parallel_safe;
+    join_evidence.parallel_aware =
+        join_evidence.parallel_safe &&
+        candidate_slot->candidate->component.parallel_aware;
+    join_evidence.parallel_workers = join_evidence.parallel_safe ?
+        candidate_slot->candidate->component.parallel_workers : 0;
+    join_evidence.gather_cost = join_evidence.parallel_safe ?
+        candidate_slot->candidate->component.gather_cost : 0;
+    join_evidence.order_preserving = nest_path->jpath.path.pathkeys != NIL;
+    join_evidence.shared_state_required =
+        candidate_slot->candidate->component.shared_state_required;
     join_evidence.bound = age_graph_join_order_property_is_bound(
         join_evidence.order_property);
+    age_graph_join_complete_path_evidence((Path *)nest_path, &join_evidence);
     age_graph_join_register_rel_path_evidence(
         root, joinrel, (Path *)nest_path, &join_evidence);
 
@@ -1296,7 +1355,8 @@ static void add_graph_join_candidate_nestloop_alternative(
             (errmsg_internal("AGE graph join candidate nestloop added: "
                              "jointype=%d joinrelids=%s component=%s "
                              "connector=%s order=%s source=%s rows=%.0f "
-                             "cost=%.2f candidates=%d required=%s "
+                             "cost=%.2f candidates=%d solved=%s "
+                             "required=%s "
                              "provided=%s",
                              (int)jointype,
                              bmsToString(joinrel->relids),
@@ -1310,6 +1370,9 @@ static void add_graph_join_candidate_nestloop_alternative(
                              nest_path->jpath.path.total_cost,
                              age_graph_join_table_candidate_count(
                                  candidate_slot->table),
+                             bmsToString(
+                                 candidate_slot->candidate->
+                                 component.solved_relids),
                              bmsToString(
                                  candidate_slot->candidate->
                                  component.required_outer),
@@ -1341,6 +1404,52 @@ static bool graph_join_candidate_nestloop_pair_is_legal(
         innerrel->top_parent_relids : innerrel->relids;
 
     return !bms_overlap(outer_paramrels, innerrelids);
+}
+
+static bool graph_join_candidate_evidence_fits_pair(
+    Path *outer_path, Path *inner_path,
+    const AgeGraphJoinPathEvidence *evidence)
+{
+    Relids provided_relids;
+    Relids required_outer;
+    Relids allowed_required;
+    bool fits;
+
+    if (evidence == NULL ||
+        evidence->order_property == NULL)
+    {
+        return false;
+    }
+
+    provided_relids = graph_join_joinrelids_from_paths(outer_path,
+                                                       inner_path);
+    required_outer = graph_join_required_outer_from_paths(
+        outer_path, inner_path, provided_relids);
+    allowed_required = bms_union(provided_relids, required_outer);
+    fits = true;
+    if (evidence->provided_relids != NULL &&
+        provided_relids != NULL &&
+        !bms_is_subset(evidence->provided_relids, provided_relids))
+    {
+        fits = false;
+    }
+    if (evidence->solved_relids != NULL &&
+        provided_relids != NULL &&
+        !bms_is_subset(evidence->solved_relids, provided_relids))
+    {
+        fits = false;
+    }
+    if (evidence->required_outer != NULL &&
+        !bms_is_subset(evidence->required_outer, allowed_required))
+    {
+        fits = false;
+    }
+
+    bms_free(provided_relids);
+    bms_free(required_outer);
+    bms_free(allowed_required);
+
+    return fits;
 }
 
 static void add_deferred_ordered_property_projection_path(
@@ -2621,7 +2730,8 @@ static void add_age_vle_stream_custom_path(PlannerInfo *root, RelOptInfo *rel,
     cost_age_vle_stream_custom_path(cp, reference_path, range_direction,
                                     edge_source);
     graph_join_table =
-        make_vle_stream_graph_join_table(rel, cp, func_args, edge_source);
+        make_vle_stream_graph_join_table(root, rel, cp, func_args,
+                                         edge_source);
     (void) age_graph_join_apply_selected_path_cost(graph_join_table,
                                                    &cp->path);
     age_graph_join_register_rel_candidate_table(root, rel, &cp->path,
@@ -2702,9 +2812,11 @@ static void cost_age_vle_stream_custom_path(CustomPath *cp,
 }
 
 static AgeGraphJoinCandidateTable *make_vle_stream_graph_join_table(
-    RelOptInfo *rel, CustomPath *cp, List *func_args, List *edge_source)
+    PlannerInfo *root, RelOptInfo *rel, CustomPath *cp, List *func_args,
+    List *edge_source)
 {
     AgeGraphJoinCandidateTable *table;
+    Relids solved_relids;
     const char *base_connector;
     const char *composite_connector;
     const char *bound;
@@ -2720,11 +2832,12 @@ static AgeGraphJoinCandidateTable *make_vle_stream_graph_join_table(
     double composite_fanout;
     double materialization_weight;
     double matrix_scheduled_work;
+    bool matrix_prescan_compact;
+    bool matrix_candidate_added = false;
     const double matrix_frontier_min_fanout = 16.0;
 
-    (void)rel;
-
     table = age_graph_join_make_candidate_table();
+    solved_relids = vle_stream_graph_join_solved_relids(root, rel, func_args);
 
     source_evidence = vle_stream_edge_source_text_field(
         edge_source, AGE_VLE_STREAM_EDGE_SOURCE_POLICY_CLASS);
@@ -2775,12 +2888,9 @@ static AgeGraphJoinCandidateTable *make_vle_stream_graph_join_table(
 
     if (!has_composite_prefilter)
     {
-        add_vle_stream_expand_candidate(
-            table, cp, base_connector, bound,
-            base_order_property,
-            source_evidence != NULL ? source_evidence : "edge-source",
-            has_bound_endpoints, base_fanout);
-        if (has_matrix_frontier)
+        matrix_prescan_compact = has_matrix_frontier &&
+            vle_stream_matrix_frontier_has_prescan_compact(edge_source, NULL);
+        if (matrix_prescan_compact)
         {
             matrix_scheduled_work =
                 vle_stream_matrix_frontier_scheduled_work(
@@ -2793,11 +2903,51 @@ static AgeGraphJoinCandidateTable *make_vle_stream_graph_join_table(
             (void) age_graph_join_table_add_scheduled_candidate(
                 table, &cp->path, "vle", "matrix-frontier-expand", bound,
                 "matrix-frontier-anchored",
-                "matrix-frontier:native,terminal-posting-schedule",
+                vle_stream_matrix_frontier_source_evidence(
+                    edge_source,
+                    (double)vle_stream_descriptor_int8_field(
+                        edge_source,
+                        AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_FANOUT,
+                        0),
+                    composite_planned),
                 clamp_row_est(matrix_scheduled_work), cp->path.startup_cost,
                 cp->path.startup_cost +
-                matrix_scheduled_work * cpu_operator_cost * 0.15 +
-                Max(matrix_scheduled_work, 1.0) * cpu_tuple_cost * 0.05,
+                matrix_scheduled_work * cpu_operator_cost * 0.02 +
+                Max(matrix_scheduled_work, 1.0) * cpu_tuple_cost * 0.005,
+                true);
+            matrix_candidate_added = true;
+        }
+        add_vle_stream_expand_candidate(
+            table, cp, base_connector, bound,
+            base_order_property,
+            source_evidence != NULL ? source_evidence : "edge-source",
+            has_bound_endpoints, base_fanout);
+        if (has_matrix_frontier && !matrix_candidate_added)
+        {
+            matrix_scheduled_work =
+                vle_stream_matrix_frontier_scheduled_work(
+                    edge_source, bound, base_fanout, cp->path.rows,
+                    (double)vle_stream_descriptor_int8_field(
+                        edge_source,
+                        AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_FANOUT,
+                        0),
+                    composite_planned);
+            (void) age_graph_join_table_add_scheduled_candidate(
+                table, &cp->path, "vle", "matrix-frontier-expand", bound,
+                "matrix-frontier-anchored",
+                vle_stream_matrix_frontier_source_evidence(
+                    edge_source,
+                    (double)vle_stream_descriptor_int8_field(
+                        edge_source,
+                        AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_FANOUT,
+                        0),
+                    composite_planned),
+                clamp_row_est(matrix_scheduled_work), cp->path.startup_cost,
+                cp->path.startup_cost +
+                matrix_scheduled_work * cpu_operator_cost *
+                0.15 +
+                Max(matrix_scheduled_work, 1.0) * cpu_tuple_cost *
+                0.05,
                 true);
         }
     }
@@ -2834,7 +2984,51 @@ static AgeGraphJoinCandidateTable *make_vle_stream_graph_join_table(
             true);
     }
 
+    apply_vle_stream_graph_join_solved_relids(table, solved_relids);
+
     return table;
+}
+
+static Relids vle_stream_graph_join_solved_relids(PlannerInfo *root,
+                                                  RelOptInfo *rel,
+                                                  List *func_args)
+{
+    Relids solved_relids;
+    ListCell *lc;
+
+    solved_relids = rel != NULL ? bms_copy(rel->relids) : NULL;
+
+    foreach(lc, func_args)
+    {
+        Node *arg = lfirst(lc);
+        Relids arg_relids;
+
+        if (arg == NULL)
+            continue;
+
+        arg_relids = pull_varnos(root, arg);
+        if (arg_relids != NULL)
+            solved_relids = bms_add_members(solved_relids, arg_relids);
+    }
+
+    return solved_relids;
+}
+
+static void apply_vle_stream_graph_join_solved_relids(
+    AgeGraphJoinCandidateTable *table, Relids solved_relids)
+{
+    ListCell *lc;
+
+    if (table == NULL || solved_relids == NULL)
+        return;
+
+    foreach(lc, table->candidates)
+    {
+        AgeGraphJoinCandidate *candidate = lfirst(lc);
+
+        candidate->component.solved_relids = bms_copy(solved_relids);
+        candidate->connector.solved_relids = bms_copy(solved_relids);
+    }
 }
 
 static void add_vle_stream_expand_candidate(
@@ -2874,6 +3068,7 @@ static double vle_stream_matrix_frontier_scheduled_work(
     const char *fanout_source;
     const char *value_posting_source;
     double scheduled_work;
+    double prescan_compact_fanout;
 
     if (bound != NULL && strcmp(bound, "in") == 0)
     {
@@ -2907,8 +3102,77 @@ static double vle_stream_matrix_frontier_scheduled_work(
     {
         scheduled_work = Min(scheduled_work, Max(composite_fanout, 1.0));
     }
+    if (vle_stream_matrix_frontier_has_prescan_compact(
+            edge_source, &prescan_compact_fanout))
+    {
+        scheduled_work = Min(scheduled_work,
+                             Max(prescan_compact_fanout, 1.0));
+    }
 
     return scheduled_work;
+}
+
+static bool vle_stream_matrix_frontier_has_prescan_compact(
+    List *edge_source, double *compact_fanout)
+{
+    const char *composite_planned;
+    int64 terminal_match_count;
+    int64 composite_candidate_fanout;
+
+    if (compact_fanout != NULL)
+        *compact_fanout = 0.0;
+    if (edge_source == NIL ||
+        !vle_stream_edge_source_bool_field(
+            edge_source,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_SOURCE_KNOWN) ||
+        !vle_stream_edge_source_bool_field(
+            edge_source,
+            AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_PREDICATE_KNOWN))
+    {
+        return false;
+    }
+
+    composite_planned = vle_stream_edge_source_text_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_PLANNED);
+    if (composite_planned == NULL ||
+        strcmp(composite_planned, "property-prefilter") == 0 ||
+        strcmp(composite_planned, "none") == 0)
+    {
+        return false;
+    }
+
+    terminal_match_count = vle_stream_descriptor_int8_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_TERMINAL_PROPERTY_MATCH_COUNT,
+        0);
+    composite_candidate_fanout = vle_stream_descriptor_int8_field(
+        edge_source, AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_CANDIDATE_FANOUT,
+        0);
+    if (terminal_match_count <= 0 || composite_candidate_fanout <= 0)
+        return false;
+
+    if (compact_fanout != NULL)
+        *compact_fanout = Min((double)terminal_match_count,
+                              (double)composite_candidate_fanout);
+
+    return true;
+}
+
+static const char *vle_stream_matrix_frontier_source_evidence(
+    List *edge_source, double composite_fanout, const char *composite_planned)
+{
+    if (vle_stream_matrix_frontier_has_prescan_compact(edge_source, NULL))
+    {
+        return "matrix-frontier:native,terminal-posting-schedule,"
+               "pre-scan-compact";
+    }
+    if (composite_fanout > 0.0 && composite_planned != NULL &&
+        strcmp(composite_planned, "none") != 0)
+    {
+        return "matrix-frontier:native,terminal-posting-schedule,"
+               "composite-fanout-schedule";
+    }
+
+    return "matrix-frontier:native,terminal-posting-schedule";
 }
 
 static const char *vle_stream_base_join_order_property(List *func_args,
@@ -2996,7 +3260,7 @@ static Plan *plan_age_vle_stream_path(PlannerInfo *root, RelOptInfo *rel,
     if (plan_terminal_property_predicate_expr != NULL)
         terminal_property_predicate_expr = plan_terminal_property_predicate_expr;
     graph_join_table =
-        make_vle_stream_graph_join_table(rel, best_path, func_args,
+        make_vle_stream_graph_join_table(root, rel, best_path, func_args,
                                          edge_source);
     graph_join_descriptor = age_graph_join_table_selected_private(
         graph_join_table);
@@ -3749,6 +4013,12 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
     int64 payload_input_seed_percent = 0;
     int64 payload_input_observed_count = 0;
     int64 payload_input_value_posting_observed_count = 0;
+    int64 payload_input_matrix_active_percent = 0;
+    int64 payload_input_matrix_filter_percent = 0;
+    int64 payload_input_matrix_prescan_percent = 0;
+    int64 payload_input_matrix_replay_source_percent = 0;
+    int64 payload_input_matrix_run_block_percent = 0;
+    int64 payload_input_matrix_regroup_percent = 0;
     const char *payload_input_reason = NULL;
     const char *payload_input_class = NULL;
     const char *payload_input_value_posting_source = NULL;
@@ -4119,6 +4389,18 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
             cost_decision.payload_input_observed_count;
         payload_input_value_posting_observed_count =
             cost_decision.payload_input_value_posting_observed_count;
+        payload_input_matrix_active_percent =
+            cost_decision.payload_input_matrix_active_percent;
+        payload_input_matrix_filter_percent =
+            cost_decision.payload_input_matrix_filter_percent;
+        payload_input_matrix_prescan_percent =
+            cost_decision.payload_input_matrix_prescan_percent;
+        payload_input_matrix_replay_source_percent =
+            cost_decision.payload_input_matrix_replay_source_percent;
+        payload_input_matrix_run_block_percent =
+            cost_decision.payload_input_matrix_run_block_percent;
+        payload_input_matrix_regroup_percent =
+            cost_decision.payload_input_matrix_regroup_percent;
         payload_input_reason = cost_decision.payload_input_reason;
         payload_input_class = cost_decision.payload_input_class;
         payload_input_value_posting_source =
@@ -4222,6 +4504,19 @@ build_descriptor:
     descriptor = lappend(
         descriptor,
         make_int8_const(payload_input_value_posting_observed_count));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_matrix_active_percent));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_matrix_filter_percent));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_matrix_prescan_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(payload_input_matrix_replay_source_percent));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_matrix_run_block_percent));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_matrix_regroup_percent));
     descriptor = lappend(descriptor, make_text_const(payload_input_reason));
     descriptor = lappend(descriptor, make_text_const(payload_input_class));
     descriptor = lappend(descriptor,
@@ -5277,6 +5572,7 @@ static void add_graph_expansion_join_side_candidate(
     AgeGraphJoinCandidateRequest request;
     Relids provided_relids;
     Relids required_outer;
+    Relids solved_relids;
 
     if (table == NULL ||
         evidence_path == NULL ||
@@ -5290,6 +5586,7 @@ static void add_graph_expansion_join_side_candidate(
                                                        inner_path);
     required_outer = graph_join_required_outer_from_paths(
         outer_path, inner_path, provided_relids);
+    solved_relids = bms_copy(provided_relids);
     age_graph_join_init_path_request(
         &request, evidence_path,
         age_graph_join_component_from_evidence(evidence),
@@ -5300,17 +5597,21 @@ static void add_graph_expansion_join_side_candidate(
         evidence->source_evidence : "path-evidence",
         evidence->shared_state_required);
     request.required_outer = required_outer;
+    request.solved_relids = solved_relids;
     request.provided_relids = provided_relids;
     request.rows = evidence_path->rows;
     request.total_cost = evidence->selected_total_cost > 0 ?
         evidence->selected_total_cost : evidence_path->total_cost;
     request.output_width = graph_join_output_width_from_paths(outer_path,
                                                               inner_path);
-    request.parallel_safe = outer_path != NULL && inner_path != NULL &&
-        outer_path->parallel_safe && inner_path->parallel_safe;
-    request.parallel_aware = false;
-    request.parallel_workers = 0;
-    request.gather_cost = 0;
+    request.parallel_safe =
+        graph_join_paths_are_parallel_safe(outer_path, inner_path) &&
+        evidence->parallel_safe;
+    request.parallel_aware = request.parallel_safe &&
+        evidence->parallel_aware;
+    request.parallel_workers = request.parallel_safe ?
+        evidence->parallel_workers : 0;
+    request.gather_cost = request.parallel_safe ? evidence->gather_cost : 0;
     request.order_preserving =
         (outer_path != NULL && outer_path->pathkeys != NIL) ||
         (inner_path != NULL && inner_path->pathkeys != NIL);
@@ -5373,6 +5674,15 @@ static int graph_join_output_width_from_paths(Path *outer_path,
     }
 
     return output_width;
+}
+
+static bool graph_join_paths_are_parallel_safe(Path *outer_path,
+                                               Path *inner_path)
+{
+    return outer_path != NULL &&
+           inner_path != NULL &&
+           outer_path->parallel_safe &&
+           inner_path->parallel_safe;
 }
 
 static bool path_get_graph_expansion_join_evidence(
@@ -5871,6 +6181,7 @@ static void bind_adjacency_match_candidate_outer_relids(
 {
     ListCell *lc;
     Index rti = 1;
+    Index edge_rti = 0;
     Index alias_rti = 0;
     Relids expr_relids = NULL;
     int expr_rti = 0;
@@ -5882,7 +6193,8 @@ static void bind_adjacency_match_candidate_outer_relids(
         return;
     }
 
-    if (candidate->bound_endpoint_alias != NULL)
+    if (candidate->edge_alias != NULL ||
+        candidate->bound_endpoint_alias != NULL)
     {
         foreach(lc, root->parse->rtable)
         {
@@ -5894,16 +6206,26 @@ static void bind_adjacency_match_candidate_outer_relids(
             else if (rte->eref != NULL)
                 aliasname = rte->eref->aliasname;
 
-            if (aliasname != NULL &&
+            if (candidate->edge_alias != NULL &&
+                aliasname != NULL &&
+                strcmp(candidate->edge_alias, aliasname) == 0)
+                edge_rti = rti;
+
+            if (candidate->bound_endpoint_alias != NULL &&
+                aliasname != NULL &&
                 strcmp(candidate->bound_endpoint_alias, aliasname) == 0)
-            {
                 alias_rti = rti;
+
+            if ((candidate->edge_alias == NULL || edge_rti > 0) &&
+                (candidate->bound_endpoint_alias == NULL || alias_rti > 0))
                 break;
-            }
 
             rti++;
         }
     }
+    candidate->edge_rti = edge_rti;
+    if (edge_rti > 0)
+        candidate->solved_relids = bms_make_singleton(edge_rti);
 
     if (candidate->bound_endpoint_expr != NULL)
     {
@@ -5919,6 +6241,11 @@ static void bind_adjacency_match_candidate_outer_relids(
             {
                 candidate->required_outer = expr_relids;
                 candidate->bound_endpoint_rti = expr_rti;
+                if (candidate->solved_relids != NULL)
+                    candidate->solved_relids = bms_add_members(
+                        candidate->solved_relids, expr_relids);
+                else
+                    candidate->solved_relids = bms_copy(expr_relids);
                 restrict_adjacency_match_terminal_property_prefetch(root,
                                                                     candidate);
                 return;
@@ -5939,6 +6266,11 @@ static void bind_adjacency_match_candidate_outer_relids(
 
     candidate->bound_endpoint_rti = alias_rti;
     candidate->required_outer = bms_make_singleton(alias_rti);
+    if (candidate->solved_relids != NULL)
+        candidate->solved_relids = bms_add_member(candidate->solved_relids,
+                                                  alias_rti);
+    else
+        candidate->solved_relids = bms_make_singleton(alias_rti);
     restrict_adjacency_match_terminal_property_prefetch(root, candidate);
 }
 
@@ -6050,7 +6382,21 @@ static void add_adjacency_match_custom_path(
                                              path_required_outer,
                                              &partial_workers))
     {
-        add_adjacency_match_partial_custom_path(rel, cp, partial_workers);
+        CustomPath *partial_path;
+        AgeGraphJoinCandidateTable *partial_graph_join_table;
+        Cost partial_gather_cost;
+
+        partial_path = add_adjacency_match_partial_custom_path(
+            rel, cp, partial_workers);
+        partial_graph_join_table = make_adjacency_match_graph_join_table(
+            rel, partial_path, candidate, &payload_request);
+        partial_gather_cost = parallel_setup_cost +
+            parallel_tuple_cost * cp->path.rows;
+        apply_adjacency_match_graph_join_parallel_properties(
+            partial_graph_join_table, true, true, partial_workers,
+            partial_gather_cost);
+        age_graph_join_register_rel_candidate_table(
+            root, rel, &partial_path->path, partial_graph_join_table);
     }
 
     ereport(DEBUG2,
@@ -6117,7 +6463,7 @@ static bool adjacency_match_can_add_partial_path(
     return parallel_workers != NULL && *parallel_workers > 0;
 }
 
-static void add_adjacency_match_partial_custom_path(
+static CustomPath *add_adjacency_match_partial_custom_path(
     RelOptInfo *rel, CustomPath *serial_path, int parallel_workers)
 {
     CustomPath *partial_path;
@@ -6167,6 +6513,8 @@ static void add_adjacency_match_partial_custom_path(
                           false, true));
 
     add_partial_path(rel, (Path *)partial_path);
+
+    return partial_path;
 }
 
 static void set_adjacency_match_descriptor_value(List *descriptor, int index,
@@ -6693,8 +7041,56 @@ static AgeGraphJoinCandidateTable *make_adjacency_match_graph_join_table(
         adjacency_match_connector_source_evidence(candidate, payload_request),
         clamp_row_est(scheduled_work), cp->path.startup_cost, scheduled_cost,
         false);
+    apply_adjacency_match_graph_join_solved_relids(table, candidate);
 
     return table;
+}
+
+static void apply_adjacency_match_graph_join_solved_relids(
+    AgeGraphJoinCandidateTable *table,
+    const CypherAdjacencyMatchCandidate *candidate)
+{
+    ListCell *lc;
+
+    if (table == NULL ||
+        candidate == NULL ||
+        candidate->solved_relids == NULL)
+    {
+        return;
+    }
+
+    foreach(lc, table->candidates)
+    {
+        AgeGraphJoinCandidate *graph_candidate = lfirst(lc);
+
+        graph_candidate->component.solved_relids =
+            bms_copy(candidate->solved_relids);
+        graph_candidate->connector.solved_relids =
+            bms_copy(candidate->solved_relids);
+    }
+}
+
+static void apply_adjacency_match_graph_join_parallel_properties(
+    AgeGraphJoinCandidateTable *table, bool parallel_safe,
+    bool parallel_aware, int parallel_workers, Cost gather_cost)
+{
+    ListCell *lc;
+
+    if (table == NULL)
+        return;
+
+    foreach(lc, table->candidates)
+    {
+        AgeGraphJoinCandidate *candidate = lfirst(lc);
+
+        candidate->component.parallel_safe = parallel_safe;
+        candidate->component.parallel_aware =
+            parallel_safe && parallel_aware;
+        candidate->component.parallel_workers =
+            candidate->component.parallel_aware ? parallel_workers : 0;
+        candidate->component.gather_cost =
+            candidate->component.parallel_safe ? gather_cost : 0;
+    }
 }
 
 static double adjacency_match_connector_scheduled_work(
@@ -7020,6 +7416,13 @@ static List *make_adjacency_match_descriptor(
                          makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
                                    CStringGetTextDatum(
                                        graph_join_candidate->connector.source_evidence),
+                                   false, false));
+    descriptor = lappend(descriptor,
+                         makeConst(TEXTOID, -1, DEFAULT_COLLATION_OID, -1,
+                                   CStringGetTextDatum(
+                                       bmsToString(
+                                           graph_join_candidate->
+                                           connector.solved_relids)),
                                    false, false));
     descriptor = lappend(descriptor,
                          makeConst(INT4OID, -1, InvalidOid, sizeof(int32),

@@ -31,9 +31,14 @@ static void graph_join_metadata_context_reset(void *arg);
 static bool graph_join_metadata_identity_matches(PlannerInfo *root);
 static void graph_join_metadata_rebuild_component_candidates(
     AgeGraphJoinRelMetadata *metadata);
+static void graph_join_metadata_append_planner_candidates(
+    AgeGraphJoinRelMetadata *metadata);
 static void graph_join_metadata_update_component_candidate(
     AgeGraphJoinRelMetadata *metadata,
     const AgeGraphJoinRelCandidate *candidate);
+static bool graph_join_component_candidate_matches(
+    const AgeGraphJoinRelComponentCandidate *component_candidate,
+    const char *component, const AgeGraphJoinPathEvidence *evidence);
 static bool graph_join_metadata_lookup_path_evidence(
     const AgeGraphJoinRelMetadata *metadata, Path *path,
     AgeGraphJoinPathEvidence *evidence);
@@ -65,6 +70,7 @@ AgeGraphJoinCandidate *age_graph_join_make_candidate(
     candidate = palloc0(sizeof(*candidate));
     candidate->component.name =
         copy_graph_join_text(request->component, "unknown");
+    candidate->component.solved_relids = bms_copy(request->solved_relids);
     candidate->component.required_outer = bms_copy(request->required_outer);
     candidate->component.provided_relids = bms_copy(request->provided_relids);
     candidate->component.estimated_rows = request->rows;
@@ -85,6 +91,7 @@ AgeGraphJoinCandidate *age_graph_join_make_candidate(
         copy_graph_join_text(request->order_property, "query-order");
     candidate->connector.source_evidence =
         copy_graph_join_text(request->source_evidence, "unknown");
+    candidate->connector.solved_relids = bms_copy(request->solved_relids);
     candidate->connector.required_outer = bms_copy(request->required_outer);
     candidate->connector.provided_relids = bms_copy(request->provided_relids);
     candidate->connector.rows = request->rows;
@@ -157,6 +164,7 @@ void age_graph_join_init_path_request(
     request->bound = bound;
     request->order_property = order_property;
     request->source_evidence = source_evidence;
+    request->solved_relids = provided_relids;
     request->required_outer = PATH_REQ_OUTER(path);
     request->provided_relids = provided_relids;
     request->rows = path->rows;
@@ -220,6 +228,8 @@ AgeGraphJoinCandidate *age_graph_join_table_add_path_evidence_candidate(
         evidence->selected_total_cost : path->total_cost;
     if (evidence->required_outer != NULL)
         request.required_outer = evidence->required_outer;
+    if (evidence->solved_relids != NULL)
+        request.solved_relids = evidence->solved_relids;
     if (evidence->provided_relids != NULL)
         request.provided_relids = evidence->provided_relids;
     if (evidence->output_width > 0)
@@ -361,6 +371,8 @@ void age_graph_join_complete_path_evidence(
         return;
 
     rel = path->parent;
+    if (evidence->solved_relids == NULL && rel != NULL)
+        evidence->solved_relids = rel->relids;
     if (evidence->required_outer == NULL)
         evidence->required_outer = PATH_REQ_OUTER(path);
     if (evidence->provided_relids == NULL && rel != NULL)
@@ -504,8 +516,7 @@ void age_graph_join_refresh_rel_metadata(
         }
         metadata->candidates = lappend(metadata->candidates, candidate);
     }
-    metadata->candidates = list_concat(metadata->candidates,
-                                       list_copy(metadata->planner_candidates));
+    graph_join_metadata_append_planner_candidates(metadata);
 
     if (metadata->candidates != NIL)
     {
@@ -518,6 +529,41 @@ void age_graph_join_refresh_rel_metadata(
                                  list_length(metadata->candidates),
                                  list_length(metadata->component_candidates),
                                  list_length(rel->pathlist))));
+    }
+}
+
+static void graph_join_metadata_append_planner_candidates(
+    AgeGraphJoinRelMetadata *metadata)
+{
+    ListCell *planner_lc;
+
+    if (metadata == NULL ||
+        metadata->planner_candidates == NIL)
+    {
+        return;
+    }
+
+    foreach(planner_lc, metadata->planner_candidates)
+    {
+        AgeGraphJoinRelCandidate *planner_candidate = lfirst(planner_lc);
+        ListCell *candidate_lc;
+        bool already_present = false;
+
+        foreach(candidate_lc, metadata->candidates)
+        {
+            AgeGraphJoinRelCandidate *candidate = lfirst(candidate_lc);
+
+            if (graph_join_planner_candidate_matches(
+                    candidate, planner_candidate->path,
+                    &planner_candidate->evidence))
+            {
+                already_present = true;
+                break;
+            }
+        }
+        if (!already_present)
+            metadata->candidates = lappend(metadata->candidates,
+                                           planner_candidate);
     }
 }
 
@@ -563,7 +609,8 @@ static void graph_join_metadata_update_component_candidate(
     {
         component_candidate = lfirst(lc);
 
-        if (strcmp(component_candidate->component, component) == 0)
+        if (graph_join_component_candidate_matches(
+                component_candidate, component, &candidate->evidence))
         {
             if (component_candidate->total_cost <= total_cost)
                 return;
@@ -583,6 +630,29 @@ static void graph_join_metadata_update_component_candidate(
     component_candidate->total_cost = total_cost;
     metadata->component_candidates = lappend(metadata->component_candidates,
                                              component_candidate);
+}
+
+static bool graph_join_component_candidate_matches(
+    const AgeGraphJoinRelComponentCandidate *component_candidate,
+    const char *component, const AgeGraphJoinPathEvidence *evidence)
+{
+    const AgeGraphJoinPathEvidence *existing;
+
+    if (component_candidate == NULL ||
+        component_candidate->component == NULL ||
+        component == NULL ||
+        evidence == NULL)
+    {
+        return false;
+    }
+    if (strcmp(component_candidate->component, component) != 0)
+        return false;
+
+    existing = &component_candidate->evidence;
+
+    return bms_equal(existing->solved_relids, evidence->solved_relids) &&
+           bms_equal(existing->provided_relids, evidence->provided_relids) &&
+           bms_equal(existing->required_outer, evidence->required_outer);
 }
 
 void age_graph_join_register_rel_candidate_table(
@@ -694,6 +764,7 @@ static void graph_join_path_evidence_from_candidate(
     evidence->connector = candidate->connector.kind;
     evidence->order_property = candidate->connector.order_property;
     evidence->source_evidence = candidate->connector.source_evidence;
+    evidence->solved_relids = candidate->connector.solved_relids;
     evidence->required_outer = candidate->connector.required_outer;
     evidence->provided_relids = candidate->connector.provided_relids;
     evidence->candidate_count = age_graph_join_table_candidate_count(table);
@@ -747,7 +818,8 @@ static bool graph_join_planner_candidate_matches(
         return false;
     }
 
-    return bms_equal(existing->required_outer, evidence->required_outer) &&
+    return bms_equal(existing->solved_relids, evidence->solved_relids) &&
+           bms_equal(existing->required_outer, evidence->required_outer) &&
            bms_equal(existing->provided_relids, evidence->provided_relids);
 }
 
@@ -865,6 +937,10 @@ List *age_graph_join_candidate_private(
     descriptor = lappend(descriptor,
                          make_graph_join_text_const(
                              candidate->connector.source_evidence));
+    descriptor = lappend(descriptor,
+                         make_graph_join_text_const(
+                             bmsToString(
+                                 candidate->connector.solved_relids)));
     descriptor = lappend(descriptor,
                          make_graph_join_text_const(
                              bmsToString(

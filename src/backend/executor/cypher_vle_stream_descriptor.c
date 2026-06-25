@@ -374,6 +374,30 @@ void read_age_vle_stream_edge_source(CustomScan *cscan,
         age_vle_stream_private_int64(
             descriptor,
             AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_VALUE_POSTING_OBSERVED_COUNT);
+    source->payload_input_matrix_active_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_ACTIVE_PERCENT);
+    source->payload_input_matrix_filter_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_FILTER_PERCENT);
+    source->payload_input_matrix_prescan_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_PRESCAN_PERCENT);
+    source->payload_input_matrix_replay_source_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_REPLAY_SOURCE_PERCENT);
+    source->payload_input_matrix_run_block_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_RUN_BLOCK_PERCENT);
+    source->payload_input_matrix_regroup_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_REGROUP_PERCENT);
     source->payload_input_reason =
         age_vle_stream_private_text(
             descriptor, AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_REASON);

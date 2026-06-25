@@ -361,12 +361,39 @@ extern void age_vle_context_record_matrix_frontier_source_run_filtered_keys(
     VLE_local_context *vlelctx, int64 filtered_keys);
 extern void age_vle_context_record_matrix_frontier_source_run_prefiltered_keys(
     VLE_local_context *vlelctx, int64 prefiltered_keys);
+extern void age_vle_context_record_matrix_frontier_source_run_raw_block_batches(
+    VLE_local_context *vlelctx, int64 block_batches,
+    int64 block_batch_cursors);
+extern void age_vle_context_record_matrix_frontier_source_run_block_tag_batch(
+    VLE_local_context *vlelctx, int64 block_batches,
+    int64 block_batch_cursors, int64 block_batch_positions);
+extern void age_vle_context_record_matrix_frontier_source_run_replay_segment(
+    VLE_local_context *vlelctx, int64 source_count);
+extern void age_vle_context_record_matrix_frontier_source_run_groups(
+    VLE_local_context *vlelctx, int64 seed_groups, int64 seed_group_cursors,
+    int64 shared_page_groups, int64 shared_page_cursors,
+    int64 shared_page_run_block_groups, int64 shared_page_run_block_cursors,
+    int64 shared_page_run_block_intersections,
+    int64 shared_page_run_block_intersection_cursors,
+    int64 shared_page_run_block_intersection_skips,
+    int64 shared_page_run_block_direct_seeds,
+    int64 shared_page_run_block_direct_seed_cursors,
+    int64 shared_page_run_block_streams,
+    int64 shared_page_run_block_stream_cursors,
+    int64 shared_page_run_block_stream_positions,
+    int64 shared_page_run_block_full_group_drains,
+    int64 shared_page_run_block_full_group_drain_cursors,
+    int64 shared_page_fallbacks, int64 fallback_regroups,
+    int64 fallback_regroup_cursors);
 extern int64 age_vle_context_empty_lifecycle_batch_size(
     VLE_local_context *vlelctx);
 extern void age_vle_context_record_source_scan(
     VLE_local_context *vlelctx, VLEContextSourceStatsKind kind);
 extern void age_vle_context_record_source_candidate(
     VLE_local_context *vlelctx, VLEContextSourceStatsKind kind);
+extern void age_vle_context_record_source_candidate_batch(
+    VLE_local_context *vlelctx, VLEContextSourceStatsKind kind,
+    int64 candidate_count);
 extern void age_vle_context_record_source_empty_scan(
     VLE_local_context *vlelctx, VLEContextSourceStatsKind kind);
 extern void age_vle_context_record_age_adjacency_directory_filtered_empty_scan(
@@ -384,6 +411,8 @@ extern void age_vle_context_record_age_adjacency_empty_source_frontier_batch(
 extern void age_vle_context_record_age_adjacency_empty_source_run_skip(
     VLE_local_context *vlelctx, bool outgoing);
 extern void age_vle_context_record_source_push(VLE_local_context *vlelctx);
+extern void age_vle_context_record_source_push_batch(
+    VLE_local_context *vlelctx, int64 push_count);
 extern void age_vle_context_record_missing_vertex_attempt(
     VLE_local_context *vlelctx);
 extern void age_vle_context_record_missing_vertex_hit(
@@ -418,6 +447,9 @@ extern void age_vle_context_apply_candidate_match_result(
 extern bool age_vle_context_push_candidate_if_matched(
     VLE_local_context *vlelctx, const VLETraversalCandidate *candidate,
     const char *caller);
+extern int64 age_vle_context_push_candidate_batch_if_matched(
+    VLE_local_context *vlelctx, const VLETraversalCandidate *candidates,
+    int candidate_count, const char *caller, bool *pushed);
 extern void age_vle_context_close_adjacency_scans(
     VLE_local_context *vlelctx);
 extern void age_vle_context_free_adjacency_payload_cache(
@@ -573,6 +605,9 @@ age_vle_context_age_adjacency_payload_source_matrix_entry(
 extern void age_vle_context_age_adjacency_payload_source_accept_scanned_payload(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
     const AgeAdjacencyPayload *payload);
+extern void age_vle_context_age_adjacency_payload_source_reserve_matrix_batch(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    int64 position_count, int64 source_count);
 extern void age_vle_context_age_adjacency_payload_source_accept_matrix_replay(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
 extern void age_vle_context_age_adjacency_payload_source_mark_empty(

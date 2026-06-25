@@ -21,6 +21,7 @@
 
 #include "common/hashfn.h"
 #include "utils/age_vle_traversal.h"
+#include "utils/graphid.h"
 
 #define VLE_FRAME_STACK_INITIAL_CAPACITY 64
 
@@ -32,6 +33,8 @@ typedef struct VLELocalEdgeStateEntry
 
 #define VLE_LOCAL_EDGE_STATE_INITIAL_CAPACITY_MAX 1048576
 
+static void age_vle_frame_stack_ensure_capacity(
+    VLETraversalFrameStack *stack, int64 required);
 static void age_vle_edge_state_ensure_capacity(VLELocalEdgeState *state,
                                                int64 required);
 static int64 age_vle_edge_state_get_or_create_index(
@@ -205,6 +208,24 @@ void age_vle_frame_stack_free(VLETraversalFrameStack *stack)
     pfree(stack);
 }
 
+static void age_vle_frame_stack_ensure_capacity(
+    VLETraversalFrameStack *stack, int64 required)
+{
+    Assert(stack != NULL);
+
+    if (required <= stack->capacity)
+    {
+        return;
+    }
+
+    while (stack->capacity < required)
+    {
+        stack->capacity *= 2;
+    }
+    stack->array = repalloc(stack->array,
+                            sizeof(VLETraversalFrame) * stack->capacity);
+}
+
 void age_vle_frame_stack_push(VLETraversalFrameStack *stack,
                               graphid edge_id, int64 edge_index,
                               graphid next_vertex_id,
@@ -214,13 +235,7 @@ void age_vle_frame_stack_push(VLETraversalFrameStack *stack,
 
     Assert(stack != NULL);
 
-    if (stack->size >= stack->capacity)
-    {
-        stack->capacity *= 2;
-        stack->array = repalloc(stack->array,
-                                sizeof(VLETraversalFrame) *
-                                stack->capacity);
-    }
+    age_vle_frame_stack_ensure_capacity(stack, stack->size + 1);
 
     frame = &stack->array[stack->size++];
     frame->edge_id = edge_id;
@@ -495,6 +510,62 @@ bool age_vle_traversal_push_candidate_if_matched(
                              candidate->next_vertex_id,
                              candidate->next_vertex_entry);
     return true;
+}
+
+int64 age_vle_traversal_push_candidate_batch_if_matched(
+    VLETraversalState *state, const VLETraversalCandidate *candidates,
+    int candidate_count, int32 target_label_id, const char *caller,
+    bool *pushed)
+{
+    VLETraversalFrameStack *stack;
+    bool target_label_valid;
+    int64 pushed_count = 0;
+    int i;
+
+    Assert(state != NULL);
+    Assert(state->frame_stack != NULL);
+    Assert(candidates != NULL);
+    Assert(candidate_count >= 0);
+    Assert(pushed != NULL);
+
+    stack = state->frame_stack;
+    target_label_valid = label_id_is_valid(target_label_id);
+    age_vle_frame_stack_ensure_capacity(stack, stack->size + candidate_count);
+
+    for (i = 0; i < candidate_count; i++)
+    {
+        const VLETraversalCandidate *candidate;
+        VLETraversalFrame *frame;
+        uint8 *edge_flags;
+
+        candidate = &candidates[i];
+        pushed[i] = false;
+        if (target_label_valid &&
+            get_graphid_label_id(candidate->next_vertex_id) !=
+            target_label_id)
+        {
+            continue;
+        }
+
+        edge_flags = age_vle_edge_state_flag_at(&state->edge_state,
+                                                candidate->edge_index,
+                                                caller);
+        if ((*edge_flags & VLE_EDGE_STATE_USED) != 0 ||
+            (*edge_flags & VLE_EDGE_STATE_MATCHED) == 0)
+        {
+            continue;
+        }
+
+        frame = &stack->array[stack->size++];
+        frame->edge_id = candidate->edge_id;
+        frame->edge_index = candidate->edge_index;
+        frame->next_vertex_id = candidate->next_vertex_id;
+        frame->next_vertex_entry = candidate->next_vertex_entry;
+        pushed[i] = true;
+        pushed_count++;
+    }
+
+    return pushed_count;
 }
 
 bool age_vle_consume_next_frame(VLETraversalState *state, const char *caller,
