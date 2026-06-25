@@ -31,13 +31,19 @@ static void set_VLE_container_materializer_metadata(
     graphid candidate_vertex_id, bool candidate_vertex_valid);
 static VLE_path_container *build_VLE_path_container(
     const VLEContainerBuildInput *input);
+static VLE_path_container *build_VLE_path_container_from_parent_chain(
+    const VLEContainerBuildInput *input);
 static VLE_path_container *build_reversed_VLE_path_container(
+    const VLEContainerBuildInput *input);
+static VLE_path_container *build_reversed_VLE_path_container_from_parent_chain(
     const VLEContainerBuildInput *input);
 static VLE_path_container *build_VLE_terminal_container(
     const VLEContainerBuildInput *input);
 static VLE_path_container *build_VLE_terminal_zero_container(
     const VLEContainerBuildInput *input);
 static VLE_path_container *build_VLE_zero_container(
+    const VLEContainerBuildInput *input);
+static bool vle_container_parent_chain_available(
     const VLEContainerBuildInput *input);
 
 static VLE_path_container *create_VLE_path_container(int64 path_size)
@@ -93,6 +99,9 @@ static VLE_path_container *build_VLE_path_container(
     int j = 0;
 
     Assert(input != NULL);
+    if (vle_container_parent_chain_available(input))
+        return build_VLE_path_container_from_parent_chain(input);
+
     stack = input->path_stack;
     vertex_stack = input->path_vertex_stack;
     if (stack == NULL)
@@ -121,6 +130,45 @@ static VLE_path_container *build_VLE_path_container(
     return vpc;
 }
 
+static VLE_path_container *build_VLE_path_container_from_parent_chain(
+    const VLEContainerBuildInput *input)
+{
+    VLE_path_container *vpc = NULL;
+    graphid *graphid_array = NULL;
+    int64 frame_index;
+    int ssize;
+    int j;
+
+    Assert(input != NULL);
+    Assert(vle_container_parent_chain_available(input));
+
+    ssize = (int) input->path_depth;
+    vpc = create_VLE_path_container((ssize * 2) + 1);
+    graphid_array = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+    graphid_array[0] = input->start_vertex_id;
+
+    frame_index = input->active_frame_index;
+    for (j = ssize - 1; j >= 0; j--)
+    {
+        const VLETraversalFrame *frame;
+
+        Assert(frame_index >= 0);
+        Assert(frame_index < input->path_frame_count);
+        frame = &input->path_frames[frame_index];
+        Assert(frame->path_length == j + 1);
+        graphid_array[(j * 2) + 1] = frame->edge_id;
+        graphid_array[(j * 2) + 2] = frame->next_vertex_id;
+        frame_index = frame->parent_frame_index;
+    }
+    Assert(frame_index < 0);
+
+    set_VLE_container_materializer_metadata(
+        vpc, input->graph_oid, VLE_MATERIALIZER_OUTPUT_PATH,
+        input->start_vertex_id, true, graphid_array[ssize * 2], true);
+
+    return vpc;
+}
+
 static VLE_path_container *build_reversed_VLE_path_container(
     const VLEContainerBuildInput *input)
 {
@@ -135,6 +183,9 @@ static VLE_path_container *build_reversed_VLE_path_container(
     int j = 0;
 
     Assert(input != NULL);
+    if (vle_container_parent_chain_available(input))
+        return build_reversed_VLE_path_container_from_parent_chain(input);
+
     stack = input->path_stack;
     vertex_stack = input->path_vertex_stack;
     if (stack == NULL)
@@ -165,6 +216,52 @@ static VLE_path_container *build_reversed_VLE_path_container(
     return vpc;
 }
 
+static VLE_path_container *build_reversed_VLE_path_container_from_parent_chain(
+    const VLEContainerBuildInput *input)
+{
+    VLE_path_container *vpc = NULL;
+    graphid *graphid_array = NULL;
+    int64 frame_index;
+    int ssize;
+    int index;
+
+    Assert(input != NULL);
+    Assert(vle_container_parent_chain_available(input));
+
+    ssize = (int) input->path_depth;
+    vpc = create_VLE_path_container((ssize * 2) + 1);
+    graphid_array = GET_GRAPHID_ARRAY_FROM_CONTAINER(vpc);
+
+    frame_index = input->active_frame_index;
+    Assert(frame_index >= 0);
+    Assert(frame_index < input->path_frame_count);
+    graphid_array[0] = input->path_frames[frame_index].next_vertex_id;
+
+    index = 1;
+    while (frame_index >= 0)
+    {
+        const VLETraversalFrame *frame;
+        int64 parent_frame_index;
+
+        Assert(frame_index < input->path_frame_count);
+        frame = &input->path_frames[frame_index];
+        parent_frame_index = frame->parent_frame_index;
+        graphid_array[index] = frame->edge_id;
+        graphid_array[index + 1] = parent_frame_index >= 0 ?
+            input->path_frames[parent_frame_index].next_vertex_id :
+            input->start_vertex_id;
+        index += 2;
+        frame_index = parent_frame_index;
+    }
+    Assert(index == (ssize * 2) + 1);
+
+    set_VLE_container_materializer_metadata(
+        vpc, input->graph_oid, VLE_MATERIALIZER_OUTPUT_PATH,
+        input->start_vertex_id, true, input->start_vertex_id, true);
+
+    return vpc;
+}
+
 static VLE_path_container *build_VLE_terminal_container(
     const VLEContainerBuildInput *input)
 {
@@ -181,8 +278,8 @@ static VLE_path_container *build_VLE_terminal_container(
         return NULL;
     }
 
-    ssize = gid_stack_size(input->path_stack);
-    Assert(gid_stack_size(vertex_stack) == ssize + 1);
+    ssize = gid_stack_size(vertex_stack) - 1;
+    Assert(ssize >= 0);
 
     terminal_id = input->reverse_output_path ? vertex_stack->array[0] :
                                                vertex_stack->array[ssize];
@@ -246,6 +343,18 @@ static VLE_path_container *build_VLE_zero_container(
     return vpc;
 }
 
+static bool vle_container_parent_chain_available(
+    const VLEContainerBuildInput *input)
+{
+    Assert(input != NULL);
+
+    return input->path_frames != NULL &&
+           input->path_frame_count > 0 &&
+           input->active_frame_index >= 0 &&
+           input->active_frame_index < input->path_frame_count &&
+           input->path_depth > 0;
+}
+
 VLE_path_container *age_vle_build_container(
     const VLEContainerBuildInput *input,
     const VLEIteratorMaterialization *materialization)
@@ -256,21 +365,25 @@ VLE_path_container *age_vle_build_container(
     switch (materialization->container_kind)
     {
         case VLE_ITERATOR_CONTAINER_PATH:
-            Assert(input->path_stack != NULL);
-            Assert(input->path_stack->size > 0);
+            Assert(vle_container_parent_chain_available(input) ||
+                   input->path_stack != NULL);
+            Assert(vle_container_parent_chain_available(input) ||
+                   input->path_stack->size > 0);
             return build_VLE_path_container(input);
 
         case VLE_ITERATOR_CONTAINER_REVERSED_PATH:
-            Assert(input->path_stack != NULL);
-            Assert(input->path_stack->size > 0);
+            Assert(vle_container_parent_chain_available(input) ||
+                   input->path_stack != NULL);
+            Assert(vle_container_parent_chain_available(input) ||
+                   input->path_stack->size > 0);
             return build_reversed_VLE_path_container(input);
 
         case VLE_ITERATOR_CONTAINER_ZERO_PATH:
             return build_VLE_zero_container(input);
 
         case VLE_ITERATOR_CONTAINER_TERMINAL_VERTEX:
-            Assert(input->path_stack != NULL);
-            Assert(input->path_stack->size > 0);
+            Assert(input->path_vertex_stack != NULL);
+            Assert(input->path_vertex_stack->size > 1);
             return build_VLE_terminal_container(input);
 
         case VLE_ITERATOR_CONTAINER_ZERO_TERMINAL_VERTEX:

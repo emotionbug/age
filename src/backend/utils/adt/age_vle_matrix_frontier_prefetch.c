@@ -31,10 +31,18 @@ static bool matrix_frontier_prefetch_label_sources_for_direction(
     VLE_local_context *vlelctx, bool outgoing);
 static void matrix_frontier_prefetch_collector_drain(
     VLEMatrixFrontierPrefetchCollector *collector, VLE_local_context *vlelctx);
+static void matrix_frontier_prefetch_collector_record_handoff(
+    VLEMatrixFrontierPrefetchCollector *collector,
+    const VLETraversalFrontierBatch *frontier_batch,
+    int accepted_source_count, int unique_source_count);
 static int matrix_frontier_prefetch_graphid_cmp(const void *left,
                                                 const void *right);
-static bool matrix_frontier_prefetch_sorted_contains(
-    const graphid *values, int64 value_count, graphid value);
+static bool matrix_frontier_prefetch_source_insert_position(
+    const graphid *values, int64 value_count, graphid value,
+    int64 *insert_index);
+static void matrix_frontier_prefetch_collector_add_source(
+    VLEMatrixFrontierPrefetchCollector *collector, VLE_local_context *vlelctx,
+    graphid source_vertex_id, int64 frontier_path_length);
 static void matrix_frontier_prefetch_age_adjacency_cursors(
     VLE_local_context *vlelctx, VLEContextSourceCursor *source_cursors,
     int64 source_cursor_count);
@@ -44,7 +52,7 @@ void age_vle_matrix_frontier_prefetch_collector_init(
     VLE_local_context *vlelctx, const VLEContextSourceCursor *source_cursors,
     int64 source_cursor_count)
 {
-    int64 source_path_length;
+    int64 frontier_path_length;
     int64 i;
 
     Assert(collector != NULL);
@@ -61,71 +69,65 @@ void age_vle_matrix_frontier_prefetch_collector_init(
         return;
     }
 
-    source_path_length = source_cursors[0].target_path_length;
-    if (age_vle_context_reached_upper_bound(vlelctx, source_path_length))
+    frontier_path_length = source_cursors[0].target_path_length;
+    if (age_vle_context_reached_upper_bound(vlelctx, frontier_path_length))
         return;
 
     for (i = 1; i < source_cursor_count; i++)
     {
-        if (source_cursors[i].target_path_length != source_path_length)
+        if (source_cursors[i].target_path_length != frontier_path_length)
             return;
     }
 
     collector->source_capacity = vlelctx->matrix_frontier_batch_size;
     collector->source_vertex_ids = palloc_array(graphid,
                                                 collector->source_capacity);
-    collector->source_path_length = source_path_length;
+    collector->frontier_path_length = frontier_path_length;
     collector->enabled = true;
 }
 
-void age_vle_matrix_frontier_prefetch_collector_add(
+void age_vle_matrix_frontier_prefetch_collector_add_batch(
     VLEMatrixFrontierPrefetchCollector *collector,
     VLE_local_context *vlelctx,
-    const VLETraversalCandidate *candidate)
-{
-    int64 i;
-
-    if (collector == NULL || !collector->enabled || vlelctx == NULL ||
-        candidate == NULL)
-        return;
-
-    for (i = 0; i < collector->source_count; i++)
-    {
-        if (collector->source_vertex_ids[i] == candidate->next_vertex_id)
-            return;
-    }
-
-    if (collector->source_count >= collector->source_capacity)
-        matrix_frontier_prefetch_collector_drain(collector, vlelctx);
-
-    collector->source_vertex_ids[collector->source_count++] =
-        candidate->next_vertex_id;
-}
-
-void age_vle_matrix_frontier_prefetch_collector_add_span(
-    VLEMatrixFrontierPrefetchCollector *collector,
-    VLE_local_context *vlelctx,
-    const VLEAcceptedCandidateSpan *span)
+    const VLETraversalFrontierBatch *frontier_batch)
 {
     graphid *accepted_source_ids;
     int accepted_source_count = 0;
-    int64 sorted_existing_count;
+    int unique_source_count = 0;
     int i;
 
     if (collector == NULL || !collector->enabled || vlelctx == NULL ||
-        span == NULL || span->candidates == NULL || span->accepted == NULL)
+        frontier_batch == NULL || frontier_batch->candidate_count <= 0 ||
+        frontier_batch->frame_count <= 0 || frontier_batch->work_count <= 0)
     {
         return;
     }
 
-    accepted_source_ids = palloc_array(graphid, span->candidate_count);
-    for (i = 0; i < span->candidate_count; i++)
+    Assert(frontier_batch->accepted != NULL);
+    Assert(frontier_batch->candidates != NULL);
+    Assert(frontier_batch->path_length == collector->frontier_path_length);
+    Assert(frontier_batch->frame_start >= 0);
+    Assert(frontier_batch->work_start >= 0);
+    Assert(frontier_batch->work_count == frontier_batch->frame_count);
+    Assert(frontier_batch->arena_segment_index >= 0);
+    Assert(frontier_batch->compaction_evidence.arena_segment_count >
+           frontier_batch->arena_segment_index);
+    Assert(frontier_batch->iterator_policy == VLE_TRAVERSAL_ITERATOR_LIFO ||
+           frontier_batch->iterator_policy ==
+           VLE_TRAVERSAL_ITERATOR_LEVEL_BATCH);
+    Assert(frontier_batch->parent_frame_index < frontier_batch->frame_start);
+
+    accepted_source_ids = palloc_array(graphid,
+                                       frontier_batch->candidate_count);
+    for (i = 0; i < frontier_batch->candidate_count; i++)
     {
-        if (!span->accepted[i])
+        if (!frontier_batch->accepted[i])
             continue;
 
+        Assert(frontier_batch->path_length ==
+               frontier_batch->candidates[i].path_length);
         accepted_source_ids[accepted_source_count++] =
-            span->candidates[i].next_vertex_id;
+            frontier_batch->candidates[i].next_vertex_id;
     }
 
     if (accepted_source_count == 0)
@@ -136,12 +138,23 @@ void age_vle_matrix_frontier_prefetch_collector_add_span(
 
     qsort(accepted_source_ids, accepted_source_count, sizeof(graphid),
           matrix_frontier_prefetch_graphid_cmp);
-    sorted_existing_count = collector->source_count;
-    if (sorted_existing_count > 1)
+
+    for (i = 0; i < accepted_source_count; i++)
     {
-        qsort(collector->source_vertex_ids, sorted_existing_count,
-              sizeof(graphid), matrix_frontier_prefetch_graphid_cmp);
+        if (i == 0 || accepted_source_ids[i - 1] != accepted_source_ids[i])
+            unique_source_count++;
     }
+
+    if (collector->source_count > 0 &&
+        collector->source_count + unique_source_count >
+        collector->source_capacity)
+    {
+        matrix_frontier_prefetch_collector_drain(collector, vlelctx);
+    }
+
+    matrix_frontier_prefetch_collector_record_handoff(
+        collector, frontier_batch, accepted_source_count,
+        unique_source_count);
 
     for (i = 0; i < accepted_source_count; i++)
     {
@@ -150,21 +163,9 @@ void age_vle_matrix_frontier_prefetch_collector_add_span(
         source_vertex_id = accepted_source_ids[i];
         if (i > 0 && accepted_source_ids[i - 1] == source_vertex_id)
             continue;
-        if (matrix_frontier_prefetch_sorted_contains(
-                collector->source_vertex_ids, sorted_existing_count,
-                source_vertex_id))
-        {
-            continue;
-        }
-
-        if (collector->source_count >= collector->source_capacity)
-        {
-            matrix_frontier_prefetch_collector_drain(collector, vlelctx);
-            sorted_existing_count = 0;
-        }
-
-        collector->source_vertex_ids[collector->source_count++] =
-            source_vertex_id;
+        matrix_frontier_prefetch_collector_add_source(
+            collector, vlelctx, source_vertex_id,
+            frontier_batch->path_length);
     }
 
     pfree(accepted_source_ids);
@@ -178,6 +179,9 @@ void age_vle_matrix_frontier_prefetch_collector_flush(
         return;
 
     matrix_frontier_prefetch_collector_drain(collector, vlelctx);
+    age_vle_context_record_matrix_frontier_handoff_evidence(
+        vlelctx, &collector->compaction_evidence,
+        &collector->pressure_evidence);
     pfree_if_not_null(collector->source_vertex_ids);
     memset(collector, 0, sizeof(*collector));
 }
@@ -201,6 +205,90 @@ static void matrix_frontier_prefetch_collector_drain(
     }
 
     collector->source_count = 0;
+    memset(&collector->pending_pressure_evidence, 0,
+           sizeof(collector->pending_pressure_evidence));
+}
+
+static void matrix_frontier_prefetch_collector_record_handoff(
+    VLEMatrixFrontierPrefetchCollector *collector,
+    const VLETraversalFrontierBatch *frontier_batch,
+    int accepted_source_count, int unique_source_count)
+{
+    const VLETraversalCompactionEvidence *batch_evidence;
+    VLETraversalCompactionEvidence *collector_evidence;
+    VLETraversalFrontierPressureEvidence *pressure;
+    VLETraversalFrontierPressureEvidence *pending;
+    int64 work_closed_delta = 0;
+    int64 compactable_delta = 0;
+    int64 compacted_delta = 0;
+
+    Assert(collector != NULL);
+    Assert(frontier_batch != NULL);
+    Assert(accepted_source_count >= 0);
+    Assert(unique_source_count >= 0);
+
+    batch_evidence = &frontier_batch->compaction_evidence;
+    collector_evidence = &collector->compaction_evidence;
+    pressure = &collector->pressure_evidence;
+    pending = &collector->pending_pressure_evidence;
+    collector->handoff_count++;
+    pressure->handoff_count++;
+    pressure->candidate_count += frontier_batch->candidate_count;
+    pressure->accepted_count += accepted_source_count;
+    pressure->unique_source_count += unique_source_count;
+    pressure->max_unique_source_count =
+        Max(pressure->max_unique_source_count, unique_source_count);
+    pressure->frame_count += frontier_batch->frame_count;
+    pressure->work_count += frontier_batch->work_count;
+    if (collector->has_compaction_evidence)
+    {
+        const VLETraversalCompactionEvidence *last;
+
+        last = &collector->last_compaction_evidence;
+        work_closed_delta =
+            Max(batch_evidence->work_closed_segment_count -
+                last->work_closed_segment_count, (int64)0);
+        compactable_delta =
+            Max(batch_evidence->compactable_frame_count -
+                last->compactable_frame_count, (int64)0);
+        compacted_delta =
+            Max(batch_evidence->compacted_frame_count -
+                last->compacted_frame_count, (int64)0);
+        pressure->work_closed_segment_delta += work_closed_delta;
+        pressure->compactable_frame_delta += compactable_delta;
+        pressure->compacted_frame_delta += compacted_delta;
+    }
+    collector->last_compaction_evidence = *batch_evidence;
+    collector->has_compaction_evidence = true;
+    collector_evidence->arena_segment_count =
+        Max(collector_evidence->arena_segment_count,
+            batch_evidence->arena_segment_count);
+    collector_evidence->work_closed_segment_count =
+        Max(collector_evidence->work_closed_segment_count,
+            batch_evidence->work_closed_segment_count);
+    collector_evidence->compactable_candidate_count =
+        Max(collector_evidence->compactable_candidate_count,
+            batch_evidence->compactable_candidate_count);
+    collector_evidence->compactable_frame_count =
+        Max(collector_evidence->compactable_frame_count,
+            batch_evidence->compactable_frame_count);
+    collector_evidence->compacted_segment_count =
+        Max(collector_evidence->compacted_segment_count,
+            batch_evidence->compacted_segment_count);
+    collector_evidence->compacted_frame_count =
+        Max(collector_evidence->compacted_frame_count,
+            batch_evidence->compacted_frame_count);
+    pending->handoff_count++;
+    pending->candidate_count += frontier_batch->candidate_count;
+    pending->accepted_count += accepted_source_count;
+    pending->unique_source_count += unique_source_count;
+    pending->max_unique_source_count =
+        Max(pending->max_unique_source_count, unique_source_count);
+    pending->frame_count += frontier_batch->frame_count;
+    pending->work_count += frontier_batch->work_count;
+    pending->work_closed_segment_delta += work_closed_delta;
+    pending->compactable_frame_delta += compactable_delta;
+    pending->compacted_frame_delta += compacted_delta;
 }
 
 static int matrix_frontier_prefetch_graphid_cmp(const void *left,
@@ -216,25 +304,68 @@ static int matrix_frontier_prefetch_graphid_cmp(const void *left,
     return 0;
 }
 
-static bool matrix_frontier_prefetch_sorted_contains(
-    const graphid *values, int64 value_count, graphid value)
+static bool matrix_frontier_prefetch_source_insert_position(
+    const graphid *values, int64 value_count, graphid value,
+    int64 *insert_index)
 {
     int64 low = 0;
     int64 high = value_count;
+
+    Assert(insert_index != NULL);
 
     while (low < high)
     {
         int64 mid = low + (high - low) / 2;
 
         if (values[mid] == value)
+        {
+            *insert_index = mid;
             return true;
+        }
         if (values[mid] < value)
             low = mid + 1;
         else
             high = mid;
     }
 
+    *insert_index = low;
     return false;
+}
+
+static void matrix_frontier_prefetch_collector_add_source(
+    VLEMatrixFrontierPrefetchCollector *collector, VLE_local_context *vlelctx,
+    graphid source_vertex_id, int64 frontier_path_length)
+{
+    int64 insert_index;
+
+    Assert(collector != NULL);
+    Assert(collector->enabled);
+    Assert(vlelctx != NULL);
+    Assert(collector->source_vertex_ids != NULL);
+    Assert(collector->source_capacity > 0);
+    Assert(frontier_path_length == collector->frontier_path_length);
+
+    if (matrix_frontier_prefetch_source_insert_position(
+            collector->source_vertex_ids, collector->source_count,
+            source_vertex_id, &insert_index))
+    {
+        return;
+    }
+
+    if (collector->source_count >= collector->source_capacity)
+    {
+        matrix_frontier_prefetch_collector_drain(collector, vlelctx);
+        insert_index = 0;
+    }
+
+    if (insert_index < collector->source_count)
+    {
+        memmove(&collector->source_vertex_ids[insert_index + 1],
+                &collector->source_vertex_ids[insert_index],
+                sizeof(graphid) * (collector->source_count - insert_index));
+    }
+    collector->source_vertex_ids[insert_index] = source_vertex_id;
+    collector->source_count++;
 }
 
 static bool matrix_frontier_prefetch_sources_for_direction(
@@ -261,7 +392,7 @@ static bool matrix_frontier_prefetch_sources_for_direction(
 
         age_vle_context_init_expansion_source_run(
             &run, collector->source_vertex_ids[i]);
-        run.source_path_length = collector->source_path_length;
+        run.source_path_length = collector->frontier_path_length;
         run.used_out_source = !outgoing &&
             age_vle_context_edge_direction(vlelctx) == CYPHER_REL_DIR_NONE;
 
@@ -277,6 +408,9 @@ static bool matrix_frontier_prefetch_sources_for_direction(
 
     if (source_cursor_count > 0)
     {
+        age_vle_context_record_matrix_frontier_direction_pressure(
+            vlelctx, outgoing, source_cursor_count,
+            &collector->pending_pressure_evidence);
         matrix_frontier_prefetch_age_adjacency_cursors(
             vlelctx, source_cursors, source_cursor_count);
         used_source = true;
@@ -351,10 +485,13 @@ static bool matrix_frontier_prefetch_label_sources_for_direction(
             source_cursor->edge_label_id = candidates[candidate_index].label_id;
             source_cursor->terminal_label_id = INVALID_LABEL_ID;
             source_cursor->target_path_length =
-                collector->source_path_length + 1;
+                collector->frontier_path_length + 1;
             source_cursor->outgoing = outgoing;
             source_cursor->skip_self_loops = skip_self_loops;
             source_cursor->has_property_constraints = false;
+            source_cursor->matrix_policy = outgoing ?
+                vlelctx->matrix_frontier_out_policy :
+                vlelctx->matrix_frontier_in_policy;
 
             source_cursor_count++;
         }
@@ -362,6 +499,9 @@ static bool matrix_frontier_prefetch_label_sources_for_direction(
 
     if (source_cursor_count > 0)
     {
+        age_vle_context_record_matrix_frontier_direction_pressure(
+            vlelctx, outgoing, source_cursor_count,
+            &collector->pending_pressure_evidence);
         matrix_frontier_prefetch_age_adjacency_cursors(
             vlelctx, source_cursors, source_cursor_count);
         used_source = true;

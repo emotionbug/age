@@ -350,6 +350,10 @@ static void initialize_age_vle_stream_input_descriptor(
         Max(state->edge_source.start_fanout, state->edge_source.end_fanout);
     if (state->input.matrix_frontier_batch_size <= 0)
         state->input.matrix_frontier_batch_size = 1;
+    state->input.matrix_frontier_out_policy =
+        state->edge_source.outgoing_matrix_cursor_policy;
+    state->input.matrix_frontier_in_policy =
+        state->edge_source.incoming_matrix_cursor_policy;
 }
 
 static VLETraversalSourceKind age_vle_stream_source_kind_to_input(
@@ -691,7 +695,8 @@ static char *format_age_vle_stream_matrix_frontier(
                     "key=graph,edge-label,direction,depth,frontier,"
                     "terminal-filter context=%s/runs:%lld/depth:%lld "
                     "capacity:%lld block=%lld/%lld mrun=%lld/%lld/%lld/%lld/%lld/%lld/%lld/%lld "
-                    "cache=h:%lld/m:%lld/s:%lld/r:%lld/e:%lld/%lld",
+                    "cache=h:%lld/m:%lld/s:%lld/r:%lld/e:%lld/%lld "
+                    "dir=scan:%lld/cand:%lld/hit:%lld/evict:%lld/cold:%lld/work:%lld",
                     input->matrix_frontier_eligible ?
                     "eligible" : "ineligible",
                     (long long)input->matrix_frontier_depth,
@@ -716,7 +721,13 @@ static char *format_age_vle_stream_matrix_frontier(
                     (long long)stats->matrix_frontier_cache_seeds,
                     (long long)stats->matrix_frontier_cache_replays,
                     (long long)stats->matrix_frontier_cache_empty_hits,
-                    (long long)stats->matrix_frontier_cache_empty_marks);
+                    (long long)stats->matrix_frontier_cache_empty_marks,
+                    (long long)stats->matrix_frontier_cache_probe_scans,
+                    (long long)stats->matrix_frontier_cache_probe_candidates,
+                    (long long)stats->matrix_frontier_cache_probe_hits,
+                    (long long)stats->matrix_frontier_cache_evictions,
+                    (long long)stats->matrix_frontier_cache_cold_evictions,
+                    (long long)stats->matrix_frontier_cache_eviction_work);
 }
 
 static AgeGraphJoinConnectorKind age_vle_stream_join_order_connector_kind(
@@ -977,6 +988,8 @@ static void finalize_age_vle_stream_source_stats(
 static void accumulate_age_vle_stream_source_stats(
     AgeVLESourceStats *total, const AgeVLESourceStats *current)
 {
+    int direction_index;
+
     Assert(total != NULL);
     Assert(current != NULL);
 
@@ -1135,10 +1148,114 @@ static void accumulate_age_vle_stream_source_stats(
         current->matrix_frontier_cache_empty_hits;
     total->matrix_frontier_cache_empty_marks +=
         current->matrix_frontier_cache_empty_marks;
+    total->matrix_frontier_cache_probe_scans +=
+        current->matrix_frontier_cache_probe_scans;
+    total->matrix_frontier_cache_probe_candidates +=
+        current->matrix_frontier_cache_probe_candidates;
+    total->matrix_frontier_cache_probe_hits +=
+        current->matrix_frontier_cache_probe_hits;
+    total->matrix_frontier_cache_evictions +=
+        current->matrix_frontier_cache_evictions;
+    total->matrix_frontier_cache_eviction_work +=
+        current->matrix_frontier_cache_eviction_work;
+    total->matrix_frontier_cache_cold_evictions +=
+        current->matrix_frontier_cache_cold_evictions;
     total->matrix_frontier_block_keys +=
         current->matrix_frontier_block_keys;
     total->matrix_frontier_block_sources +=
         current->matrix_frontier_block_sources;
+    total->matrix_frontier_handoff_batches +=
+        current->matrix_frontier_handoff_batches;
+    total->matrix_frontier_handoff_candidates +=
+        current->matrix_frontier_handoff_candidates;
+    total->matrix_frontier_handoff_accepted +=
+        current->matrix_frontier_handoff_accepted;
+    total->matrix_frontier_handoff_unique_sources +=
+        current->matrix_frontier_handoff_unique_sources;
+    total->matrix_frontier_handoff_max_unique_sources =
+        Max(total->matrix_frontier_handoff_max_unique_sources,
+            current->matrix_frontier_handoff_max_unique_sources);
+    total->matrix_frontier_handoff_frames +=
+        current->matrix_frontier_handoff_frames;
+    total->matrix_frontier_handoff_work_items +=
+        current->matrix_frontier_handoff_work_items;
+    total->matrix_frontier_handoff_work_closed_segment_delta +=
+        current->matrix_frontier_handoff_work_closed_segment_delta;
+    total->matrix_frontier_handoff_compactable_frame_delta +=
+        current->matrix_frontier_handoff_compactable_frame_delta;
+    total->matrix_frontier_handoff_compacted_frame_delta +=
+        current->matrix_frontier_handoff_compacted_frame_delta;
+    total->matrix_frontier_handoff_arena_segments =
+        Max(total->matrix_frontier_handoff_arena_segments,
+            current->matrix_frontier_handoff_arena_segments);
+    total->matrix_frontier_handoff_work_closed_segments =
+        Max(total->matrix_frontier_handoff_work_closed_segments,
+            current->matrix_frontier_handoff_work_closed_segments);
+    total->matrix_frontier_handoff_compactable_candidates =
+        Max(total->matrix_frontier_handoff_compactable_candidates,
+            current->matrix_frontier_handoff_compactable_candidates);
+    total->matrix_frontier_handoff_compactable_frames =
+        Max(total->matrix_frontier_handoff_compactable_frames,
+            current->matrix_frontier_handoff_compactable_frames);
+    total->matrix_frontier_handoff_compacted_segments =
+        Max(total->matrix_frontier_handoff_compacted_segments,
+            current->matrix_frontier_handoff_compacted_segments);
+    total->matrix_frontier_handoff_compacted_frames =
+        Max(total->matrix_frontier_handoff_compacted_frames,
+            current->matrix_frontier_handoff_compacted_frames);
+    for (direction_index = 0;
+         direction_index < AGE_VLE_MATRIX_FRONTIER_DIRECTION_COUNT;
+         direction_index++)
+    {
+        AgeVLEMatrixFrontierPressureVector *total_vector;
+        const AgeVLEMatrixFrontierPressureVector *current_vector;
+
+        total_vector = &total->matrix_frontier_pressure[direction_index];
+        current_vector =
+            &current->matrix_frontier_pressure[direction_index];
+        total_vector->handoff_batches += current_vector->handoff_batches;
+        total_vector->handoff_candidates +=
+            current_vector->handoff_candidates;
+        total_vector->handoff_accepted += current_vector->handoff_accepted;
+        total_vector->handoff_unique_sources +=
+            current_vector->handoff_unique_sources;
+        total_vector->handoff_max_unique_sources =
+            Max(total_vector->handoff_max_unique_sources,
+                current_vector->handoff_max_unique_sources);
+        total_vector->handoff_work_closed_segment_delta +=
+            current_vector->handoff_work_closed_segment_delta;
+        total_vector->handoff_compactable_frame_delta +=
+            current_vector->handoff_compactable_frame_delta;
+        total_vector->handoff_compacted_frame_delta +=
+            current_vector->handoff_compacted_frame_delta;
+        total_vector->prefetch_runs += current_vector->prefetch_runs;
+        total_vector->prefetch_cursors += current_vector->prefetch_cursors;
+        total_vector->phase_cursors += current_vector->phase_cursors;
+        total_vector->replay_cursors += current_vector->replay_cursors;
+        total_vector->raw_cursors += current_vector->raw_cursors;
+        total_vector->scalar_cursors += current_vector->scalar_cursors;
+        total_vector->cache_probes += current_vector->cache_probes;
+        total_vector->cache_requested_sources +=
+            current_vector->cache_requested_sources;
+        total_vector->cache_matching_sources +=
+            current_vector->cache_matching_sources;
+        total_vector->cache_entry_sources +=
+            current_vector->cache_entry_sources;
+        total_vector->cache_payload_span +=
+            current_vector->cache_payload_span;
+        total_vector->cache_matching_payload_span +=
+            current_vector->cache_matching_payload_span;
+        total_vector->cache_reuse_distance +=
+            current_vector->cache_reuse_distance;
+        total_vector->cache_replay_work +=
+            current_vector->cache_replay_work;
+        total_vector->cache_raw_work += current_vector->cache_raw_work;
+        total_vector->cache_scalar_work += current_vector->cache_scalar_work;
+        total_vector->cache_replay_selections +=
+            current_vector->cache_replay_selections;
+        total_vector->cache_fallback_selections +=
+            current_vector->cache_fallback_selections;
+    }
     total->matrix_frontier_source_runs +=
         current->matrix_frontier_source_runs;
     total->matrix_frontier_source_run_sources +=

@@ -246,6 +246,10 @@ static void init_vle_traversal_context_apply(
         apply->input->matrix_frontier_depth;
     context_apply->matrix_frontier_batch_size =
         apply->input->matrix_frontier_batch_size;
+    context_apply->matrix_frontier_out_policy =
+        apply->input->matrix_frontier_out_policy;
+    context_apply->matrix_frontier_in_policy =
+        apply->input->matrix_frontier_in_policy;
     context_apply->lower = shape->lower;
     context_apply->upper = shape->upper;
     context_apply->upper_infinite = shape->upper_infinite;
@@ -668,6 +672,8 @@ void init_vle_context_refresh_input(AgeVLEInput *input,
     refresh->matrix_frontier_eligible = input->matrix_frontier_eligible;
     refresh->matrix_frontier_depth = input->matrix_frontier_depth;
     refresh->matrix_frontier_batch_size = input->matrix_frontier_batch_size;
+    refresh->matrix_frontier_out_policy = input->matrix_frontier_out_policy;
+    refresh->matrix_frontier_in_policy = input->matrix_frontier_in_policy;
 }
 
 bool apply_cached_vle_context_refresh(
@@ -700,6 +706,10 @@ bool apply_cached_vle_context_refresh(
     vlelctx->matrix_frontier_depth = refresh->matrix_frontier_depth;
     vlelctx->matrix_frontier_batch_size =
         refresh->matrix_frontier_batch_size;
+    vlelctx->matrix_frontier_out_policy =
+        refresh->matrix_frontier_out_policy;
+    vlelctx->matrix_frontier_in_policy =
+        refresh->matrix_frontier_in_policy;
     age_vle_context_record_empty_lifecycle_policy(vlelctx);
     age_vle_context_record_matrix_frontier_policy(vlelctx);
 

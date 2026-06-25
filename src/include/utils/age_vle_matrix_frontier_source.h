@@ -123,6 +123,9 @@ typedef struct VLEMatrixFrontierSourceBlock
     AgeAdjacencyVisiblePayloadRunKey *raw_keys;
     AgeAdjacencyTerminalLabelPostingEstimate *raw_estimates;
     AgeAdjacencyCompositeTerminalFilter raw_filter;
+    graphid *matrix_source_vertex_ids;
+    int64 matrix_source_vertex_count;
+    int64 matrix_source_vertex_capacity;
     int64 run_source_count;
     int64 run_source_capacity;
     int64 run_input_count;

@@ -40,6 +40,15 @@ typedef enum AgeAdjacencyMatchTerminalStrategy
     AGE_ADJACENCY_MATCH_TERMINAL_STRATEGY_PROPERTY_RECHECK
 } AgeAdjacencyMatchTerminalStrategy;
 
+typedef enum AgeAdjacencyMatchSourceHandoff
+{
+    AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_POSTING_RUN = 0,
+    AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_LABEL_SLICE,
+    AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_PROPERTY_SET,
+    AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_LABEL_PROPERTY_INTERSECTION,
+    AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_RECHECK
+} AgeAdjacencyMatchSourceHandoff;
+
 typedef enum AgeAdjacencyMatchTerminalPrefetchReason
 {
     AGE_ADJACENCY_MATCH_PREFETCH_REASON_NONE = 0,
@@ -77,6 +86,10 @@ typedef enum AgeAdjacencyMatchDescriptorField
     AGE_ADJACENCY_MATCH_DESC_ESTIMATED_FANOUT,
     AGE_ADJACENCY_MATCH_DESC_ESTIMATED_TERMINAL_FANOUT,
     AGE_ADJACENCY_MATCH_DESC_ESTIMATED_COMPOSITE_FANOUT,
+    AGE_ADJACENCY_MATCH_DESC_SOURCE_HANDOFF_KIND,
+    AGE_ADJACENCY_MATCH_DESC_ESTIMATED_SOURCE_FANOUT,
+    AGE_ADJACENCY_MATCH_DESC_ESTIMATED_SOURCE_BLOCKS,
+    AGE_ADJACENCY_MATCH_DESC_ESTIMATED_PROPERTY_SOURCE_MATCHES,
     AGE_ADJACENCY_MATCH_DESC_COMPOSITE_SELECTIVITY_PPM,
     AGE_ADJACENCY_MATCH_DESC_COMPOSITE_SELECTIVITY_SOURCE_KIND,
     AGE_ADJACENCY_MATCH_DESC_VALUE_POSTING_SOURCE_KIND,
@@ -132,5 +145,7 @@ extern const char *age_adjacency_match_index_direction_name(
     AgeAdjacencyMatchIndexDirection direction);
 extern const char *age_adjacency_match_terminal_prefetch_reason_name(
     AgeAdjacencyMatchTerminalPrefetchReason reason);
+extern const char *age_adjacency_match_source_handoff_name(
+    AgeAdjacencyMatchSourceHandoff handoff);
 
 #endif

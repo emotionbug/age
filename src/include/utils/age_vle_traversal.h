@@ -38,6 +38,9 @@ typedef struct VLETraversalFrame
 {
     graphid edge_id;
     int64 edge_index;
+    int64 path_length;
+    int64 parent_frame_index;
+    int64 arena_segment_index;
     graphid next_vertex_id;
     vertex_entry *next_vertex_entry;
 } VLETraversalFrame;
@@ -49,14 +52,102 @@ typedef struct VLETraversalFrameStack
     int64 capacity;
 } VLETraversalFrameStack;
 
+typedef enum VLETraversalIteratorPolicy
+{
+    VLE_TRAVERSAL_ITERATOR_LIFO = 0,
+    VLE_TRAVERSAL_ITERATOR_LEVEL_BATCH
+} VLETraversalIteratorPolicy;
+
+typedef enum VLETraversalWorkItemKind
+{
+    VLE_TRAVERSAL_WORK_VISIT = 0,
+    VLE_TRAVERSAL_WORK_BACKTRACK
+} VLETraversalWorkItemKind;
+
+typedef struct VLETraversalWorkItem
+{
+    int64 frame_index;
+    int64 path_length;
+    int64 work_ordinal;
+    int64 arena_segment_index;
+    VLETraversalWorkItemKind kind;
+} VLETraversalWorkItem;
+
+typedef struct VLETraversalWorklist
+{
+    VLETraversalWorkItem *items;
+    int64 size;
+    int64 capacity;
+    int64 next_work_ordinal;
+    VLETraversalIteratorPolicy iterator_policy;
+} VLETraversalWorklist;
+
+typedef struct VLETraversalArenaSegment
+{
+    int64 frame_start;
+    int64 frame_count;
+    int64 work_start;
+    int64 work_count;
+    int64 path_length;
+    int64 parent_frame_index;
+    int64 remaining_work_count;
+    int64 consumed_work_count;
+    VLETraversalIteratorPolicy iterator_policy;
+    bool work_closed;
+    bool compactable_candidate;
+    bool frames_compacted;
+} VLETraversalArenaSegment;
+
+typedef struct VLETraversalArenaSegmentList
+{
+    VLETraversalArenaSegment *array;
+    int64 size;
+    int64 capacity;
+    int64 work_closed_count;
+    int64 compactable_candidate_count;
+    int64 compactable_frame_count;
+    int64 compacted_segment_count;
+    int64 compacted_frame_count;
+} VLETraversalArenaSegmentList;
+
+typedef struct VLETraversalCompactionEvidence
+{
+    int64 arena_segment_count;
+    int64 work_closed_segment_count;
+    int64 compactable_candidate_count;
+    int64 compactable_frame_count;
+    int64 compacted_segment_count;
+    int64 compacted_frame_count;
+} VLETraversalCompactionEvidence;
+
+typedef struct VLETraversalFrontierPressureEvidence
+{
+    int64 handoff_count;
+    int64 candidate_count;
+    int64 accepted_count;
+    int64 unique_source_count;
+    int64 max_unique_source_count;
+    int64 frame_count;
+    int64 work_count;
+    int64 work_closed_segment_delta;
+    int64 compactable_frame_delta;
+    int64 compacted_frame_delta;
+} VLETraversalFrontierPressureEvidence;
+
 typedef struct VLETraversalState
 {
     VLETraversalFrameStack *frame_stack;
+    VLETraversalWorklist *worklist;
+    VLETraversalArenaSegmentList arena_segments;
     GraphIdStack *path_stack;
     GraphIdStack *path_edge_index_stack;
     GraphIdStack *path_vertex_stack;
     VLELocalEdgeState edge_state;
+    int64 *path_replay_frame_indexes;
+    int64 path_replay_frame_capacity;
+    bool store_path_edges;
     int64 path_depth;
+    int64 active_frame_index;
 } VLETraversalState;
 
 typedef struct VLETraversalAcceptance
@@ -74,9 +165,27 @@ typedef struct VLETraversalCandidate
 {
     graphid edge_id;
     int64 edge_index;
+    int64 path_length;
     graphid next_vertex_id;
     vertex_entry *next_vertex_entry;
 } VLETraversalCandidate;
+
+typedef struct VLETraversalFrontierBatch
+{
+    const VLETraversalCandidate *candidates;
+    const bool *accepted;
+    int candidate_count;
+    int64 path_length;
+    int64 frame_start;
+    int64 frame_count;
+    int64 work_start;
+    int64 work_count;
+    int64 arena_segment_index;
+    VLETraversalIteratorPolicy iterator_policy;
+    int64 parent_frame_index;
+    VLETraversalCompactionEvidence compaction_evidence;
+    bool single_accepted;
+} VLETraversalFrontierBatch;
 
 typedef struct VLETraversalStep
 {
@@ -108,20 +217,24 @@ extern bool age_vle_accepts_step(
 extern bool age_vle_step_over_upper_bound(
     const VLETraversalAcceptance *acceptance,
     const VLETraversalStep *step);
-extern void age_vle_traversal_state_init(VLETraversalState *state);
+extern void age_vle_traversal_state_init(VLETraversalState *state,
+                                         bool store_path_edges);
+extern void age_vle_traversal_state_set_iterator_policy(
+    VLETraversalState *state, VLETraversalIteratorPolicy iterator_policy);
 extern void age_vle_traversal_state_free(VLETraversalState *state);
 extern void age_vle_traversal_state_reset(VLETraversalState *state,
                                           graphid start_vertex_id);
 extern VLETraversalFrameStack *age_vle_frame_stack_new(void);
 extern void age_vle_frame_stack_free(VLETraversalFrameStack *stack);
-extern void age_vle_frame_stack_push(VLETraversalFrameStack *stack,
-                                     graphid edge_id, int64 edge_index,
-                                     graphid next_vertex_id,
-                                     vertex_entry *next_vertex_entry);
-extern VLETraversalFrame *age_vle_frame_stack_peek(
-    VLETraversalFrameStack *stack);
-extern void age_vle_frame_stack_pop(VLETraversalFrameStack *stack);
-extern bool age_vle_frame_stack_is_empty(VLETraversalFrameStack *stack);
+extern int64 age_vle_frame_stack_push(VLETraversalFrameStack *stack,
+                                      graphid edge_id, int64 edge_index,
+                                      int64 path_length,
+                                      int64 parent_frame_index,
+                                      int64 arena_segment_index,
+                                      graphid next_vertex_id,
+                                      vertex_entry *next_vertex_entry);
+extern VLETraversalWorklist *age_vle_worklist_new(void);
+extern void age_vle_worklist_free(VLETraversalWorklist *worklist);
 extern void age_vle_path_stacks_push(GraphIdStack *path_stack,
                                      GraphIdStack *path_edge_index_stack,
                                      GraphIdStack *path_vertex_stack,
@@ -146,13 +259,15 @@ extern bool age_vle_traversal_candidate_needs_match_check(
 extern void age_vle_traversal_candidate_mark_match(
     VLETraversalState *state, int64 edge_index, bool matched,
     const char *caller);
+extern void age_vle_traversal_compaction_evidence(
+    const VLETraversalState *state, VLETraversalCompactionEvidence *evidence);
 extern bool age_vle_traversal_push_candidate_if_matched(
     VLETraversalState *state, const VLETraversalCandidate *candidate,
-    const char *caller);
+    const char *caller, VLETraversalFrontierBatch *frontier_batch);
 extern int64 age_vle_traversal_push_candidate_batch_if_matched(
     VLETraversalState *state, const VLETraversalCandidate *candidates,
     int candidate_count, int32 target_label_id, const char *caller,
-    bool *pushed);
+    bool *pushed, VLETraversalFrontierBatch *frontier_batch);
 extern bool age_vle_consume_next_frame(VLETraversalState *state,
                                        const char *caller,
                                        VLETraversalStep *step);

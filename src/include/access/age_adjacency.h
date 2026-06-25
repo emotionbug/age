@@ -22,6 +22,7 @@
 
 #include "postgres.h"
 
+#include "port/atomics.h"
 #include "storage/itemptr.h"
 #include "utils/graphid.h"
 #include "utils/hsearch.h"
@@ -216,6 +217,9 @@ extern bool age_adjacency_visible_payload_scan_begin_key(
 extern void age_adjacency_visible_payload_scan_set_parallel_slice(
     AgeAdjacencyVisiblePayloadScan *scan, int32 slice_index,
     int32 slice_count);
+extern void age_adjacency_visible_payload_scan_set_parallel_claim(
+    AgeAdjacencyVisiblePayloadScan *scan, pg_atomic_uint64 *main_cursor,
+    pg_atomic_uint64 *delta_cursor, uint32 chunk_size);
 extern int64 age_adjacency_visible_payload_scan_run_postings(
     AgeAdjacencyVisiblePayloadScan *scan);
 extern int64 age_adjacency_visible_payload_scan_active_postings(

@@ -824,8 +824,8 @@ BEGIN
     EXECUTE format(
         'INSERT INTO %I."N"(id, properties)
          SELECT ag_catalog._graphid(%s, i::bigint),
-                ''{}''::ag_catalog.agtype
-         FROM generate_series(0, 1024) AS g(i)',
+                format(''{"bucket": %%s}'', i %% 4)::ag_catalog.agtype
+         FROM generate_series(0, 32768) AS g(i)',
         graph_name, n_label_id);
     EXECUTE format(
         'INSERT INTO %I."R"(id, start_id, end_id, properties)
@@ -833,10 +833,13 @@ BEGIN
                 ag_catalog._graphid(%s, 0),
                 ag_catalog._graphid(%s, i::bigint),
                 ''{}''::ag_catalog.agtype
-         FROM generate_series(1, 1024) AS g(i)',
+         FROM generate_series(1, 32768) AS g(i)',
         graph_name, r_label_id, n_label_id, n_label_id);
     EXECUTE format('CREATE INDEX ON %I."R" USING age_adjacency ' ||
                    '(start_id, id, end_id)', graph_name);
+    EXECUTE format(
+        'SELECT create_property_source_index_named(%L, %L, %L, %L, %L)',
+        graph_name, 'N', 'bucket', 'n_bucket_source', 'int8');
     EXECUTE format('ANALYZE %I."N"', graph_name);
     EXECUTE format('ANALYZE %I."R"', graph_name);
 
@@ -855,6 +858,19 @@ SELECT * FROM cypher('age_adj_parallel_match', $$
     MATCH (s)-[:R]->()
     RETURN count(*)
 $$) AS (plan agtype);
+SELECT * FROM cypher('age_adj_parallel_match', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (s:N)
+    WHERE id(s) = 844424930131968
+    MATCH (s)-[:R]->(n:N {bucket: 3})
+    RETURN count(*)
+$$) AS (plan agtype);
+SELECT * FROM cypher('age_adj_parallel_match', $$
+    MATCH (s:N)
+    WHERE id(s) = 844424930131968
+    MATCH (s)-[:R]->(n:N {bucket: 3})
+    RETURN count(*)
+$$) AS (matched agtype);
 SELECT drop_graph('age_adj_parallel_match', true);
 RESET max_parallel_workers_per_gather;
 RESET min_parallel_index_scan_size;
@@ -904,6 +920,51 @@ SELECT * FROM cypher('age_adj_match_prefetch_gate', $$
     RETURN n.i
 $$) AS (plan agtype);
 SELECT drop_graph('age_adj_match_prefetch_gate', true);
+
+SELECT create_graph('age_adj_default_source_handoff');
+SELECT create_vlabel('age_adj_default_source_handoff', 'N');
+SELECT create_elabel('age_adj_default_source_handoff', 'R');
+DO $age_adj_default_source_handoff$
+DECLARE
+    graph_name text := 'age_adj_default_source_handoff';
+    vertex_label_id int;
+    edge_label_id int;
+BEGIN
+    vertex_label_id := _label_id(graph_name, 'N');
+    edge_label_id := _label_id(graph_name, 'R');
+
+    EXECUTE format(
+        'INSERT INTO %I."N"(id, properties)
+         SELECT ag_catalog._graphid(%s, i::bigint),
+                format(''{"i": %%s}'', i)::ag_catalog.agtype
+         FROM generate_series(0, 64) AS g(i)',
+        graph_name, vertex_label_id);
+    EXECUTE format(
+        'INSERT INTO %I."R"(id, start_id, end_id, properties)
+         SELECT ag_catalog._graphid(%s, i::bigint),
+                ag_catalog._graphid(%s, 0),
+                ag_catalog._graphid(%s, i::bigint),
+                ''{}''::ag_catalog.agtype
+         FROM generate_series(1, 64) AS g(i)',
+        graph_name, edge_label_id, vertex_label_id, vertex_label_id);
+END
+$age_adj_default_source_handoff$;
+SELECT * FROM cypher('age_adj_default_source_handoff', $$
+    CREATE INDEX r_adj_out FOR ()-[r:R]->() ON (ADJACENCY)
+$$) AS (create_index text);
+SELECT create_property_source_index_named(
+    'age_adj_default_source_handoff', '_ag_label_vertex', 'i',
+    'default_i_source');
+SELECT create_property_source_index_named(
+    'age_adj_default_source_handoff', 'N', 'i', 'n_i_source');
+ANALYZE age_adj_default_source_handoff."N";
+ANALYZE age_adj_default_source_handoff."R";
+SELECT * FROM cypher('age_adj_default_source_handoff', $$
+    EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+    MATCH (:N {i: 0})-[:R]->(n:N {i: 63})
+    RETURN n.i
+$$) AS (plan agtype);
+SELECT drop_graph('age_adj_default_source_handoff', true);
 
 DO $age_custom_path$
 DECLARE

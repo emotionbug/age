@@ -70,6 +70,10 @@ typedef struct CypherAdjacencyMatchCandidate
     double estimated_endpoint_fanout;
     double estimated_terminal_fanout;
     double estimated_composite_fanout;
+    AgeAdjacencyMatchSourceHandoff source_handoff_kind_id;
+    double estimated_source_fanout;
+    double estimated_source_blocks;
+    double estimated_property_source_matches;
     double estimated_composite_selectivity;
     AgeGraphPropertySelectivitySource
         estimated_composite_selectivity_source_kind;

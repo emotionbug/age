@@ -29,6 +29,8 @@
 #include "executor/executor.h"
 #include "lib/stringinfo.h"
 #include "optimizer/cypher_graph_join.h"
+#include "port/atomics.h"
+#include "storage/spin.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/graphid.h"
@@ -49,7 +51,24 @@ typedef struct AgeAdjacencyMatchParallelState
 {
     uint32 magic;
     int32 planned_workers;
+    int32 source_status;
+    int64 source_capacity;
+    int64 source_count;
+    pg_atomic_uint64 main_claim_cursor;
+    pg_atomic_uint64 delta_claim_cursor;
+    slock_t claim_lock;
+    bool claim_key_valid;
+    graphid claim_key;
+    graphid source_vertex_ids[FLEXIBLE_ARRAY_MEMBER];
 } AgeAdjacencyMatchParallelState;
+
+typedef enum AgeAdjacencySharedSourceStatus
+{
+    AGE_ADJACENCY_SHARED_SOURCE_NONE = 0,
+    AGE_ADJACENCY_SHARED_SOURCE_READY,
+    AGE_ADJACENCY_SHARED_SOURCE_OVERFLOW,
+    AGE_ADJACENCY_SHARED_SOURCE_UNAVAILABLE
+} AgeAdjacencySharedSourceStatus;
 
 typedef enum AgeAdjacencyTerminalPrunePlan
 {
@@ -73,6 +92,8 @@ typedef enum AgeAdjacencyPayloadSliceMode
 {
     AGE_ADJACENCY_PAYLOAD_SLICE_SERIAL_ONLY = 0,
     AGE_ADJACENCY_PAYLOAD_SLICE_WORKER_LOCAL,
+    AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_SOURCE_WORKER_LOCAL,
+    AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_SOURCE_DYNAMIC,
     AGE_ADJACENCY_PAYLOAD_SLICE_WORKER_LOCAL_READY,
     AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_STATE_REQUIRED
 } AgeAdjacencyPayloadSliceMode;
@@ -95,6 +116,10 @@ typedef struct AgeAdjacencyMatchScanState
     int64 estimated_endpoint_fanout;
     int64 estimated_terminal_fanout;
     int64 estimated_composite_fanout;
+    AgeAdjacencyMatchSourceHandoff source_handoff_kind;
+    int64 estimated_source_fanout;
+    int64 estimated_source_blocks;
+    int64 estimated_property_source_matches;
     int64 composite_selectivity_ppm;
     int64 estimated_terminal_label_groups;
     int64 estimated_main_blocks;
@@ -140,6 +165,11 @@ typedef struct AgeAdjacencyMatchScanState
     int32 payload_slice_index;
     int32 payload_slice_count;
     int32 payload_parallel_workers;
+    AgeAdjacencyMatchParallelState *parallel_state;
+    int32 shared_source_status;
+    int64 shared_source_count;
+    int64 shared_source_capacity;
+    bool shared_source_active;
     Datum right_property_value;
     bool right_property_value_isnull;
     AgeAdjacencyMatchTerminalPropertyLookup *terminal_property_lookup;
@@ -205,6 +235,8 @@ static char *format_age_adjacency_match_terminal_property(
     AgeAdjacencyMatchScanState *state);
 static char *format_age_adjacency_match_terminal_runtime(
     AgeAdjacencyMatchScanState *state);
+static void install_age_adjacency_match_composite_filter(
+    AgeAdjacencyMatchScanState *state);
 static char *format_age_adjacency_match_terminal_prefetch(
     AgeAdjacencyMatchScanState *state);
 static const char *age_adjacency_match_terminal_runtime_outcome(
@@ -261,6 +293,8 @@ static const char *age_adjacency_match_terminal_policy_class_name(
     AgeAdjacencyTerminalPolicyClass policy_class);
 static const char *age_adjacency_match_payload_slice_mode_name(
     AgeAdjacencyPayloadSliceMode mode);
+static const char *age_adjacency_match_shared_source_status_name(
+    AgeAdjacencySharedSourceStatus status);
 static const char *age_adjacency_match_value_kind_name(
     AgeAdjacencyMatchValueKind kind);
 static const char *age_adjacency_match_terminal_strategy_name(
@@ -279,7 +313,17 @@ make_age_adjacency_match_terminal_property_request(
 static void configure_age_adjacency_match_payload_slice(
     AgeAdjacencyMatchScanState *state);
 static void initialize_age_adjacency_match_parallel_state(
+    AgeAdjacencyMatchScanState *state,
     AgeAdjacencyMatchParallelState *parallel_state, ParallelContext *pcxt);
+static int64 age_adjacency_match_shared_source_capacity(
+    const AgeAdjacencyMatchScanState *state);
+static void build_age_adjacency_match_shared_source(
+    AgeAdjacencyMatchScanState *state,
+    AgeAdjacencyMatchParallelState *parallel_state);
+static bool install_age_adjacency_match_shared_source(
+    AgeAdjacencyMatchScanState *state);
+static void prepare_age_adjacency_match_parallel_work(
+    AgeAdjacencyMatchScanState *state, graphid key);
 
 const CustomScanMethods age_adjacency_match_scan_methods = {
     AGE_ADJACENCY_MATCH_SCAN_NAME, create_age_adjacency_match_scan_state};
@@ -399,42 +443,6 @@ static void begin_age_adjacency_match_scan(CustomScanState *node,
         state->terminal_property_lookup =
             age_adjacency_match_terminal_property_begin(
                 &request, node->ss.ps.state->es_query_cxt);
-        if (age_adjacency_match_terminal_property_prefilter_active(
-                state->terminal_property_lookup))
-        {
-            AgeAdjacencyCompositeTerminalFilter composite_filter;
-
-            memset(&composite_filter, 0, sizeof(composite_filter));
-            composite_filter.terminal_label_id = state->right_label_id;
-            composite_filter.property_index_oid =
-                age_adjacency_match_terminal_property_index_oid(
-                    state->terminal_property_lookup);
-            composite_filter.property_filter_id =
-                age_adjacency_match_terminal_property_filter_id(
-                    state->terminal_property_lookup);
-            composite_filter.property_match_count =
-                age_adjacency_match_terminal_property_prefetched_matches(
-                    state->terminal_property_lookup);
-            composite_filter.has_property_summary = true;
-            if (age_adjacency_match_terminal_property_prefilter_set(
-                    state->terminal_property_lookup,
-                    &composite_filter.vertex_set_filter))
-            {
-                composite_filter.has_vertex_set_filter = true;
-                composite_filter.source = "label-property-prefetch";
-            }
-            else
-            {
-                composite_filter.vertex_filter =
-                    age_adjacency_match_terminal_property_prefilter_matches;
-                composite_filter.vertex_filter_state =
-                    state->terminal_property_lookup;
-                composite_filter.has_vertex_filter = true;
-                composite_filter.source = "label-property-callback";
-            }
-            age_adjacency_visible_payload_scan_set_composite_terminal_filter(
-                state->payload_scan, &composite_filter);
-        }
     }
 }
 
@@ -478,15 +486,38 @@ static TupleTableSlot *access_age_adjacency_match_scan(ScanState *node)
             property_value_isnull);
         age_adjacency_visible_payload_scan_set_terminal_vertex_filter(
             state->payload_scan, NULL, NULL);
+        state->shared_source_active = false;
         if (!isnull)
         {
             state->current_key = DATUM_GET_GRAPHID(key_datum);
+            prepare_age_adjacency_match_parallel_work(
+                state, state->current_key);
+            if (install_age_adjacency_match_shared_source(state))
+            {
+                state->shared_source_active = true;
+                if (state->parallel_state->source_count == 0)
+                    return ExecClearTuple(slot);
+            }
+            else if (state->terminal_prefetch_threshold > 0 &&
+                state->estimated_terminal_fanout >=
+                    state->terminal_prefetch_threshold &&
+                age_adjacency_match_terminal_property_prepare_prefilter(
+                    state->terminal_property_lookup,
+                    state->estimated_endpoint_fanout,
+                    state->estimated_terminal_fanout,
+                    state->terminal_prefetch_threshold))
+            {
+                install_age_adjacency_match_composite_filter(state);
+            }
             oldcontext = MemoryContextSwitchTo(state->payload_scan_context);
             state->payload_active =
                 age_adjacency_visible_payload_scan_begin_key(
                     state->payload_scan, state->current_key);
             MemoryContextSwitchTo(oldcontext);
             if (state->payload_active &&
+                !state->shared_source_active &&
+                !age_adjacency_match_terminal_property_prefilter_active(
+                    state->terminal_property_lookup) &&
                 age_adjacency_match_terminal_property_prepare_prefilter(
                     state->terminal_property_lookup,
                     age_adjacency_visible_payload_scan_run_postings(
@@ -495,38 +526,7 @@ static TupleTableSlot *access_age_adjacency_match_scan(ScanState *node)
                         state->payload_scan),
                     state->terminal_prefetch_threshold))
             {
-                AgeAdjacencyCompositeTerminalFilter composite_filter;
-
-                memset(&composite_filter, 0, sizeof(composite_filter));
-                composite_filter.terminal_label_id = state->right_label_id;
-                composite_filter.property_index_oid =
-                    age_adjacency_match_terminal_property_index_oid(
-                        state->terminal_property_lookup);
-                composite_filter.property_filter_id =
-                    age_adjacency_match_terminal_property_filter_id(
-                        state->terminal_property_lookup);
-                composite_filter.property_match_count =
-                    age_adjacency_match_terminal_property_prefetched_matches(
-                        state->terminal_property_lookup);
-                composite_filter.has_property_summary = true;
-                if (age_adjacency_match_terminal_property_prefilter_set(
-                        state->terminal_property_lookup,
-                        &composite_filter.vertex_set_filter))
-                {
-                    composite_filter.has_vertex_set_filter = true;
-                    composite_filter.source = "label-property-prefetch";
-                }
-                else
-                {
-                    composite_filter.vertex_filter =
-                        age_adjacency_match_terminal_property_prefilter_matches;
-                    composite_filter.vertex_filter_state =
-                        state->terminal_property_lookup;
-                    composite_filter.has_vertex_filter = true;
-                    composite_filter.source = "label-property-callback";
-                }
-                age_adjacency_visible_payload_scan_set_composite_terminal_filter(
-                    state->payload_scan, &composite_filter);
+                install_age_adjacency_match_composite_filter(state);
             }
         }
     }
@@ -553,6 +553,7 @@ static TupleTableSlot *access_age_adjacency_match_scan(ScanState *node)
         state->payload_candidates++;
         if (age_adjacency_match_terminal_property_active(
                 state->terminal_property_lookup) &&
+            !state->shared_source_active &&
             !age_adjacency_match_terminal_property_prefilter_active(
                 state->terminal_property_lookup) &&
             !age_adjacency_match_terminal_property_matches(
@@ -663,6 +664,14 @@ static void rescan_age_adjacency_match_scan(CustomScanState *node)
     state->payload_candidates = 0;
     state->terminal_filtered = 0;
     state->rows_emitted = 0;
+    if (state->parallel_state != NULL)
+    {
+        SpinLockAcquire(&state->parallel_state->claim_lock);
+        state->parallel_state->claim_key_valid = false;
+        pg_atomic_write_u64(&state->parallel_state->main_claim_cursor, 0);
+        pg_atomic_write_u64(&state->parallel_state->delta_claim_cursor, 0);
+        SpinLockRelease(&state->parallel_state->claim_lock);
+    }
 }
 
 static void explain_age_adjacency_match_scan(CustomScanState *node,
@@ -692,7 +701,8 @@ static void explain_age_adjacency_match_scan(CustomScanState *node,
     ExplainPropertyText("Adjacency Parallel",
                         psprintf("safe=%s aware=%s workers=%ld "
                                  "gather-cost=%.2f order-preserving=%s "
-                                 "shared-state=%s slice=%s active=%s",
+                                 "shared-state=%s shared-source=%s:%ld/%ld "
+                                 "slice=%s active=%s",
                                  state->graph_join_parallel_safe ?
                                  "true" : "false",
                                  state->graph_join_parallel_aware ?
@@ -703,6 +713,10 @@ static void explain_age_adjacency_match_scan(CustomScanState *node,
                                  "true" : "false",
                                  state->graph_join_shared_state_required ?
                                  "true" : "false",
+                                 age_adjacency_match_shared_source_status_name(
+                                     state->shared_source_status),
+                                 (long)state->shared_source_count,
+                                 (long)state->shared_source_capacity,
                                  age_adjacency_match_payload_slice_mode_name(
                                      state->payload_slice_mode),
                                  state->payload_slice_count > 1 ?
@@ -790,6 +804,19 @@ static void load_age_adjacency_match_descriptor(
     state->estimated_composite_fanout =
         adjacency_match_descriptor_int64(
             descriptor, AGE_ADJACENCY_MATCH_DESC_ESTIMATED_COMPOSITE_FANOUT);
+    state->source_handoff_kind =
+        (AgeAdjacencyMatchSourceHandoff)adjacency_match_descriptor_int64(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_SOURCE_HANDOFF_KIND);
+    state->estimated_source_fanout =
+        adjacency_match_descriptor_int64(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_ESTIMATED_SOURCE_FANOUT);
+    state->estimated_source_blocks =
+        adjacency_match_descriptor_int64(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_ESTIMATED_SOURCE_BLOCKS);
+    state->estimated_property_source_matches =
+        adjacency_match_descriptor_int64(
+            descriptor,
+            AGE_ADJACENCY_MATCH_DESC_ESTIMATED_PROPERTY_SOURCE_MATCHES);
     state->composite_selectivity_ppm =
         adjacency_match_descriptor_int64(
             descriptor,
@@ -939,10 +966,16 @@ static void load_age_adjacency_match_descriptor(
 static Size estimate_age_adjacency_match_dsm(CustomScanState *node,
                                              ParallelContext *pcxt)
 {
-    (void)node;
+    AgeAdjacencyMatchScanState *state =
+        (AgeAdjacencyMatchScanState *)node;
+    int64 capacity;
+
     (void)pcxt;
 
-    return MAXALIGN(sizeof(AgeAdjacencyMatchParallelState));
+    capacity = age_adjacency_match_shared_source_capacity(state);
+    return MAXALIGN(offsetof(AgeAdjacencyMatchParallelState,
+                             source_vertex_ids)) +
+        MAXALIGN(mul_size(sizeof(graphid), capacity));
 }
 
 static void initialize_age_adjacency_match_dsm(CustomScanState *node,
@@ -954,8 +987,15 @@ static void initialize_age_adjacency_match_dsm(CustomScanState *node,
     AgeAdjacencyMatchParallelState *parallel_state = coordinate;
 
     Assert(parallel_state != NULL);
-    initialize_age_adjacency_match_parallel_state(parallel_state, pcxt);
+    initialize_age_adjacency_match_parallel_state(state, parallel_state,
+                                                  pcxt);
+    state->parallel_state = parallel_state;
     state->payload_parallel_workers = parallel_state->planned_workers;
+    state->shared_source_status = parallel_state->source_status;
+    state->shared_source_count = parallel_state->source_count;
+    state->shared_source_capacity = parallel_state->source_capacity;
+    if (state->payload_scan != NULL)
+        configure_age_adjacency_match_payload_slice(state);
 }
 
 static void reinitialize_age_adjacency_match_dsm(CustomScanState *node,
@@ -981,12 +1021,17 @@ static void initialize_age_adjacency_match_worker(CustomScanState *node,
         elog(ERROR, "invalid AGE adjacency match parallel state");
     }
 
+    state->parallel_state = parallel_state;
     state->payload_parallel_workers = parallel_state->planned_workers;
+    state->shared_source_status = parallel_state->source_status;
+    state->shared_source_count = parallel_state->source_count;
+    state->shared_source_capacity = parallel_state->source_capacity;
     if (state->payload_scan != NULL)
         configure_age_adjacency_match_payload_slice(state);
 }
 
 static void initialize_age_adjacency_match_parallel_state(
+    AgeAdjacencyMatchScanState *state,
     AgeAdjacencyMatchParallelState *parallel_state, ParallelContext *pcxt)
 {
     int planned_workers;
@@ -999,6 +1044,160 @@ static void initialize_age_adjacency_match_parallel_state(
     parallel_state->magic = AGE_ADJACENCY_MATCH_PARALLEL_MAGIC;
     parallel_state->planned_workers = planned_workers > 0 ?
         planned_workers : 0;
+    parallel_state->source_status = AGE_ADJACENCY_SHARED_SOURCE_NONE;
+    parallel_state->source_capacity =
+        age_adjacency_match_shared_source_capacity(state);
+    parallel_state->source_count = 0;
+    pg_atomic_init_u64(&parallel_state->main_claim_cursor, 0);
+    pg_atomic_init_u64(&parallel_state->delta_claim_cursor, 0);
+    SpinLockInit(&parallel_state->claim_lock);
+    parallel_state->claim_key_valid = false;
+    parallel_state->claim_key = 0;
+    build_age_adjacency_match_shared_source(state, parallel_state);
+}
+
+static int64
+age_adjacency_match_shared_source_capacity(
+    const AgeAdjacencyMatchScanState *state)
+{
+    int64 capacity;
+
+    if (state == NULL || !state->graph_join_shared_state_required ||
+        state->right_property_value_kind != AGE_ADJACENCY_MATCH_VALUE_CONST ||
+        state->estimated_property_source_matches <= 0)
+    {
+        return 0;
+    }
+
+    capacity = (int64)ceil((double)state->estimated_property_source_matches *
+                           2.0) + 32;
+    return Min(Max(capacity, 16), 65536);
+}
+
+static void
+build_age_adjacency_match_shared_source(
+    AgeAdjacencyMatchScanState *state,
+    AgeAdjacencyMatchParallelState *parallel_state)
+{
+    AgeAdjacencyMatchTerminalPropertyRequest request;
+    AgeAdjacencyMatchTerminalPropertyLookup *lookup;
+    MemoryContext context;
+    int64 copied;
+
+    Assert(state != NULL);
+    Assert(parallel_state != NULL);
+
+    if (parallel_state->source_capacity <= 0)
+        return;
+
+    context = AllocSetContextCreate(CurrentMemoryContext,
+                                    "AGE adjacency shared source build",
+                                    ALLOCSET_DEFAULT_SIZES);
+    request = make_age_adjacency_match_terminal_property_request(state);
+    lookup = age_adjacency_match_terminal_property_begin(&request, context);
+    age_adjacency_match_terminal_property_set_value(
+        lookup, state->right_property_value,
+        state->right_property_value_isnull);
+    if (!age_adjacency_match_terminal_property_prepare_prefilter(
+            lookup, state->estimated_endpoint_fanout,
+            state->estimated_terminal_fanout,
+            Max(state->terminal_prefetch_threshold, 1)))
+    {
+        parallel_state->source_status =
+            AGE_ADJACENCY_SHARED_SOURCE_UNAVAILABLE;
+        age_adjacency_match_terminal_property_end(lookup);
+        MemoryContextDelete(context);
+        return;
+    }
+
+    copied = age_adjacency_match_terminal_property_copy_prefilter_ids(
+        lookup, parallel_state->source_vertex_ids,
+        parallel_state->source_capacity);
+    if (copied < 0)
+    {
+        parallel_state->source_status = AGE_ADJACENCY_SHARED_SOURCE_OVERFLOW;
+        parallel_state->source_count = -copied;
+    }
+    else
+    {
+        parallel_state->source_status = AGE_ADJACENCY_SHARED_SOURCE_READY;
+        parallel_state->source_count = copied;
+    }
+
+    age_adjacency_match_terminal_property_end(lookup);
+    MemoryContextDelete(context);
+}
+
+static bool
+install_age_adjacency_match_shared_source(AgeAdjacencyMatchScanState *state)
+{
+    AgeAdjacencyCompositeTerminalFilter filter;
+    AgeAdjacencyMatchParallelState *parallel_state;
+
+    if (state == NULL || state->parallel_state == NULL)
+        return false;
+    parallel_state = state->parallel_state;
+    if (parallel_state->source_status != AGE_ADJACENCY_SHARED_SOURCE_READY)
+        return false;
+
+    memset(&filter, 0, sizeof(filter));
+    filter.terminal_label_id = state->right_label_id;
+    filter.property_index_oid = state->right_property_index_oid;
+    filter.property_filter_id = age_adjacency_property_filter_id(
+        state->right_property_index_oid, state->right_property_value,
+        state->right_property_value_isnull);
+    filter.property_match_count = parallel_state->source_count;
+    filter.has_property_summary = true;
+    filter.source = "shared-property-source";
+    if (parallel_state->source_count > 0)
+    {
+        filter.vertex_set_filter.sorted_vertex_ids =
+            parallel_state->source_vertex_ids;
+        filter.vertex_set_filter.sorted_vertex_count =
+            parallel_state->source_count;
+        filter.vertex_set_filter.min_vertex_id =
+            parallel_state->source_vertex_ids[0];
+        filter.vertex_set_filter.max_vertex_id =
+            parallel_state->source_vertex_ids[
+                parallel_state->source_count - 1];
+        filter.vertex_set_filter.has_range = true;
+        filter.vertex_set_filter.has_sorted_vertex_ids = true;
+        filter.vertex_set_filter.source = "parallel-shared-property-source";
+        filter.vertex_set_filter.matches = parallel_state->source_count;
+        filter.has_vertex_set_filter = true;
+    }
+    age_adjacency_visible_payload_scan_set_composite_terminal_filter(
+        state->payload_scan, &filter);
+
+    return true;
+}
+
+static void
+prepare_age_adjacency_match_parallel_work(AgeAdjacencyMatchScanState *state,
+                                          graphid key)
+{
+    AgeAdjacencyMatchParallelState *parallel_state;
+
+    if (state == NULL || state->parallel_state == NULL ||
+        state->payload_slice_mode !=
+        AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_SOURCE_DYNAMIC)
+    {
+        return;
+    }
+
+    parallel_state = state->parallel_state;
+    SpinLockAcquire(&parallel_state->claim_lock);
+
+    if (!parallel_state->claim_key_valid ||
+        parallel_state->claim_key != key)
+    {
+        pg_atomic_write_u64(&parallel_state->main_claim_cursor, 0);
+        pg_atomic_write_u64(&parallel_state->delta_claim_cursor, 0);
+        parallel_state->claim_key = key;
+        parallel_state->claim_key_valid = true;
+    }
+
+    SpinLockRelease(&parallel_state->claim_lock);
 }
 
 static void configure_age_adjacency_match_payload_slice(
@@ -1006,17 +1205,37 @@ static void configure_age_adjacency_match_payload_slice(
 {
     int32 slice_index = 0;
     int32 slice_count = state->payload_parallel_workers;
+    uint32 chunk_size = 0;
 
     Assert(state != NULL);
     Assert(state->payload_scan != NULL);
 
     if (state->graph_join_parallel_aware &&
-        slice_count > 1 &&
-        !state->graph_join_shared_state_required &&
-        IsParallelWorker())
+        state->graph_join_shared_state_required &&
+        (slice_count > 0 || state->graph_join_parallel_workers > 0))
     {
-        slice_index = ParallelWorkerNumber % slice_count;
-        state->payload_slice_mode = AGE_ADJACENCY_PAYLOAD_SLICE_WORKER_LOCAL;
+        if (slice_count <= 0)
+            slice_count = (int32)state->graph_join_parallel_workers;
+        state->payload_slice_mode =
+            AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_SOURCE_DYNAMIC;
+        if (state->parallel_state != NULL)
+        {
+            chunk_size = Max((uint32) Min(state->estimated_source_fanout,
+                                          1024),
+                             (uint32) 32);
+            age_adjacency_visible_payload_scan_set_parallel_claim(
+                state->payload_scan,
+                &state->parallel_state->main_claim_cursor,
+                &state->parallel_state->delta_claim_cursor, chunk_size);
+        }
+    }
+    else if (state->graph_join_parallel_aware && slice_count > 0)
+    {
+        slice_index = IsParallelWorker() ?
+            ParallelWorkerNumber % slice_count : slice_count;
+        state->payload_slice_mode = state->graph_join_shared_state_required ?
+            AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_SOURCE_WORKER_LOCAL :
+            AGE_ADJACENCY_PAYLOAD_SLICE_WORKER_LOCAL;
     }
     else if (state->graph_join_parallel_safe &&
              !state->graph_join_shared_state_required)
@@ -1036,8 +1255,20 @@ static void configure_age_adjacency_match_payload_slice(
 
     state->payload_slice_index = slice_index;
     state->payload_slice_count = slice_count;
-    age_adjacency_visible_payload_scan_set_parallel_slice(
-        state->payload_scan, slice_index, slice_count);
+    if (chunk_size == 0)
+    {
+        if (state->payload_slice_mode ==
+            AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_SOURCE_DYNAMIC)
+        {
+            age_adjacency_visible_payload_scan_set_parallel_slice(
+                state->payload_scan, 0, 0);
+        }
+        else
+        {
+            age_adjacency_visible_payload_scan_set_parallel_slice(
+                state->payload_scan, slice_index, slice_count);
+        }
+    }
 }
 
 static bool adjacency_match_descriptor_bool(List *descriptor, int index)
@@ -1187,6 +1418,8 @@ static char *format_age_adjacency_match_cost_input(
     index_credit_percent = Max(70, 100 - (10 * index_solved_count));
 
     return psprintf("fanout=%ld terminal-fanout=%ld composite-fanout=%ld "
+                    "source-handoff=%s source-fanout=%ld source-blocks=%ld "
+                    "property-source-matches=%ld "
                     "residual=%d "
                     "label-groups=%ld main-blocks=%ld fanout-source=%s "
                     "value-posting=%s "
@@ -1196,6 +1429,11 @@ static char *format_age_adjacency_match_cost_input(
                     (long)state->estimated_endpoint_fanout,
                     (long)state->estimated_terminal_fanout,
                     (long)state->estimated_composite_fanout,
+                    age_adjacency_match_source_handoff_name(
+                        state->source_handoff_kind),
+                    (long)state->estimated_source_fanout,
+                    (long)state->estimated_source_blocks,
+                    (long)state->estimated_property_source_matches,
                     residual_count,
                     (long)state->estimated_terminal_label_groups,
                     (long)state->estimated_main_blocks,
@@ -1256,11 +1494,13 @@ static char *format_age_adjacency_match_join_order(
 static char *format_age_adjacency_match_composite_source(
     AgeAdjacencyMatchScanState *state)
 {
-    return psprintf("strategy=%s label=%s property=%s value=%s "
+    return psprintf("strategy=%s handoff=%s label=%s property=%s value=%s "
                     "candidate-fanout=%ld composite-fanout=%ld "
                     "value-posting=%s planned=%s threshold=%ld reason=%s",
                     age_adjacency_match_terminal_strategy_name(
                         state->terminal_source_strategy),
+                    age_adjacency_match_source_handoff_name(
+                        state->source_handoff_kind),
                     label_id_is_valid(state->right_label_id) ?
                     "yes" : "no",
                     state->right_property_prefetch_eligible ?
@@ -1997,6 +2237,10 @@ static const char *age_adjacency_match_payload_slice_mode_name(
     {
         case AGE_ADJACENCY_PAYLOAD_SLICE_WORKER_LOCAL:
             return "worker-local";
+        case AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_SOURCE_WORKER_LOCAL:
+            return "shared-source-worker-local";
+        case AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_SOURCE_DYNAMIC:
+            return "shared-source-dynamic";
         case AGE_ADJACENCY_PAYLOAD_SLICE_WORKER_LOCAL_READY:
             return "worker-local-ready";
         case AGE_ADJACENCY_PAYLOAD_SLICE_SHARED_STATE_REQUIRED:
@@ -2006,6 +2250,24 @@ static const char *age_adjacency_match_payload_slice_mode_name(
     }
 
     return "serial-only";
+}
+
+static const char *age_adjacency_match_shared_source_status_name(
+    AgeAdjacencySharedSourceStatus status)
+{
+    switch (status)
+    {
+        case AGE_ADJACENCY_SHARED_SOURCE_READY:
+            return "ready";
+        case AGE_ADJACENCY_SHARED_SOURCE_OVERFLOW:
+            return "overflow";
+        case AGE_ADJACENCY_SHARED_SOURCE_UNAVAILABLE:
+            return "unavailable";
+        case AGE_ADJACENCY_SHARED_SOURCE_NONE:
+            break;
+    }
+
+    return "none";
 }
 
 const char *age_adjacency_match_terminal_prefetch_reason_name(
@@ -2026,6 +2288,26 @@ const char *age_adjacency_match_terminal_prefetch_reason_name(
     }
 
     return "none";
+}
+
+const char *age_adjacency_match_source_handoff_name(
+    AgeAdjacencyMatchSourceHandoff handoff)
+{
+    switch (handoff)
+    {
+        case AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_LABEL_SLICE:
+            return "label-slice";
+        case AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_PROPERTY_SET:
+            return "property-set";
+        case AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_LABEL_PROPERTY_INTERSECTION:
+            return "label-property-intersection";
+        case AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_RECHECK:
+            return "posting-recheck";
+        case AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_POSTING_RUN:
+            break;
+    }
+
+    return "posting-run";
 }
 
 static const char *age_adjacency_match_value_kind_name(
@@ -2158,4 +2440,46 @@ make_age_adjacency_match_terminal_property_request(
     request.property_value_isnull = state->right_property_value_isnull;
 
     return request;
+}
+
+static void
+install_age_adjacency_match_composite_filter(
+    AgeAdjacencyMatchScanState *state)
+{
+    AgeAdjacencyCompositeTerminalFilter composite_filter;
+
+    Assert(state != NULL);
+    Assert(age_adjacency_match_terminal_property_prefilter_active(
+        state->terminal_property_lookup));
+
+    memset(&composite_filter, 0, sizeof(composite_filter));
+    composite_filter.terminal_label_id = state->right_label_id;
+    composite_filter.property_index_oid =
+        age_adjacency_match_terminal_property_index_oid(
+            state->terminal_property_lookup);
+    composite_filter.property_filter_id =
+        age_adjacency_match_terminal_property_filter_id(
+            state->terminal_property_lookup);
+    composite_filter.property_match_count =
+        age_adjacency_match_terminal_property_prefetched_matches(
+            state->terminal_property_lookup);
+    composite_filter.has_property_summary = true;
+    if (age_adjacency_match_terminal_property_prefilter_set(
+            state->terminal_property_lookup,
+            &composite_filter.vertex_set_filter))
+    {
+        composite_filter.has_vertex_set_filter = true;
+        composite_filter.source = "label-property-prefetch";
+    }
+    else
+    {
+        composite_filter.vertex_filter =
+            age_adjacency_match_terminal_property_prefilter_matches;
+        composite_filter.vertex_filter_state =
+            state->terminal_property_lookup;
+        composite_filter.has_vertex_filter = true;
+        composite_filter.source = "label-property-callback";
+    }
+    age_adjacency_visible_payload_scan_set_composite_terminal_filter(
+        state->payload_scan, &composite_filter);
 }

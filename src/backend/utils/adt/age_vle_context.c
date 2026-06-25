@@ -32,6 +32,8 @@
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 
+#define VLE_MATRIX_FRONTIER_REPLAY_PAYLOADS_PER_SOURCE 64
+
 struct VLEContextEndpointIndexSource
 {
     Relation edge_rel;
@@ -50,6 +52,9 @@ struct VLEContextAgeAdjacencyPayloadSource
     AgeAdjacencyVisiblePayloadScan *payload_scan;
     VLEAdjacencyPayloadCacheEntry *cache_entry;
     VLEMatrixFrontierCacheEntry *matrix_entry;
+    const graphid *matrix_source_vertex_ids;
+    int64 matrix_source_vertex_count;
+    VLEMatrixFrontierCacheEvidence matrix_cache_evidence;
     graphid *frontier_empty_keys;
     int64 scanned;
     int64 replay_index;
@@ -107,7 +112,11 @@ static void age_vle_context_init_matrix_frontier_key(
     VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
     uint32 terminal_property_filter_id, VLEMatrixFrontierCacheKey *key);
 static bool age_vle_context_matrix_frontier_cache_lookup(
-    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    const VLEContextSourceCursor *cursor);
+static bool age_vle_context_cursor_uses_matrix_frontier_cache(
+    const VLEContextSourceCursor *cursor,
+    VLEMatrixFrontierCacheEvidence *evidence);
 static void age_vle_context_matrix_frontier_cache_seed(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
     const AgeAdjacencyPayload *payload);
@@ -155,12 +164,16 @@ static void age_vle_context_age_adjacency_payload_source_mark_empty_internal(
     bool mark_matrix_frontier);
 static AgeAdjacencyMatchTerminalPropertyLookup *
 age_vle_context_get_terminal_property_lookup(VLE_local_context *vlelctx);
+static VLETraversalIteratorPolicy age_vle_context_select_iterator_policy(
+    VLE_local_context *vlelctx);
 static void age_vle_context_prepare_terminal_property_prefilter(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
 static VLEContextAgeAdjacencyPayloadSource *
 age_vle_context_begin_age_adjacency_payload_source_internal(
     VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
-    const VLEMatrixFrontierCacheKey *matrix_key, bool record_matrix_block,
+    const VLEMatrixFrontierCacheKey *matrix_key,
+    const graphid *matrix_source_vertex_ids,
+    int64 matrix_source_vertex_count, bool record_matrix_block,
     bool defer_visible_scan);
 
 void age_vle_context_apply_base(
@@ -233,6 +246,10 @@ void age_vle_context_apply_base(
         context_apply->matrix_frontier_depth;
     vlelctx->matrix_frontier_batch_size =
         context_apply->matrix_frontier_batch_size;
+    vlelctx->matrix_frontier_out_policy =
+        context_apply->matrix_frontier_out_policy;
+    vlelctx->matrix_frontier_in_policy =
+        context_apply->matrix_frontier_in_policy;
 
     vlelctx->root.lidx = context_apply->lower;
     vlelctx->root.uidx = context_apply->upper;
@@ -513,6 +530,25 @@ void age_vle_context_get_source_stats(
     Assert(vlelctx != NULL);
     Assert(stats != NULL);
 
+    if (vlelctx->root.matrix_frontier_cache != NULL)
+    {
+        const VLEMatrixFrontierCacheStats *cache_stats =
+            &vlelctx->root.matrix_frontier_cache->stats;
+
+        vlelctx->source_stats.matrix_frontier_cache_probe_scans =
+            cache_stats->probe_scans;
+        vlelctx->source_stats.matrix_frontier_cache_probe_candidates =
+            cache_stats->probe_candidates;
+        vlelctx->source_stats.matrix_frontier_cache_probe_hits =
+            cache_stats->probe_hits;
+        vlelctx->source_stats.matrix_frontier_cache_evictions =
+            cache_stats->evictions;
+        vlelctx->source_stats.matrix_frontier_cache_eviction_work =
+            cache_stats->eviction_work;
+        vlelctx->source_stats.matrix_frontier_cache_cold_evictions =
+            cache_stats->cold_evictions;
+    }
+
     *stats = vlelctx->source_stats;
     if (stats->root_empty_completion_count > 0 ||
         stats->empty_lifecycle_batch_capacity <= 0)
@@ -705,6 +741,142 @@ void age_vle_context_record_matrix_frontier_source_run_prefiltered_keys(
     if (prefiltered_keys > 0)
         vlelctx->source_stats.matrix_frontier_source_run_prefiltered_keys +=
             prefiltered_keys;
+}
+
+void age_vle_context_record_matrix_frontier_handoff_evidence(
+    VLE_local_context *vlelctx,
+    const VLETraversalCompactionEvidence *compaction_evidence,
+    const VLETraversalFrontierPressureEvidence *pressure_evidence)
+{
+    AgeVLESourceStats *stats;
+
+    Assert(vlelctx != NULL);
+    Assert(compaction_evidence != NULL);
+    Assert(pressure_evidence != NULL);
+
+    if (pressure_evidence->handoff_count <= 0)
+        return;
+
+    stats = &vlelctx->source_stats;
+    stats->matrix_frontier_handoff_batches +=
+        pressure_evidence->handoff_count;
+    stats->matrix_frontier_handoff_candidates +=
+        pressure_evidence->candidate_count;
+    stats->matrix_frontier_handoff_accepted +=
+        pressure_evidence->accepted_count;
+    stats->matrix_frontier_handoff_unique_sources +=
+        pressure_evidence->unique_source_count;
+    stats->matrix_frontier_handoff_max_unique_sources =
+        Max(stats->matrix_frontier_handoff_max_unique_sources,
+            pressure_evidence->max_unique_source_count);
+    stats->matrix_frontier_handoff_frames +=
+        pressure_evidence->frame_count;
+    stats->matrix_frontier_handoff_work_items +=
+        pressure_evidence->work_count;
+    stats->matrix_frontier_handoff_work_closed_segment_delta +=
+        pressure_evidence->work_closed_segment_delta;
+    stats->matrix_frontier_handoff_compactable_frame_delta +=
+        pressure_evidence->compactable_frame_delta;
+    stats->matrix_frontier_handoff_compacted_frame_delta +=
+        pressure_evidence->compacted_frame_delta;
+    stats->matrix_frontier_handoff_arena_segments =
+        Max(stats->matrix_frontier_handoff_arena_segments,
+            compaction_evidence->arena_segment_count);
+    stats->matrix_frontier_handoff_work_closed_segments =
+        Max(stats->matrix_frontier_handoff_work_closed_segments,
+            compaction_evidence->work_closed_segment_count);
+    stats->matrix_frontier_handoff_compactable_candidates =
+        Max(stats->matrix_frontier_handoff_compactable_candidates,
+            compaction_evidence->compactable_candidate_count);
+    stats->matrix_frontier_handoff_compactable_frames =
+        Max(stats->matrix_frontier_handoff_compactable_frames,
+            compaction_evidence->compactable_frame_count);
+    stats->matrix_frontier_handoff_compacted_segments =
+        Max(stats->matrix_frontier_handoff_compacted_segments,
+            compaction_evidence->compacted_segment_count);
+    stats->matrix_frontier_handoff_compacted_frames =
+        Max(stats->matrix_frontier_handoff_compacted_frames,
+            compaction_evidence->compacted_frame_count);
+}
+
+void age_vle_context_record_matrix_frontier_direction_pressure(
+    VLE_local_context *vlelctx, bool outgoing, int64 source_cursor_count,
+    const VLETraversalFrontierPressureEvidence *pressure_evidence)
+{
+    AgeVLEMatrixFrontierPressureVector *vector;
+
+    Assert(vlelctx != NULL);
+    Assert(pressure_evidence != NULL);
+    Assert(source_cursor_count > 0);
+
+    vector = &vlelctx->source_stats.matrix_frontier_pressure[
+        outgoing ? AGE_VLE_MATRIX_FRONTIER_OUT :
+        AGE_VLE_MATRIX_FRONTIER_IN];
+    vector->handoff_batches += pressure_evidence->handoff_count;
+    vector->handoff_candidates += pressure_evidence->candidate_count;
+    vector->handoff_accepted += pressure_evidence->accepted_count;
+    vector->handoff_unique_sources += pressure_evidence->unique_source_count;
+    vector->handoff_max_unique_sources =
+        Max(vector->handoff_max_unique_sources,
+            pressure_evidence->max_unique_source_count);
+    vector->handoff_work_closed_segment_delta +=
+        pressure_evidence->work_closed_segment_delta;
+    vector->handoff_compactable_frame_delta +=
+        pressure_evidence->compactable_frame_delta;
+    vector->handoff_compacted_frame_delta +=
+        pressure_evidence->compacted_frame_delta;
+    vector->prefetch_runs++;
+    vector->prefetch_cursors += source_cursor_count;
+}
+
+void age_vle_context_record_matrix_frontier_cursor_phases(
+    VLE_local_context *vlelctx, bool outgoing, int64 phase_cursors,
+    int64 replay_cursors, int64 raw_cursors, int64 scalar_cursors)
+{
+    AgeVLEMatrixFrontierPressureVector *vector;
+
+    Assert(vlelctx != NULL);
+    Assert(phase_cursors >= 0);
+    Assert(replay_cursors >= 0);
+    Assert(raw_cursors >= 0);
+    Assert(scalar_cursors >= 0);
+    Assert(replay_cursors + raw_cursors + scalar_cursors <= phase_cursors);
+
+    vector = &vlelctx->source_stats.matrix_frontier_pressure[
+        outgoing ? AGE_VLE_MATRIX_FRONTIER_OUT :
+        AGE_VLE_MATRIX_FRONTIER_IN];
+    vector->phase_cursors += phase_cursors;
+    vector->replay_cursors += replay_cursors;
+    vector->raw_cursors += raw_cursors;
+    vector->scalar_cursors += scalar_cursors;
+}
+
+void age_vle_context_record_matrix_frontier_cache_evidence(
+    VLE_local_context *vlelctx, bool outgoing,
+    const VLEMatrixFrontierCacheEvidence *evidence)
+{
+    AgeVLEMatrixFrontierPressureVector *vector;
+
+    Assert(vlelctx != NULL);
+    Assert(evidence != NULL);
+
+    vector = &vlelctx->source_stats.matrix_frontier_pressure[
+        outgoing ? AGE_VLE_MATRIX_FRONTIER_OUT :
+        AGE_VLE_MATRIX_FRONTIER_IN];
+    vector->cache_probes++;
+    vector->cache_requested_sources += evidence->requested_source_count;
+    vector->cache_matching_sources += evidence->matching_source_count;
+    vector->cache_entry_sources += evidence->entry_source_count;
+    vector->cache_payload_span += evidence->payload_count;
+    vector->cache_matching_payload_span += evidence->matching_payload_count;
+    vector->cache_reuse_distance += evidence->reuse_distance;
+    vector->cache_replay_work += evidence->replay_work;
+    vector->cache_raw_work += evidence->raw_work;
+    vector->cache_scalar_work += evidence->scalar_work;
+    if (evidence->selected_replay)
+        vector->cache_replay_selections++;
+    else
+        vector->cache_fallback_selections++;
 }
 
 void age_vle_context_record_matrix_frontier_source_run_raw_block_batches(
@@ -1197,15 +1369,17 @@ void age_vle_context_apply_candidate_match_result(
 
 bool age_vle_context_push_candidate_if_matched(
     VLE_local_context *vlelctx, const VLETraversalCandidate *candidate,
-    const char *caller)
+    const char *caller, VLETraversalFrontierBatch *frontier_batch)
 {
     int32 target_label_id;
 
     Assert(vlelctx != NULL);
     Assert(candidate != NULL);
+    Assert(candidate->path_length > 0);
+    Assert(candidate->path_length == vlelctx->traversal.path_depth + 1);
 
     target_label_id = age_vle_context_label_id_for_target_path_length(
-        vlelctx, vlelctx->traversal.path_depth + 1);
+        vlelctx, candidate->path_length);
     if (label_id_is_valid(target_label_id) &&
         get_graphid_label_id(candidate->next_vertex_id) !=
         target_label_id)
@@ -1214,12 +1388,13 @@ bool age_vle_context_push_candidate_if_matched(
     }
 
     return age_vle_traversal_push_candidate_if_matched(
-        &vlelctx->traversal, candidate, caller);
+        &vlelctx->traversal, candidate, caller, frontier_batch);
 }
 
 int64 age_vle_context_push_candidate_batch_if_matched(
     VLE_local_context *vlelctx, const VLETraversalCandidate *candidates,
-    int candidate_count, const char *caller, bool *pushed)
+    int candidate_count, const char *caller, bool *pushed,
+    VLETraversalFrontierBatch *frontier_batch)
 {
     int32 target_label_id;
 
@@ -1228,12 +1403,17 @@ int64 age_vle_context_push_candidate_batch_if_matched(
     Assert(candidate_count >= 0);
     Assert(pushed != NULL);
 
+    if (candidate_count <= 0)
+        return 0;
+
+    Assert(candidates[0].path_length > 0);
+    Assert(candidates[0].path_length == vlelctx->traversal.path_depth + 1);
     target_label_id = age_vle_context_label_id_for_target_path_length(
-        vlelctx, vlelctx->traversal.path_depth + 1);
+        vlelctx, candidates[0].path_length);
 
     return age_vle_traversal_push_candidate_batch_if_matched(
         &vlelctx->traversal, candidates, candidate_count, target_label_id,
-        caller, pushed);
+        caller, pushed, frontier_batch);
 }
 
 void age_vle_context_refresh_source_indexes(VLE_local_context *vlelctx)
@@ -1263,9 +1443,35 @@ bool age_vle_context_should_load_initial_stacks(VLE_local_context *vlelctx)
 
 void age_vle_context_init_traversal_state(VLE_local_context *vlelctx)
 {
+    VLETraversalIteratorPolicy iterator_policy;
+    bool store_path_edges;
+
     Assert(vlelctx != NULL);
 
-    age_vle_traversal_state_init(&vlelctx->traversal);
+    store_path_edges =
+        vlelctx->output.requirement == AGE_VLE_OUTPUT_REQUIREMENT_PATH ||
+        !vlelctx->output.emit_terminal_only;
+    age_vle_traversal_state_init(&vlelctx->traversal, store_path_edges);
+    iterator_policy = age_vle_context_select_iterator_policy(vlelctx);
+    age_vle_traversal_state_set_iterator_policy(&vlelctx->traversal,
+                                                iterator_policy);
+}
+
+static VLETraversalIteratorPolicy age_vle_context_select_iterator_policy(
+    VLE_local_context *vlelctx)
+{
+    Assert(vlelctx != NULL);
+
+    if (vlelctx->matrix_frontier_policy_known &&
+        vlelctx->matrix_frontier_eligible &&
+        vlelctx->matrix_frontier_batch_size > 1 &&
+        vlelctx->output.emit_terminal_only &&
+        vlelctx->output.requirement != AGE_VLE_OUTPUT_REQUIREMENT_PATH)
+    {
+        return VLE_TRAVERSAL_ITERATOR_LEVEL_BATCH;
+    }
+
+    return VLE_TRAVERSAL_ITERATOR_LIFO;
 }
 
 void age_vle_context_reset_traversal_for_start(VLE_local_context *vlelctx)
@@ -1834,8 +2040,8 @@ graphid age_vle_context_current_terminal_vertex_id(VLE_local_context *vlelctx)
     if (vertex_stack == NULL)
         return age_vle_context_start_vertex_id(vlelctx);
 
-    ssize = gid_stack_size(vlelctx->traversal.path_stack);
-    Assert(gid_stack_size(vertex_stack) == ssize + 1);
+    ssize = gid_stack_size(vertex_stack) - 1;
+    Assert(ssize >= 0);
 
     return age_vle_context_reverse_output_path(vlelctx) ?
         vertex_stack->array[0] : vertex_stack->array[ssize];
@@ -1853,6 +2059,12 @@ void age_vle_context_init_container_build_input(
         age_vle_context_reverse_output_path(vlelctx);
     input->path_stack = vlelctx->traversal.path_stack;
     input->path_vertex_stack = vlelctx->traversal.path_vertex_stack;
+    input->path_frames = vlelctx->traversal.frame_stack != NULL ?
+        vlelctx->traversal.frame_stack->array : NULL;
+    input->path_frame_count = vlelctx->traversal.frame_stack != NULL ?
+        vlelctx->traversal.frame_stack->size : 0;
+    input->active_frame_index = vlelctx->traversal.active_frame_index;
+    input->path_depth = vlelctx->traversal.path_depth;
 }
 
 bool age_vle_context_init_source_cursor(
@@ -1900,6 +2112,8 @@ bool age_vle_context_init_source_cursor(
     cursor->outgoing = outgoing;
     cursor->skip_self_loops = skip_self_loops;
     cursor->has_property_constraints = layout->has_property_constraints;
+    cursor->matrix_policy = outgoing ? vlelctx->matrix_frontier_out_policy :
+        vlelctx->matrix_frontier_in_policy;
 
     return true;
 }
@@ -2416,23 +2630,43 @@ bool age_vle_context_init_matrix_frontier_cursor_array_key(
 }
 
 static bool age_vle_context_matrix_frontier_cache_lookup(
-    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source)
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    const VLEContextSourceCursor *cursor)
 {
     VLEMatrixFrontierCacheEntry *entry;
 
     Assert(vlelctx != NULL);
     Assert(source != NULL);
+    Assert(cursor != NULL);
 
     if (!source->use_matrix_frontier_cache)
         return false;
 
-    entry = age_vle_matrix_frontier_cache_lookup(
-        vlelctx->root.matrix_frontier_cache, &source->matrix_key);
+    entry = age_vle_matrix_frontier_cache_probe(
+        vlelctx->root.matrix_frontier_cache, &source->matrix_key,
+        source->matrix_source_vertex_ids,
+        source->matrix_source_vertex_count, source->source_vertex_id,
+        &source->matrix_cache_evidence);
     if (entry == NULL)
     {
         vlelctx->source_stats.matrix_frontier_cache_misses++;
         return false;
     }
+
+    if (!age_vle_context_cursor_uses_matrix_frontier_cache(
+            cursor, &source->matrix_cache_evidence))
+    {
+        age_vle_context_record_matrix_frontier_cache_evidence(
+            vlelctx, source->outgoing, &source->matrix_cache_evidence);
+        vlelctx->source_stats.matrix_frontier_cache_misses++;
+        return false;
+    }
+
+    age_vle_context_record_matrix_frontier_cache_evidence(
+        vlelctx, source->outgoing, &source->matrix_cache_evidence);
+    entry->last_access_clock =
+        vlelctx->root.matrix_frontier_cache->access_clock;
+    entry->access_count++;
 
     if (entry->known_empty)
     {
@@ -2454,6 +2688,89 @@ static bool age_vle_context_matrix_frontier_cache_lookup(
     return false;
 }
 
+static bool age_vle_context_cursor_uses_matrix_frontier_cache(
+    const VLEContextSourceCursor *cursor,
+    VLEMatrixFrontierCacheEvidence *evidence)
+{
+    const AgeVLEMatrixFrontierCursorPolicy *policy;
+    int64 average_payloads;
+    int64 cache_affinity;
+    int64 fallback_work;
+    int64 replay_payload_limit;
+    int64 policy_replay_weight;
+    int64 policy_prefetch_weight;
+
+    Assert(cursor != NULL);
+    Assert(evidence != NULL);
+
+    policy = &cursor->matrix_policy;
+    average_payloads = evidence->entry_source_count > 0 ?
+        (evidence->payload_count + evidence->entry_source_count - 1) /
+            evidence->entry_source_count :
+        evidence->payload_count;
+    evidence->replay_work = evidence->payload_count +
+        evidence->reuse_distance * Max(evidence->matching_source_count,
+                                       (int64)1);
+    replay_payload_limit = evidence->requested_source_count *
+        VLE_MATRIX_FRONTIER_REPLAY_PAYLOADS_PER_SOURCE;
+    if (evidence->payload_count > replay_payload_limit)
+    {
+        evidence->replay_work +=
+            (evidence->payload_count - replay_payload_limit) * 4;
+    }
+    evidence->raw_work = evidence->requested_source_count *
+        (average_payloads * 4 + 8);
+    evidence->scalar_work = evidence->matching_payload_count * 2 +
+        evidence->matching_source_count * 2 +
+        (evidence->requested_source_count -
+         evidence->matching_source_count) * (average_payloads * 4 + 8);
+
+    policy_replay_weight = Max(25, 100 + policy->replay_percent -
+                               policy->prefetch_percent);
+    policy_prefetch_weight = Max(25, 100 + policy->prefetch_percent -
+                                 policy->replay_percent);
+    cache_affinity = (policy->payload_coverage_percent +
+                      policy->source_overlap_percent +
+                      policy->reuse_proximity_percent) / 3;
+    policy_replay_weight += cache_affinity / 2;
+    policy_prefetch_weight += (100 - cache_affinity) / 2;
+    /*
+     * A prior plan that observed the cache thrashing (residency_pressure_percent
+     * folded in from runtime feedback) shifts the weights toward prefetch: an
+     * entry that historically got evicted before reuse is a poor replay bet.
+     */
+    policy_prefetch_weight += policy->residency_pressure_percent / 2;
+    policy_replay_weight = Max(25, policy_replay_weight -
+                               policy->residency_pressure_percent / 2);
+    evidence->replay_work =
+        (evidence->replay_work * policy_prefetch_weight + 99) / 100;
+    /*
+     * Replaying relies on the matched entry staying resident; when the cache is
+     * over its residency budget that entry is an eviction candidate, so charge
+     * the residency overage to replay to bias toward a fresh fallback scan.
+     */
+    evidence->replay_work += evidence->eviction_work;
+    evidence->raw_work =
+        (evidence->raw_work * policy_replay_weight + 99) / 100;
+    evidence->scalar_work =
+        (evidence->scalar_work * policy_replay_weight + 99) / 100;
+
+    fallback_work = Min(evidence->raw_work, evidence->scalar_work);
+    evidence->selected_replay = evidence->matching_source_count > 0 &&
+        evidence->replay_work <= fallback_work;
+    if (!evidence->exact_match)
+    {
+        evidence->selected_replay = evidence->selected_replay &&
+            (evidence->matching_source_count * 2 >=
+                 evidence->requested_source_count ||
+             evidence->matching_payload_count * 2 >=
+                 evidence->payload_count ||
+             evidence->reuse_distance <= 2);
+    }
+
+    return evidence->selected_replay;
+}
+
 static void age_vle_context_matrix_frontier_cache_seed(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
     const AgeAdjacencyPayload *payload)
@@ -2472,7 +2789,8 @@ static void age_vle_context_matrix_frontier_cache_seed(
         source->matrix_entry->count < source->matrix_entry->capacity)
     {
         age_vle_matrix_frontier_cache_append_reserved(
-            source->matrix_entry, source->source_vertex_id, payload,
+            vlelctx->root.matrix_frontier_cache, source->matrix_entry,
+            source->source_vertex_id, payload,
             source->matrix_batch_reserved_source_count > 0 ?
             source->matrix_batch_reserved_source_count : 1);
         source->matrix_batch_reserved_payloads--;
@@ -2482,7 +2800,8 @@ static void age_vle_context_matrix_frontier_cache_seed(
     else
     {
         age_vle_matrix_frontier_cache_append(
-            source->matrix_entry, source->source_vertex_id, payload);
+            vlelctx->root.matrix_frontier_cache, source->matrix_entry,
+            source->source_vertex_id, payload);
     }
 }
 
@@ -2504,9 +2823,14 @@ static void age_vle_context_matrix_frontier_cache_mark_empty(
             &found);
         if (found && source->matrix_entry->known_empty)
             return;
+        age_vle_matrix_frontier_cache_set_sources(
+            vlelctx->root.matrix_frontier_cache, source->matrix_entry,
+            source->matrix_source_vertex_ids,
+            source->matrix_source_vertex_count);
     }
 
-    age_vle_matrix_frontier_cache_mark_empty(source->matrix_entry);
+    age_vle_matrix_frontier_cache_mark_empty(
+        vlelctx->root.matrix_frontier_cache, source->matrix_entry);
     vlelctx->source_stats.matrix_frontier_cache_empty_marks++;
 }
 
@@ -2722,22 +3046,28 @@ age_vle_context_begin_age_adjacency_payload_source_with_matrix_key(
     const VLEMatrixFrontierCacheKey *matrix_key, bool record_matrix_block)
 {
     return age_vle_context_begin_age_adjacency_payload_source_internal(
-        vlelctx, cursor, matrix_key, record_matrix_block, false);
+        vlelctx, cursor, matrix_key, &cursor->source_vertex_id, 1,
+        record_matrix_block, false);
 }
 
 VLEContextAgeAdjacencyPayloadSource *
 age_vle_context_begin_age_adjacency_payload_source_batch(
     VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
-    const VLEMatrixFrontierCacheKey *matrix_key, bool record_matrix_block)
+    const VLEMatrixFrontierCacheKey *matrix_key,
+    const graphid *matrix_source_vertex_ids,
+    int64 matrix_source_vertex_count, bool record_matrix_block)
 {
     return age_vle_context_begin_age_adjacency_payload_source_internal(
-        vlelctx, cursor, matrix_key, record_matrix_block, true);
+        vlelctx, cursor, matrix_key, matrix_source_vertex_ids,
+        matrix_source_vertex_count, record_matrix_block, true);
 }
 
 static VLEContextAgeAdjacencyPayloadSource *
 age_vle_context_begin_age_adjacency_payload_source_internal(
     VLE_local_context *vlelctx, const VLEContextSourceCursor *cursor,
-    const VLEMatrixFrontierCacheKey *matrix_key, bool record_matrix_block,
+    const VLEMatrixFrontierCacheKey *matrix_key,
+    const graphid *matrix_source_vertex_ids,
+    int64 matrix_source_vertex_count, bool record_matrix_block,
     bool defer_visible_scan)
 {
     bool found;
@@ -2746,6 +3076,8 @@ age_vle_context_begin_age_adjacency_payload_source_internal(
     Assert(vlelctx != NULL);
     Assert(cursor != NULL);
     Assert(cursor->source_kind == VLE_TRAVERSAL_SOURCE_AGE_ADJACENCY);
+    Assert(matrix_source_vertex_ids != NULL);
+    Assert(matrix_source_vertex_count > 0);
 
     if (!OidIsValid(cursor->index_oid))
         return NULL;
@@ -2755,6 +3087,8 @@ age_vle_context_begin_age_adjacency_payload_source_internal(
     source->index_oid = cursor->index_oid;
     source->terminal_label_id = cursor->terminal_label_id;
     source->outgoing = cursor->outgoing;
+    source->matrix_source_vertex_ids = matrix_source_vertex_ids;
+    source->matrix_source_vertex_count = matrix_source_vertex_count;
     source->terminal_property_filter_id =
         age_vle_context_cursor_targets_terminal_property_depth(vlelctx,
                                                                cursor) ?
@@ -2781,7 +3115,8 @@ age_vle_context_begin_age_adjacency_payload_source_internal(
             vlelctx->source_stats.matrix_frontier_block_sources +=
                 source->matrix_key.frontier_source_count;
         }
-        if (age_vle_context_matrix_frontier_cache_lookup(vlelctx, source))
+        if (age_vle_context_matrix_frontier_cache_lookup(vlelctx, source,
+                                                         cursor))
             return source;
     }
 
@@ -3149,7 +3484,12 @@ age_vle_context_prepare_age_adjacency_matrix_seed_entry(
             &vlelctx->root.matrix_frontier_cache, &source->matrix_key,
             &found);
         if (found)
-            age_vle_matrix_frontier_cache_discard(source->matrix_entry);
+            age_vle_matrix_frontier_cache_discard(
+                vlelctx->root.matrix_frontier_cache, source->matrix_entry);
+        age_vle_matrix_frontier_cache_set_sources(
+            vlelctx->root.matrix_frontier_cache, source->matrix_entry,
+            source->matrix_source_vertex_ids,
+            source->matrix_source_vertex_count);
         vlelctx->source_stats.matrix_frontier_cache_seeds++;
     }
 

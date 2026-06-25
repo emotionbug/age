@@ -117,6 +117,8 @@ typedef struct VLEContextRefreshInput
     bool matrix_frontier_eligible;
     int64 matrix_frontier_depth;
     int64 matrix_frontier_batch_size;
+    AgeVLEMatrixFrontierCursorPolicy matrix_frontier_out_policy;
+    AgeVLEMatrixFrontierCursorPolicy matrix_frontier_in_policy;
 } VLEContextRefreshInput;
 
 typedef struct VLETraversalRootDescriptor

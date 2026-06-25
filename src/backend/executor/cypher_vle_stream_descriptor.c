@@ -406,6 +406,114 @@ void read_age_vle_stream_edge_source(CustomScan *cscan,
         age_vle_stream_private_int64(
             descriptor,
             AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_REGROUP_PERCENT);
+    source->payload_input_matrix_compaction_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_COMPACTION_PERCENT);
+    source->payload_input_matrix_dense_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_DENSE_PERCENT);
+    source->payload_input_matrix_duplicate_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_DUPLICATE_PERCENT);
+    source->payload_input_matrix_compaction_pressure_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_COMPACTION_PRESSURE_PERCENT);
+    source->payload_input_matrix_residency_pressure_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_RESIDENCY_PRESSURE_PERCENT);
+    source->payload_input_matrix_replay_cutover_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_REPLAY_CUTOVER_PERCENT);
+    source->payload_input_matrix_prefetch_cutover_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_PREFETCH_CUTOVER_PERCENT);
+    source->payload_input_matrix_payload_coverage_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_PAYLOAD_COVERAGE_PERCENT);
+    source->payload_input_matrix_source_overlap_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_SOURCE_OVERLAP_PERCENT);
+    source->payload_input_matrix_reuse_proximity_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_PAYLOAD_INPUT_MATRIX_REUSE_PROXIMITY_PERCENT);
+    source->outgoing_matrix_cursor_policy.dense_percent =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_OUT_MATRIX_DENSE_PERCENT);
+    source->outgoing_matrix_cursor_policy.duplicate_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_OUT_MATRIX_DUPLICATE_PERCENT);
+    source->outgoing_matrix_cursor_policy.compaction_pressure_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_OUT_MATRIX_COMPACTION_PRESSURE_PERCENT);
+    source->outgoing_matrix_cursor_policy.residency_pressure_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_OUT_MATRIX_RESIDENCY_PRESSURE_PERCENT);
+    source->outgoing_matrix_cursor_policy.replay_percent =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_OUT_MATRIX_REPLAY_PERCENT);
+    source->outgoing_matrix_cursor_policy.prefetch_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_OUT_MATRIX_PREFETCH_PERCENT);
+    source->outgoing_matrix_cursor_policy.payload_coverage_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_OUT_MATRIX_PAYLOAD_COVERAGE_PERCENT);
+    source->outgoing_matrix_cursor_policy.source_overlap_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_OUT_MATRIX_SOURCE_OVERLAP_PERCENT);
+    source->outgoing_matrix_cursor_policy.reuse_proximity_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_OUT_MATRIX_REUSE_PROXIMITY_PERCENT);
+    source->incoming_matrix_cursor_policy.dense_percent =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_IN_MATRIX_DENSE_PERCENT);
+    source->incoming_matrix_cursor_policy.duplicate_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_IN_MATRIX_DUPLICATE_PERCENT);
+    source->incoming_matrix_cursor_policy.compaction_pressure_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_IN_MATRIX_COMPACTION_PRESSURE_PERCENT);
+    source->incoming_matrix_cursor_policy.residency_pressure_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_IN_MATRIX_RESIDENCY_PRESSURE_PERCENT);
+    source->incoming_matrix_cursor_policy.replay_percent =
+        age_vle_stream_private_int64(
+            descriptor, AGE_VLE_STREAM_EDGE_SOURCE_IN_MATRIX_REPLAY_PERCENT);
+    source->incoming_matrix_cursor_policy.prefetch_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_IN_MATRIX_PREFETCH_PERCENT);
+    source->incoming_matrix_cursor_policy.payload_coverage_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_IN_MATRIX_PAYLOAD_COVERAGE_PERCENT);
+    source->incoming_matrix_cursor_policy.source_overlap_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_IN_MATRIX_SOURCE_OVERLAP_PERCENT);
+    source->incoming_matrix_cursor_policy.reuse_proximity_percent =
+        age_vle_stream_private_int64(
+            descriptor,
+            AGE_VLE_STREAM_EDGE_SOURCE_IN_MATRIX_REUSE_PROXIMITY_PERCENT);
     source->payload_input_reason_id =
         (VLESourcePayloadFeedbackReason)age_vle_stream_private_int64(
             descriptor,

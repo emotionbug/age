@@ -174,9 +174,10 @@ static CustomPath *make_adjacency_match_partial_custom_path(
     RelOptInfo *rel, CustomPath *serial_path, int parallel_workers);
 static void set_adjacency_match_custom_private_descriptor(
     CustomPath *path, List *descriptor);
-static void add_adjacency_match_partial_gather_path(PlannerInfo *root,
-                                                    RelOptInfo *rel,
-                                                    CustomPath *partial_path);
+static Path *add_adjacency_match_partial_gather_path(PlannerInfo *root,
+                                                     RelOptInfo *rel,
+                                                     CustomPath *partial_path,
+                                                     double gathered_rows);
 static Const *find_endpoint_graphid_const(PlannerInfo *root,
                                           CypherAdjacencyMatchCandidate *candidate);
 static bool adjacency_match_bound_expr_uses_age_id(Node *node);
@@ -204,6 +205,12 @@ static AgeAdjacencyMatchValueKind adjacency_match_terminal_property_value_kind(
     const CypherAdjacencyMatchCandidate *candidate);
 static AgeAdjacencyMatchTerminalStrategy adjacency_match_terminal_source_strategy(
     const CypherAdjacencyMatchCandidate *candidate);
+static AgeAdjacencyMatchSourceHandoff adjacency_match_source_handoff_kind(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request);
+static void estimate_adjacency_match_source_handoff(
+    CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request);
 static int adjacency_match_terminal_prefetch_threshold(
     const CypherAdjacencyMatchCandidate *candidate,
     const AdjacencyMatchPayloadRequest *payload_request);
@@ -217,6 +224,9 @@ static int adjacency_match_index_solved_predicate_count(
     const AdjacencyMatchPayloadRequest *payload_request);
 static AgeAdjacencyMatchTerminalPrefetchReason
 adjacency_match_terminal_prefetch_reason_kind(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request);
+static Cost adjacency_match_property_source_build_cost(
     const CypherAdjacencyMatchCandidate *candidate,
     const AdjacencyMatchPayloadRequest *payload_request);
 static AgeGraphJoinConnectorKind adjacency_match_join_order_connector_kind(
@@ -247,7 +257,8 @@ static AgeGraphJoinLoweringInput make_adjacency_match_lowering_input(
     Relids path_required_outer);
 static void apply_adjacency_match_graph_join_parallel_properties(
     AgeGraphJoinCandidateTable *table, bool parallel_safe,
-    bool parallel_aware, int parallel_workers, Cost gather_cost);
+    bool parallel_aware, int parallel_workers, Cost gather_cost,
+    bool shared_state_required);
 static void apply_adjacency_match_graph_join_parallel_costs(
     AgeGraphJoinCandidateTable *table, double divisor, Cost gather_cost);
 static double adjacency_match_connector_scheduled_work(
@@ -1288,8 +1299,8 @@ static bool path_get_graph_join_rel_evidence(
         if (path->parent != NULL)
             evidence->provided_relids = path->parent->relids;
         evidence->parallel_safe = path->parallel_safe;
-        evidence->parallel_aware = path->parallel_aware;
-        evidence->parallel_workers = path->parallel_workers;
+        evidence->parallel_aware = gather_path->subpath->parallel_aware;
+        evidence->parallel_workers = gather_path->subpath->parallel_workers;
         evidence->order_preserving = path->pathkeys != NIL;
         evidence->physical_properties_known = true;
         age_graph_join_complete_path_evidence(path, evidence);
@@ -4904,6 +4915,18 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
     int64 payload_input_matrix_replay_source_percent = 0;
     int64 payload_input_matrix_run_block_percent = 0;
     int64 payload_input_matrix_regroup_percent = 0;
+    int64 payload_input_matrix_compaction_percent = 0;
+    int64 payload_input_matrix_dense_percent = 0;
+    int64 payload_input_matrix_duplicate_percent = 0;
+    int64 payload_input_matrix_compaction_pressure_percent = 0;
+    int64 payload_input_matrix_residency_pressure_percent = 0;
+    int64 payload_input_matrix_replay_cutover_percent = 0;
+    int64 payload_input_matrix_prefetch_cutover_percent = 0;
+    int64 payload_input_matrix_payload_coverage_percent = 0;
+    int64 payload_input_matrix_source_overlap_percent = 0;
+    int64 payload_input_matrix_reuse_proximity_percent = 0;
+    AgeVLEMatrixFrontierCursorPolicy outgoing_matrix_cursor_policy = {0};
+    AgeVLEMatrixFrontierCursorPolicy incoming_matrix_cursor_policy = {0};
     VLESourcePayloadFeedbackReason payload_input_reason_id =
         VLE_SOURCE_PAYLOAD_REASON_NONE;
     VLESourcePolicyClass payload_input_class_id =
@@ -5303,6 +5326,30 @@ static List *make_age_vle_stream_edge_source(List *graph, List *edge,
             cost_decision.payload_input_matrix_run_block_percent;
         payload_input_matrix_regroup_percent =
             cost_decision.payload_input_matrix_regroup_percent;
+        payload_input_matrix_compaction_percent =
+            cost_decision.payload_input_matrix_compaction_percent;
+        payload_input_matrix_dense_percent =
+            cost_decision.payload_input_matrix_dense_percent;
+        payload_input_matrix_duplicate_percent =
+            cost_decision.payload_input_matrix_duplicate_percent;
+        payload_input_matrix_compaction_pressure_percent =
+            cost_decision.payload_input_matrix_compaction_pressure_percent;
+        payload_input_matrix_residency_pressure_percent =
+            cost_decision.payload_input_matrix_residency_pressure_percent;
+        payload_input_matrix_replay_cutover_percent =
+            cost_decision.payload_input_matrix_replay_cutover_percent;
+        payload_input_matrix_prefetch_cutover_percent =
+            cost_decision.payload_input_matrix_prefetch_cutover_percent;
+        payload_input_matrix_payload_coverage_percent =
+            cost_decision.payload_input_matrix_payload_coverage_percent;
+        payload_input_matrix_source_overlap_percent =
+            cost_decision.payload_input_matrix_source_overlap_percent;
+        payload_input_matrix_reuse_proximity_percent =
+            cost_decision.payload_input_matrix_reuse_proximity_percent;
+        outgoing_matrix_cursor_policy =
+            cost_decision.outgoing_matrix_cursor_policy;
+        incoming_matrix_cursor_policy =
+            cost_decision.incoming_matrix_cursor_policy;
         payload_input_reason_id = cost_decision.payload_input_reason_id;
         payload_input_class_id = cost_decision.payload_input_class_id;
         payload_input_value_posting_source_kind =
@@ -5424,6 +5471,90 @@ build_descriptor:
                          make_int8_const(payload_input_matrix_run_block_percent));
     descriptor = lappend(descriptor,
                          make_int8_const(payload_input_matrix_regroup_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(payload_input_matrix_compaction_percent));
+    descriptor = lappend(descriptor,
+                         make_int8_const(payload_input_matrix_dense_percent));
+    descriptor = lappend(
+        descriptor, make_int8_const(payload_input_matrix_duplicate_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(payload_input_matrix_compaction_pressure_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(payload_input_matrix_residency_pressure_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(payload_input_matrix_replay_cutover_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(payload_input_matrix_prefetch_cutover_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(payload_input_matrix_payload_coverage_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(payload_input_matrix_source_overlap_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(payload_input_matrix_reuse_proximity_percent));
+    descriptor = lappend(
+        descriptor, make_int8_const(outgoing_matrix_cursor_policy.dense_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(outgoing_matrix_cursor_policy.duplicate_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(
+            outgoing_matrix_cursor_policy.compaction_pressure_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(
+            outgoing_matrix_cursor_policy.residency_pressure_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(outgoing_matrix_cursor_policy.replay_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(outgoing_matrix_cursor_policy.prefetch_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(outgoing_matrix_cursor_policy.payload_coverage_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(outgoing_matrix_cursor_policy.source_overlap_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(outgoing_matrix_cursor_policy.reuse_proximity_percent));
+    descriptor = lappend(
+        descriptor, make_int8_const(incoming_matrix_cursor_policy.dense_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(incoming_matrix_cursor_policy.duplicate_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(
+            incoming_matrix_cursor_policy.compaction_pressure_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(
+            incoming_matrix_cursor_policy.residency_pressure_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(incoming_matrix_cursor_policy.replay_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(incoming_matrix_cursor_policy.prefetch_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(incoming_matrix_cursor_policy.payload_coverage_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(incoming_matrix_cursor_policy.source_overlap_percent));
+    descriptor = lappend(
+        descriptor,
+        make_int8_const(incoming_matrix_cursor_policy.reuse_proximity_percent));
     descriptor = lappend(
         descriptor, make_int8_const((int64)payload_input_reason_id));
     descriptor = lappend(descriptor,
@@ -8024,6 +8155,7 @@ static void add_adjacency_match_custom_path(
     if (can_add_partial)
     {
         CustomPath *partial_path;
+        Path *gather_path;
         AgeGraphJoinCandidateTable *partial_graph_join_table;
         AgeGraphJoinCandidate *partial_graph_join_candidate;
         Cost partial_gather_cost;
@@ -8041,7 +8173,8 @@ static void add_adjacency_match_custom_path(
             partial_gather_cost);
         apply_adjacency_match_graph_join_parallel_properties(
             partial_graph_join_table, true, true, partial_workers,
-            partial_gather_cost);
+            partial_gather_cost,
+            candidate->has_right_property_predicate);
         partial_graph_join_candidate = age_graph_join_table_select_cheapest(
             partial_graph_join_table);
         Assert(partial_graph_join_candidate != NULL);
@@ -8051,9 +8184,20 @@ static void add_adjacency_match_custom_path(
                                             partial_graph_join_table,
                                             partial_graph_join_candidate));
         add_partial_path(rel, (Path *)partial_path);
-        add_adjacency_match_partial_gather_path(root, rel, partial_path);
+        gather_path = add_adjacency_match_partial_gather_path(
+            root, rel, partial_path, cp->path.rows);
+        if (gather_path != NULL &&
+            candidate->has_right_property_predicate &&
+            gather_path->total_cost < cp->path.total_cost)
+        {
+            /* Keep serial replay as fallback without hiding the cheaper DSM plan. */
+            cp->path.disabled_nodes++;
+        }
         age_graph_join_register_rel_lowering_table(
             root, rel, &partial_path->path, partial_graph_join_table);
+        if (gather_path != NULL)
+            age_graph_join_register_rel_lowering_table(
+                root, rel, gather_path, partial_graph_join_table);
     }
 
     ereport(DEBUG2,
@@ -8092,26 +8236,36 @@ static bool adjacency_match_can_add_partial_path(
         return false;
     if (payload_request->fetch_properties)
         return false;
-    if (candidate->has_right_property_predicate ||
-        candidate->has_edge_property_predicate ||
+    if (candidate->estimated_source_fanout < 2.0)
+        return false;
+    if (candidate->has_edge_property_predicate ||
         candidate->has_edge_variable_projection)
     {
         return false;
     }
-    if (candidate->estimated_terminal_fanout < 2.0)
+    if (candidate->has_right_property_predicate &&
+        (candidate->right_property_value_kind_id !=
+             AGE_ADJACENCY_MATCH_VALUE_CONST ||
+         (candidate->source_handoff_kind_id !=
+              AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_PROPERTY_SET &&
+          candidate->source_handoff_kind_id !=
+              AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_LABEL_PROPERTY_INTERSECTION) ||
+         candidate->estimated_property_source_matches <= 0 ||
+         candidate->estimated_property_source_matches > 65536.0))
+    {
         return false;
-
-    if (candidate->estimated_main_blocks > 0)
-        index_pages = Max(1.0, candidate->estimated_main_blocks);
+    }
+    if (candidate->estimated_source_blocks > 0)
+        index_pages = Max(1.0, candidate->estimated_source_blocks);
     else
         index_pages =
-            Max(1.0, ceil(candidate->estimated_terminal_fanout / 128.0));
+            Max(1.0, ceil(candidate->estimated_source_fanout / 128.0));
     if (parallel_workers != NULL)
     {
         *parallel_workers = compute_parallel_worker(
             rel, -1, index_pages, max_parallel_workers_per_gather);
         if (*parallel_workers <= 0 &&
-            candidate->estimated_terminal_fanout >= 2.0)
+            candidate->estimated_source_fanout >= 2.0)
         {
             *parallel_workers = 1;
         }
@@ -8171,23 +8325,33 @@ static void set_adjacency_match_custom_private_descriptor(
     lfirst(cell) = descriptor;
 }
 
-static void add_adjacency_match_partial_gather_path(PlannerInfo *root,
-                                                    RelOptInfo *rel,
-                                                    CustomPath *partial_path)
+static Path *add_adjacency_match_partial_gather_path(PlannerInfo *root,
+                                                     RelOptInfo *rel,
+                                                     CustomPath *partial_path,
+                                                     double gathered_rows)
 {
     Path *gather_path;
+    ListCell *lc;
 
     if (root == NULL ||
         rel == NULL ||
         partial_path == NULL)
     {
-        return;
+        return NULL;
     }
 
     gather_path = (Path *)create_gather_path(root, rel,
                                              (Path *)partial_path,
                                              rel->reltarget, NULL, NULL);
+    gather_path->rows = clamp_row_est(gathered_rows);
     add_path(rel, gather_path);
+    foreach(lc, rel->pathlist)
+    {
+        if (lfirst(lc) == gather_path)
+            return gather_path;
+    }
+
+    return NULL;
 }
 
 static Const *find_endpoint_graphid_const(PlannerInfo *root,
@@ -8305,6 +8469,7 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
     double pages;
     double estimated_payload_rows;
     double page_probe_cost;
+    Cost property_source_build_cost;
     double heap_recheck_cost;
     double right_property_recheck_cost;
     double cpu_cost;
@@ -8403,10 +8568,20 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
             property_selectivity.selectivity;
         candidate->estimated_composite_selectivity_source_kind =
             property_selectivity.source_kind;
+        candidate->estimated_property_source_matches = clamp_row_est(
+            Max(1.0,
+                get_vle_relation_estimated_tuples(
+                    candidate->right_property_index_oid) *
+                property_selectivity.selectivity));
         rows = clamp_row_est(Max(1.0, rows * property_selectivity.selectivity));
         composite_fanout = rows;
     }
+    else
+    {
+        candidate->estimated_property_source_matches = 0;
+    }
     candidate->estimated_composite_fanout = composite_fanout;
+    estimate_adjacency_match_source_handoff(candidate, payload_request);
     estimated_payload_rows = rows;
     if (payload_request != NULL)
         edge_payload_required = payload_request->fetch_properties;
@@ -8426,7 +8601,11 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
      * the endpoint posting run. Charge a bounded page probe plus heap
      * visibility rechecks for the estimated payload rows.
      */
+    if (candidate->estimated_source_blocks > 0)
+        pages = Min(pages, candidate->estimated_source_blocks);
     page_probe_cost = Min(pages, 4.0) * local_random_page_cost * 0.03;
+    property_source_build_cost = adjacency_match_property_source_build_cost(
+        candidate, payload_request);
     heap_recheck_cost = estimated_payload_rows * local_random_page_cost *
         (edge_payload_required ? 0.035 : 0.012);
     right_property_recheck_cost = 0;
@@ -8444,7 +8623,7 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
         index_solved_credit;
 
     cp->path.rows = rows;
-    cp->path.startup_cost = page_probe_cost;
+    cp->path.startup_cost = page_probe_cost + property_source_build_cost;
     cp->path.total_cost = cp->path.startup_cost + heap_recheck_cost +
         right_property_recheck_cost + cpu_cost;
 
@@ -8510,6 +8689,79 @@ adjacency_match_terminal_source_strategy(
     return AGE_ADJACENCY_MATCH_TERMINAL_STRATEGY_NONE;
 }
 
+static AgeAdjacencyMatchSourceHandoff
+adjacency_match_source_handoff_kind(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request)
+{
+    bool label_slice;
+    bool property_set;
+
+    Assert(candidate != NULL);
+
+    label_slice = candidate->has_right_label_constraint &&
+        label_id_is_valid(candidate->right_label_id);
+    property_set = adjacency_match_plans_terminal_property_prefetch(
+        candidate, payload_request);
+
+    if (label_slice && property_set)
+        return AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_LABEL_PROPERTY_INTERSECTION;
+    if (property_set)
+        return AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_PROPERTY_SET;
+    if (label_slice)
+        return AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_LABEL_SLICE;
+    if (candidate->has_right_property_predicate)
+        return AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_RECHECK;
+
+    return AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_POSTING_RUN;
+}
+
+static void
+estimate_adjacency_match_source_handoff(
+    CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request)
+{
+    double source_ratio;
+
+    Assert(candidate != NULL);
+
+    candidate->source_handoff_kind_id =
+        adjacency_match_source_handoff_kind(candidate, payload_request);
+    if (candidate->source_handoff_kind_id ==
+            AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_PROPERTY_SET ||
+        candidate->source_handoff_kind_id ==
+            AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_LABEL_PROPERTY_INTERSECTION)
+    {
+        candidate->estimated_source_fanout =
+            candidate->estimated_composite_fanout;
+    }
+    else if (candidate->source_handoff_kind_id ==
+             AGE_ADJACENCY_MATCH_SOURCE_HANDOFF_LABEL_SLICE)
+    {
+        candidate->estimated_source_fanout =
+            candidate->estimated_terminal_fanout;
+    }
+    else
+    {
+        candidate->estimated_source_fanout =
+            candidate->estimated_endpoint_fanout;
+    }
+
+    candidate->estimated_source_fanout =
+        Max(candidate->estimated_source_fanout, 1.0);
+    if (candidate->estimated_main_blocks <= 0 ||
+        candidate->estimated_endpoint_fanout <= 0)
+    {
+        candidate->estimated_source_blocks = 0;
+        return;
+    }
+
+    source_ratio = candidate->estimated_source_fanout /
+        candidate->estimated_endpoint_fanout;
+    candidate->estimated_source_blocks = Max(
+        1.0, ceil(candidate->estimated_main_blocks * Min(source_ratio, 1.0)));
+}
+
 static int
 adjacency_match_terminal_prefetch_threshold(
     const CypherAdjacencyMatchCandidate *candidate,
@@ -8552,6 +8804,23 @@ adjacency_match_terminal_prefetch_reason_kind(
         return AGE_ADJACENCY_MATCH_PREFETCH_REASON_LARGE_TERMINAL_FANOUT;
 
     return AGE_ADJACENCY_MATCH_PREFETCH_REASON_SMALL_TERMINAL_FANOUT;
+}
+
+static Cost
+adjacency_match_property_source_build_cost(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request)
+{
+    if (candidate == NULL ||
+        !adjacency_match_plans_terminal_property_prefetch(candidate,
+                                                          payload_request) ||
+        candidate->estimated_property_source_matches <= 0)
+    {
+        return 0;
+    }
+
+    return candidate->estimated_property_source_matches *
+        (cpu_index_tuple_cost + cpu_operator_cost);
 }
 
 static AgeGraphJoinConnectorKind
@@ -8644,6 +8913,7 @@ static AgeGraphJoinLoweringArtifact *make_adjacency_match_lowering_artifact(
     Cost scheduled_cost;
     double rows;
     int output_width;
+    Cost source_build_cost;
 
     adjacency_table = graph_pattern_registry_typed_entry_table(
         candidate->graph_pattern_key, AGE_GRAPH_JOIN_SOURCE_ADJACENCY_EXPANSION,
@@ -8653,8 +8923,10 @@ static AgeGraphJoinLoweringArtifact *make_adjacency_match_lowering_artifact(
     lowering_input = make_adjacency_match_lowering_input(
         rel, candidate, path_required_outer);
     scheduled_work = adjacency_match_connector_scheduled_work(candidate);
+    source_build_cost = adjacency_match_property_source_build_cost(
+        candidate, payload_request);
     scheduled_cost = adjacency_match_connector_scheduled_cost(
-        candidate, payload_request, 0);
+        candidate, payload_request, source_build_cost);
     rows = clamp_row_est(Max(scheduled_work, 1.0));
     output_width = lowering_input.output_width;
 
@@ -8683,8 +8955,8 @@ static AgeGraphJoinLoweringArtifact *make_adjacency_match_lowering_artifact(
         request.required_outer = lowering_input.required_outer;
         request.provided_relids = lowering_input.provided_relids;
         request.rows = rows;
-        request.startup_cost = 0;
-        request.total_cost =
+        request.startup_cost = source_build_cost;
+        request.total_cost = scheduled_cost +
             Max(candidate->estimated_composite_fanout, 1.0) *
             cpu_operator_cost * (payload_request != NULL &&
                                  payload_request->fetch_properties ?
@@ -8714,7 +8986,7 @@ static AgeGraphJoinLoweringArtifact *make_adjacency_match_lowering_artifact(
         request.required_outer = lowering_input.required_outer;
         request.provided_relids = lowering_input.provided_relids;
         request.rows = rows;
-        request.startup_cost = 0;
+        request.startup_cost = source_build_cost;
         request.total_cost = scheduled_cost +
             Max(scheduled_work, 1.0) * cpu_tuple_cost;
         request.output_width = output_width;
@@ -8754,7 +9026,7 @@ static AgeGraphJoinLoweringArtifact *make_adjacency_match_lowering_artifact(
         request.required_outer = lowering_input.required_outer;
         request.provided_relids = lowering_input.provided_relids;
         request.rows = rows;
-        request.startup_cost = 0;
+        request.startup_cost = source_build_cost;
         request.total_cost = scheduled_cost;
         request.output_width = output_width;
         request.parallel_safe = false;
@@ -8839,7 +9111,8 @@ static AgeGraphJoinLoweringInput make_adjacency_match_lowering_input(
 
 static void apply_adjacency_match_graph_join_parallel_properties(
     AgeGraphJoinCandidateTable *table, bool parallel_safe,
-    bool parallel_aware, int parallel_workers, Cost gather_cost)
+    bool parallel_aware, int parallel_workers, Cost gather_cost,
+    bool shared_state_required)
 {
     ListCell *lc;
 
@@ -8857,6 +9130,8 @@ static void apply_adjacency_match_graph_join_parallel_properties(
             candidate->component.parallel_aware ? parallel_workers : 0;
         candidate->component.gather_cost =
             candidate->component.parallel_safe ? gather_cost : 0;
+        candidate->component.shared_state_required =
+            candidate->component.parallel_aware && shared_state_required;
     }
 }
 
@@ -9036,6 +9311,29 @@ static List *make_adjacency_match_descriptor(
                          makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
                                    Int64GetDatum((int64)(
                                        candidate->estimated_composite_fanout +
+                                       0.5)),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum((int32)
+                                       candidate->source_handoff_kind_id),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
+                                   Int64GetDatum((int64)(
+                                       candidate->estimated_source_fanout +
+                                       0.5)),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
+                                   Int64GetDatum((int64)(
+                                       candidate->estimated_source_blocks +
+                                       0.5)),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
+                                   Int64GetDatum((int64)(
+                                       candidate->estimated_property_source_matches +
                                        0.5)),
                                    false, true));
     descriptor = lappend(descriptor,

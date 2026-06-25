@@ -30,29 +30,24 @@ typedef struct VLEMatrixFrontierPrefetchCollector
     graphid *source_vertex_ids;
     int64 source_count;
     int64 source_capacity;
-    int64 source_path_length;
+    int64 frontier_path_length;
+    int64 handoff_count;
+    VLETraversalCompactionEvidence compaction_evidence;
+    VLETraversalCompactionEvidence last_compaction_evidence;
+    VLETraversalFrontierPressureEvidence pressure_evidence;
+    VLETraversalFrontierPressureEvidence pending_pressure_evidence;
+    bool has_compaction_evidence;
     bool enabled;
 } VLEMatrixFrontierPrefetchCollector;
-
-typedef struct VLEAcceptedCandidateSpan
-{
-    const VLETraversalCandidate *candidates;
-    const bool *accepted;
-    int candidate_count;
-} VLEAcceptedCandidateSpan;
 
 extern void age_vle_matrix_frontier_prefetch_collector_init(
     VLEMatrixFrontierPrefetchCollector *collector,
     VLE_local_context *vlelctx, const VLEContextSourceCursor *source_cursors,
     int64 source_cursor_count);
-extern void age_vle_matrix_frontier_prefetch_collector_add(
+extern void age_vle_matrix_frontier_prefetch_collector_add_batch(
     VLEMatrixFrontierPrefetchCollector *collector,
     VLE_local_context *vlelctx,
-    const VLETraversalCandidate *candidate);
-extern void age_vle_matrix_frontier_prefetch_collector_add_span(
-    VLEMatrixFrontierPrefetchCollector *collector,
-    VLE_local_context *vlelctx,
-    const VLEAcceptedCandidateSpan *span);
+    const VLETraversalFrontierBatch *frontier_batch);
 extern void age_vle_matrix_frontier_prefetch_collector_flush(
     VLEMatrixFrontierPrefetchCollector *collector,
     VLE_local_context *vlelctx);

@@ -58,6 +58,56 @@ typedef enum VLETraversalSourceKind
     VLE_TRAVERSAL_SOURCE_ENDPOINT_BTREE
 } VLETraversalSourceKind;
 
+typedef enum AgeVLEMatrixFrontierDirection
+{
+    AGE_VLE_MATRIX_FRONTIER_OUT = 0,
+    AGE_VLE_MATRIX_FRONTIER_IN,
+    AGE_VLE_MATRIX_FRONTIER_DIRECTION_COUNT
+} AgeVLEMatrixFrontierDirection;
+
+typedef struct AgeVLEMatrixFrontierPressureVector
+{
+    int64 handoff_batches;
+    int64 handoff_candidates;
+    int64 handoff_accepted;
+    int64 handoff_unique_sources;
+    int64 handoff_max_unique_sources;
+    int64 handoff_work_closed_segment_delta;
+    int64 handoff_compactable_frame_delta;
+    int64 handoff_compacted_frame_delta;
+    int64 prefetch_runs;
+    int64 prefetch_cursors;
+    int64 phase_cursors;
+    int64 replay_cursors;
+    int64 raw_cursors;
+    int64 scalar_cursors;
+    int64 cache_probes;
+    int64 cache_requested_sources;
+    int64 cache_matching_sources;
+    int64 cache_entry_sources;
+    int64 cache_payload_span;
+    int64 cache_matching_payload_span;
+    int64 cache_reuse_distance;
+    int64 cache_replay_work;
+    int64 cache_raw_work;
+    int64 cache_scalar_work;
+    int64 cache_replay_selections;
+    int64 cache_fallback_selections;
+} AgeVLEMatrixFrontierPressureVector;
+
+typedef struct AgeVLEMatrixFrontierCursorPolicy
+{
+    int64 dense_percent;
+    int64 duplicate_percent;
+    int64 compaction_pressure_percent;
+    int64 residency_pressure_percent;
+    int64 replay_percent;
+    int64 prefetch_percent;
+    int64 payload_coverage_percent;
+    int64 source_overlap_percent;
+    int64 reuse_proximity_percent;
+} AgeVLEMatrixFrontierCursorPolicy;
+
 typedef struct AgeVLEInput
 {
     int nargs;
@@ -124,6 +174,8 @@ typedef struct AgeVLEInput
     bool matrix_frontier_eligible;
     int64 matrix_frontier_depth;
     int64 matrix_frontier_batch_size;
+    AgeVLEMatrixFrontierCursorPolicy matrix_frontier_out_policy;
+    AgeVLEMatrixFrontierCursorPolicy matrix_frontier_in_policy;
 } AgeVLEInput;
 
 typedef struct AgeVLEInputEdgePrototype
@@ -219,8 +271,32 @@ typedef struct AgeVLESourceStats
     int64 matrix_frontier_cache_replays;
     int64 matrix_frontier_cache_empty_hits;
     int64 matrix_frontier_cache_empty_marks;
+    int64 matrix_frontier_cache_probe_scans;
+    int64 matrix_frontier_cache_probe_candidates;
+    int64 matrix_frontier_cache_probe_hits;
+    int64 matrix_frontier_cache_evictions;
+    int64 matrix_frontier_cache_eviction_work;
+    int64 matrix_frontier_cache_cold_evictions;
     int64 matrix_frontier_block_keys;
     int64 matrix_frontier_block_sources;
+    int64 matrix_frontier_handoff_batches;
+    int64 matrix_frontier_handoff_candidates;
+    int64 matrix_frontier_handoff_accepted;
+    int64 matrix_frontier_handoff_unique_sources;
+    int64 matrix_frontier_handoff_max_unique_sources;
+    int64 matrix_frontier_handoff_frames;
+    int64 matrix_frontier_handoff_work_items;
+    int64 matrix_frontier_handoff_work_closed_segment_delta;
+    int64 matrix_frontier_handoff_compactable_frame_delta;
+    int64 matrix_frontier_handoff_compacted_frame_delta;
+    int64 matrix_frontier_handoff_arena_segments;
+    int64 matrix_frontier_handoff_work_closed_segments;
+    int64 matrix_frontier_handoff_compactable_candidates;
+    int64 matrix_frontier_handoff_compactable_frames;
+    int64 matrix_frontier_handoff_compacted_segments;
+    int64 matrix_frontier_handoff_compacted_frames;
+    AgeVLEMatrixFrontierPressureVector
+        matrix_frontier_pressure[AGE_VLE_MATRIX_FRONTIER_DIRECTION_COUNT];
     int64 matrix_frontier_source_runs;
     int64 matrix_frontier_source_run_sources;
     int64 matrix_frontier_source_run_max;

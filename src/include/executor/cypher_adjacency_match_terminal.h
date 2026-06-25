@@ -75,6 +75,9 @@ extern bool age_adjacency_match_terminal_property_prefilter_matches(
 extern bool age_adjacency_match_terminal_property_prefilter_set(
     const AgeAdjacencyMatchTerminalPropertyLookup *lookup,
     AgeAdjacencyVertexSetFilter *filter);
+extern int64 age_adjacency_match_terminal_property_copy_prefilter_ids(
+    const AgeAdjacencyMatchTerminalPropertyLookup *lookup,
+    graphid *vertex_ids, int64 capacity);
 extern AgeAdjacencyMatchTerminalPropertyMode
 age_adjacency_match_terminal_property_mode_id(
     const AgeAdjacencyMatchTerminalPropertyLookup *lookup);

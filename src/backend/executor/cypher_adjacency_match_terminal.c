@@ -365,6 +365,26 @@ bool age_adjacency_match_terminal_property_prefilter_set(
     return true;
 }
 
+int64 age_adjacency_match_terminal_property_copy_prefilter_ids(
+    const AgeAdjacencyMatchTerminalPropertyLookup *lookup,
+    graphid *vertex_ids, int64 capacity)
+{
+    if (!age_adjacency_match_terminal_property_prefilter_active(lookup))
+        return -1;
+    if (lookup->property_index_vertex_count > capacity)
+        return -lookup->property_index_vertex_count;
+    if (lookup->property_index_vertex_count > 0 && vertex_ids == NULL)
+        return -lookup->property_index_vertex_count;
+
+    if (lookup->property_index_vertex_count > 0)
+    {
+        memcpy(vertex_ids, lookup->property_index_vertex_ids,
+               sizeof(graphid) * lookup->property_index_vertex_count);
+    }
+
+    return lookup->property_index_vertex_count;
+}
+
 AgeAdjacencyMatchTerminalPropertyMode
 age_adjacency_match_terminal_property_mode_id(
     const AgeAdjacencyMatchTerminalPropertyLookup *lookup)

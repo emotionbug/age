@@ -64,12 +64,14 @@ typedef struct VLEPackedAdjacencyCandidateValidation
 {
     VLECandidateGraphAccess graph_access;
     const VLEEdgePropertyMatchContext *match_context;
+    int64 target_path_length;
 } VLEPackedAdjacencyCandidateValidation;
 
 typedef struct VLEEndpointIndexCandidateValidation
 {
     VLECandidateGraphAccess graph_access;
     VLECandidateSourceIdentity source_identity;
+    int64 target_path_length;
 } VLEEndpointIndexCandidateValidation;
 
 typedef struct VLEAgeAdjacencyScanState
@@ -245,13 +247,15 @@ static bool endpoint_index_source_scan_next_candidate(
 static bool init_packed_adjacency_source_scan(
     VLEPackedAdjacencySourceScan *scan, VLE_local_context *vlelctx,
     VLEContextPackedAdjacencySource *packed_source,
-    const VLEEdgePropertyMatchContext *match_context);
+    const VLEEdgePropertyMatchContext *match_context,
+    int64 target_path_length);
 static bool packed_adjacency_source_scan_next_candidate(
     VLECandidateSource *source, VLETraversalCandidate *candidate);
 static void init_packed_adjacency_candidate_validation(
     VLEPackedAdjacencyCandidateValidation *validation,
     VLE_local_context *vlelctx,
-    const VLEEdgePropertyMatchContext *match_context);
+    const VLEEdgePropertyMatchContext *match_context,
+    int64 target_path_length);
 static void finish_packed_adjacency_source_scan(
     VLECandidateSource *source);
 static bool init_packed_adjacency_candidate(
@@ -507,7 +511,8 @@ static void push_candidates_from_packed_adjacency(
         return;
 
     init_packed_adjacency_source_scan(
-        &packed_scan, vlelctx, packed_context_source, match_context);
+        &packed_scan, vlelctx, packed_context_source, match_context,
+        run->source_path_length + 1);
     init_candidate_source(&packed_source, &packed_scan,
                           packed_adjacency_source_scan_next_candidate,
                           finish_packed_adjacency_source_scan,
@@ -560,14 +565,16 @@ static int64 push_candidates_from_source(
 
     while (source->next_candidate(source, &candidate))
     {
+        VLETraversalFrontierBatch frontier_batch;
+
         yielded++;
         age_vle_context_record_source_candidate(vlelctx, source->stats_kind);
         if (age_vle_context_push_candidate_if_matched(
-                vlelctx, &candidate, source->trace_name))
+                vlelctx, &candidate, source->trace_name, &frontier_batch))
         {
             age_vle_context_record_source_push(vlelctx);
-            age_vle_matrix_frontier_prefetch_collector_add(prefetch, vlelctx,
-                                                           &candidate);
+            age_vle_matrix_frontier_prefetch_collector_add_batch(
+                prefetch, vlelctx, &frontier_batch);
         }
         if (source->drain_buffered != NULL)
             yielded += source->drain_buffered(source, vlelctx, prefetch);
@@ -1028,7 +1035,7 @@ static int64 age_adjacency_source_scan_drain_buffered_candidates(
 
     if (scan->candidate_buffer_index < scan->candidate_buffer_count)
     {
-        VLEAcceptedCandidateSpan accepted_span;
+        VLETraversalFrontierBatch frontier_batch;
         int batch_start;
         int batch_count;
         int64 pushed_count;
@@ -1037,17 +1044,14 @@ static int64 age_adjacency_source_scan_drain_buffered_candidates(
         batch_count = scan->candidate_buffer_count - batch_start;
         pushed_count = age_vle_context_push_candidate_batch_if_matched(
             vlelctx, &scan->candidate_buffer[batch_start], batch_count,
-            source->trace_name, scan->candidate_pushed);
+            source->trace_name, scan->candidate_pushed, &frontier_batch);
         yielded += batch_count;
         age_vle_context_record_source_candidate_batch(
             vlelctx, source->stats_kind, batch_count);
         age_vle_context_record_source_push_batch(vlelctx, pushed_count);
 
-        accepted_span.candidates = &scan->candidate_buffer[batch_start];
-        accepted_span.accepted = scan->candidate_pushed;
-        accepted_span.candidate_count = batch_count;
-        age_vle_matrix_frontier_prefetch_collector_add_span(
-            prefetch, vlelctx, &accepted_span);
+        age_vle_matrix_frontier_prefetch_collector_add_batch(
+            prefetch, vlelctx, &frontier_batch);
     }
 
     scan->candidate_buffer_index = 0;
@@ -1254,6 +1258,8 @@ static void age_adjacency_source_scan_fill_local_candidate_subrun(
         candidate.edge_id = edge_id;
         candidate.edge_index = age_vle_context_get_or_create_local_edge_index(
             scan->state.vlelctx, edge_id);
+        candidate.path_length =
+            materialization->source_cursor->target_path_length;
         candidate.next_vertex_id = next_vertex_id;
         if (materialization->next_vertex_entry_required)
         {
@@ -1362,6 +1368,7 @@ static void init_endpoint_index_candidate_validation(
     init_candidate_graph_access(&validation->graph_access, vlelctx);
     init_candidate_source_identity(&validation->source_identity,
                                    source_cursor);
+    validation->target_path_length = source_cursor->target_path_length;
 }
 
 static bool endpoint_index_source_scan_next_candidate(
@@ -1422,6 +1429,7 @@ static bool endpoint_index_source_scan_next_candidate(
 
         candidate->edge_id = edge_id;
         candidate->edge_index = edge_index;
+        candidate->path_length = validation->target_path_length;
         candidate->next_vertex_id = next_vertex_id;
         candidate->next_vertex_entry = next_vertex_entry;
         age_vle_context_init_candidate_match_result(&match_result,
@@ -1436,17 +1444,20 @@ static bool endpoint_index_source_scan_next_candidate(
 static bool init_packed_adjacency_source_scan(
     VLEPackedAdjacencySourceScan *scan, VLE_local_context *vlelctx,
     VLEContextPackedAdjacencySource *packed_source,
-    const VLEEdgePropertyMatchContext *match_context)
+    const VLEEdgePropertyMatchContext *match_context,
+    int64 target_path_length)
 {
     Assert(scan != NULL);
     Assert(vlelctx != NULL);
     Assert(packed_source != NULL);
     Assert(match_context != NULL);
+    Assert(target_path_length > 0);
 
     memset(scan, 0, sizeof(*scan));
     scan->packed_source = packed_source;
     init_packed_adjacency_candidate_validation(&scan->validation, vlelctx,
-                                               match_context);
+                                               match_context,
+                                               target_path_length);
     scan->vlelctx = vlelctx;
 
     return true;
@@ -1501,14 +1512,17 @@ static void finish_packed_adjacency_source_scan(
 static void init_packed_adjacency_candidate_validation(
     VLEPackedAdjacencyCandidateValidation *validation,
     VLE_local_context *vlelctx,
-    const VLEEdgePropertyMatchContext *match_context)
+    const VLEEdgePropertyMatchContext *match_context,
+    int64 target_path_length)
 {
     Assert(validation != NULL);
     Assert(vlelctx != NULL);
     Assert(match_context != NULL);
+    Assert(target_path_length > 0);
 
     init_candidate_graph_access(&validation->graph_access, vlelctx);
     validation->match_context = match_context;
+    validation->target_path_length = target_path_length;
 }
 
 static bool init_packed_adjacency_candidate(
@@ -1537,6 +1551,7 @@ static bool init_packed_adjacency_candidate(
 
     candidate->edge_id = adj_entry->edge_id;
     candidate->edge_index = adj_entry->edge_index;
+    candidate->path_length = validation->target_path_length;
     candidate->next_vertex_id = adj_entry->next_vertex_id;
     candidate->next_vertex_entry =
         validation->graph_access.carry_frame_vertex_entry ?
@@ -1637,6 +1652,8 @@ static bool init_age_adjacency_payload_candidate(
 
     candidate->edge_id = edge_id;
     candidate->edge_index = edge_index;
+    candidate->path_length =
+        materialization->source_cursor->target_path_length;
     candidate->next_vertex_id = next_vertex_id;
     candidate->next_vertex_entry =
         materialization->next_vertex_entry_required ? next_vertex_entry : NULL;
@@ -1670,6 +1687,8 @@ static bool init_age_adjacency_local_payload_candidate(
     candidate->edge_id = edge_id;
     candidate->edge_index =
         age_vle_context_get_or_create_local_edge_index(vlelctx, edge_id);
+    candidate->path_length =
+        materialization->source_cursor->target_path_length;
     candidate->next_vertex_id = next_vertex_id;
     candidate->next_vertex_entry =
         materialization->next_vertex_entry_required ?

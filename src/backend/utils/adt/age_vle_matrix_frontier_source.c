@@ -323,6 +323,7 @@ static void age_vle_matrix_frontier_source_block_prepare_run(
     int64 run_start;
     int64 run_end;
     int64 run_count;
+    int64 i;
 
     Assert(block != NULL);
     Assert(block->vlelctx != NULL);
@@ -343,6 +344,22 @@ static void age_vle_matrix_frontier_source_block_prepare_run(
     block->run_end_index = run_end;
     block->matrix_key_counted = false;
     run_count = run_end - run_start;
+    if (block->matrix_source_vertex_capacity < run_count)
+    {
+        if (block->matrix_source_vertex_ids == NULL)
+            block->matrix_source_vertex_ids = palloc_array(graphid,
+                                                           run_count);
+        else
+            block->matrix_source_vertex_ids = repalloc_array(
+                block->matrix_source_vertex_ids, graphid, run_count);
+        block->matrix_source_vertex_capacity = run_count;
+    }
+    block->matrix_source_vertex_count = run_count;
+    for (i = 0; i < run_count; i++)
+    {
+        block->matrix_source_vertex_ids[i] =
+            block->cursor_order[run_start + i]->source_vertex_id;
+    }
     block->matrix_key_valid =
         age_vle_context_init_matrix_frontier_cursor_array_key(
             block->vlelctx, &block->cursor_order[run_start], run_count,
@@ -1505,7 +1522,9 @@ static bool age_vle_matrix_frontier_source_block_drain_run(
         record_matrix_block =
             block->matrix_key_valid && !block->matrix_key_counted;
         source = age_vle_context_begin_age_adjacency_payload_source_batch(
-            block->vlelctx, cursor, &block->matrix_key, record_matrix_block);
+            block->vlelctx, cursor, &block->matrix_key,
+            block->matrix_source_vertex_ids,
+            block->matrix_source_vertex_count, record_matrix_block);
         if (source == NULL)
             continue;
 
@@ -1562,6 +1581,12 @@ static bool age_vle_matrix_frontier_source_block_drain_run(
         age_vle_context_record_matrix_frontier_source_run_prefiltered_keys(
             block->vlelctx, block->raw_prefiltered_source_count);
     }
+    age_vle_context_record_matrix_frontier_cursor_phases(
+        block->vlelctx, first_cursor->outgoing, run_count,
+        matrix_replay_state != NULL ?
+        matrix_replay_state->matrix_replay_input_count : 0,
+        block->raw_source_count + block->raw_prefiltered_source_count,
+        block->cursor_input_heap_count);
 
     block->cursor_index = block->run_end_index;
     block->run_batch_active = block->run_source_count > 0;
@@ -1910,11 +1935,15 @@ void age_vle_matrix_frontier_source_block_end(
     pfree_if_not_null(block->raw_batch_items);
     pfree_if_not_null(block->raw_keys);
     pfree_if_not_null(block->raw_estimates);
+    pfree_if_not_null(block->matrix_source_vertex_ids);
     block->cursor_order = NULL;
     block->run_sources = NULL;
     block->run_inputs = NULL;
     block->raw_batch_items = NULL;
     block->raw_keys = NULL;
     block->raw_estimates = NULL;
+    block->matrix_source_vertex_ids = NULL;
+    block->matrix_source_vertex_count = 0;
+    block->matrix_source_vertex_capacity = 0;
     block->raw_batch_item_capacity = 0;
 }

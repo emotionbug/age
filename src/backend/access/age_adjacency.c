@@ -39,6 +39,7 @@
 #include "nodes/pathnodes.h"
 #include "nodes/tidbitmap.h"
 #include "optimizer/optimizer.h"
+#include "port/atomics.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
 #include "storage/itemptr.h"
@@ -375,8 +376,17 @@ struct AgeAdjacencyVisiblePayloadScan
     OffsetNumber delta_offnum;
     int32 parallel_slice_index;
     int32 parallel_slice_count;
+    pg_atomic_uint64 *parallel_main_claim_cursor;
+    pg_atomic_uint64 *parallel_delta_claim_cursor;
+    uint32 parallel_claim_chunk_size;
+    uint64 parallel_main_claim_start;
+    uint64 parallel_main_claim_end;
+    uint64 parallel_delta_claim_start;
+    uint64 parallel_delta_claim_end;
     uint64 main_posting_ordinal;
     uint64 delta_posting_ordinal;
+    uint64 main_page_index;
+    bool main_page_pending;
 };
 
 typedef struct AgeAdjacencyVisiblePayloadRunBlockStream
@@ -3634,7 +3644,8 @@ age_adjacency_posting_matches_terminal_vertex_filter(
     if (target == NULL)
         return true;
 
-    if (target->terminal_vertex_set_filter.vertex_ids != NULL)
+    if (target->terminal_vertex_set_filter.vertex_ids != NULL ||
+        target->terminal_vertex_set_filter.has_sorted_vertex_ids)
     {
         if (target->terminal_vertex_set_filter.has_range &&
             (next_vertex_id < target->terminal_vertex_set_filter.min_vertex_id ||
@@ -5662,6 +5673,12 @@ age_adjacency_visible_payload_scan_begin_key(
     scan->delta_offnum = cursor.delta_offnum;
     scan->main_posting_ordinal = 0;
     scan->delta_posting_ordinal = 0;
+    scan->main_page_index = 0;
+    scan->main_page_pending = true;
+    scan->parallel_main_claim_start = 0;
+    scan->parallel_main_claim_end = 0;
+    scan->parallel_delta_claim_start = 0;
+    scan->parallel_delta_claim_end = 0;
 
     return true;
 }
@@ -5682,19 +5699,59 @@ age_adjacency_visible_payload_scan_set_parallel_slice(
     {
         scan->parallel_slice_index = 0;
         scan->parallel_slice_count = 0;
+        scan->parallel_main_claim_cursor = NULL;
+        scan->parallel_delta_claim_cursor = NULL;
         return;
     }
 
-    if (slice_index < 0 || slice_index >= slice_count)
+    /* slice_index == slice_count is an intentionally empty leader slice. */
+    if (slice_index < 0 || slice_index > slice_count)
     {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("age_adjacency parallel slice requires "
-                        "0 <= slice_index < slice_count")));
+                        "0 <= slice_index <= slice_count")));
     }
 
     scan->parallel_slice_index = slice_index;
     scan->parallel_slice_count = slice_count;
+    scan->parallel_main_claim_cursor = NULL;
+    scan->parallel_delta_claim_cursor = NULL;
+}
+
+void
+age_adjacency_visible_payload_scan_set_parallel_claim(
+    AgeAdjacencyVisiblePayloadScan *scan, pg_atomic_uint64 *main_cursor,
+    pg_atomic_uint64 *delta_cursor, uint32 chunk_size)
+{
+    if (scan == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload scan is required")));
+    }
+
+    if (main_cursor == NULL || delta_cursor == NULL)
+    {
+        scan->parallel_main_claim_cursor = NULL;
+        scan->parallel_delta_claim_cursor = NULL;
+        scan->parallel_claim_chunk_size = 0;
+        scan->parallel_main_claim_start = 0;
+        scan->parallel_main_claim_end = 0;
+        scan->parallel_delta_claim_start = 0;
+        scan->parallel_delta_claim_end = 0;
+        return;
+    }
+
+    scan->parallel_slice_index = 0;
+    scan->parallel_slice_count = 0;
+    scan->parallel_main_claim_cursor = main_cursor;
+    scan->parallel_delta_claim_cursor = delta_cursor;
+    scan->parallel_claim_chunk_size = Max(chunk_size, 1);
+    scan->parallel_main_claim_start = 0;
+    scan->parallel_main_claim_end = 0;
+    scan->parallel_delta_claim_start = 0;
+    scan->parallel_delta_claim_end = 0;
 }
 
 int64
@@ -8288,16 +8345,101 @@ age_adjacency_visible_payload_key_cursor_next_delta(
     return false;
 }
 
+/*
+ * Page-granular parallel claim for the single-key main chain.  The chain walk
+ * is identical and deterministic in every worker, so assigning each page index
+ * to exactly one worker through the shared atomic cursor (one page per claim)
+ * partitions the postings without replaying each page's body in every worker.
+ * Returns true when the page about to be processed is owned by this worker.
+ */
+static bool
+age_adjacency_scan_accept_main_page(AgeAdjacencyVisiblePayloadScan *scan)
+{
+    uint64 page = scan->main_page_index++;
+
+    Assert(scan->parallel_main_claim_cursor != NULL);
+
+    while (page >= scan->parallel_main_claim_end)
+    {
+        scan->parallel_main_claim_start = pg_atomic_fetch_add_u64(
+            scan->parallel_main_claim_cursor, 1);
+        scan->parallel_main_claim_end = scan->parallel_main_claim_start + 1;
+    }
+
+    return page >= scan->parallel_main_claim_start &&
+           page < scan->parallel_main_claim_end;
+}
+
+/*
+ * Read only the chain link of a main page so a worker can step over a page it
+ * does not own without parsing or filtering the page body.
+ */
+static BlockNumber
+age_adjacency_main_page_peek_next(AgeAdjacencyVisiblePayloadScan *scan,
+                                  BlockNumber blkno)
+{
+    Buffer buf;
+    Page page;
+    AgeAdjacencyPageOpaque opaque;
+    BlockNumber next_blkno;
+
+    buf = ReadBuffer(scan->index_rel, blkno);
+    LockBuffer(buf, BUFFER_LOCK_SHARE);
+    page = BufferGetPage(buf);
+
+    opaque = (AgeAdjacencyPageOpaque) PageGetSpecialPointer(page);
+    if (opaque->magic != AGE_ADJACENCY_MAGIC ||
+        opaque->version != AGE_ADJACENCY_VERSION ||
+        opaque->page_type != AGE_ADJACENCY_PAGE_MAIN)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INDEX_CORRUPTED),
+                 errmsg("age_adjacency main page %u is invalid", blkno)));
+    }
+    next_blkno = opaque->next_blkno;
+    UnlockReleaseBuffer(buf);
+    return next_blkno;
+}
+
 static bool
 age_adjacency_visible_payload_scan_next_main(
     AgeAdjacencyVisiblePayloadScan *scan, AgeAdjacencyPayload *payload)
 {
+    bool page_claim;
+
     Assert(scan != NULL);
     Assert(payload != NULL);
+
+    page_claim = scan->parallel_main_claim_cursor != NULL;
 
     while (scan->main_active && scan->main_remaining > 0 &&
            BlockNumberIsValid(scan->main_blkno))
     {
+        /*
+         * In page-claim mode decide ownership once per page (the generator
+         * resumes mid-page, so main_page_pending guards against re-claiming the
+         * page we are still emitting).  Non-owned pages are stepped over by the
+         * chain link alone; owned pages are loaded and emitted in full without
+         * the per-posting slice check.
+         */
+        if (page_claim && scan->main_page_pending)
+        {
+            scan->main_page_pending = false;
+            if (!age_adjacency_scan_accept_main_page(scan))
+            {
+                BlockNumber next_blkno = age_adjacency_main_page_peek_next(
+                    scan, scan->main_blkno);
+
+                scan->main_blkno = next_blkno;
+                scan->main_offnum = FirstOffsetNumber;
+                scan->main_posting_index = 0;
+                scan->main_cache_index = 0;
+                scan->main_cache.valid = false;
+                scan->main_page_pending = true;
+                continue;
+            }
+        }
+
         age_adjacency_load_main_cache(scan, scan->main_blkno);
         while (scan->main_cache_index < scan->main_cache.count &&
                scan->main_remaining > 0)
@@ -8312,7 +8454,8 @@ age_adjacency_visible_payload_scan_next_main(
             posting.edge_id = cached->posting.edge_id;
             posting.next_vertex_id = cached->posting.next_vertex_id;
 
-            if (!age_adjacency_visible_payload_scan_accept_slice(scan, true))
+            if (!page_claim &&
+                !age_adjacency_visible_payload_scan_accept_slice(scan, true))
                 continue;
 
             if (age_adjacency_posting_visible_payload(&posting,
@@ -8323,6 +8466,13 @@ age_adjacency_visible_payload_scan_next_main(
             }
         }
 
+        /*
+         * A budget-limited cache load can resume the same physical page
+         * (next_blkno == current block); only treat a real chain step as a new
+         * page so the claim is taken once per page.
+         */
+        scan->main_page_pending =
+            scan->main_cache.next_blkno != scan->main_blkno;
         scan->main_blkno = scan->main_cache.next_blkno;
         scan->main_offnum = scan->main_cache.next_offnum;
         scan->main_posting_index = scan->main_cache.next_posting_index;
@@ -8430,13 +8580,38 @@ age_adjacency_visible_payload_scan_accept_slice(
     AgeAdjacencyVisiblePayloadScan *scan, bool main_posting)
 {
     uint64 ordinal;
+    uint64 *claim_start;
+    uint64 *claim_end;
+    pg_atomic_uint64 *claim_cursor;
 
     Assert(scan != NULL);
 
     if (main_posting)
+    {
         ordinal = scan->main_posting_ordinal++;
+        claim_start = &scan->parallel_main_claim_start;
+        claim_end = &scan->parallel_main_claim_end;
+        claim_cursor = scan->parallel_main_claim_cursor;
+    }
     else
+    {
         ordinal = scan->delta_posting_ordinal++;
+        claim_start = &scan->parallel_delta_claim_start;
+        claim_end = &scan->parallel_delta_claim_end;
+        claim_cursor = scan->parallel_delta_claim_cursor;
+    }
+
+    if (claim_cursor != NULL)
+    {
+        while (ordinal >= *claim_end)
+        {
+            *claim_start = pg_atomic_fetch_add_u64(
+                claim_cursor, scan->parallel_claim_chunk_size);
+            *claim_end = *claim_start + scan->parallel_claim_chunk_size;
+        }
+
+        return ordinal >= *claim_start && ordinal < *claim_end;
+    }
 
     if (scan->parallel_slice_count <= 1)
         return true;

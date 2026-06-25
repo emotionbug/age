@@ -203,6 +203,16 @@ typedef struct VLESourcePolicyProfile
     int64 payload_input_matrix_replay_source_percent;
     int64 payload_input_matrix_run_block_percent;
     int64 payload_input_matrix_regroup_percent;
+    int64 payload_input_matrix_compaction_percent;
+    int64 payload_input_matrix_dense_percent;
+    int64 payload_input_matrix_duplicate_percent;
+    int64 payload_input_matrix_compaction_pressure_percent;
+    int64 payload_input_matrix_residency_pressure_percent;
+    int64 payload_input_matrix_replay_cutover_percent;
+    int64 payload_input_matrix_prefetch_cutover_percent;
+    int64 payload_input_matrix_payload_coverage_percent;
+    int64 payload_input_matrix_source_overlap_percent;
+    int64 payload_input_matrix_reuse_proximity_percent;
     VLESourcePayloadFeedbackReason payload_input_reason_id;
     VLESourcePolicyClass payload_input_class_id;
     VLESourceValuePostingKind payload_input_value_posting_source_kind;
@@ -224,6 +234,21 @@ typedef struct VLESourceRuntimePayloadFeedback
     int64 matrix_replay_source_percent;
     int64 matrix_run_block_percent;
     int64 matrix_regroup_percent;
+    int64 matrix_compaction_percent;
+    int64 matrix_dense_percent;
+    int64 matrix_duplicate_percent;
+    int64 matrix_compaction_pressure_percent;
+    int64 matrix_residency_pressure_percent;
+    int64 matrix_replay_cutover_percent;
+    int64 matrix_prefetch_cutover_percent;
+    int64 matrix_payload_coverage_percent;
+    int64 matrix_source_overlap_percent;
+    int64 matrix_reuse_proximity_percent;
+    int64 matrix_replay_work;
+    int64 matrix_raw_work;
+    int64 matrix_scalar_work;
+    int64 matrix_replay_selections;
+    int64 matrix_fallback_selections;
     VLESourcePayloadFeedbackReason reason_id;
     VLESourcePolicyClass feedback_class_id;
     VLESourceValuePostingKind value_posting_source_kind;
@@ -264,6 +289,16 @@ typedef struct VLESourceThresholdCacheEntry
     int64 payload_matrix_replay_source_percent;
     int64 payload_matrix_run_block_percent;
     int64 payload_matrix_regroup_percent;
+    int64 payload_matrix_compaction_percent;
+    int64 payload_matrix_dense_percent;
+    int64 payload_matrix_duplicate_percent;
+    int64 payload_matrix_compaction_pressure_percent;
+    int64 payload_matrix_residency_pressure_percent;
+    int64 payload_matrix_replay_cutover_percent;
+    int64 payload_matrix_prefetch_cutover_percent;
+    int64 payload_matrix_payload_coverage_percent;
+    int64 payload_matrix_source_overlap_percent;
+    int64 payload_matrix_reuse_proximity_percent;
     int64 directional_empty_completion_count;
     VLESourceDirectionClass source_direction_id;
     VLESourceThresholdFeedbackReason reason_id;
@@ -433,6 +468,10 @@ static int64 age_vle_runtime_value_pruning_count(
     const AgeVLESourceStats *stats);
 static int64 age_vle_runtime_value_posting_pruning_count(
     const AgeVLESourceStats *stats, const AgeVLEStreamEdgeSource *source);
+static void age_vle_runtime_matrix_frontier_pressure_vector(
+    const AgeVLESourceStats *stats,
+    VLESourceDirectionClass source_direction_id,
+    VLESourceRuntimePayloadFeedback *feedback);
 static HTAB *get_vle_source_threshold_cache(void);
 static bool lookup_vle_source_threshold_feedback(
     const VLEStreamSourceCostInput *input,
@@ -482,7 +521,8 @@ static void set_vle_payload_feedback_reason(
     VLESourcePayloadFeedbackReason reason);
 static void derive_vle_source_runtime_payload_feedback(
     VLESourceRuntimePayloadFeedback *feedback,
-    const AgeVLESourceStats *stats, const AgeVLEStreamEdgeSource *source);
+    const AgeVLESourceStats *stats, const AgeVLEStreamEdgeSource *source,
+    VLESourceDirectionClass source_direction_id);
 static int64 select_vle_payload_replay_strong_percent(
     const AgeVLEStreamEdgeSource *source);
 static int64 select_vle_payload_replay_strong_headroom_percent(
@@ -531,6 +571,11 @@ static void apply_vle_source_cache_key_runtime_identity(
     VLESourceThresholdCacheKey *key,
     const AgeVLEStreamEdgeSource *source,
     VLESourceDirectionClass source_direction_id);
+static bool lookup_vle_matrix_frontier_cursor_policy(
+    const VLEStreamSourceCostInput *input,
+    const VLESourcePolicyProfile *profile,
+    VLESourceDirectionClass source_direction_id,
+    AgeVLEMatrixFrontierCursorPolicy *policy);
 static VLESourceValuePostingKind
 age_vle_source_value_posting_source_kind_for_direction(
     const AgeVLEStreamEdgeSource *source,
@@ -757,6 +802,20 @@ void choose_vle_stream_source_cost_decision(
     decision->payload_input_matrix_replay_source_percent = 0;
     decision->payload_input_matrix_run_block_percent = 0;
     decision->payload_input_matrix_regroup_percent = 0;
+    decision->payload_input_matrix_compaction_percent = 0;
+    decision->payload_input_matrix_dense_percent = 0;
+    decision->payload_input_matrix_duplicate_percent = 0;
+    decision->payload_input_matrix_compaction_pressure_percent = 0;
+    decision->payload_input_matrix_residency_pressure_percent = 0;
+    decision->payload_input_matrix_replay_cutover_percent = 0;
+    decision->payload_input_matrix_prefetch_cutover_percent = 0;
+    decision->payload_input_matrix_payload_coverage_percent = 0;
+    decision->payload_input_matrix_source_overlap_percent = 0;
+    decision->payload_input_matrix_reuse_proximity_percent = 0;
+    memset(&decision->outgoing_matrix_cursor_policy, 0,
+           sizeof(decision->outgoing_matrix_cursor_policy));
+    memset(&decision->incoming_matrix_cursor_policy, 0,
+           sizeof(decision->incoming_matrix_cursor_policy));
     decision->payload_input_reason_id = VLE_SOURCE_PAYLOAD_REASON_NONE;
     decision->payload_input_class_id = VLE_SOURCE_POLICY_CLASS_NONE;
     decision->payload_input_value_posting_source_kind =
@@ -769,6 +828,18 @@ void choose_vle_stream_source_cost_decision(
         return;
 
     build_vle_source_policy_profile(&profile, input);
+    if (profile.outgoing_active)
+    {
+        (void) lookup_vle_matrix_frontier_cursor_policy(
+            input, &profile, VLE_SOURCE_DIRECTION_OUT,
+            &decision->outgoing_matrix_cursor_policy);
+    }
+    if (profile.incoming_active)
+    {
+        (void) lookup_vle_matrix_frontier_cursor_policy(
+            input, &profile, VLE_SOURCE_DIRECTION_IN,
+            &decision->incoming_matrix_cursor_policy);
+    }
 
     choose_vle_source_policy_decision(
         &out_policy,
@@ -815,6 +886,16 @@ void choose_vle_stream_source_cost_decision(
         profile.payload_input_matrix_replay_source_percent = 0;
         profile.payload_input_matrix_run_block_percent = 0;
         profile.payload_input_matrix_regroup_percent = 0;
+        profile.payload_input_matrix_compaction_percent = 0;
+        profile.payload_input_matrix_dense_percent = 0;
+        profile.payload_input_matrix_duplicate_percent = 0;
+        profile.payload_input_matrix_compaction_pressure_percent = 0;
+        profile.payload_input_matrix_residency_pressure_percent = 0;
+        profile.payload_input_matrix_replay_cutover_percent = 0;
+        profile.payload_input_matrix_prefetch_cutover_percent = 0;
+        profile.payload_input_matrix_payload_coverage_percent = 0;
+        profile.payload_input_matrix_source_overlap_percent = 0;
+        profile.payload_input_matrix_reuse_proximity_percent = 0;
         profile.payload_input_reason_id = VLE_SOURCE_PAYLOAD_REASON_NONE;
         profile.payload_input_class_id = VLE_SOURCE_POLICY_CLASS_NONE;
         profile.payload_input_value_posting_source_kind =
@@ -886,6 +967,26 @@ void choose_vle_stream_source_cost_decision(
         profile.payload_input_matrix_run_block_percent;
     decision->payload_input_matrix_regroup_percent =
         profile.payload_input_matrix_regroup_percent;
+    decision->payload_input_matrix_compaction_percent =
+        profile.payload_input_matrix_compaction_percent;
+    decision->payload_input_matrix_dense_percent =
+        profile.payload_input_matrix_dense_percent;
+    decision->payload_input_matrix_duplicate_percent =
+        profile.payload_input_matrix_duplicate_percent;
+    decision->payload_input_matrix_compaction_pressure_percent =
+        profile.payload_input_matrix_compaction_pressure_percent;
+    decision->payload_input_matrix_residency_pressure_percent =
+        profile.payload_input_matrix_residency_pressure_percent;
+    decision->payload_input_matrix_replay_cutover_percent =
+        profile.payload_input_matrix_replay_cutover_percent;
+    decision->payload_input_matrix_prefetch_cutover_percent =
+        profile.payload_input_matrix_prefetch_cutover_percent;
+    decision->payload_input_matrix_payload_coverage_percent =
+        profile.payload_input_matrix_payload_coverage_percent;
+    decision->payload_input_matrix_source_overlap_percent =
+        profile.payload_input_matrix_source_overlap_percent;
+    decision->payload_input_matrix_reuse_proximity_percent =
+        profile.payload_input_matrix_reuse_proximity_percent;
     decision->payload_input_reason_id = profile.payload_input_reason_id;
     decision->payload_input_class_id = profile.payload_input_class_id;
     decision->payload_input_value_posting_source_kind =
@@ -1193,7 +1294,17 @@ char *format_vle_stream_edge_source_payload_input(
         (source->payload_input_matrix_active_percent > 0 ||
          source->payload_input_matrix_filter_percent > 0 ||
          source->payload_input_matrix_prescan_percent > 0 ||
-         source->payload_input_matrix_replay_source_percent > 0))
+         source->payload_input_matrix_replay_source_percent > 0 ||
+         source->payload_input_matrix_compaction_percent > 0 ||
+         source->payload_input_matrix_dense_percent > 0 ||
+         source->payload_input_matrix_duplicate_percent > 0 ||
+         source->payload_input_matrix_compaction_pressure_percent > 0 ||
+         source->payload_input_matrix_residency_pressure_percent > 0 ||
+         source->payload_input_matrix_replay_cutover_percent > 0 ||
+         source->payload_input_matrix_prefetch_cutover_percent > 0 ||
+         source->payload_input_matrix_payload_coverage_percent > 0 ||
+         source->payload_input_matrix_source_overlap_percent > 0 ||
+         source->payload_input_matrix_reuse_proximity_percent > 0))
     {
         appendStringInfo(&buf, " mrun=active:%lld/filter:%lld/prescan:%lld",
                          (long long)
@@ -1206,6 +1317,63 @@ char *format_vle_stream_edge_source_payload_input(
             appendStringInfo(&buf, "/replay:%lld",
                              (long long)
                                 source->payload_input_matrix_replay_source_percent);
+        if (source->payload_input_matrix_compaction_percent > 0)
+            appendStringInfo(&buf, "/compact:%lld",
+                             (long long)
+                                source->payload_input_matrix_compaction_percent);
+        appendStringInfo(
+            &buf, "/shape=dense:%lld/duplicate:%lld/compaction:%lld"
+            "/residency:%lld/cutover=replay:%lld/prefetch:%lld",
+            (long long)source->payload_input_matrix_dense_percent,
+            (long long)source->payload_input_matrix_duplicate_percent,
+            (long long)
+                source->payload_input_matrix_compaction_pressure_percent,
+            (long long)
+                source->payload_input_matrix_residency_pressure_percent,
+            (long long)source->payload_input_matrix_replay_cutover_percent,
+            (long long)source->payload_input_matrix_prefetch_cutover_percent);
+        appendStringInfo(
+            &buf, "/cache=payload:%lld/overlap:%lld/reuse:%lld",
+            (long long)
+                source->payload_input_matrix_payload_coverage_percent,
+            (long long)source->payload_input_matrix_source_overlap_percent,
+            (long long)
+                source->payload_input_matrix_reuse_proximity_percent);
+        appendStringInfo(
+            &buf,
+            " cursor=out(dense:%lld/duplicate:%lld/compaction:%lld/"
+            "residency:%lld/"
+            "replay:%lld/prefetch:%lld/payload:%lld/overlap:%lld/reuse:%lld)"
+            "/in(dense:%lld/duplicate:%lld/compaction:%lld/residency:%lld/"
+            "replay:%lld/prefetch:%lld/payload:%lld/overlap:%lld/reuse:%lld)",
+            (long long)source->outgoing_matrix_cursor_policy.dense_percent,
+            (long long)source->outgoing_matrix_cursor_policy.duplicate_percent,
+            (long long)
+                source->outgoing_matrix_cursor_policy.compaction_pressure_percent,
+            (long long)
+                source->outgoing_matrix_cursor_policy.residency_pressure_percent,
+            (long long)source->outgoing_matrix_cursor_policy.replay_percent,
+            (long long)source->outgoing_matrix_cursor_policy.prefetch_percent,
+            (long long)
+                source->outgoing_matrix_cursor_policy.payload_coverage_percent,
+            (long long)
+                source->outgoing_matrix_cursor_policy.source_overlap_percent,
+            (long long)
+                source->outgoing_matrix_cursor_policy.reuse_proximity_percent,
+            (long long)source->incoming_matrix_cursor_policy.dense_percent,
+            (long long)source->incoming_matrix_cursor_policy.duplicate_percent,
+            (long long)
+                source->incoming_matrix_cursor_policy.compaction_pressure_percent,
+            (long long)
+                source->incoming_matrix_cursor_policy.residency_pressure_percent,
+            (long long)source->incoming_matrix_cursor_policy.replay_percent,
+            (long long)source->incoming_matrix_cursor_policy.prefetch_percent,
+            (long long)
+                source->incoming_matrix_cursor_policy.payload_coverage_percent,
+            (long long)
+                source->incoming_matrix_cursor_policy.source_overlap_percent,
+            (long long)
+                source->incoming_matrix_cursor_policy.reuse_proximity_percent);
     }
 
     return buf.data;
@@ -1428,6 +1596,35 @@ char *format_vle_source_runtime_payload(
                      (long long)stats->age_adjacency_payload_cache_seeds,
                      (long long)stats->age_adjacency_payload_replays,
                      (long long)stats->age_adjacency_payload_scans);
+    if (stats->matrix_frontier_handoff_batches > 0)
+        appendStringInfo(&buf,
+                         " mhandoff=batch:%lld/segments:%lld/closed:%lld/"
+                         "compactable:%lld/compacted:%lld "
+                         "frontier=%lld/%lld/%lld/max:%lld "
+                         "delta=closed:%lld/compactable:%lld/compacted:%lld",
+                         (long long)stats->matrix_frontier_handoff_batches,
+                         (long long)
+                            stats->matrix_frontier_handoff_arena_segments,
+                         (long long)
+                            stats->matrix_frontier_handoff_work_closed_segments,
+                         (long long)
+                            stats->matrix_frontier_handoff_compactable_frames,
+                         (long long)
+                            stats->matrix_frontier_handoff_compacted_frames,
+                         (long long)
+                            stats->matrix_frontier_handoff_accepted,
+                         (long long)
+                            stats->matrix_frontier_handoff_candidates,
+                         (long long)
+                            stats->matrix_frontier_handoff_unique_sources,
+                         (long long)
+                            stats->matrix_frontier_handoff_max_unique_sources,
+                         (long long)
+                            stats->matrix_frontier_handoff_work_closed_segment_delta,
+                         (long long)
+                            stats->matrix_frontier_handoff_compactable_frame_delta,
+                         (long long)
+                            stats->matrix_frontier_handoff_compacted_frame_delta);
 
     return buf.data;
 }
@@ -1508,10 +1705,17 @@ char *format_vle_source_runtime_feedback(
 {
     StringInfoData buf;
     VLESourceRuntimeExplain explain;
+    VLESourceRuntimePayloadFeedback matrix_feedback;
 
     Assert(stats != NULL);
 
     build_vle_source_runtime_explain(&explain, stats, source);
+    memset(&matrix_feedback, 0, sizeof(matrix_feedback));
+    age_vle_runtime_matrix_frontier_pressure_vector(
+        stats,
+        source != NULL ? source->policy_active_direction_id :
+        VLE_SOURCE_DIRECTION_NONE,
+        &matrix_feedback);
 
     initStringInfo(&buf);
     appendStringInfo(&buf,
@@ -1556,6 +1760,39 @@ char *format_vle_source_runtime_feedback(
                              stats->matrix_frontier_source_run_prefiltered_keys,
                              stats->matrix_frontier_source_run_sources));
     }
+    if (stats->matrix_frontier_handoff_batches > 0)
+        appendStringInfo(
+            &buf, "%scompact:%lld/shape=dense:%lld/duplicate:%lld/"
+            "compaction:%lld/residency:%lld/cutover=replay:%lld/prefetch:%lld/"
+            "cache=payload:%lld/overlap:%lld/reuse:%lld/"
+            "work=replay:%lld/raw:%lld/scalar:%lld/select:%lld/%lld",
+                         stats->matrix_frontier_source_run_sources > 0 ?
+                         "/" : " mrun=",
+                         (long long)calculate_vle_source_ratio_percent(
+                             stats->matrix_frontier_handoff_compacted_frames,
+                             stats->matrix_frontier_handoff_compactable_frames),
+                         (long long)matrix_feedback.matrix_dense_percent,
+                         (long long)matrix_feedback.matrix_duplicate_percent,
+                         (long long)
+                            matrix_feedback.matrix_compaction_pressure_percent,
+                         (long long)
+                            matrix_feedback.matrix_residency_pressure_percent,
+                         (long long)
+                            matrix_feedback.matrix_replay_cutover_percent,
+                         (long long)
+                            matrix_feedback.matrix_prefetch_cutover_percent,
+                         (long long)
+                            matrix_feedback.matrix_payload_coverage_percent,
+                         (long long)
+                            matrix_feedback.matrix_source_overlap_percent,
+                         (long long)
+                            matrix_feedback.matrix_reuse_proximity_percent,
+                         (long long)matrix_feedback.matrix_replay_work,
+                         (long long)matrix_feedback.matrix_raw_work,
+                         (long long)matrix_feedback.matrix_scalar_work,
+                         (long long)matrix_feedback.matrix_replay_selections,
+                         (long long)
+                            matrix_feedback.matrix_fallback_selections);
 
     return buf.data;
 }
@@ -1625,6 +1862,16 @@ void derive_vle_source_runtime_threshold_feedback(
     feedback->payload_matrix_replay_source_percent = 0;
     feedback->payload_matrix_run_block_percent = 0;
     feedback->payload_matrix_regroup_percent = 0;
+    feedback->payload_matrix_compaction_percent = 0;
+    feedback->payload_matrix_dense_percent = 0;
+    feedback->payload_matrix_duplicate_percent = 0;
+    feedback->payload_matrix_compaction_pressure_percent = 0;
+    feedback->payload_matrix_residency_pressure_percent = 0;
+    feedback->payload_matrix_replay_cutover_percent = 0;
+    feedback->payload_matrix_prefetch_cutover_percent = 0;
+    feedback->payload_matrix_payload_coverage_percent = 0;
+    feedback->payload_matrix_source_overlap_percent = 0;
+    feedback->payload_matrix_reuse_proximity_percent = 0;
     feedback->source_direction_id = VLE_SOURCE_DIRECTION_NONE;
     set_vle_threshold_feedback_reason(
         feedback, VLE_SOURCE_THRESHOLD_REASON_NONE);
@@ -1668,7 +1915,8 @@ void derive_vle_source_runtime_threshold_feedback(
 
 static void derive_vle_source_runtime_payload_feedback(
     VLESourceRuntimePayloadFeedback *feedback,
-    const AgeVLESourceStats *stats, const AgeVLEStreamEdgeSource *source)
+    const AgeVLESourceStats *stats, const AgeVLEStreamEdgeSource *source,
+    VLESourceDirectionClass source_direction_id)
 {
     bool composite_prefilter_policy;
     int64 value_posting_pruning_count;
@@ -1693,6 +1941,16 @@ static void derive_vle_source_runtime_payload_feedback(
     feedback->matrix_replay_source_percent = 0;
     feedback->matrix_run_block_percent = 0;
     feedback->matrix_regroup_percent = 0;
+    feedback->matrix_compaction_percent = 0;
+    feedback->matrix_dense_percent = 0;
+    feedback->matrix_duplicate_percent = 0;
+    feedback->matrix_compaction_pressure_percent = 0;
+    feedback->matrix_residency_pressure_percent = 0;
+    feedback->matrix_replay_cutover_percent = 0;
+    feedback->matrix_prefetch_cutover_percent = 0;
+    feedback->matrix_payload_coverage_percent = 0;
+    feedback->matrix_source_overlap_percent = 0;
+    feedback->matrix_reuse_proximity_percent = 0;
 
     composite_prefilter_policy = source != NULL &&
         source->policy_class_id ==
@@ -1740,6 +1998,11 @@ static void derive_vle_source_runtime_payload_feedback(
     feedback->matrix_regroup_percent = calculate_vle_source_ratio_percent(
         stats->matrix_frontier_source_run_fallback_regroup_cursors,
         stats->matrix_frontier_source_run_sources);
+    feedback->matrix_compaction_percent = calculate_vle_source_ratio_percent(
+        stats->matrix_frontier_handoff_compacted_frames,
+        stats->matrix_frontier_handoff_compactable_frames);
+    age_vle_runtime_matrix_frontier_pressure_vector(
+        stats, source_direction_id, feedback);
     feedback->endpoint_headroom_percent = source->endpoint_headroom_percent;
     set_vle_payload_feedback_reason(
         feedback, VLE_SOURCE_PAYLOAD_REASON_SCAN_OBSERVED);
@@ -1841,6 +2104,30 @@ static void derive_vle_source_runtime_payload_feedback(
             stats->matrix_frontier_source_run_fallback_regroups > 0 ?
             VLE_SOURCE_PAYLOAD_REASON_MATRIX_FALLBACK_REGROUP :
             VLE_SOURCE_PAYLOAD_REASON_MATRIX_PAGE_GROUP);
+    }
+    else if (stats->matrix_frontier_handoff_compacted_frames > 0)
+    {
+        feedback->endpoint_headroom_percent =
+            Min(feedback->endpoint_headroom_percent,
+                select_vle_payload_value_posting_headroom_percent(source));
+        set_vle_payload_feedback_reason(
+            feedback, VLE_SOURCE_PAYLOAD_REASON_MATRIX_ARENA_COMPACTION);
+    }
+    else if (feedback->matrix_dense_percent > 0 ||
+             feedback->matrix_duplicate_percent > 0 ||
+             feedback->matrix_compaction_pressure_percent > 0 ||
+             feedback->matrix_residency_pressure_percent > 0 ||
+             feedback->matrix_replay_cutover_percent > 0 ||
+             feedback->matrix_prefetch_cutover_percent > 0 ||
+             feedback->matrix_payload_coverage_percent > 0 ||
+             feedback->matrix_source_overlap_percent > 0 ||
+             feedback->matrix_reuse_proximity_percent > 0)
+    {
+        feedback->endpoint_headroom_percent =
+            Min(feedback->endpoint_headroom_percent,
+                select_vle_payload_value_posting_headroom_percent(source));
+        set_vle_payload_feedback_reason(
+            feedback, VLE_SOURCE_PAYLOAD_REASON_MATRIX_FRONTIER_PRESSURE);
     }
     else if (stats->age_adjacency_payload_replay_runs > 0)
     {
@@ -2061,6 +2348,7 @@ void record_vle_source_runtime_threshold_feedback(
 {
     VLESourceRuntimeThresholdFeedback feedback;
     VLESourceRuntimePayloadFeedback payload_feedback;
+    VLESourceRuntimePayloadFeedback directional_payload_feedback;
     VLESourceThresholdCacheKey key;
     VLESourceDirectionClass active_direction_id;
     VLESourceConsumerClass consumer_class_id;
@@ -2070,8 +2358,8 @@ void record_vle_source_runtime_threshold_feedback(
     active_direction_id = source == NULL ? VLE_SOURCE_DIRECTION_NONE :
         source->policy_active_direction_id;
     derive_vle_source_runtime_threshold_feedback(&feedback, stats, source);
-    derive_vle_source_runtime_payload_feedback(&payload_feedback, stats,
-                                               source);
+    derive_vle_source_runtime_payload_feedback(
+        &payload_feedback, stats, source, active_direction_id);
     if (((!feedback.eligible || feedback.endpoint_headroom_percent <= 0) &&
          (!payload_feedback.eligible ||
           payload_feedback.endpoint_headroom_percent <= 0)) ||
@@ -2100,51 +2388,63 @@ void record_vle_source_runtime_threshold_feedback(
             active_direction_id);
     }
 
-    if (feedback.source_direction_id != VLE_SOURCE_DIRECTION_NONE &&
-        (feedback.source_direction_id == VLE_SOURCE_DIRECTION_BOTH ||
-         feedback.source_direction_id !=
-         source->policy_active_direction_id))
+    if (active_direction_id == VLE_SOURCE_DIRECTION_BOTH ||
+        (feedback.source_direction_id != VLE_SOURCE_DIRECTION_NONE &&
+         feedback.source_direction_id != active_direction_id))
     {
-        if (feedback.source_direction_id == VLE_SOURCE_DIRECTION_BOTH)
+        if (active_direction_id == VLE_SOURCE_DIRECTION_BOTH ||
+            feedback.source_direction_id == VLE_SOURCE_DIRECTION_BOTH)
         {
+            derive_vle_source_runtime_payload_feedback(
+                &directional_payload_feedback, stats, source,
+                VLE_SOURCE_DIRECTION_OUT);
             build_vle_source_threshold_cache_key(&key, graph_name, label_name,
                                                  source->edge_label_oid,
                                                  consumer_class_id,
                                                  VLE_SOURCE_DIRECTION_OUT);
             apply_vle_source_cache_key_runtime_identity(
                 &key, source, VLE_SOURCE_DIRECTION_OUT);
-            update_vle_source_threshold_cache_entry(&key, &feedback,
-                                                    &payload_feedback,
+            update_vle_source_threshold_cache_entry(
+                &key, &feedback, &directional_payload_feedback,
                                                     VLE_SOURCE_DIRECTION_OUT);
             update_vle_source_payload_family_cache_for_direction(
-                graph_name, label_name, source, &payload_feedback,
+                graph_name, label_name, source,
+                &directional_payload_feedback,
                 VLE_SOURCE_DIRECTION_OUT);
+            derive_vle_source_runtime_payload_feedback(
+                &directional_payload_feedback, stats, source,
+                VLE_SOURCE_DIRECTION_IN);
             build_vle_source_threshold_cache_key(&key, graph_name, label_name,
                                                  source->edge_label_oid,
                                                  consumer_class_id,
                                                  VLE_SOURCE_DIRECTION_IN);
             apply_vle_source_cache_key_runtime_identity(
                 &key, source, VLE_SOURCE_DIRECTION_IN);
-            update_vle_source_threshold_cache_entry(&key, &feedback,
-                                                    &payload_feedback,
+            update_vle_source_threshold_cache_entry(
+                &key, &feedback, &directional_payload_feedback,
                                                     VLE_SOURCE_DIRECTION_IN);
             update_vle_source_payload_family_cache_for_direction(
-                graph_name, label_name, source, &payload_feedback,
+                graph_name, label_name, source,
+                &directional_payload_feedback,
                 VLE_SOURCE_DIRECTION_IN);
         }
         else
         {
+            derive_vle_source_runtime_payload_feedback(
+                &directional_payload_feedback, stats, source,
+                feedback.source_direction_id);
             build_vle_source_threshold_cache_key(&key, graph_name, label_name,
                                                  source->edge_label_oid,
                                                  consumer_class_id,
                                                  feedback.source_direction_id);
             apply_vle_source_cache_key_runtime_identity(
                 &key, source, feedback.source_direction_id);
-            update_vle_source_threshold_cache_entry(&key, &feedback,
-                                                    &payload_feedback,
+            update_vle_source_threshold_cache_entry(
+                &key, &feedback, &directional_payload_feedback,
                                                     feedback.source_direction_id);
             update_vle_source_payload_family_cache_for_direction(
-                graph_name, label_name, source, &payload_feedback,
+                graph_name, label_name, source,
+                &directional_payload_feedback,
                 feedback.source_direction_id);
         }
     }
@@ -2293,6 +2593,16 @@ static void initialize_vle_source_threshold_cache_entry(
     entry->payload_matrix_replay_source_percent = 0;
     entry->payload_matrix_run_block_percent = 0;
     entry->payload_matrix_regroup_percent = 0;
+    entry->payload_matrix_compaction_percent = 0;
+    entry->payload_matrix_dense_percent = 0;
+    entry->payload_matrix_duplicate_percent = 0;
+    entry->payload_matrix_compaction_pressure_percent = 0;
+    entry->payload_matrix_residency_pressure_percent = 0;
+    entry->payload_matrix_replay_cutover_percent = 0;
+    entry->payload_matrix_prefetch_cutover_percent = 0;
+    entry->payload_matrix_payload_coverage_percent = 0;
+    entry->payload_matrix_source_overlap_percent = 0;
+    entry->payload_matrix_reuse_proximity_percent = 0;
     entry->directional_empty_completion_count = 0;
     entry->source_direction_id = source_direction_id;
     entry->reason_id = feedback != NULL ? feedback->reason_id :
@@ -2350,6 +2660,36 @@ merge_vle_source_payload_cache_entry(
     entry->payload_matrix_regroup_percent =
         Max(entry->payload_matrix_regroup_percent,
             payload_feedback->matrix_regroup_percent);
+    entry->payload_matrix_compaction_percent =
+        Max(entry->payload_matrix_compaction_percent,
+            payload_feedback->matrix_compaction_percent);
+    entry->payload_matrix_dense_percent =
+        Max(entry->payload_matrix_dense_percent,
+            payload_feedback->matrix_dense_percent);
+    entry->payload_matrix_duplicate_percent =
+        Max(entry->payload_matrix_duplicate_percent,
+            payload_feedback->matrix_duplicate_percent);
+    entry->payload_matrix_compaction_pressure_percent =
+        Max(entry->payload_matrix_compaction_pressure_percent,
+            payload_feedback->matrix_compaction_pressure_percent);
+    entry->payload_matrix_residency_pressure_percent =
+        Max(entry->payload_matrix_residency_pressure_percent,
+            payload_feedback->matrix_residency_pressure_percent);
+    entry->payload_matrix_replay_cutover_percent =
+        Max(entry->payload_matrix_replay_cutover_percent,
+            payload_feedback->matrix_replay_cutover_percent);
+    entry->payload_matrix_prefetch_cutover_percent =
+        Max(entry->payload_matrix_prefetch_cutover_percent,
+            payload_feedback->matrix_prefetch_cutover_percent);
+    entry->payload_matrix_payload_coverage_percent =
+        Max(entry->payload_matrix_payload_coverage_percent,
+            payload_feedback->matrix_payload_coverage_percent);
+    entry->payload_matrix_source_overlap_percent =
+        Max(entry->payload_matrix_source_overlap_percent,
+            payload_feedback->matrix_source_overlap_percent);
+    entry->payload_matrix_reuse_proximity_percent =
+        Max(entry->payload_matrix_reuse_proximity_percent,
+            payload_feedback->matrix_reuse_proximity_percent);
 
     if (entry->payload_observed_count == 1 ||
         vle_source_payload_class_rank_id(payload_feedback->feedback_class_id) >
@@ -2481,6 +2821,16 @@ static bool lookup_vle_source_threshold_feedback(
     feedback->payload_matrix_replay_source_percent = 0;
     feedback->payload_matrix_run_block_percent = 0;
     feedback->payload_matrix_regroup_percent = 0;
+    feedback->payload_matrix_compaction_percent = 0;
+    feedback->payload_matrix_dense_percent = 0;
+    feedback->payload_matrix_duplicate_percent = 0;
+    feedback->payload_matrix_compaction_pressure_percent = 0;
+    feedback->payload_matrix_residency_pressure_percent = 0;
+    feedback->payload_matrix_replay_cutover_percent = 0;
+    feedback->payload_matrix_prefetch_cutover_percent = 0;
+    feedback->payload_matrix_payload_coverage_percent = 0;
+    feedback->payload_matrix_source_overlap_percent = 0;
+    feedback->payload_matrix_reuse_proximity_percent = 0;
     feedback->source_direction_id = VLE_SOURCE_DIRECTION_NONE;
     feedback->reason_id = VLE_SOURCE_THRESHOLD_REASON_NONE;
     feedback->feedback_class_id = VLE_SOURCE_POLICY_CLASS_NONE;
@@ -2551,6 +2901,26 @@ static bool lookup_vle_source_threshold_feedback(
             entry->payload_matrix_run_block_percent;
         feedback->payload_matrix_regroup_percent =
             entry->payload_matrix_regroup_percent;
+        feedback->payload_matrix_compaction_percent =
+            entry->payload_matrix_compaction_percent;
+        feedback->payload_matrix_dense_percent =
+            entry->payload_matrix_dense_percent;
+        feedback->payload_matrix_duplicate_percent =
+            entry->payload_matrix_duplicate_percent;
+        feedback->payload_matrix_compaction_pressure_percent =
+            entry->payload_matrix_compaction_pressure_percent;
+        feedback->payload_matrix_residency_pressure_percent =
+            entry->payload_matrix_residency_pressure_percent;
+        feedback->payload_matrix_replay_cutover_percent =
+            entry->payload_matrix_replay_cutover_percent;
+        feedback->payload_matrix_prefetch_cutover_percent =
+            entry->payload_matrix_prefetch_cutover_percent;
+        feedback->payload_matrix_payload_coverage_percent =
+            entry->payload_matrix_payload_coverage_percent;
+        feedback->payload_matrix_source_overlap_percent =
+            entry->payload_matrix_source_overlap_percent;
+        feedback->payload_matrix_reuse_proximity_percent =
+            entry->payload_matrix_reuse_proximity_percent;
         feedback->payload_value_posting_source_kind =
             entry->payload_value_posting_source_kind;
     }
@@ -2741,6 +3111,26 @@ static bool merge_vle_source_directional_feedback_entry(
                 entry->payload_matrix_run_block_percent;
             feedback->payload_matrix_regroup_percent =
                 entry->payload_matrix_regroup_percent;
+            feedback->payload_matrix_compaction_percent =
+                entry->payload_matrix_compaction_percent;
+            feedback->payload_matrix_dense_percent =
+                entry->payload_matrix_dense_percent;
+            feedback->payload_matrix_duplicate_percent =
+                entry->payload_matrix_duplicate_percent;
+            feedback->payload_matrix_compaction_pressure_percent =
+                entry->payload_matrix_compaction_pressure_percent;
+            feedback->payload_matrix_residency_pressure_percent =
+                entry->payload_matrix_residency_pressure_percent;
+            feedback->payload_matrix_replay_cutover_percent =
+                entry->payload_matrix_replay_cutover_percent;
+            feedback->payload_matrix_prefetch_cutover_percent =
+                entry->payload_matrix_prefetch_cutover_percent;
+            feedback->payload_matrix_payload_coverage_percent =
+                entry->payload_matrix_payload_coverage_percent;
+            feedback->payload_matrix_source_overlap_percent =
+                entry->payload_matrix_source_overlap_percent;
+            feedback->payload_matrix_reuse_proximity_percent =
+                entry->payload_matrix_reuse_proximity_percent;
             feedback->payload_value_posting_source_kind =
                 entry->payload_value_posting_source_kind;
         }
@@ -2784,6 +3174,36 @@ static bool merge_vle_source_directional_feedback_entry(
         feedback->payload_matrix_regroup_percent =
             Max(feedback->payload_matrix_regroup_percent,
                 entry->payload_matrix_regroup_percent);
+        feedback->payload_matrix_compaction_percent =
+            Max(feedback->payload_matrix_compaction_percent,
+                entry->payload_matrix_compaction_percent);
+        feedback->payload_matrix_dense_percent =
+            Max(feedback->payload_matrix_dense_percent,
+                entry->payload_matrix_dense_percent);
+        feedback->payload_matrix_duplicate_percent =
+            Max(feedback->payload_matrix_duplicate_percent,
+                entry->payload_matrix_duplicate_percent);
+        feedback->payload_matrix_compaction_pressure_percent =
+            Max(feedback->payload_matrix_compaction_pressure_percent,
+                entry->payload_matrix_compaction_pressure_percent);
+        feedback->payload_matrix_residency_pressure_percent =
+            Max(feedback->payload_matrix_residency_pressure_percent,
+                entry->payload_matrix_residency_pressure_percent);
+        feedback->payload_matrix_replay_cutover_percent =
+            Max(feedback->payload_matrix_replay_cutover_percent,
+                entry->payload_matrix_replay_cutover_percent);
+        feedback->payload_matrix_prefetch_cutover_percent =
+            Max(feedback->payload_matrix_prefetch_cutover_percent,
+                entry->payload_matrix_prefetch_cutover_percent);
+        feedback->payload_matrix_payload_coverage_percent =
+            Max(feedback->payload_matrix_payload_coverage_percent,
+                entry->payload_matrix_payload_coverage_percent);
+        feedback->payload_matrix_source_overlap_percent =
+            Max(feedback->payload_matrix_source_overlap_percent,
+                entry->payload_matrix_source_overlap_percent);
+        feedback->payload_matrix_reuse_proximity_percent =
+            Max(feedback->payload_matrix_reuse_proximity_percent,
+                entry->payload_matrix_reuse_proximity_percent);
         feedback->scan_runs += entry->payload_scan_runs;
         feedback->replay_runs += entry->payload_replay_runs;
         feedback->seed_runs += entry->payload_seed_runs;
@@ -2858,6 +3278,26 @@ static bool lookup_vle_source_payload_family_feedback(
         entry->payload_matrix_run_block_percent;
     feedback->payload_matrix_regroup_percent =
         entry->payload_matrix_regroup_percent;
+    feedback->payload_matrix_compaction_percent =
+        entry->payload_matrix_compaction_percent;
+    feedback->payload_matrix_dense_percent =
+        entry->payload_matrix_dense_percent;
+    feedback->payload_matrix_duplicate_percent =
+        entry->payload_matrix_duplicate_percent;
+    feedback->payload_matrix_compaction_pressure_percent =
+        entry->payload_matrix_compaction_pressure_percent;
+    feedback->payload_matrix_residency_pressure_percent =
+        entry->payload_matrix_residency_pressure_percent;
+    feedback->payload_matrix_replay_cutover_percent =
+        entry->payload_matrix_replay_cutover_percent;
+    feedback->payload_matrix_prefetch_cutover_percent =
+        entry->payload_matrix_prefetch_cutover_percent;
+    feedback->payload_matrix_payload_coverage_percent =
+        entry->payload_matrix_payload_coverage_percent;
+    feedback->payload_matrix_source_overlap_percent =
+        entry->payload_matrix_source_overlap_percent;
+    feedback->payload_matrix_reuse_proximity_percent =
+        entry->payload_matrix_reuse_proximity_percent;
     feedback->payload_value_posting_source_kind =
         entry->payload_value_posting_source_kind;
 
@@ -3163,6 +3603,64 @@ static void apply_vle_source_cache_key_runtime_identity(
     apply_vle_source_cache_key_composite_identity(
         key, source->terminal_label_id, source->terminal_property_index_oid,
         source->terminal_property_filter_id, value_posting_source_kind);
+}
+
+static bool lookup_vle_matrix_frontier_cursor_policy(
+    const VLEStreamSourceCostInput *input,
+    const VLESourcePolicyProfile *profile,
+    VLESourceDirectionClass source_direction_id,
+    AgeVLEMatrixFrontierCursorPolicy *policy)
+{
+    VLESourceThresholdCacheKey key;
+    VLESourceThresholdCacheEntry *entry;
+    VLESourceConsumerClass consumer_class_id;
+
+    Assert(input != NULL);
+    Assert(profile != NULL);
+    Assert(policy != NULL);
+
+    memset(policy, 0, sizeof(*policy));
+    consumer_class_id = profile->consumer_class_id;
+    build_vle_source_threshold_cache_key(
+        &key, input->graph_name, input->label_name,
+        input->evidence->edge_label_oid, consumer_class_id,
+        source_direction_id);
+    apply_vle_source_cache_key_input_identity(&key, input,
+                                              source_direction_id);
+    entry = hash_search(get_vle_source_threshold_cache(), &key,
+                        HASH_FIND, NULL);
+    if (entry == NULL)
+    {
+        consumer_class_id =
+            vle_payload_feedback_consumer_family_id(consumer_class_id);
+        build_vle_source_threshold_cache_key(
+            &key, input->graph_name, input->label_name,
+            input->evidence->edge_label_oid, consumer_class_id,
+            source_direction_id);
+        apply_vle_source_cache_key_input_identity(&key, input,
+                                                  source_direction_id);
+        entry = hash_search(get_vle_source_threshold_cache(), &key,
+                            HASH_FIND, NULL);
+    }
+    if (entry == NULL || entry->payload_observed_count <= 0)
+        return false;
+
+    policy->dense_percent = entry->payload_matrix_dense_percent;
+    policy->duplicate_percent = entry->payload_matrix_duplicate_percent;
+    policy->compaction_pressure_percent =
+        entry->payload_matrix_compaction_pressure_percent;
+    policy->residency_pressure_percent =
+        entry->payload_matrix_residency_pressure_percent;
+    policy->replay_percent = entry->payload_matrix_replay_cutover_percent;
+    policy->prefetch_percent =
+        entry->payload_matrix_prefetch_cutover_percent;
+    policy->payload_coverage_percent =
+        entry->payload_matrix_payload_coverage_percent;
+    policy->source_overlap_percent =
+        entry->payload_matrix_source_overlap_percent;
+    policy->reuse_proximity_percent =
+        entry->payload_matrix_reuse_proximity_percent;
+    return true;
 }
 
 static VLESourceConsumerClass vle_payload_feedback_consumer_family_id(
@@ -3570,7 +4068,7 @@ static int64 select_vle_payload_matrix_frontier_batch_size(
     const VLESourceRuntimeThresholdFeedback *feedback)
 {
     int64 base_batch_size;
-    int64 filter_percent;
+    int64 benefit_percent;
     int64 matrix_extra;
 
     Assert(profile != NULL);
@@ -3581,25 +4079,54 @@ static int64 select_vle_payload_matrix_frontier_batch_size(
          feedback->payload_matrix_prescan_percent <= 0 &&
          feedback->payload_matrix_replay_source_percent <= 0 &&
          feedback->payload_matrix_run_block_percent <= 0 &&
-         feedback->payload_matrix_regroup_percent <= 0))
+         feedback->payload_matrix_regroup_percent <= 0 &&
+         feedback->payload_matrix_compaction_percent <= 0 &&
+         feedback->payload_matrix_dense_percent <= 0 &&
+         feedback->payload_matrix_compaction_pressure_percent <= 0 &&
+         feedback->payload_matrix_residency_pressure_percent <= 0 &&
+         feedback->payload_matrix_replay_cutover_percent <= 0 &&
+         feedback->payload_matrix_prefetch_cutover_percent <= 0 &&
+         feedback->payload_matrix_payload_coverage_percent <= 0 &&
+         feedback->payload_matrix_source_overlap_percent <= 0 &&
+         feedback->payload_matrix_reuse_proximity_percent <= 0))
     {
         return 0;
     }
 
     base_batch_size = estimate_vle_empty_lifecycle_batch_size(profile);
-    filter_percent = Max(feedback->payload_matrix_filter_percent,
-                         feedback->payload_matrix_prescan_percent);
-    filter_percent = Max(filter_percent,
-                         feedback->payload_matrix_replay_source_percent);
-    filter_percent = Max(filter_percent,
-                         feedback->payload_matrix_run_block_percent);
-    filter_percent = Max(filter_percent,
-                         feedback->payload_matrix_regroup_percent);
+    benefit_percent = Max(feedback->payload_matrix_filter_percent,
+                          feedback->payload_matrix_prescan_percent);
+    benefit_percent = Max(benefit_percent,
+                          feedback->payload_matrix_replay_source_percent);
+    benefit_percent = Max(benefit_percent,
+                          feedback->payload_matrix_run_block_percent);
+    benefit_percent = Max(benefit_percent,
+                          feedback->payload_matrix_regroup_percent);
+    benefit_percent = Max(benefit_percent,
+                          feedback->payload_matrix_compaction_percent);
+    benefit_percent = Max(benefit_percent,
+                          feedback->payload_matrix_dense_percent);
+    benefit_percent = Max(benefit_percent,
+                          feedback->payload_matrix_compaction_pressure_percent);
+    benefit_percent = Max(benefit_percent,
+                          feedback->payload_matrix_replay_cutover_percent);
+    benefit_percent = Max(benefit_percent,
+                          feedback->payload_matrix_prefetch_cutover_percent);
+    benefit_percent = Max(benefit_percent,
+                          feedback->payload_matrix_payload_coverage_percent);
+    benefit_percent = Max(benefit_percent,
+                          feedback->payload_matrix_source_overlap_percent);
+    benefit_percent = Max(benefit_percent,
+                          feedback->payload_matrix_reuse_proximity_percent);
+    benefit_percent = Max(benefit_percent -
+                          feedback->payload_matrix_duplicate_percent / 2 -
+                          feedback->payload_matrix_residency_pressure_percent / 2,
+                          (int64)0);
     matrix_extra =
         (base_batch_size *
          Max(profile->materialization_weight,
              (int64)VLE_MATERIALIZATION_WEIGHT_SCALAR) *
-         filter_percent + 99) / 100;
+         benefit_percent + 99) / 100;
 
     return Min(base_batch_size + Max(matrix_extra, (int64)1),
                (int64)VLE_EMPTY_LIFECYCLE_BATCH_MAX);
@@ -3753,6 +4280,8 @@ static VLESourcePolicyClass classify_vle_payload_feedback_reason_kind(
         case VLE_SOURCE_PAYLOAD_REASON_MATRIX_RUN_BLOCK_GROUP:
         case VLE_SOURCE_PAYLOAD_REASON_MATRIX_PAGE_GROUP:
         case VLE_SOURCE_PAYLOAD_REASON_MATRIX_FALLBACK_REGROUP:
+        case VLE_SOURCE_PAYLOAD_REASON_MATRIX_ARENA_COMPACTION:
+        case VLE_SOURCE_PAYLOAD_REASON_MATRIX_FRONTIER_PRESSURE:
             return VLE_SOURCE_POLICY_CLASS_MATRIX_FRONTIER_PRE_SCAN;
         case VLE_SOURCE_PAYLOAD_REASON_SCAN_OBSERVED:
             return VLE_SOURCE_POLICY_CLASS_ADJACENCY_PAYLOAD_SCAN;
@@ -3805,6 +4334,10 @@ const char *age_vle_payload_feedback_reason_name(
             return "payload-matrix-page-group";
         case VLE_SOURCE_PAYLOAD_REASON_MATRIX_FALLBACK_REGROUP:
             return "payload-matrix-fallback-regroup";
+        case VLE_SOURCE_PAYLOAD_REASON_MATRIX_ARENA_COMPACTION:
+            return "payload-matrix-arena-compaction";
+        case VLE_SOURCE_PAYLOAD_REASON_MATRIX_FRONTIER_PRESSURE:
+            return "payload-matrix-frontier-pressure";
         case VLE_SOURCE_PAYLOAD_REASON_REPLAY_RATIO_OBSERVED:
             return "payload-replay-ratio-observed";
         case VLE_SOURCE_PAYLOAD_REASON_REPLAY_OBSERVED:
@@ -4070,6 +4603,16 @@ static void build_vle_source_policy_profile(
     profile->payload_input_matrix_replay_source_percent = 0;
     profile->payload_input_matrix_run_block_percent = 0;
     profile->payload_input_matrix_regroup_percent = 0;
+    profile->payload_input_matrix_compaction_percent = 0;
+    profile->payload_input_matrix_dense_percent = 0;
+    profile->payload_input_matrix_duplicate_percent = 0;
+    profile->payload_input_matrix_compaction_pressure_percent = 0;
+    profile->payload_input_matrix_residency_pressure_percent = 0;
+    profile->payload_input_matrix_replay_cutover_percent = 0;
+    profile->payload_input_matrix_prefetch_cutover_percent = 0;
+    profile->payload_input_matrix_payload_coverage_percent = 0;
+    profile->payload_input_matrix_source_overlap_percent = 0;
+    profile->payload_input_matrix_reuse_proximity_percent = 0;
     profile->payload_input_reason_id = VLE_SOURCE_PAYLOAD_REASON_NONE;
     profile->payload_input_class_id = VLE_SOURCE_POLICY_CLASS_NONE;
     profile->payload_input_value_posting_source_kind =
@@ -4240,6 +4783,26 @@ static void build_vle_source_policy_profile(
             threshold_feedback.payload_matrix_run_block_percent;
         profile->payload_input_matrix_regroup_percent =
             threshold_feedback.payload_matrix_regroup_percent;
+        profile->payload_input_matrix_compaction_percent =
+            threshold_feedback.payload_matrix_compaction_percent;
+        profile->payload_input_matrix_dense_percent =
+            threshold_feedback.payload_matrix_dense_percent;
+        profile->payload_input_matrix_duplicate_percent =
+            threshold_feedback.payload_matrix_duplicate_percent;
+        profile->payload_input_matrix_compaction_pressure_percent =
+            threshold_feedback.payload_matrix_compaction_pressure_percent;
+        profile->payload_input_matrix_residency_pressure_percent =
+            threshold_feedback.payload_matrix_residency_pressure_percent;
+        profile->payload_input_matrix_replay_cutover_percent =
+            threshold_feedback.payload_matrix_replay_cutover_percent;
+        profile->payload_input_matrix_prefetch_cutover_percent =
+            threshold_feedback.payload_matrix_prefetch_cutover_percent;
+        profile->payload_input_matrix_payload_coverage_percent =
+            threshold_feedback.payload_matrix_payload_coverage_percent;
+        profile->payload_input_matrix_source_overlap_percent =
+            threshold_feedback.payload_matrix_source_overlap_percent;
+        profile->payload_input_matrix_reuse_proximity_percent =
+            threshold_feedback.payload_matrix_reuse_proximity_percent;
         profile->payload_input_value_posting_source_kind =
             threshold_feedback.payload_value_posting_source_kind;
     }
@@ -4520,7 +5083,17 @@ static void choose_vle_source_policy_feedback(
              profile->payload_input_matrix_prescan_percent > 0 ||
              profile->payload_input_matrix_replay_source_percent > 0 ||
              profile->payload_input_matrix_run_block_percent > 0 ||
-             profile->payload_input_matrix_regroup_percent > 0))
+             profile->payload_input_matrix_regroup_percent > 0 ||
+             profile->payload_input_matrix_compaction_percent > 0 ||
+             profile->payload_input_matrix_dense_percent > 0 ||
+             profile->payload_input_matrix_duplicate_percent > 0 ||
+             profile->payload_input_matrix_compaction_pressure_percent > 0 ||
+             profile->payload_input_matrix_residency_pressure_percent > 0 ||
+             profile->payload_input_matrix_replay_cutover_percent > 0 ||
+             profile->payload_input_matrix_prefetch_cutover_percent > 0 ||
+             profile->payload_input_matrix_payload_coverage_percent > 0 ||
+             profile->payload_input_matrix_source_overlap_percent > 0 ||
+             profile->payload_input_matrix_reuse_proximity_percent > 0))
         {
             set_vle_source_policy_feedback_class(
                 feedback, VLE_SOURCE_POLICY_CLASS_MATRIX_FRONTIER_PRE_SCAN);
@@ -5188,6 +5761,150 @@ age_vle_runtime_value_posting_pruning_count(
         stats->age_adjacency_payload_cache_filtered +
         stats->age_adjacency_payload_composite_block_filtered +
         stats->age_adjacency_payload_composite_directory_filtered;
+}
+
+static void
+age_vle_runtime_matrix_frontier_pressure_vector(
+    const AgeVLESourceStats *stats,
+    VLESourceDirectionClass source_direction_id,
+    VLESourceRuntimePayloadFeedback *feedback)
+{
+    AgeVLEMatrixFrontierPressureVector combined;
+    const AgeVLEMatrixFrontierPressureVector *vector;
+    int64 total_capacity;
+    int64 duplicate_count;
+    int64 prefetch_cursor_count;
+    int direction_index;
+
+    Assert(stats != NULL);
+    Assert(feedback != NULL);
+
+    memset(&combined, 0, sizeof(combined));
+    if (source_direction_id == VLE_SOURCE_DIRECTION_OUT)
+    {
+        vector = &stats->matrix_frontier_pressure[
+            AGE_VLE_MATRIX_FRONTIER_OUT];
+    }
+    else if (source_direction_id == VLE_SOURCE_DIRECTION_IN)
+    {
+        vector = &stats->matrix_frontier_pressure[
+            AGE_VLE_MATRIX_FRONTIER_IN];
+    }
+    else
+    {
+        for (direction_index = 0;
+             direction_index < AGE_VLE_MATRIX_FRONTIER_DIRECTION_COUNT;
+             direction_index++)
+        {
+            const AgeVLEMatrixFrontierPressureVector *part;
+
+            part = &stats->matrix_frontier_pressure[direction_index];
+            combined.handoff_batches += part->handoff_batches;
+            combined.handoff_candidates += part->handoff_candidates;
+            combined.handoff_accepted += part->handoff_accepted;
+            combined.handoff_unique_sources += part->handoff_unique_sources;
+            combined.handoff_max_unique_sources =
+                Max(combined.handoff_max_unique_sources,
+                    part->handoff_max_unique_sources);
+            combined.handoff_work_closed_segment_delta +=
+                part->handoff_work_closed_segment_delta;
+            combined.handoff_compactable_frame_delta +=
+                part->handoff_compactable_frame_delta;
+            combined.handoff_compacted_frame_delta +=
+                part->handoff_compacted_frame_delta;
+            combined.prefetch_runs += part->prefetch_runs;
+            combined.prefetch_cursors += part->prefetch_cursors;
+            combined.phase_cursors += part->phase_cursors;
+            combined.replay_cursors += part->replay_cursors;
+            combined.raw_cursors += part->raw_cursors;
+            combined.scalar_cursors += part->scalar_cursors;
+            combined.cache_probes += part->cache_probes;
+            combined.cache_requested_sources +=
+                part->cache_requested_sources;
+            combined.cache_matching_sources += part->cache_matching_sources;
+            combined.cache_entry_sources += part->cache_entry_sources;
+            combined.cache_payload_span += part->cache_payload_span;
+            combined.cache_matching_payload_span +=
+                part->cache_matching_payload_span;
+            combined.cache_reuse_distance += part->cache_reuse_distance;
+            combined.cache_replay_work += part->cache_replay_work;
+            combined.cache_raw_work += part->cache_raw_work;
+            combined.cache_scalar_work += part->cache_scalar_work;
+            combined.cache_replay_selections +=
+                part->cache_replay_selections;
+            combined.cache_fallback_selections +=
+                part->cache_fallback_selections;
+        }
+        vector = &combined;
+    }
+
+    total_capacity = vector->handoff_batches *
+        stats->matrix_frontier_batch_capacity;
+    feedback->matrix_dense_percent = calculate_vle_source_ratio_percent(
+        vector->handoff_unique_sources, total_capacity);
+    duplicate_count = Max(vector->handoff_accepted -
+                          vector->handoff_unique_sources, (int64)0);
+    feedback->matrix_duplicate_percent = calculate_vle_source_ratio_percent(
+        duplicate_count, vector->handoff_accepted);
+    feedback->matrix_compaction_pressure_percent = Max(
+        calculate_vle_source_ratio_percent(
+            vector->handoff_work_closed_segment_delta,
+            vector->handoff_batches),
+        calculate_vle_source_ratio_percent(
+            vector->handoff_compacted_frame_delta,
+            vector->handoff_compactable_frame_delta));
+    /*
+     * Residency pressure is cache-wide (the directory cache is shared across
+     * directions), so it is derived from the eviction-vs-reuse ratio rather
+     * than the per-direction handoff vector: how much of the cache's useful
+     * work was paid back by replay hits versus thrown away by eviction.
+     */
+    feedback->matrix_residency_pressure_percent =
+        calculate_vle_source_ratio_percent(
+            stats->matrix_frontier_cache_evictions,
+            stats->matrix_frontier_cache_evictions +
+                stats->matrix_frontier_cache_probe_hits);
+    feedback->matrix_replay_cutover_percent =
+        calculate_vle_source_ratio_percent(vector->replay_cursors,
+                                           vector->phase_cursors);
+    prefetch_cursor_count = vector->raw_cursors + vector->scalar_cursors;
+    feedback->matrix_prefetch_cutover_percent =
+        calculate_vle_source_ratio_percent(prefetch_cursor_count,
+                                           vector->phase_cursors);
+    feedback->matrix_payload_coverage_percent =
+        calculate_vle_source_ratio_percent(
+            vector->cache_matching_payload_span,
+            vector->cache_payload_span);
+    feedback->matrix_source_overlap_percent =
+        calculate_vle_source_ratio_percent(vector->cache_matching_sources,
+                                           vector->cache_requested_sources);
+    feedback->matrix_reuse_proximity_percent =
+        calculate_vle_source_ratio_percent(
+            vector->cache_probes,
+            vector->cache_probes + vector->cache_reuse_distance);
+    feedback->matrix_replay_work = vector->cache_replay_work;
+    feedback->matrix_raw_work = vector->cache_raw_work;
+    feedback->matrix_scalar_work = vector->cache_scalar_work;
+    feedback->matrix_replay_selections = vector->cache_replay_selections;
+    feedback->matrix_fallback_selections =
+        vector->cache_fallback_selections;
+    if (vector->cache_probes > 0)
+    {
+        int64 fallback_work = Min(vector->cache_raw_work,
+                                  vector->cache_scalar_work);
+        int64 total_work = vector->cache_replay_work + fallback_work;
+        int64 replay_work_preference = calculate_vle_source_ratio_percent(
+            fallback_work, total_work);
+        int64 prefetch_work_preference = calculate_vle_source_ratio_percent(
+            vector->cache_replay_work, total_work);
+
+        feedback->matrix_replay_cutover_percent =
+            (feedback->matrix_replay_cutover_percent +
+             replay_work_preference) / 2;
+        feedback->matrix_prefetch_cutover_percent =
+            (feedback->matrix_prefetch_cutover_percent +
+             prefetch_work_preference) / 2;
+    }
 }
 
 static VLESourceValuePostingKind

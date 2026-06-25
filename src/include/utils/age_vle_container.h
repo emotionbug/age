@@ -26,6 +26,7 @@
 #include "utils/age_vle.h"
 #include "utils/age_vle_iterator_materialization.h"
 #include "utils/age_vle_materializer_cache.h"
+#include "utils/age_vle_traversal.h"
 
 /*
  * Container to hold the graphid array that contains one valid path. This
@@ -58,6 +59,10 @@ typedef struct VLEContainerBuildInput
     bool reverse_output_path;
     GraphIdStack *path_stack;
     GraphIdStack *path_vertex_stack;
+    const VLETraversalFrame *path_frames;
+    int64 path_frame_count;
+    int64 active_frame_index;
+    int64 path_depth;
 } VLEContainerBuildInput;
 
 extern VLE_path_container *age_vle_build_container(
