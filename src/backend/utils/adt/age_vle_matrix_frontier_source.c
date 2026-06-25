@@ -22,6 +22,12 @@
 #include "access/age_adjacency.h"
 #include "utils/age_vle_matrix_frontier_source.h"
 
+typedef struct VLEMatrixFrontierRawRunFilterState
+{
+    VLE_local_context *vlelctx;
+    VLEContextAgeAdjacencyPayloadSource *source;
+} VLEMatrixFrontierRawRunFilterState;
+
 static int age_vle_matrix_frontier_source_cursor_compare(
     const void *a, const void *b);
 static void age_vle_matrix_frontier_source_block_init_order(
@@ -36,16 +42,74 @@ static void age_vle_matrix_frontier_source_block_cleanup_run(
 static void age_vle_matrix_frontier_source_block_remember_source(
     VLEMatrixFrontierSourceBlock *block,
     VLEContextAgeAdjacencyPayloadSource *source);
-static void age_vle_matrix_frontier_source_block_append_run_cursor(
+static void age_vle_matrix_frontier_source_block_ensure_run_input_capacity(
+    VLEMatrixFrontierSourceBlock *block, int64 capacity);
+static VLEMatrixFrontierRunInput *
+age_vle_matrix_frontier_source_block_append_run_input(
+    VLEMatrixFrontierSourceBlock *block,
+    VLEMatrixFrontierRunInputKind kind,
+    VLEContextAgeAdjacencyPayloadSource *source,
+    const VLEContextSourceCursor *cursor);
+static VLEMatrixFrontierRunInputState *
+age_vle_matrix_frontier_source_block_find_run_input_state(
+    VLEMatrixFrontierSourceBlock *block,
+    VLEMatrixFrontierRunInputKind kind);
+static void age_vle_matrix_frontier_source_block_release_run_input_states(
+    VLEMatrixFrontierSourceBlock *block);
+static VLEMatrixFrontierRunInput *
+age_vle_matrix_frontier_source_block_append_cursor_input(
     VLEMatrixFrontierSourceBlock *block,
     VLEContextAgeAdjacencyPayloadSource *source,
     const VLEContextSourceCursor *cursor, const AgeAdjacencyPayload *payload);
-static void age_vle_matrix_frontier_source_block_append_payload(
-    VLEMatrixFrontierSourceBlock *block, const AgeAdjacencyPayload *payload,
+static bool age_vle_matrix_frontier_source_block_append_replay_input(
+    VLEMatrixFrontierSourceBlock *block,
+    VLEMatrixFrontierRunInputState **matrix_replay_state,
+    VLEContextAgeAdjacencyPayloadSource *source,
+    const VLEContextSourceCursor *cursor,
+    VLEMatrixFrontierCacheEntry *entry);
+static void age_vle_matrix_frontier_source_block_append_raw_merge_input(
+    VLEMatrixFrontierSourceBlock *block,
+    VLEMatrixFrontierRunInputState **raw_scan_state,
     VLEContextAgeAdjacencyPayloadSource *source,
     const VLEContextSourceCursor *cursor);
-static bool age_vle_matrix_frontier_source_block_pop_next_payload(
-    VLEMatrixFrontierSourceBlock *block, VLEMatrixFrontierRunPayload *entry);
+static void age_vle_matrix_frontier_source_block_begin_raw_merge_scan(
+    VLEMatrixFrontierSourceBlock *block,
+    const VLEContextSourceCursor *first_cursor,
+    VLEMatrixFrontierRunInputState *raw_scan_state);
+static bool age_vle_matrix_frontier_source_block_next_cursor_input(
+    VLEMatrixFrontierSourceBlock *block, AgeAdjacencyPayload *payload,
+    VLEContextAgeAdjacencyPayloadSource **payload_source,
+    const VLEContextSourceCursor **source_cursor,
+    VLEMatrixFrontierRunInput **selected_input);
+static void age_vle_matrix_frontier_source_block_close_raw_scan(
+    VLEMatrixFrontierSourceBlock *block);
+static bool age_vle_matrix_frontier_source_block_next_replay_input(
+    VLEMatrixFrontierSourceBlock *block, AgeAdjacencyPayload *payload,
+    VLEContextAgeAdjacencyPayloadSource **payload_source,
+    const VLEContextSourceCursor **source_cursor,
+    VLEMatrixFrontierRunInput **selected_input);
+static bool age_vle_matrix_frontier_source_block_next_raw_input(
+    VLEMatrixFrontierSourceBlock *block, AgeAdjacencyPayload *payload,
+    VLEContextAgeAdjacencyPayloadSource **payload_source,
+    const VLEContextSourceCursor **source_cursor,
+    VLEMatrixFrontierRunInput **selected_input);
+static bool age_vle_matrix_frontier_source_block_next_run_input_kind(
+    VLEMatrixFrontierSourceBlock *block,
+    VLEMatrixFrontierRunInputKind kind,
+    AgeAdjacencyPayload *payload,
+    VLEContextAgeAdjacencyPayloadSource **payload_source,
+    const VLEContextSourceCursor **source_cursor,
+    VLEMatrixFrontierRunInput **selected_input);
+static bool age_vle_matrix_frontier_source_block_next_run_input(
+    VLEMatrixFrontierSourceBlock *block, AgeAdjacencyPayload *payload,
+    VLEContextAgeAdjacencyPayloadSource **payload_source,
+    const VLEContextSourceCursor **source_cursor);
+static bool age_vle_matrix_frontier_source_block_prepare_raw_run_filter(
+    int64 run_postings, int64 active_postings,
+    AgeAdjacencyCompositeTerminalFilter *filter, bool *known_empty,
+    void *callback_state);
+static void age_vle_matrix_frontier_source_block_accept_raw_run_payload(
+    void *tag, const AgeAdjacencyPayload *payload, void *callback_state);
 static bool age_vle_matrix_frontier_source_block_drain_run(
     VLEMatrixFrontierSourceBlock *block);
 static bool age_vle_matrix_frontier_source_block_advance(
@@ -162,6 +226,7 @@ static void age_vle_matrix_frontier_source_block_cleanup_run(
 
     Assert(block != NULL);
 
+    age_vle_matrix_frontier_source_block_close_raw_scan(block);
     for (i = 0; i < block->run_source_count; i++)
     {
         age_vle_context_end_age_adjacency_payload_source(
@@ -169,9 +234,9 @@ static void age_vle_matrix_frontier_source_block_cleanup_run(
     }
 
     block->run_source_count = 0;
-    block->run_cursor_count = 0;
-    block->run_payload_count = 0;
-    block->run_payload_index = 0;
+    age_vle_matrix_frontier_source_block_release_run_input_states(block);
+    block->run_input_count = 0;
+    block->raw_source_count = 0;
     block->run_batch_active = false;
 }
 
@@ -201,92 +266,247 @@ static void age_vle_matrix_frontier_source_block_remember_source(
     block->run_sources[block->run_source_count++] = source;
 }
 
-static void age_vle_matrix_frontier_source_block_append_run_cursor(
+static void age_vle_matrix_frontier_source_block_ensure_run_input_capacity(
+    VLEMatrixFrontierSourceBlock *block, int64 capacity)
+{
+    Assert(block != NULL);
+    Assert(capacity > 0);
+
+    if (capacity <= block->run_input_capacity)
+        return;
+
+    if (block->run_input_capacity == 0)
+    {
+        block->run_inputs =
+            palloc_array(VLEMatrixFrontierRunInput, capacity);
+        block->raw_keys =
+            palloc_array(AgeAdjacencyVisiblePayloadRunKey, capacity);
+    }
+    else
+    {
+        block->run_inputs = repalloc_array(
+            block->run_inputs, VLEMatrixFrontierRunInput, capacity);
+        block->raw_keys = repalloc_array(
+            block->raw_keys, AgeAdjacencyVisiblePayloadRunKey, capacity);
+    }
+
+    block->run_input_capacity = capacity;
+}
+
+static VLEMatrixFrontierRunInput *
+age_vle_matrix_frontier_source_block_append_run_input(
+    VLEMatrixFrontierSourceBlock *block,
+    VLEMatrixFrontierRunInputKind kind,
+    VLEContextAgeAdjacencyPayloadSource *source,
+    const VLEContextSourceCursor *cursor)
+{
+    VLEMatrixFrontierRunInput *input;
+
+    Assert(block != NULL);
+    Assert(source != NULL);
+    Assert(cursor != NULL);
+    Assert(block->run_input_count < block->run_input_capacity);
+
+    input = &block->run_inputs[block->run_input_count++];
+    input->kind = kind;
+    input->source = source;
+    input->cursor = cursor;
+    input->state = NULL;
+    input->payload_valid = false;
+    input->state_owner = false;
+    return input;
+}
+
+static VLEMatrixFrontierRunInputState *
+age_vle_matrix_frontier_source_block_find_run_input_state(
+    VLEMatrixFrontierSourceBlock *block,
+    VLEMatrixFrontierRunInputKind kind)
+{
+    int64 i;
+
+    Assert(block != NULL);
+
+    for (i = 0; i < block->run_input_count; i++)
+    {
+        VLEMatrixFrontierRunInput *input;
+
+        input = &block->run_inputs[i];
+        if (input->kind == kind && input->state != NULL)
+            return input->state;
+    }
+
+    return NULL;
+}
+
+static void
+age_vle_matrix_frontier_source_block_release_run_input_states(
+    VLEMatrixFrontierSourceBlock *block)
+{
+    int64 i;
+
+    Assert(block != NULL);
+
+    for (i = 0; i < block->run_input_count; i++)
+    {
+        VLEMatrixFrontierRunInput *input;
+
+        input = &block->run_inputs[i];
+        if (input->state_owner && input->state != NULL)
+            pfree(input->state);
+        input->state = NULL;
+        input->state_owner = false;
+    }
+}
+
+static VLEMatrixFrontierRunInput *
+age_vle_matrix_frontier_source_block_append_cursor_input(
     VLEMatrixFrontierSourceBlock *block,
     VLEContextAgeAdjacencyPayloadSource *source,
     const VLEContextSourceCursor *cursor, const AgeAdjacencyPayload *payload)
 {
-    VLEMatrixFrontierRunCursor *entry;
+    VLEMatrixFrontierRunInput *input;
 
     Assert(block != NULL);
     Assert(source != NULL);
     Assert(cursor != NULL);
     Assert(payload != NULL);
 
-    if (block->run_cursor_count >= block->run_cursor_capacity)
-    {
-        int64 new_capacity;
-
-        new_capacity = block->run_cursor_capacity == 0 ?
-                       8 : block->run_cursor_capacity * 2;
-        if (block->run_cursors == NULL)
-            block->run_cursors = palloc_array(VLEMatrixFrontierRunCursor,
-                                              new_capacity);
-        else
-            block->run_cursors = repalloc_array(
-                block->run_cursors, VLEMatrixFrontierRunCursor,
-                new_capacity);
-        block->run_cursor_capacity = new_capacity;
-    }
-
-    entry = &block->run_cursors[block->run_cursor_count++];
-    entry->source = source;
-    entry->cursor = cursor;
-    entry->payload = *payload;
-    entry->payload_valid = true;
+    input = age_vle_matrix_frontier_source_block_append_run_input(
+        block, VLE_MATRIX_FRONTIER_RUN_INPUT_CURSOR, source, cursor);
+    input->payload = *payload;
+    input->payload_valid = true;
+    return input;
 }
 
-static void age_vle_matrix_frontier_source_block_append_payload(
-    VLEMatrixFrontierSourceBlock *block, const AgeAdjacencyPayload *payload,
+static bool age_vle_matrix_frontier_source_block_append_replay_input(
+    VLEMatrixFrontierSourceBlock *block,
+    VLEMatrixFrontierRunInputState **matrix_replay_state,
+    VLEContextAgeAdjacencyPayloadSource *source,
+    const VLEContextSourceCursor *cursor,
+    VLEMatrixFrontierCacheEntry *entry)
+{
+    VLEMatrixFrontierRunInput *input;
+    bool state_owner;
+
+    Assert(block != NULL);
+    Assert(matrix_replay_state != NULL);
+    Assert(source != NULL);
+    Assert(cursor != NULL);
+    Assert(entry != NULL);
+
+    if (*matrix_replay_state != NULL &&
+        (*matrix_replay_state)->matrix_replay_entry != entry)
+        return false;
+
+    state_owner = false;
+    if (*matrix_replay_state == NULL)
+    {
+        *matrix_replay_state = palloc0(sizeof(VLEMatrixFrontierRunInputState));
+        (*matrix_replay_state)->matrix_replay_entry = entry;
+        state_owner = true;
+    }
+
+    input = age_vle_matrix_frontier_source_block_append_run_input(
+        block, VLE_MATRIX_FRONTIER_RUN_INPUT_REPLAY, source, cursor);
+    input->state = *matrix_replay_state;
+    input->state_owner = state_owner;
+    return true;
+}
+
+static void age_vle_matrix_frontier_source_block_append_raw_merge_input(
+    VLEMatrixFrontierSourceBlock *block,
+    VLEMatrixFrontierRunInputState **raw_scan_state,
     VLEContextAgeAdjacencyPayloadSource *source,
     const VLEContextSourceCursor *cursor)
 {
-    VLEMatrixFrontierRunPayload *entry;
+    VLEMatrixFrontierRunInput *input;
 
     Assert(block != NULL);
-    Assert(payload != NULL);
+    Assert(raw_scan_state != NULL);
     Assert(source != NULL);
     Assert(cursor != NULL);
 
-    if (block->run_payload_count >= block->run_payload_capacity)
-    {
-        int64 new_capacity;
+    if (*raw_scan_state == NULL)
+        *raw_scan_state = palloc0(sizeof(VLEMatrixFrontierRunInputState));
 
-        new_capacity = block->run_payload_capacity == 0 ?
-                       32 : block->run_payload_capacity * 2;
-        if (block->run_payloads == NULL)
-            block->run_payloads = palloc_array(VLEMatrixFrontierRunPayload,
-                                               new_capacity);
-        else
-            block->run_payloads = repalloc_array(
-                block->run_payloads, VLEMatrixFrontierRunPayload,
-                new_capacity);
-        block->run_payload_capacity = new_capacity;
-    }
-
-    entry = &block->run_payloads[block->run_payload_count++];
-    entry->payload = *payload;
-    entry->source = source;
-    entry->cursor = cursor;
+    input = age_vle_matrix_frontier_source_block_append_run_input(
+        block, VLE_MATRIX_FRONTIER_RUN_INPUT_RAW, source, cursor);
+    input->state = *raw_scan_state;
+    input->state_owner = block->raw_source_count == 0;
+    block->raw_keys[block->raw_source_count].key = cursor->source_vertex_id;
+    block->raw_keys[block->raw_source_count].tag = input;
+    block->raw_source_count++;
 }
 
-static bool age_vle_matrix_frontier_source_block_pop_next_payload(
-    VLEMatrixFrontierSourceBlock *block, VLEMatrixFrontierRunPayload *entry)
+static void age_vle_matrix_frontier_source_block_begin_raw_merge_scan(
+    VLEMatrixFrontierSourceBlock *block,
+    const VLEContextSourceCursor *first_cursor,
+    VLEMatrixFrontierRunInputState *raw_scan_state)
 {
-    VLEMatrixFrontierRunCursor *selected;
-    int64 selected_index;
+    AgeAdjacencyVisiblePayloadRunOptions options;
+    VLEMatrixFrontierCacheEntry *matrix_entry;
+    VLEMatrixFrontierRawRunFilterState filter_state;
     int64 i;
 
     Assert(block != NULL);
-    Assert(entry != NULL);
+    Assert(first_cursor != NULL);
+    Assert(raw_scan_state != NULL);
+    Assert(block->raw_source_count > 0);
+
+    matrix_entry =
+        age_vle_context_prepare_age_adjacency_matrix_seed_entry(
+            block->vlelctx,
+            ((VLEMatrixFrontierRunInput *) block->raw_keys[0].tag)->source);
+    for (i = 1; i < block->raw_source_count; i++)
+    {
+        VLEMatrixFrontierRunInput *input;
+
+        input = block->raw_keys[i].tag;
+        Assert(input != NULL);
+        age_vle_context_bind_age_adjacency_matrix_seed_entry(
+            input->source, matrix_entry);
+    }
+
+    memset(&options, 0, sizeof(options));
+    filter_state.vlelctx = block->vlelctx;
+    filter_state.source =
+        ((VLEMatrixFrontierRunInput *) block->raw_keys[0].tag)->source;
+    options.terminal_label_id = first_cursor->terminal_label_id;
+    options.filter_callback =
+        age_vle_matrix_frontier_source_block_prepare_raw_run_filter;
+    options.filter_callback_state = &filter_state;
+    options.payload_callback =
+        age_vle_matrix_frontier_source_block_accept_raw_run_payload;
+    options.payload_callback_state = block->vlelctx;
+    raw_scan_state->raw_run_scan =
+        age_adjacency_begin_visible_payload_run_scan_with_options(
+            first_cursor->index_oid, NULL, false, &options,
+            block->raw_keys, block->raw_source_count);
+}
+
+static bool age_vle_matrix_frontier_source_block_next_cursor_input(
+    VLEMatrixFrontierSourceBlock *block, AgeAdjacencyPayload *payload,
+    VLEContextAgeAdjacencyPayloadSource **payload_source,
+    const VLEContextSourceCursor **source_cursor,
+    VLEMatrixFrontierRunInput **selected_input)
+{
+    VLEMatrixFrontierRunInput *selected;
+    int64 i;
+
+    Assert(block != NULL);
+    Assert(payload != NULL);
+    Assert(payload_source != NULL);
+    Assert(source_cursor != NULL);
+    Assert(selected_input != NULL);
 
     selected = NULL;
-    selected_index = -1;
-    for (i = 0; i < block->run_cursor_count; i++)
+    for (i = 0; i < block->run_input_count; i++)
     {
-        VLEMatrixFrontierRunCursor *candidate;
+        VLEMatrixFrontierRunInput *candidate;
 
-        candidate = &block->run_cursors[i];
+        candidate = &block->run_inputs[i];
+        if (candidate->kind != VLE_MATRIX_FRONTIER_RUN_INPUT_CURSOR)
+            continue;
         if (!candidate->payload_valid)
             continue;
         if (selected == NULL ||
@@ -297,61 +517,257 @@ static bool age_vle_matrix_frontier_source_block_pop_next_payload(
              candidate->payload.edge_id < selected->payload.edge_id))
         {
             selected = candidate;
-            selected_index = i;
         }
     }
 
     if (selected == NULL)
         return false;
 
-    entry->payload = selected->payload;
-    entry->source = selected->source;
-    entry->cursor = selected->cursor;
+    *payload = selected->payload;
+    *payload_source = selected->source;
+    *source_cursor = selected->cursor;
+    *selected_input = selected;
     selected->payload_valid =
         age_vle_context_age_adjacency_payload_next(
             block->vlelctx, selected->source, &selected->payload);
-    if (!selected->payload_valid && selected_index >= 0)
+
+    return true;
+}
+
+static void age_vle_matrix_frontier_source_block_close_raw_scan(
+    VLEMatrixFrontierSourceBlock *block)
+{
+    VLEMatrixFrontierRunInputState *state;
+    int64 i;
+
+    Assert(block != NULL);
+
+    state = age_vle_matrix_frontier_source_block_find_run_input_state(
+        block, VLE_MATRIX_FRONTIER_RUN_INPUT_RAW);
+    if (state == NULL || state->raw_run_scan == NULL)
+        return;
+
+    for (i = 0; i < block->raw_source_count; i++)
     {
-        while (block->run_cursor_count > 0 &&
-               !block->run_cursors[block->run_cursor_count - 1].payload_valid)
+        VLEMatrixFrontierRunInput *input;
+
+        input = block->raw_keys[i].tag;
+        Assert(input != NULL);
+        if (!age_adjacency_visible_payload_run_scan_key_seen(
+                state->raw_run_scan, i))
+            age_vle_context_age_adjacency_payload_source_mark_empty(
+                block->vlelctx, input->source);
+    }
+    age_adjacency_end_visible_payload_run_scan(state->raw_run_scan);
+    state->raw_run_scan = NULL;
+}
+
+static bool age_vle_matrix_frontier_source_block_next_replay_input(
+    VLEMatrixFrontierSourceBlock *block, AgeAdjacencyPayload *payload,
+    VLEContextAgeAdjacencyPayloadSource **payload_source,
+    const VLEContextSourceCursor **source_cursor,
+    VLEMatrixFrontierRunInput **selected_input)
+{
+    VLEMatrixFrontierRunInputState *state;
+
+    Assert(block != NULL);
+    Assert(payload != NULL);
+    Assert(payload_source != NULL);
+    Assert(source_cursor != NULL);
+    Assert(selected_input != NULL);
+
+    state = age_vle_matrix_frontier_source_block_find_run_input_state(
+        block, VLE_MATRIX_FRONTIER_RUN_INPUT_REPLAY);
+    if (state == NULL || state->matrix_replay_entry == NULL)
+        return false;
+
+    while (state->matrix_payload_index < state->matrix_replay_entry->count)
+    {
+        VLEMatrixFrontierPayload *matrix_payload;
+        int64 input_index;
+
+        matrix_payload =
+            &state->matrix_replay_entry->payloads[
+                state->matrix_payload_index++];
+        for (input_index = 0; input_index < block->run_input_count;
+             input_index++)
         {
-            block->run_cursor_count--;
+            VLEMatrixFrontierRunInput *input;
+
+            input = &block->run_inputs[input_index];
+            if (input->kind != VLE_MATRIX_FRONTIER_RUN_INPUT_REPLAY)
+                continue;
+            if (matrix_payload->source_vertex_id !=
+                input->cursor->source_vertex_id)
+                continue;
+
+            age_vle_context_age_adjacency_payload_source_accept_matrix_replay(
+                block->vlelctx, input->source);
+            *payload = matrix_payload->payload;
+            *payload_source = input->source;
+            *source_cursor = input->cursor;
+            *selected_input = input;
+            return true;
         }
     }
 
-    return true;
+    return false;
+}
+
+static bool age_vle_matrix_frontier_source_block_next_raw_input(
+    VLEMatrixFrontierSourceBlock *block, AgeAdjacencyPayload *payload,
+    VLEContextAgeAdjacencyPayloadSource **payload_source,
+    const VLEContextSourceCursor **source_cursor,
+    VLEMatrixFrontierRunInput **selected_input)
+{
+    VLEMatrixFrontierRunInputState *state;
+    VLEMatrixFrontierRunInput *raw_source;
+    void *tag;
+
+    Assert(block != NULL);
+    Assert(payload != NULL);
+    Assert(payload_source != NULL);
+    Assert(source_cursor != NULL);
+    Assert(selected_input != NULL);
+
+    state = age_vle_matrix_frontier_source_block_find_run_input_state(
+        block, VLE_MATRIX_FRONTIER_RUN_INPUT_RAW);
+    if (state == NULL || state->raw_run_scan == NULL)
+        return false;
+
+    if (age_adjacency_visible_payload_run_scan_next_tag(state->raw_run_scan,
+                                                        payload, &tag))
+    {
+        raw_source = tag;
+        Assert(raw_source != NULL);
+
+        *payload_source = raw_source->source;
+        *source_cursor = raw_source->cursor;
+        *selected_input = raw_source;
+        return true;
+    }
+
+    age_vle_matrix_frontier_source_block_close_raw_scan(block);
+    return false;
+}
+
+static bool age_vle_matrix_frontier_source_block_next_run_input_kind(
+    VLEMatrixFrontierSourceBlock *block,
+    VLEMatrixFrontierRunInputKind kind,
+    AgeAdjacencyPayload *payload,
+    VLEContextAgeAdjacencyPayloadSource **payload_source,
+    const VLEContextSourceCursor **source_cursor,
+    VLEMatrixFrontierRunInput **selected_input)
+{
+    Assert(block != NULL);
+    Assert(payload != NULL);
+    Assert(payload_source != NULL);
+    Assert(source_cursor != NULL);
+    Assert(selected_input != NULL);
+
+    switch (kind)
+    {
+        case VLE_MATRIX_FRONTIER_RUN_INPUT_REPLAY:
+            return age_vle_matrix_frontier_source_block_next_replay_input(
+                block, payload, payload_source, source_cursor,
+                selected_input);
+        case VLE_MATRIX_FRONTIER_RUN_INPUT_RAW:
+            return age_vle_matrix_frontier_source_block_next_raw_input(
+                block, payload, payload_source, source_cursor,
+                selected_input);
+        case VLE_MATRIX_FRONTIER_RUN_INPUT_CURSOR:
+            return age_vle_matrix_frontier_source_block_next_cursor_input(
+                block, payload, payload_source, source_cursor,
+                selected_input);
+    }
+
+    return false;
+}
+
+static bool age_vle_matrix_frontier_source_block_next_run_input(
+    VLEMatrixFrontierSourceBlock *block, AgeAdjacencyPayload *payload,
+    VLEContextAgeAdjacencyPayloadSource **payload_source,
+    const VLEContextSourceCursor **source_cursor)
+{
+    VLEMatrixFrontierRunInput *selected_input;
+    VLEMatrixFrontierRunInputKind kinds[] = {
+        VLE_MATRIX_FRONTIER_RUN_INPUT_REPLAY,
+        VLE_MATRIX_FRONTIER_RUN_INPUT_RAW,
+        VLE_MATRIX_FRONTIER_RUN_INPUT_CURSOR
+    };
+    int i;
+
+    Assert(block != NULL);
+    Assert(payload != NULL);
+    Assert(payload_source != NULL);
+    Assert(source_cursor != NULL);
+
+    selected_input = NULL;
+    for (i = 0; i < lengthof(kinds); i++)
+    {
+        if (age_vle_matrix_frontier_source_block_next_run_input_kind(
+                block, kinds[i], payload, payload_source, source_cursor,
+                &selected_input))
+            return true;
+    }
+
+    return false;
+}
+
+static bool age_vle_matrix_frontier_source_block_prepare_raw_run_filter(
+    int64 run_postings, int64 active_postings,
+    AgeAdjacencyCompositeTerminalFilter *filter, bool *known_empty,
+    void *callback_state)
+{
+    VLEMatrixFrontierRawRunFilterState *state;
+
+    Assert(filter != NULL);
+    Assert(known_empty != NULL);
+    Assert(callback_state != NULL);
+
+    state = callback_state;
+    return age_vle_context_prepare_age_adjacency_payload_source_run_filter(
+        state->vlelctx, state->source, run_postings, active_postings,
+        filter, known_empty);
+}
+
+static void age_vle_matrix_frontier_source_block_accept_raw_run_payload(
+    void *tag, const AgeAdjacencyPayload *payload, void *callback_state)
+{
+    VLEMatrixFrontierRunInput *raw_source;
+    VLE_local_context *vlelctx;
+
+    Assert(tag != NULL);
+    Assert(payload != NULL);
+    Assert(callback_state != NULL);
+
+    raw_source = tag;
+    vlelctx = callback_state;
+    age_vle_context_age_adjacency_payload_source_accept_scanned_payload(
+        vlelctx, raw_source->source, payload);
 }
 
 static bool age_vle_matrix_frontier_source_block_drain_run(
     VLEMatrixFrontierSourceBlock *block)
 {
     const VLEContextSourceCursor *first_cursor;
-    const VLEContextSourceCursor **raw_cursors;
-    VLEContextAgeAdjacencyPayloadSource **raw_sources;
-    graphid *raw_keys;
-    bool *raw_seen;
+    VLEMatrixFrontierRunInputState *matrix_replay_state;
+    VLEMatrixFrontierRunInputState *raw_scan_state;
     int64 i;
-    int64 raw_source_count;
-    VLEMatrixFrontierRunPayload entry;
+    int64 run_count;
 
     Assert(block != NULL);
     Assert(block->matrix_key_valid);
     Assert(block->run_end_index > block->run_start_index);
 
     first_cursor = block->cursor_order[block->run_start_index];
-    raw_cursors = palloc_array(const VLEContextSourceCursor *,
-                               block->run_end_index -
-                               block->run_start_index);
-    raw_sources = palloc_array(VLEContextAgeAdjacencyPayloadSource *,
-                               block->run_end_index -
-                               block->run_start_index);
-    raw_keys = palloc_array(graphid,
-                            block->run_end_index - block->run_start_index);
-    raw_seen = palloc0_array(bool,
-                             block->run_end_index - block->run_start_index);
-    raw_source_count = 0;
+    run_count = block->run_end_index - block->run_start_index;
 
     age_vle_matrix_frontier_source_block_cleanup_run(block);
+    age_vle_matrix_frontier_source_block_ensure_run_input_capacity(block,
+                                                                   run_count);
+    matrix_replay_state = NULL;
+    raw_scan_state = NULL;
     for (i = block->run_start_index; i < block->run_end_index; i++)
     {
         const VLEContextSourceCursor *cursor;
@@ -375,69 +791,40 @@ static bool age_vle_matrix_frontier_source_block_drain_run(
                 source))
             continue;
 
+        if (age_vle_context_age_adjacency_payload_source_replays_matrix(
+                source))
+        {
+            VLEMatrixFrontierCacheEntry *entry;
+
+            entry = age_vle_context_age_adjacency_payload_source_matrix_entry(
+                source);
+            if (age_vle_matrix_frontier_source_block_append_replay_input(
+                    block, &matrix_replay_state, source, cursor, entry))
+            {
+                continue;
+            }
+        }
+
         if (age_vle_context_age_adjacency_payload_source_uses_visible_scan(
                 source))
         {
-            raw_cursors[raw_source_count] = cursor;
-            raw_sources[raw_source_count] = source;
-            raw_keys[raw_source_count] = cursor->source_vertex_id;
-            raw_source_count++;
+            age_vle_matrix_frontier_source_block_append_raw_merge_input(
+                block, &raw_scan_state, source, cursor);
             continue;
         }
 
         if (age_vle_context_age_adjacency_payload_next(block->vlelctx, source,
                                                        &payload))
-            age_vle_matrix_frontier_source_block_append_run_cursor(
+            age_vle_matrix_frontier_source_block_append_cursor_input(
                 block, source, cursor, &payload);
     }
 
-    if (raw_source_count > 0)
-    {
-        AgeAdjacencyVisiblePayloadRunScan *run_scan;
-        AgeAdjacencyPayload payload;
-        int64 key_index;
-
-        run_scan = age_adjacency_begin_visible_payload_run_scan(
-            first_cursor->index_oid, NULL, false, first_cursor->terminal_label_id,
-            raw_keys, raw_source_count);
-        while (age_adjacency_visible_payload_run_scan_next(
-                   run_scan, &payload, &key_index))
-        {
-            VLEContextAgeAdjacencyPayloadSource *source;
-
-            Assert(key_index >= 0);
-            Assert(key_index < raw_source_count);
-
-            source = raw_sources[key_index];
-            raw_seen[key_index] = true;
-            age_vle_context_age_adjacency_payload_source_accept_scanned_payload(
-                block->vlelctx, source, &payload);
-            age_vle_matrix_frontier_source_block_append_payload(
-                block, &payload, source, raw_cursors[key_index]);
-        }
-        age_adjacency_end_visible_payload_run_scan(run_scan);
-
-        for (i = 0; i < raw_source_count; i++)
-        {
-            if (!raw_seen[i])
-                age_vle_context_age_adjacency_payload_source_mark_empty(
-                    block->vlelctx, raw_sources[i]);
-        }
-    }
-
-    while (age_vle_matrix_frontier_source_block_pop_next_payload(block,
-                                                                 &entry))
-    {
-        age_vle_matrix_frontier_source_block_append_payload(
-            block, &entry.payload, entry.source, entry.cursor);
-    }
+    if (block->raw_source_count > 0)
+        age_vle_matrix_frontier_source_block_begin_raw_merge_scan(
+            block, first_cursor, raw_scan_state);
 
     block->cursor_index = block->run_end_index;
     block->run_batch_active = block->run_source_count > 0;
-    pfree(raw_cursors);
-    pfree(raw_sources);
-    pfree(raw_keys);
-    pfree(raw_seen);
     return block->run_batch_active;
 }
 
@@ -542,16 +929,9 @@ bool age_vle_matrix_frontier_source_block_next(
 
     while (block->run_batch_active)
     {
-        if (block->run_payload_index < block->run_payload_count)
-        {
-            VLEMatrixFrontierRunPayload *entry;
-
-            entry = &block->run_payloads[block->run_payload_index++];
-            *payload = entry->payload;
-            *payload_source = entry->source;
-            *source_cursor = entry->cursor;
+        if (age_vle_matrix_frontier_source_block_next_run_input(
+                block, payload, payload_source, source_cursor))
             return true;
-        }
 
         if (!age_vle_matrix_frontier_source_block_advance(block))
             break;
@@ -590,10 +970,10 @@ void age_vle_matrix_frontier_source_block_end(
     age_vle_matrix_frontier_source_block_cleanup_run(block);
     pfree_if_not_null(block->cursor_order);
     pfree_if_not_null(block->run_sources);
-    pfree_if_not_null(block->run_cursors);
-    pfree_if_not_null(block->run_payloads);
+    pfree_if_not_null(block->run_inputs);
+    pfree_if_not_null(block->raw_keys);
     block->cursor_order = NULL;
     block->run_sources = NULL;
-    block->run_cursors = NULL;
-    block->run_payloads = NULL;
+    block->run_inputs = NULL;
+    block->raw_keys = NULL;
 }

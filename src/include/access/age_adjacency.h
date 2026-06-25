@@ -78,6 +78,36 @@ typedef struct AgeAdjacencyVisiblePayloadScan AgeAdjacencyVisiblePayloadScan;
 typedef struct AgeAdjacencyVisiblePayloadRunScan
     AgeAdjacencyVisiblePayloadRunScan;
 
+typedef struct AgeAdjacencyVisiblePayloadRunKey
+{
+    graphid key;
+    void *tag;
+} AgeAdjacencyVisiblePayloadRunKey;
+
+typedef struct AgeAdjacencyVisiblePayloadRunKeyEvidence
+{
+    int64 run_postings;
+    int64 terminal_postings;
+    bool active;
+    bool known_empty;
+} AgeAdjacencyVisiblePayloadRunKeyEvidence;
+
+typedef bool (*AgeAdjacencyVisiblePayloadRunFilterCallback) (
+    int64 run_postings, int64 active_postings,
+    AgeAdjacencyCompositeTerminalFilter *filter, bool *known_empty,
+    void *callback_state);
+typedef void (*AgeAdjacencyVisiblePayloadRunPayloadCallback) (
+    void *tag, const AgeAdjacencyPayload *payload, void *callback_state);
+
+typedef struct AgeAdjacencyVisiblePayloadRunOptions
+{
+    int32 terminal_label_id;
+    AgeAdjacencyVisiblePayloadRunFilterCallback filter_callback;
+    void *filter_callback_state;
+    AgeAdjacencyVisiblePayloadRunPayloadCallback payload_callback;
+    void *payload_callback_state;
+} AgeAdjacencyVisiblePayloadRunOptions;
+
 extern uint32 age_adjacency_property_filter_id(Oid property_index_oid,
                                                Datum property_value,
                                                bool property_value_isnull);
@@ -118,9 +148,27 @@ extern AgeAdjacencyVisiblePayloadRunScan *
 age_adjacency_begin_visible_payload_run_scan(
     Oid index_oid, Snapshot snapshot, bool fetch_properties,
     int32 terminal_label_id, const graphid *keys, int64 key_count);
+extern AgeAdjacencyVisiblePayloadRunScan *
+age_adjacency_begin_visible_payload_run_scan_with_tags(
+    Oid index_oid, Snapshot snapshot, bool fetch_properties,
+    int32 terminal_label_id, const AgeAdjacencyVisiblePayloadRunKey *keys,
+    int64 key_count);
+extern AgeAdjacencyVisiblePayloadRunScan *
+age_adjacency_begin_visible_payload_run_scan_with_options(
+    Oid index_oid, Snapshot snapshot, bool fetch_properties,
+    const AgeAdjacencyVisiblePayloadRunOptions *options,
+    const AgeAdjacencyVisiblePayloadRunKey *keys, int64 key_count);
 extern bool age_adjacency_visible_payload_run_scan_next(
     AgeAdjacencyVisiblePayloadRunScan *scan, AgeAdjacencyPayload *payload,
     int64 *key_index);
+extern bool age_adjacency_visible_payload_run_scan_next_tag(
+    AgeAdjacencyVisiblePayloadRunScan *scan, AgeAdjacencyPayload *payload,
+    void **tag);
+extern bool age_adjacency_visible_payload_run_scan_key_seen(
+    AgeAdjacencyVisiblePayloadRunScan *scan, int64 key_index);
+extern bool age_adjacency_visible_payload_run_scan_key_evidence(
+    AgeAdjacencyVisiblePayloadRunScan *scan, int64 key_index,
+    AgeAdjacencyVisiblePayloadRunKeyEvidence *evidence);
 extern void age_adjacency_end_visible_payload_run_scan(
     AgeAdjacencyVisiblePayloadRunScan *scan);
 extern int64 age_adjacency_visible_payload_scan_label_filtered(

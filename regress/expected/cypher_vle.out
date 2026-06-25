@@ -5338,7 +5338,7 @@ AS (plan agtype);
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop (actual rows=4.00 loops=1)
    Output: _age_default_alias_0.edges
-   Buffers: shared hit=185
+   Buffers: shared hit=173
    ->  Seq Scan on vle_value_posting_feedback."N" s (actual rows=1.00 loops=1)
          Output: s.id, s.properties
          Filter: (s.id = '844424930132167'::graphid)
@@ -5361,7 +5361,7 @@ AS (plan agtype);
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
          VLE Source Policy: out=age-adjacency/in=none depth=costed endpoint-work=sum(out:7239/14,in:6/14) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-cache-seeded recommendation=prefer-age-adjacency-depth
-         VLE Matrix Frontier: plan=eligible backend=native depth:3 batch:14 key=graph,edge-label,direction,depth,frontier,terminal-filter context=eligible/runs:1/depth:3 capacity:14 block=37/24 mrun=24/37/14 cache=h:0/m:37/s:36/r:0/e:0/0
+         VLE Matrix Frontier: plan=eligible backend=native depth:3 batch:14 key=graph,edge-label,direction,depth,frontier,terminal-filter context=eligible/runs:1/depth:3 capacity:14 block=37/24 mrun=24/37/14 cache=h:0/m:37/s:24/r:0/e:0/0
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..3
          VLE Direction: right
@@ -5375,7 +5375,7 @@ AS (plan agtype);
          VLE Empty Evidence: scans=age_adjacency:0/endpoint-btree:0 evidence=empty-run missing-vertex=1/1 suppressed=out:age-adjacency/in:none match=true cache=1/1/0 frontier=22/22/0 run=34/34/0
          VLE Empty Lifecycle: plan=eligible/depth:3 match=true context=eligible/depth:3/runs:1 match=true batch=eligible/size:14/capacity:14 match=true frontier-batch=flushes:19/keys:38/max:20 packed-suppressed=out:0/in:0/self:0
          VLE Runtime Feedback: recommendation=prefer-age-adjacency-depth planned=prefer-age-adjacency-depth root-empty=completion:57/out:57/in:0/batch:14/saturated-roots:1 threshold=eligible/headroom:35/batch:57/source:out/reason:root-empty-saturated yield=60/23 push=60/60
-         Buffers: shared hit=184
+         Buffers: shared hit=172
          ->  Values Scan on _age_default_alias_0 (never executed)
                Output: _age_default_alias_0.edges
  Planning:

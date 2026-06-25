@@ -556,11 +556,28 @@ extern bool age_vle_context_age_adjacency_payload_next(
     AgeAdjacencyPayload *payload);
 extern bool age_vle_context_age_adjacency_payload_source_uses_visible_scan(
     VLEContextAgeAdjacencyPayloadSource *source);
+extern bool age_vle_context_age_adjacency_payload_source_replays_matrix(
+    VLEContextAgeAdjacencyPayloadSource *source);
+extern VLEMatrixFrontierCacheEntry *
+age_vle_context_age_adjacency_payload_source_matrix_entry(
+    VLEContextAgeAdjacencyPayloadSource *source);
 extern void age_vle_context_age_adjacency_payload_source_accept_scanned_payload(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
     const AgeAdjacencyPayload *payload);
+extern void age_vle_context_age_adjacency_payload_source_accept_matrix_replay(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
 extern void age_vle_context_age_adjacency_payload_source_mark_empty(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
+extern bool age_vle_context_prepare_age_adjacency_payload_source_run_filter(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    int64 run_postings, int64 active_postings,
+    AgeAdjacencyCompositeTerminalFilter *filter, bool *known_empty);
+extern VLEMatrixFrontierCacheEntry *
+age_vle_context_prepare_age_adjacency_matrix_seed_entry(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
+extern void age_vle_context_bind_age_adjacency_matrix_seed_entry(
+    VLEContextAgeAdjacencyPayloadSource *source,
+    VLEMatrixFrontierCacheEntry *entry);
 extern void age_vle_context_maybe_mark_age_adjacency_frontier_empty(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
     graphid next_source_vertex_id);

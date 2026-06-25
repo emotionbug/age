@@ -22,22 +22,33 @@
 
 #include "postgres.h"
 
+#include "access/age_adjacency.h"
 #include "utils/age_vle_context.h"
 
-typedef struct VLEMatrixFrontierRunPayload
+typedef enum VLEMatrixFrontierRunInputKind
 {
-    AgeAdjacencyPayload payload;
-    VLEContextAgeAdjacencyPayloadSource *source;
-    const VLEContextSourceCursor *cursor;
-} VLEMatrixFrontierRunPayload;
+    VLE_MATRIX_FRONTIER_RUN_INPUT_REPLAY,
+    VLE_MATRIX_FRONTIER_RUN_INPUT_RAW,
+    VLE_MATRIX_FRONTIER_RUN_INPUT_CURSOR
+} VLEMatrixFrontierRunInputKind;
 
-typedef struct VLEMatrixFrontierRunCursor
+typedef struct VLEMatrixFrontierRunInputState
 {
+    VLEMatrixFrontierCacheEntry *matrix_replay_entry;
+    AgeAdjacencyVisiblePayloadRunScan *raw_run_scan;
+    int64 matrix_payload_index;
+} VLEMatrixFrontierRunInputState;
+
+typedef struct VLEMatrixFrontierRunInput
+{
+    VLEMatrixFrontierRunInputKind kind;
     VLEContextAgeAdjacencyPayloadSource *source;
     const VLEContextSourceCursor *cursor;
+    VLEMatrixFrontierRunInputState *state;
     AgeAdjacencyPayload payload;
     bool payload_valid;
-} VLEMatrixFrontierRunCursor;
+    bool state_owner;
+} VLEMatrixFrontierRunInput;
 
 typedef struct VLEMatrixFrontierSourceBlock
 {
@@ -51,15 +62,13 @@ typedef struct VLEMatrixFrontierSourceBlock
     const VLEContextSourceCursor *active_cursor;
     VLEContextAgeAdjacencyPayloadSource *active_source;
     VLEContextAgeAdjacencyPayloadSource **run_sources;
-    VLEMatrixFrontierRunCursor *run_cursors;
-    VLEMatrixFrontierRunPayload *run_payloads;
+    VLEMatrixFrontierRunInput *run_inputs;
+    AgeAdjacencyVisiblePayloadRunKey *raw_keys;
     int64 run_source_count;
     int64 run_source_capacity;
-    int64 run_cursor_count;
-    int64 run_cursor_capacity;
-    int64 run_payload_count;
-    int64 run_payload_index;
-    int64 run_payload_capacity;
+    int64 run_input_count;
+    int64 run_input_capacity;
+    int64 raw_source_count;
     VLEMatrixFrontierCacheKey matrix_key;
     bool matrix_key_valid;
     bool matrix_key_counted;

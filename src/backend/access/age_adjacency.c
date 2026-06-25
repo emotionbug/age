@@ -356,11 +356,14 @@ struct AgeAdjacencyVisiblePayloadScan
 
 typedef struct AgeAdjacencyVisiblePayloadKeyCursor
 {
+    void *tag;
     graphid active_key;
     bool key_active;
     bool main_active;
     uint32 main_remaining;
     int64 main_label_candidate_count;
+    uint32 initial_main_remaining;
+    int64 initial_main_label_candidate_count;
     bool main_composite_estimate_recorded;
     BlockNumber main_blkno;
     OffsetNumber main_offnum;
@@ -370,13 +373,19 @@ typedef struct AgeAdjacencyVisiblePayloadKeyCursor
     OffsetNumber delta_offnum;
     AgeAdjacencyPayload payload;
     bool payload_valid;
+    bool seen;
 } AgeAdjacencyVisiblePayloadKeyCursor;
 
 struct AgeAdjacencyVisiblePayloadRunScan
 {
     AgeAdjacencyVisiblePayloadScan *scan;
     AgeAdjacencyVisiblePayloadKeyCursor *cursors;
+    int64 *active_cursor_indexes;
+    AgeAdjacencyVisiblePayloadRunPayloadCallback payload_callback;
+    void *payload_callback_state;
     int64 cursor_count;
+    int64 active_cursor_count;
+    bool known_empty;
 };
 
 typedef struct AgeAdjacencyCandidateStore
@@ -639,6 +648,10 @@ static bool age_adjacency_visible_payload_key_cursor_next(
     AgeAdjacencyVisiblePayloadScan *scan,
     AgeAdjacencyVisiblePayloadKeyCursor *cursor,
     AgeAdjacencyPayload *payload);
+static void age_adjacency_visible_payload_run_scan_activate_cursor(
+    AgeAdjacencyVisiblePayloadRunScan *scan, int64 cursor_index);
+static void age_adjacency_visible_payload_run_scan_deactivate_cursor(
+    AgeAdjacencyVisiblePayloadRunScan *scan, int64 active_index);
 static bool age_adjacency_visible_payload_key_cursor_next_main(
     AgeAdjacencyVisiblePayloadScan *scan,
     AgeAdjacencyVisiblePayloadKeyCursor *cursor,
@@ -5263,8 +5276,53 @@ age_adjacency_begin_visible_payload_run_scan(
     Oid index_oid, Snapshot snapshot, bool fetch_properties,
     int32 terminal_label_id, const graphid *keys, int64 key_count)
 {
+    AgeAdjacencyVisiblePayloadRunKey *tagged_keys;
     AgeAdjacencyVisiblePayloadRunScan *run_scan;
     int64 i;
+
+    if (keys == NULL || key_count <= 0)
+        return NULL;
+
+    tagged_keys = palloc_array(AgeAdjacencyVisiblePayloadRunKey, key_count);
+    for (i = 0; i < key_count; i++)
+    {
+        tagged_keys[i].key = keys[i];
+        tagged_keys[i].tag = (void *) (intptr_t) i;
+    }
+
+    run_scan = age_adjacency_begin_visible_payload_run_scan_with_tags(
+        index_oid, snapshot, fetch_properties, terminal_label_id, tagged_keys,
+        key_count);
+    pfree(tagged_keys);
+    return run_scan;
+}
+
+AgeAdjacencyVisiblePayloadRunScan *
+age_adjacency_begin_visible_payload_run_scan_with_tags(
+    Oid index_oid, Snapshot snapshot, bool fetch_properties,
+    int32 terminal_label_id, const AgeAdjacencyVisiblePayloadRunKey *keys,
+    int64 key_count)
+{
+    AgeAdjacencyVisiblePayloadRunOptions options;
+
+    memset(&options, 0, sizeof(options));
+    options.terminal_label_id = terminal_label_id;
+    return age_adjacency_begin_visible_payload_run_scan_with_options(
+        index_oid, snapshot, fetch_properties, &options, keys, key_count);
+}
+
+AgeAdjacencyVisiblePayloadRunScan *
+age_adjacency_begin_visible_payload_run_scan_with_options(
+    Oid index_oid, Snapshot snapshot, bool fetch_properties,
+    const AgeAdjacencyVisiblePayloadRunOptions *options,
+    const AgeAdjacencyVisiblePayloadRunKey *keys, int64 key_count)
+{
+    AgeAdjacencyVisiblePayloadRunScan *run_scan;
+    AgeAdjacencyCompositeTerminalFilter composite_filter;
+    int64 active_postings;
+    int64 i;
+    int64 run_postings;
+    bool known_empty;
 
     if (keys == NULL || key_count <= 0)
         return NULL;
@@ -5272,26 +5330,124 @@ age_adjacency_begin_visible_payload_run_scan(
     run_scan = palloc0(sizeof(*run_scan));
     run_scan->scan = age_adjacency_begin_visible_payload_scan(
         index_oid, snapshot, fetch_properties);
-    age_adjacency_visible_payload_scan_set_terminal_label(run_scan->scan,
-                                                          terminal_label_id);
+    if (options != NULL)
+    {
+        age_adjacency_visible_payload_scan_set_terminal_label(
+            run_scan->scan, options->terminal_label_id);
+        run_scan->payload_callback = options->payload_callback;
+        run_scan->payload_callback_state = options->payload_callback_state;
+    }
     run_scan->cursors = palloc0_array(AgeAdjacencyVisiblePayloadKeyCursor,
                                       key_count);
+    run_scan->active_cursor_indexes = palloc_array(int64, key_count);
     run_scan->cursor_count = key_count;
 
+    run_postings = 0;
+    active_postings = 0;
     for (i = 0; i < key_count; i++)
     {
         AgeAdjacencyVisiblePayloadKeyCursor *cursor;
 
         cursor = &run_scan->cursors[i];
         if (!age_adjacency_visible_payload_key_cursor_begin(
-                run_scan->scan, cursor, keys[i]))
+                run_scan->scan, cursor, keys[i].key))
+            continue;
+        cursor->tag = keys[i].tag;
+        run_postings += cursor->main_remaining;
+        active_postings += cursor->main_label_candidate_count;
+    }
+
+    known_empty = false;
+    memset(&composite_filter, 0, sizeof(composite_filter));
+    if (options != NULL && options->filter_callback != NULL &&
+        options->filter_callback(run_postings, active_postings,
+                                 &composite_filter, &known_empty,
+                                 options->filter_callback_state))
+    {
+        age_adjacency_visible_payload_scan_set_composite_terminal_filter(
+            run_scan->scan, &composite_filter);
+        age_adjacency_visible_payload_scan_reset_runtime(run_scan->scan);
+        for (i = 0; i < key_count; i++)
+        {
+            AgeAdjacencyVisiblePayloadKeyCursor *cursor;
+            void *tag;
+
+            cursor = &run_scan->cursors[i];
+            tag = keys[i].tag;
+            if (!age_adjacency_visible_payload_key_cursor_begin(
+                    run_scan->scan, cursor, keys[i].key))
+                continue;
+            cursor->tag = tag;
+        }
+    }
+
+    if (known_empty)
+    {
+        run_scan->known_empty = true;
+        return run_scan;
+    }
+
+    for (i = 0; i < key_count; i++)
+    {
+        AgeAdjacencyVisiblePayloadKeyCursor *cursor;
+
+        cursor = &run_scan->cursors[i];
+        if (!cursor->key_active)
             continue;
         cursor->payload_valid =
             age_adjacency_visible_payload_key_cursor_next(
                 run_scan->scan, cursor, &cursor->payload);
+        if (cursor->payload_valid)
+            age_adjacency_visible_payload_run_scan_activate_cursor(run_scan,
+                                                                   i);
     }
 
     return run_scan;
+}
+
+static void
+age_adjacency_visible_payload_run_scan_activate_cursor(
+    AgeAdjacencyVisiblePayloadRunScan *scan, int64 cursor_index)
+{
+    AgeAdjacencyVisiblePayloadKeyCursor *cursor;
+    int64 insert_index;
+
+    Assert(scan != NULL);
+    Assert(cursor_index >= 0 && cursor_index < scan->cursor_count);
+    Assert(scan->active_cursor_count < scan->cursor_count);
+
+    cursor = &scan->cursors[cursor_index];
+    insert_index = scan->active_cursor_count;
+    while (insert_index > 0)
+    {
+        AgeAdjacencyVisiblePayloadKeyCursor *before;
+
+        before = &scan->cursors[
+            scan->active_cursor_indexes[insert_index - 1]];
+        if (before->initial_main_label_candidate_count <=
+            cursor->initial_main_label_candidate_count)
+            break;
+        scan->active_cursor_indexes[insert_index] =
+            scan->active_cursor_indexes[insert_index - 1];
+        insert_index--;
+    }
+
+    scan->active_cursor_indexes[insert_index] = cursor_index;
+    scan->active_cursor_count++;
+}
+
+static void
+age_adjacency_visible_payload_run_scan_deactivate_cursor(
+    AgeAdjacencyVisiblePayloadRunScan *scan, int64 active_index)
+{
+    int64 i;
+
+    Assert(scan != NULL);
+    Assert(active_index >= 0 && active_index < scan->active_cursor_count);
+
+    for (i = active_index + 1; i < scan->active_cursor_count; i++)
+        scan->active_cursor_indexes[i - 1] = scan->active_cursor_indexes[i];
+    scan->active_cursor_count--;
 }
 
 bool
@@ -5299,25 +5455,47 @@ age_adjacency_visible_payload_run_scan_next(
     AgeAdjacencyVisiblePayloadRunScan *scan, AgeAdjacencyPayload *payload,
     int64 *key_index)
 {
-    AgeAdjacencyVisiblePayloadKeyCursor *selected;
-    int64 selected_index;
-    int64 i;
+    void *tag;
 
-    if (scan == NULL || payload == NULL || key_index == NULL)
+    if (key_index == NULL)
     {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("age_adjacency visible payload run scan next requires "
-                        "scan, payload, and key_index")));
+                        "key_index")));
+    }
+
+    if (!age_adjacency_visible_payload_run_scan_next_tag(scan, payload, &tag))
+        return false;
+
+    *key_index = (int64) (intptr_t) tag;
+    return true;
+}
+
+bool
+age_adjacency_visible_payload_run_scan_next_tag(
+    AgeAdjacencyVisiblePayloadRunScan *scan, AgeAdjacencyPayload *payload,
+    void **tag)
+{
+    AgeAdjacencyVisiblePayloadKeyCursor *selected;
+    int64 selected_active_index;
+    int64 i;
+
+    if (scan == NULL || payload == NULL || tag == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload run scan next requires "
+                        "scan, payload, and tag")));
     }
 
     selected = NULL;
-    selected_index = -1;
-    for (i = 0; i < scan->cursor_count; i++)
+    selected_active_index = -1;
+    for (i = 0; i < scan->active_cursor_count; i++)
     {
         AgeAdjacencyVisiblePayloadKeyCursor *candidate;
 
-        candidate = &scan->cursors[i];
+        candidate = &scan->cursors[scan->active_cursor_indexes[i]];
         if (!candidate->payload_valid)
             continue;
         if (selected == NULL ||
@@ -5328,7 +5506,7 @@ age_adjacency_visible_payload_run_scan_next(
              candidate->payload.edge_id < selected->payload.edge_id))
         {
             selected = candidate;
-            selected_index = i;
+            selected_active_index = i;
         }
     }
 
@@ -5336,11 +5514,61 @@ age_adjacency_visible_payload_run_scan_next(
         return false;
 
     *payload = selected->payload;
-    *key_index = selected_index;
+    *tag = selected->tag;
+    selected->seen = true;
+    if (scan->payload_callback != NULL)
+        scan->payload_callback(selected->tag, payload,
+                               scan->payload_callback_state);
     selected->payload_valid = age_adjacency_visible_payload_key_cursor_next(
         scan->scan, selected, &selected->payload);
+    if (!selected->payload_valid)
+        age_adjacency_visible_payload_run_scan_deactivate_cursor(
+            scan, selected_active_index);
 
     return true;
+}
+
+bool
+age_adjacency_visible_payload_run_scan_key_seen(
+    AgeAdjacencyVisiblePayloadRunScan *scan, int64 key_index)
+{
+    if (scan == NULL || key_index < 0 || key_index >= scan->cursor_count)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload run scan seen check "
+                        "requires scan and valid key_index")));
+    }
+
+    return scan->cursors[key_index].seen;
+}
+
+bool
+age_adjacency_visible_payload_run_scan_key_evidence(
+    AgeAdjacencyVisiblePayloadRunScan *scan, int64 key_index,
+    AgeAdjacencyVisiblePayloadRunKeyEvidence *evidence)
+{
+    AgeAdjacencyVisiblePayloadKeyCursor *cursor;
+
+    if (scan == NULL || key_index < 0 || key_index >= scan->cursor_count ||
+        evidence == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload run scan evidence "
+                        "requires scan, valid key_index, and evidence")));
+    }
+
+    cursor = &scan->cursors[key_index];
+    evidence->run_postings = cursor->initial_main_remaining;
+    evidence->terminal_postings = cursor->initial_main_label_candidate_count;
+    evidence->active = !scan->known_empty &&
+                       cursor->key_active &&
+                       (cursor->main_active ||
+                        BlockNumberIsValid(cursor->delta_blkno));
+    evidence->known_empty = scan->known_empty || !evidence->active;
+
+    return evidence->active;
 }
 
 void
@@ -5351,6 +5579,8 @@ age_adjacency_end_visible_payload_run_scan(
         return;
 
     age_adjacency_end_visible_payload_scan(scan->scan);
+    if (scan->active_cursor_indexes != NULL)
+        pfree(scan->active_cursor_indexes);
     if (scan->cursors != NULL)
         pfree(scan->cursors);
     pfree(scan);
@@ -5715,6 +5945,9 @@ age_adjacency_visible_payload_key_cursor_begin(
             cursor->main_label_candidate_count =
                 age_adjacency_directory_entry_terminal_label_postings(
                     &entry, scan->target.terminal_label_id);
+            cursor->initial_main_remaining = cursor->main_remaining;
+            cursor->initial_main_label_candidate_count =
+                cursor->main_label_candidate_count;
             cursor->main_blkno = entry.first_blkno;
             cursor->main_offnum = entry.first_offnum;
             cursor->main_posting_index = 0;

@@ -2213,8 +2213,6 @@ static void age_vle_context_matrix_frontier_cache_seed(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
     const AgeAdjacencyPayload *payload)
 {
-    bool found;
-
     Assert(vlelctx != NULL);
     Assert(source != NULL);
     Assert(payload != NULL);
@@ -2222,15 +2220,8 @@ static void age_vle_context_matrix_frontier_cache_seed(
     if (!source->use_matrix_frontier_cache)
         return;
 
-    if (source->matrix_entry == NULL)
-    {
-        source->matrix_entry = age_vle_matrix_frontier_cache_get(
-            &vlelctx->root.matrix_frontier_cache, &source->matrix_key,
-            &found);
-        if (found)
-            age_vle_matrix_frontier_cache_discard(source->matrix_entry);
-        vlelctx->source_stats.matrix_frontier_cache_seeds++;
-    }
+    (void) age_vle_context_prepare_age_adjacency_matrix_seed_entry(
+        vlelctx, source);
 
     age_vle_matrix_frontier_cache_append(
         source->matrix_entry, source->source_vertex_id, payload);
@@ -2676,6 +2667,26 @@ age_vle_context_age_adjacency_payload_source_uses_visible_scan(
            (source->payload_scan != NULL || source->batch_visible_scan);
 }
 
+bool
+age_vle_context_age_adjacency_payload_source_replays_matrix(
+    VLEContextAgeAdjacencyPayloadSource *source)
+{
+    Assert(source != NULL);
+
+    return !source->empty_suppressed &&
+           source->replay_matrix_frontier_cache &&
+           source->matrix_entry != NULL;
+}
+
+VLEMatrixFrontierCacheEntry *
+age_vle_context_age_adjacency_payload_source_matrix_entry(
+    VLEContextAgeAdjacencyPayloadSource *source)
+{
+    Assert(source != NULL);
+
+    return source->matrix_entry;
+}
+
 void
 age_vle_context_age_adjacency_payload_source_accept_scanned_payload(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
@@ -2718,6 +2729,18 @@ age_vle_context_age_adjacency_payload_source_accept_scanned_payload(
 }
 
 void
+age_vle_context_age_adjacency_payload_source_accept_matrix_replay(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source)
+{
+    Assert(vlelctx != NULL);
+    Assert(source != NULL);
+    Assert(source->replay_matrix_frontier_cache);
+
+    vlelctx->source_stats.matrix_frontier_cache_replays++;
+    age_vle_context_record_age_adjacency_payload_replay(vlelctx);
+}
+
+void
 age_vle_context_age_adjacency_payload_source_mark_empty(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source)
 {
@@ -2733,6 +2756,121 @@ age_vle_context_age_adjacency_payload_source_mark_empty(
         age_vle_adjacency_payload_cache_mark_empty(source->cache_entry);
     age_vle_context_matrix_frontier_cache_mark_empty(vlelctx, source);
     source->empty_suppressed = true;
+}
+
+bool
+age_vle_context_prepare_age_adjacency_payload_source_run_filter(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,
+    int64 run_postings, int64 active_postings,
+    AgeAdjacencyCompositeTerminalFilter *filter, bool *known_empty)
+{
+    AgeAdjacencyMatchTerminalPropertyLookup *lookup;
+
+    Assert(vlelctx != NULL);
+    Assert(source != NULL);
+    Assert(filter != NULL);
+    Assert(known_empty != NULL);
+
+    *known_empty = false;
+    if (!vlelctx->root.terminal_property_prefilter_eligible ||
+        source->terminal_property_filter_id == 0 ||
+        !label_id_is_valid(source->terminal_label_id))
+    {
+        return false;
+    }
+
+    lookup = age_vle_context_get_terminal_property_lookup(vlelctx);
+    if (lookup == NULL)
+        return false;
+
+    age_adjacency_match_terminal_property_set_value(
+        lookup, vlelctx->root.terminal_property_predicate_value,
+        vlelctx->root.terminal_property_predicate_null);
+    vlelctx->source_stats.age_adjacency_payload_property_prefilter_runs++;
+    vlelctx->source_stats.age_adjacency_payload_property_prefilter_candidates +=
+        active_postings;
+
+    if (!age_adjacency_match_terminal_property_prepare_prefilter(
+            lookup, run_postings, active_postings,
+            vlelctx->root.terminal_property_prefetch_threshold))
+    {
+        return false;
+    }
+
+    vlelctx->source_stats.age_adjacency_payload_property_prefetch_matches =
+        Max(vlelctx->source_stats.age_adjacency_payload_property_prefetch_matches,
+            age_adjacency_match_terminal_property_prefetched_matches(lookup));
+
+    if (age_adjacency_match_terminal_property_prefetched_matches(lookup) == 0)
+    {
+        *known_empty = true;
+        return true;
+    }
+
+    memset(filter, 0, sizeof(*filter));
+    filter->terminal_label_id = source->terminal_label_id;
+    filter->property_index_oid =
+        age_adjacency_match_terminal_property_index_oid(lookup);
+    filter->property_filter_id = source->terminal_property_filter_id;
+    filter->property_match_count =
+        age_adjacency_match_terminal_property_prefetched_matches(lookup);
+    filter->has_property_summary = true;
+    if (age_adjacency_match_terminal_property_prefilter_set(
+            lookup, &filter->vertex_set_filter))
+    {
+        filter->has_vertex_set_filter = true;
+        filter->source = "label-property-prefetch";
+        vlelctx->source_stats.age_adjacency_payload_property_vertex_set_runs++;
+    }
+    else
+    {
+        filter->vertex_filter =
+            age_adjacency_match_terminal_property_prefilter_matches;
+        filter->vertex_filter_state = lookup;
+        filter->has_vertex_filter = true;
+        filter->source = "label-property-callback";
+    }
+
+    return true;
+}
+
+VLEMatrixFrontierCacheEntry *
+age_vle_context_prepare_age_adjacency_matrix_seed_entry(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source)
+{
+    bool found;
+
+    Assert(vlelctx != NULL);
+    Assert(source != NULL);
+
+    if (!source->use_matrix_frontier_cache)
+        return NULL;
+
+    if (source->matrix_entry == NULL)
+    {
+        source->matrix_entry = age_vle_matrix_frontier_cache_get(
+            &vlelctx->root.matrix_frontier_cache, &source->matrix_key,
+            &found);
+        if (found)
+            age_vle_matrix_frontier_cache_discard(source->matrix_entry);
+        vlelctx->source_stats.matrix_frontier_cache_seeds++;
+    }
+
+    return source->matrix_entry;
+}
+
+void
+age_vle_context_bind_age_adjacency_matrix_seed_entry(
+    VLEContextAgeAdjacencyPayloadSource *source,
+    VLEMatrixFrontierCacheEntry *entry)
+{
+    Assert(source != NULL);
+
+    if (entry == NULL)
+        return;
+
+    Assert(source->use_matrix_frontier_cache);
+    source->matrix_entry = entry;
 }
 
 void age_vle_context_maybe_mark_age_adjacency_frontier_empty(
