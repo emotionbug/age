@@ -657,7 +657,7 @@ static char *format_age_vle_stream_matrix_frontier(
     return psprintf("plan=%s backend=native depth:%lld batch:%lld "
                     "key=graph,edge-label,direction,depth,frontier,"
                     "terminal-filter context=%s/runs:%lld/depth:%lld "
-                    "capacity:%lld block=%lld/%lld mrun=%lld/%lld/%lld "
+                    "capacity:%lld block=%lld/%lld mrun=%lld/%lld/%lld/%lld/%lld "
                     "cache=h:%lld/m:%lld/s:%lld/r:%lld/e:%lld/%lld",
                     input->matrix_frontier_eligible ?
                     "eligible" : "ineligible",
@@ -673,6 +673,8 @@ static char *format_age_vle_stream_matrix_frontier(
                     (long long)stats->matrix_frontier_source_runs,
                     (long long)stats->matrix_frontier_source_run_sources,
                     (long long)stats->matrix_frontier_source_run_max,
+                    (long long)stats->matrix_frontier_source_run_postings,
+                    (long long)stats->matrix_frontier_source_run_terminal_postings,
                     (long long)stats->matrix_frontier_cache_hits,
                     (long long)stats->matrix_frontier_cache_misses,
                     (long long)stats->matrix_frontier_cache_seeds,
@@ -1109,6 +1111,10 @@ static void accumulate_age_vle_stream_source_stats(
     total->matrix_frontier_source_run_max =
         Max(total->matrix_frontier_source_run_max,
             current->matrix_frontier_source_run_max);
+    total->matrix_frontier_source_run_postings +=
+        current->matrix_frontier_source_run_postings;
+    total->matrix_frontier_source_run_terminal_postings +=
+        current->matrix_frontier_source_run_terminal_postings;
     total->root_empty_completion_count +=
         current->root_empty_completion_count;
     total->root_empty_completion_out +=

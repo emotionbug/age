@@ -277,6 +277,16 @@ static AgeGraphJoinCandidateTable *make_graph_expansion_join_candidate_table(
     Path *outer_path, Path *inner_path,
     const AgeGraphJoinPathEvidence *outer_evidence,
     const AgeGraphJoinPathEvidence *inner_evidence);
+static void add_graph_expansion_join_side_candidate(
+    AgeGraphJoinCandidateTable *table, Path *outer_path, Path *inner_path,
+    Path *evidence_path, const AgeGraphJoinPathEvidence *evidence);
+static Relids graph_join_joinrelids_from_paths(Path *outer_path,
+                                               Path *inner_path);
+static Relids graph_join_required_outer_from_paths(Path *outer_path,
+                                                   Path *inner_path,
+                                                   Relids provided_relids);
+static int graph_join_output_width_from_paths(Path *outer_path,
+                                              Path *inner_path);
 static bool graph_join_candidate_nestloop_pair_is_legal(
     RelOptInfo *outerrel, RelOptInfo *innerrel, Path *outer_path,
     Path *inner_path);
@@ -990,6 +1000,7 @@ static bool path_get_graph_join_rel_evidence(
         else
             return false;
 
+        age_graph_join_complete_path_evidence(path, evidence);
         return evidence->order_property != NULL;
     }
 
@@ -1007,6 +1018,7 @@ static bool path_get_graph_join_rel_evidence(
             evidence->selected_total_cost = path->total_cost;
             evidence->next_total_cost = 0;
             evidence->bound = age_graph_join_order_property_is_bound(property);
+            age_graph_join_complete_path_evidence(path, evidence);
             return true;
         }
     }
@@ -1149,6 +1161,13 @@ static void graph_join_consider_nestloop_candidate_pair(
 
     if (!path_contains_graph_expansion(outer_path) &&
         !path_contains_graph_expansion(inner_path))
+    {
+        return;
+    }
+
+    if (inner_evidence->shared_state_required &&
+        outer_path != NULL &&
+        outer_path->rows > 1.0)
     {
         return;
     }
@@ -2604,6 +2623,8 @@ static void add_age_vle_stream_custom_path(PlannerInfo *root, RelOptInfo *rel,
         make_vle_stream_graph_join_table(rel, cp, func_args, edge_source);
     (void) age_graph_join_apply_selected_path_cost(graph_join_table,
                                                    &cp->path);
+    age_graph_join_register_rel_candidate_table(root, rel, &cp->path,
+                                                graph_join_table);
     cp->custom_private = lappend(cp->custom_private,
                                  age_graph_join_table_selected_private(
                                      graph_join_table));
@@ -4624,7 +4645,7 @@ static void apply_vle_stream_directory_fanout_evidence(
 
         if (age_adjacency_estimate_terminal_label_postings(
                 age_adjacency_out_index_oid, start_id, 0,
-                &run_postings, NULL, NULL, NULL))
+                &run_postings, NULL, NULL, NULL, NULL))
         {
             source_evidence->start_fanout = (double)run_postings;
             source_evidence->start_fanout_known = true;
@@ -4634,7 +4655,7 @@ static void apply_vle_stream_directory_fanout_evidence(
             age_adjacency_estimate_terminal_label_postings(
                 age_adjacency_out_index_oid, start_id, terminal_label_id,
                 &run_postings, &terminal_postings, NULL,
-                &value_posting_source))
+                &value_posting_source, NULL))
         {
             source_evidence->start_fanout = (double)terminal_postings;
             source_evidence->start_fanout_known = true;
@@ -4658,7 +4679,7 @@ static void apply_vle_stream_directory_fanout_evidence(
 
         if (age_adjacency_estimate_terminal_label_postings(
                 age_adjacency_in_index_oid, end_id, 0,
-                &run_postings, NULL, NULL, NULL))
+                &run_postings, NULL, NULL, NULL, NULL))
         {
             source_evidence->end_fanout = (double)run_postings;
             source_evidence->end_fanout_known = true;
@@ -4668,7 +4689,7 @@ static void apply_vle_stream_directory_fanout_evidence(
             age_adjacency_estimate_terminal_label_postings(
                 age_adjacency_in_index_oid, end_id, terminal_label_id,
                 &run_postings, &terminal_postings, NULL,
-                &value_posting_source))
+                &value_posting_source, NULL))
         {
             source_evidence->end_fanout = (double)terminal_postings;
             source_evidence->end_fanout_known = true;
@@ -5222,19 +5243,124 @@ static AgeGraphJoinCandidateTable *make_graph_expansion_join_candidate_table(
         outer_evidence != NULL &&
         outer_evidence->bound)
     {
-        (void) age_graph_join_table_add_path_evidence_candidate(
-            table, outer_path, NULL, outer_evidence);
+        add_graph_expansion_join_side_candidate(
+            table, outer_path, inner_path, outer_path, outer_evidence);
     }
 
     if (inner_path != NULL &&
         inner_evidence != NULL &&
         inner_evidence->bound)
     {
-        (void) age_graph_join_table_add_path_evidence_candidate(
-            table, inner_path, NULL, inner_evidence);
+        add_graph_expansion_join_side_candidate(
+            table, outer_path, inner_path, inner_path, inner_evidence);
     }
 
     return table;
+}
+
+static void add_graph_expansion_join_side_candidate(
+    AgeGraphJoinCandidateTable *table, Path *outer_path, Path *inner_path,
+    Path *evidence_path, const AgeGraphJoinPathEvidence *evidence)
+{
+    AgeGraphJoinCandidateRequest request;
+    Relids provided_relids;
+    Relids required_outer;
+
+    if (table == NULL ||
+        evidence_path == NULL ||
+        evidence == NULL ||
+        evidence->order_property == NULL)
+    {
+        return;
+    }
+
+    provided_relids = graph_join_joinrelids_from_paths(outer_path,
+                                                       inner_path);
+    required_outer = graph_join_required_outer_from_paths(
+        outer_path, inner_path, provided_relids);
+    age_graph_join_init_path_request(
+        &request, evidence_path,
+        age_graph_join_component_from_evidence(evidence),
+        evidence->connector != NULL ? evidence->connector : "graph-connector",
+        evidence->bound ? "bound" : "unbound",
+        evidence->order_property,
+        evidence->source_evidence != NULL ?
+        evidence->source_evidence : "path-evidence",
+        evidence->shared_state_required);
+    request.required_outer = required_outer;
+    request.provided_relids = provided_relids;
+    request.rows = evidence_path->rows;
+    request.total_cost = evidence->selected_total_cost > 0 ?
+        evidence->selected_total_cost : evidence_path->total_cost;
+    request.output_width = graph_join_output_width_from_paths(outer_path,
+                                                              inner_path);
+    request.parallel_safe = outer_path != NULL && inner_path != NULL &&
+        outer_path->parallel_safe && inner_path->parallel_safe;
+    request.parallel_aware = false;
+    request.parallel_workers = 0;
+    request.gather_cost = 0;
+    request.order_preserving =
+        (outer_path != NULL && outer_path->pathkeys != NIL) ||
+        (inner_path != NULL && inner_path->pathkeys != NIL);
+
+    (void) age_graph_join_table_add_candidate(table, &request);
+}
+
+static Relids graph_join_joinrelids_from_paths(Path *outer_path,
+                                               Path *inner_path)
+{
+    Relids relids = NULL;
+
+    if (outer_path != NULL && outer_path->parent != NULL)
+        relids = bms_union(relids, outer_path->parent->relids);
+    if (inner_path != NULL && inner_path->parent != NULL)
+        relids = bms_add_members(relids, inner_path->parent->relids);
+
+    return relids;
+}
+
+static Relids graph_join_required_outer_from_paths(Path *outer_path,
+                                                   Path *inner_path,
+                                                   Relids provided_relids)
+{
+    Relids required_outer = NULL;
+
+    if (outer_path != NULL)
+        required_outer = bms_union(required_outer, PATH_REQ_OUTER(outer_path));
+    if (inner_path != NULL)
+        required_outer = bms_add_members(required_outer,
+                                         PATH_REQ_OUTER(inner_path));
+    if (provided_relids != NULL)
+        required_outer = bms_del_members(required_outer, provided_relids);
+
+    return required_outer;
+}
+
+static int graph_join_output_width_from_paths(Path *outer_path,
+                                              Path *inner_path)
+{
+    int output_width = 0;
+
+    if (outer_path != NULL)
+    {
+        if (outer_path->pathtarget != NULL &&
+            outer_path->pathtarget->width > 0)
+            output_width += outer_path->pathtarget->width;
+        else if (outer_path->parent != NULL &&
+                 outer_path->parent->reltarget != NULL)
+            output_width += outer_path->parent->reltarget->width;
+    }
+    if (inner_path != NULL)
+    {
+        if (inner_path->pathtarget != NULL &&
+            inner_path->pathtarget->width > 0)
+            output_width += inner_path->pathtarget->width;
+        else if (inner_path->parent != NULL &&
+                 inner_path->parent->reltarget != NULL)
+            output_width += inner_path->parent->reltarget->width;
+    }
+
+    return output_width;
 }
 
 static bool path_get_graph_expansion_join_evidence(
@@ -5268,6 +5394,7 @@ static bool path_get_graph_expansion_join_evidence(
         else
             return false;
 
+        age_graph_join_complete_path_evidence(path, evidence);
         return evidence->order_property != NULL;
     }
 
@@ -5290,6 +5417,7 @@ static bool path_get_graph_expansion_join_evidence(
             evidence->selected_total_cost = path->total_cost;
             evidence->next_total_cost = 0;
             evidence->bound = age_graph_join_order_property_is_bound(property);
+            age_graph_join_complete_path_evidence(path, evidence);
             return true;
         }
     }
@@ -5393,6 +5521,18 @@ static bool custom_path_adjacency_join_evidence(
     evidence->selected_total_cost = custom_path->path.total_cost;
     evidence->next_total_cost = age_graph_join_descriptor_float_field(
         descriptor, AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_NEXT_TOTAL_COST, 0);
+    evidence->parallel_safe = age_graph_join_descriptor_int_field(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_SAFE, 0) != 0;
+    evidence->parallel_aware = age_graph_join_descriptor_int_field(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_AWARE, 0) != 0;
+    evidence->parallel_workers = (int)age_graph_join_descriptor_int_field(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_WORKERS, 0);
+    evidence->gather_cost = age_graph_join_descriptor_float_field(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_GATHER_COST, 0);
+    evidence->order_preserving = age_graph_join_descriptor_int_field(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_ORDER_PRESERVING, 0) != 0;
+    evidence->shared_state_required = age_graph_join_descriptor_int_field(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_SHARED_STATE_REQUIRED, 0) != 0;
     evidence->bound = age_graph_join_order_property_is_bound(
         evidence->order_property);
 
@@ -5447,6 +5587,27 @@ static bool custom_path_vle_join_evidence(
                 age_graph_join_descriptor_float_field(
                     graph_join_descriptor,
                     AGE_GRAPH_JOIN_DESC_NEXT_TOTAL_COST, 0);
+            evidence->output_width = (int)age_graph_join_descriptor_int_field(
+                graph_join_descriptor, AGE_GRAPH_JOIN_DESC_OUTPUT_WIDTH, 0);
+            evidence->parallel_safe = age_graph_join_descriptor_int_field(
+                graph_join_descriptor, AGE_GRAPH_JOIN_DESC_PARALLEL_SAFE,
+                0) != 0;
+            evidence->parallel_aware = age_graph_join_descriptor_int_field(
+                graph_join_descriptor, AGE_GRAPH_JOIN_DESC_PARALLEL_AWARE,
+                0) != 0;
+            evidence->parallel_workers =
+                (int)age_graph_join_descriptor_int_field(
+                    graph_join_descriptor,
+                    AGE_GRAPH_JOIN_DESC_PARALLEL_WORKERS, 0);
+            evidence->gather_cost = age_graph_join_descriptor_float_field(
+                graph_join_descriptor, AGE_GRAPH_JOIN_DESC_GATHER_COST, 0);
+            evidence->order_preserving = age_graph_join_descriptor_int_field(
+                graph_join_descriptor, AGE_GRAPH_JOIN_DESC_ORDER_PRESERVING,
+                0) != 0;
+            evidence->shared_state_required =
+                age_graph_join_descriptor_int_field(
+                    graph_join_descriptor,
+                    AGE_GRAPH_JOIN_DESC_SHARED_STATE_REQUIRED, 0) != 0;
             evidence->bound = age_graph_join_order_property_is_bound(
                 evidence->order_property);
 
@@ -5853,6 +6014,8 @@ static void add_adjacency_match_custom_path(
     Assert(graph_join_candidate != NULL);
     (void) age_graph_join_apply_selected_path_cost(graph_join_table,
                                                    &cp->path);
+    age_graph_join_register_rel_candidate_table(root, rel, &cp->path,
+                                                graph_join_table);
     cp->flags = CUSTOMPATH_SUPPORT_PROJECTION;
     cp->custom_paths = NIL;
     cp->custom_private = list_make5(
@@ -5923,7 +6086,11 @@ static bool adjacency_match_can_add_partial_path(
     if (candidate->estimated_terminal_fanout < 2.0)
         return false;
 
-    index_pages = Max(1.0, ceil(candidate->estimated_terminal_fanout / 128.0));
+    if (candidate->estimated_main_blocks > 0)
+        index_pages = Max(1.0, candidate->estimated_main_blocks);
+    else
+        index_pages =
+            Max(1.0, ceil(candidate->estimated_terminal_fanout / 128.0));
     if (parallel_workers != NULL)
     {
         *parallel_workers = compute_parallel_worker(
@@ -6147,6 +6314,7 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
     terminal_fanout = endpoint_fanout;
     candidate->estimated_terminal_label_groups = 0;
     candidate->estimated_value_posting_source = "none";
+    candidate->estimated_main_blocks = 0;
     candidate->estimated_fanout_from_directory = false;
     if (endpoint_const != NULL &&
         endpoint_const->consttype == GRAPHIDOID &&
@@ -6155,6 +6323,7 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
         int64 run_postings;
         int64 terminal_postings;
         int64 label_groups;
+        int64 main_blocks;
         const char *value_posting_source;
 
         if (age_adjacency_estimate_terminal_label_postings(
@@ -6162,7 +6331,7 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
                 (graphid)DatumGetInt64(endpoint_const->constvalue),
                 candidate->right_label_id,
                 &run_postings, &terminal_postings, &label_groups,
-                &value_posting_source))
+                &value_posting_source, &main_blocks))
         {
             endpoint_fanout = (double)run_postings;
             if (candidate->has_right_label_constraint &&
@@ -6178,6 +6347,7 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
                 (double)label_groups;
             candidate->estimated_value_posting_source =
                 (char *)value_posting_source;
+            candidate->estimated_main_blocks = (double)main_blocks;
             candidate->estimated_fanout_from_directory = true;
         }
     }

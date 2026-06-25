@@ -217,6 +217,8 @@ typedef struct AgeVLESourceStats
     int64 matrix_frontier_source_runs;
     int64 matrix_frontier_source_run_sources;
     int64 matrix_frontier_source_run_max;
+    int64 matrix_frontier_source_run_postings;
+    int64 matrix_frontier_source_run_terminal_postings;
     int64 root_empty_completion_count;
     int64 root_empty_completion_out;
     int64 root_empty_completion_in;

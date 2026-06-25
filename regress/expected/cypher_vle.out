@@ -5359,7 +5359,7 @@ AS (plan agtype);
          VLE Source Threshold Input: source=none headroom=0 batch=0 direction=none reason=none class=none observed=0 saturated=0 relaxed=0
          VLE Source Payload Input: source=none headroom=0 scan-runs=0 replay-runs=0 seed-runs=0 replay-percent=0 seed-percent=0 observed=0 value-posting=none/observed:0 reason=none class=none
          VLE Source Policy: out=age-adjacency/in=none depth=costed endpoint-work=sum(out:7239/14,in:6/14) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-cache-seeded recommendation=prefer-age-adjacency-depth
-         VLE Matrix Frontier: plan=eligible backend=native depth:3 batch:14 key=graph,edge-label,direction,depth,frontier,terminal-filter context=eligible/runs:1/depth:3 capacity:14 block=37/24 mrun=24/37/14 cache=h:0/m:37/s:24/r:0/e:0/0
+         VLE Matrix Frontier: plan=eligible backend=native depth:3 batch:14 key=graph,edge-label,direction,depth,frontier,terminal-filter context=eligible/runs:1/depth:3 capacity:14 block=37/24 mrun=24/37/14/0/0 cache=h:0/m:37/s:24/r:0/e:0/0
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..3
          VLE Direction: right
@@ -5404,7 +5404,7 @@ AS (plan agtype);
          VLE Source Threshold Input: source=runtime-cache headroom=35 batch=57 direction=out reason=root-empty-saturated class=adjacency-empty-batch observed=1 saturated=1 relaxed=0
          VLE Source Payload Input: source=runtime-cache headroom=65 scan-runs=23 replay-runs=0 seed-runs=1 replay-percent=0 seed-percent=4 observed=1 value-posting=none/observed:0 reason=payload-cache-seeded class=adjacency-cache-seeded
          VLE Source Policy: out=age-adjacency/in=none depth=costed endpoint-work=sum(out:7239/14,in:6/14) combined-work=all:0/0 reason=out:work-exceeds-limit/in:inactive-direction class=adjacency-empty-batch recommendation=keep-empty-batch
-         VLE Matrix Frontier: plan=eligible backend=native depth:3 batch:57 key=graph,edge-label,direction,depth,frontier,terminal-filter context=ineligible/runs:0/depth:0 capacity:0 block=0/0 mrun=0/0/0 cache=h:0/m:0/s:0/r:0/e:0/0
+         VLE Matrix Frontier: plan=eligible backend=native depth:3 batch:57 key=graph,edge-label,direction,depth,frontier,terminal-filter context=ineligible/runs:0/depth:0 capacity:0 block=0/0 mrun=0/0/0/0/0 cache=h:0/m:0/s:0/r:0/e:0/0
          VLE Endpoints: start=runtime-id, end=const-id
          VLE Range: 1..3
          VLE Direction: right

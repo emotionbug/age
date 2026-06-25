@@ -31,6 +31,8 @@ typedef enum AgeGraphJoinDescriptorField
     AGE_GRAPH_JOIN_DESC_BOUND,
     AGE_GRAPH_JOIN_DESC_ORDER_PROPERTY,
     AGE_GRAPH_JOIN_DESC_SOURCE_EVIDENCE,
+    AGE_GRAPH_JOIN_DESC_REQUIRED_OUTER,
+    AGE_GRAPH_JOIN_DESC_PROVIDED_RELIDS,
     AGE_GRAPH_JOIN_DESC_ROWS,
     AGE_GRAPH_JOIN_DESC_STARTUP_COST,
     AGE_GRAPH_JOIN_DESC_TOTAL_COST,
@@ -92,6 +94,8 @@ typedef struct AgeGraphJoinConnector
     char *bound;
     char *order_property;
     char *source_evidence;
+    Relids required_outer;
+    Relids provided_relids;
     double rows;
     Cost startup_cost;
     Cost total_cost;
@@ -113,9 +117,18 @@ typedef struct AgeGraphJoinPathEvidence
     const char *connector;
     const char *order_property;
     const char *source_evidence;
+    Relids required_outer;
+    Relids provided_relids;
     int64 candidate_count;
     double selected_total_cost;
     double next_total_cost;
+    int output_width;
+    bool parallel_safe;
+    bool parallel_aware;
+    int parallel_workers;
+    Cost gather_cost;
+    bool order_preserving;
+    bool shared_state_required;
     bool bound;
 } AgeGraphJoinPathEvidence;
 
@@ -143,6 +156,7 @@ typedef struct AgeGraphJoinRelMetadata
 {
     RelOptInfo *rel;
     List *candidates;
+    List *planner_candidates;
     List *path_evidence;
     List *component_candidates;
 } AgeGraphJoinRelMetadata;
@@ -176,9 +190,13 @@ AgeGraphJoinCandidate *age_graph_join_table_select_cheapest(
     const AgeGraphJoinCandidateTable *table);
 bool age_graph_join_apply_selected_path_cost(
     const AgeGraphJoinCandidateTable *table, Path *path);
+const char *age_graph_join_component_from_evidence(
+    const AgeGraphJoinPathEvidence *evidence);
 bool age_graph_join_order_property_is_bound(const char *order_property);
 void age_graph_join_init_path_evidence(
     AgeGraphJoinPathEvidence *evidence);
+void age_graph_join_complete_path_evidence(
+    Path *path, AgeGraphJoinPathEvidence *evidence);
 void age_graph_join_metadata_begin(PlannerInfo *root);
 bool age_graph_join_metadata_matches_root(PlannerInfo *root);
 AgeGraphJoinRelMetadata *age_graph_join_get_rel_metadata(RelOptInfo *rel,
@@ -189,6 +207,9 @@ void age_graph_join_refresh_rel_metadata(
 void age_graph_join_register_rel_path_evidence(
     PlannerInfo *root, RelOptInfo *rel, Path *path,
     const AgeGraphJoinPathEvidence *evidence);
+void age_graph_join_register_rel_candidate_table(
+    PlannerInfo *root, RelOptInfo *rel, Path *path,
+    const AgeGraphJoinCandidateTable *table);
 double age_graph_join_path_evidence_credit(
     const AgeGraphJoinPathEvidence *outer_evidence,
     const AgeGraphJoinPathEvidence *inner_evidence);

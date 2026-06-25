@@ -67,6 +67,7 @@ typedef struct CypherAdjacencyMatchCandidate
     char *estimated_composite_selectivity_source;
     char *estimated_value_posting_source;
     double estimated_terminal_label_groups;
+    double estimated_main_blocks;
     bool estimated_fanout_from_directory;
 } CypherAdjacencyMatchCandidate;
 

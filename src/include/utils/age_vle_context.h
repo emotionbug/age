@@ -352,6 +352,9 @@ extern void age_vle_context_record_matrix_frontier_policy(
     VLE_local_context *vlelctx);
 extern void age_vle_context_record_matrix_frontier_source_run(
     VLE_local_context *vlelctx, int64 source_count);
+extern void age_vle_context_record_matrix_frontier_source_run_evidence(
+    VLE_local_context *vlelctx, int64 run_postings,
+    int64 terminal_postings);
 extern int64 age_vle_context_empty_lifecycle_batch_size(
     VLE_local_context *vlelctx);
 extern void age_vle_context_record_source_scan(

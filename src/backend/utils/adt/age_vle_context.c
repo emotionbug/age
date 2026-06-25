@@ -659,6 +659,19 @@ void age_vle_context_record_matrix_frontier_source_run(
             source_count);
 }
 
+void age_vle_context_record_matrix_frontier_source_run_evidence(
+    VLE_local_context *vlelctx, int64 run_postings, int64 terminal_postings)
+{
+    Assert(vlelctx != NULL);
+
+    if (run_postings > 0)
+        vlelctx->source_stats.matrix_frontier_source_run_postings +=
+            run_postings;
+    if (terminal_postings > 0)
+        vlelctx->source_stats.matrix_frontier_source_run_terminal_postings +=
+            terminal_postings;
+}
+
 int64 age_vle_context_empty_lifecycle_batch_size(VLE_local_context *vlelctx)
 {
     Assert(vlelctx != NULL);

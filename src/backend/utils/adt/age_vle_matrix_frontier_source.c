@@ -550,9 +550,17 @@ static void age_vle_matrix_frontier_source_block_close_raw_scan(
     for (i = 0; i < block->raw_source_count; i++)
     {
         VLEMatrixFrontierRunInput *input;
+        AgeAdjacencyVisiblePayloadRunKeyEvidence evidence;
 
         input = block->raw_keys[i].tag;
         Assert(input != NULL);
+        if (age_adjacency_visible_payload_run_scan_key_evidence(
+                state->raw_run_scan, i, &evidence))
+        {
+            age_vle_context_record_matrix_frontier_source_run_evidence(
+                block->vlelctx, evidence.run_postings,
+                evidence.terminal_postings);
+        }
         if (!age_adjacency_visible_payload_run_scan_key_seen(
                 state->raw_run_scan, i))
             age_vle_context_age_adjacency_payload_source_mark_empty(

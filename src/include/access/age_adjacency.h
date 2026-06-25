@@ -142,7 +142,7 @@ extern int64 age_adjacency_visible_payload_scan_active_postings(
 extern bool age_adjacency_estimate_terminal_label_postings(
     Oid index_oid, graphid key, int32 terminal_label_id,
     int64 *run_postings, int64 *terminal_postings, int64 *label_groups,
-    const char **value_posting_source);
+    const char **value_posting_source, int64 *main_blocks);
 extern bool age_adjacency_visible_payload_scan_key_known_empty(
     AgeAdjacencyVisiblePayloadScan *scan, graphid key);
 extern bool age_adjacency_visible_payload_scan_next(
