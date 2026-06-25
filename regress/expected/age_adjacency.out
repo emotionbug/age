@@ -857,6 +857,7 @@ $$) AS (plan agtype);
                      Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=id-only
                      Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                      Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+                     Adjacency Edge Skip: cursor-pushdown=no filtered=0
                      Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                      Adjacency Join Order: component=_age_default_alias_1 solved=(b 5 6) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
                      Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -873,7 +874,7 @@ $$) AS (plan agtype);
          Output: m.id, m.properties
          Filter: ((m.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[m.properties, '"i"'::agtype]) = '1'::agtype))
          Rows Removed by Filter: 2
-(37 rows)
+(38 rows)
 
 SELECT * FROM cypher('age_adj_match_descriptor', $$
     EXPLAIN (VERBOSE, COSTS OFF)
@@ -897,6 +898,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
                Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -907,7 +909,7 @@ $$) AS (plan agtype);
    ->  Seq Scan on age_adj_match_descriptor."N" n
          Output: n.id, n.properties
          Filter: ((n.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '1'::agtype))
-(25 rows)
+(26 rows)
 
 SET enable_seqscan = off;
 SET enable_indexscan = off;
@@ -937,6 +939,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=2 composite-fanout=2 label-groups=2 main-blocks=2 fanout-source=directory source=graph-metadata:r_adj_out payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=yes
                Adjacency Cost Input: fanout=3 terminal-fanout=2 composite-fanout=2 source-handoff=label-slice source-fanout=2 source-blocks=2 property-source-matches=0 residual=1 label-groups=2 main-blocks=2 fanout-source=directory value-posting=label-slice index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-directory-anchored rows=1 fanout=3 terminal-fanout=2 composite-fanout=2 source=adjacency-value candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                Adjacency Parallel: safe=true aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=worker-local-ready active=serial
@@ -946,7 +949,7 @@ $$) AS (plan agtype);
    ->  Seq Scan on age_adj_match_descriptor."N" n
          Disabled: true
          Output: n.id, n.properties
-(25 rows)
+(26 rows)
 
 RESET enable_bitmapscan;
 RESET enable_indexscan;
@@ -974,6 +977,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no filtered=0
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
                Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -988,7 +992,7 @@ $$) AS (plan agtype);
          Output: n.id, n.properties
          Filter: ((n.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '1'::agtype))
          Rows Removed by Filter: 1
-(30 rows)
+(31 rows)
 
 SELECT * FROM cypher('age_adj_match_descriptor', $$
     EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
@@ -1013,6 +1017,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no filtered=0
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
                Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1026,7 +1031,7 @@ $$) AS (plan agtype);
    ->  Seq Scan on age_adj_match_descriptor."M" m (actual rows=1.00 loops=1)
          Output: m.id, m.properties
          Filter: ((m.properties @> '{"i": 1}'::agtype) AND agtype_object_field_equals(m.properties, '"i"'::agtype, '1'::agtype))
-(29 rows)
+(30 rows)
 
 SELECT * FROM cypher('age_adj_match_descriptor', $$
     EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
@@ -1051,6 +1056,7 @@ $$) AS (plan agtype);
                      Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=id-only
                      Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                      Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:no
+                     Adjacency Edge Skip: cursor-pushdown=no filtered=0
                      Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=1 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                      Adjacency Join Order: component=_age_default_alias_1 solved=(b 2 3) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                      Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1065,7 +1071,7 @@ $$) AS (plan agtype);
                Index Cond: (_age_default_alias_2.id = _age_default_alias_1.end_id)
                Heap Fetches: 0
                Index Searches: 0
-(30 rows)
+(31 rows)
 
 -- Graph statistics cost conditioning: R edges run 2/3 to :N and 1/3 to :M.
 -- Before refreshing the stats cache the destination-label fanout uses the 0.50
@@ -1097,6 +1103,7 @@ $$) AS (plan agtype);
                      Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=id-only
                      Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                      Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+                     Adjacency Edge Skip: cursor-pushdown=no
                      Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                      Adjacency Join Order: component=_age_default_alias_1 solved=(b 5 6) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
                      Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1109,7 +1116,7 @@ $$) AS (plan agtype);
    ->  Seq Scan on age_adj_match_descriptor."N" m
          Output: m.id, m.properties
          Filter: ((m.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[m.properties, '"i"'::agtype]) = '1'::agtype))
-(30 rows)
+(31 rows)
 
 SELECT ag_catalog.age_refresh_graph_edge_label_stats('age_adj_match_descriptor')
        AS cached_triples;
@@ -1155,6 +1162,7 @@ $$) AS (plan agtype);
                      Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=2 composite-fanout=2 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=id-only
                      Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                      Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+                     Adjacency Edge Skip: cursor-pushdown=no
                      Adjacency Cost Input: fanout=3 terminal-fanout=2 composite-fanout=2 source-handoff=label-slice source-fanout=2 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                      Adjacency Join Order: component=_age_default_alias_1 solved=(b 5 6) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=2 fanout=3 terminal-fanout=2 composite-fanout=2 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
                      Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1167,7 +1175,7 @@ $$) AS (plan agtype);
    ->  Seq Scan on age_adj_match_descriptor."N" m
          Output: m.id, m.properties
          Filter: ((m.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[m.properties, '"i"'::agtype]) = '1'::agtype))
-(30 rows)
+(31 rows)
 
 -- Clear the cache again so the remaining descriptor tests below see the default
 -- (un-conditioned) estimate, keeping their expected output unchanged.
@@ -1246,6 +1254,7 @@ $$) AS (plan agtype);
                            Adjacency Index: direction=outgoing endpoint=start_id fanout=32768 terminal-fanout=32768 composite-fanout=32768 label-groups=1 main-blocks=77 fanout-source=directory source=relcache-scan payload=id-only
                            Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=out properties=0 metadata=no
                            Adjacency Pruning: required=start_id,end_id terminal-source=none right-prune=label:no/props:none index-solved=0 residual-count=0 residual=edge:no/right-label:no/right-props:no edge-var:no
+                           Adjacency Edge Skip: cursor-pushdown=yes
                            Adjacency Cost Input: fanout=32768 terminal-fanout=32768 composite-fanout=32768 source-handoff=posting-run source-fanout=32768 source-blocks=77 property-source-matches=0 residual=0 label-groups=1 main-blocks=77 fanout-source=directory value-posting=run index-solved=0 residual-weight=100% index-credit=100% prefetch-threshold=0 reason=not-indexable payload=id-only
                            Adjacency Join Order: component=_age_default_alias_0 solved=(b 3 5) connector=adjacency-expand bound=start-bound property=adjacency-directory-anchored rows=6554 fanout=32768 terminal-fanout=32768 composite-fanout=32768 source=adjacency-value candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                            Adjacency Parallel: safe=true aware=true workers=2 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=worker-local-ready active=serial
@@ -1258,7 +1267,7 @@ $$) AS (plan agtype);
                ->  Index Only Scan using "N_pkey" on age_adj_parallel_match."N" _age_default_alias_1_2
                      Output: _age_default_alias_1_2.id
                      Index Cond: (_age_default_alias_1_2.id = _age_default_alias_0.end_id)
-(29 rows)
+(30 rows)
 
 SELECT * FROM cypher('age_adj_parallel_match', $$
     EXPLAIN (VERBOSE, COSTS OFF)
@@ -1287,6 +1296,7 @@ $$) AS (plan agtype);
                            Adjacency Index: direction=outgoing endpoint=start_id fanout=32768 terminal-fanout=32768 composite-fanout=4915 composite-selectivity=0.150000 selectivity-source=fallback-ceiling label-groups=1 main-blocks=77 fanout-source=directory source=relcache-scan payload=id-only
                            Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=out properties=0 metadata=no
                            Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
+                           Adjacency Edge Skip: cursor-pushdown=yes
                            Adjacency Cost Input: fanout=32768 terminal-fanout=32768 composite-fanout=4915 source-handoff=label-property-intersection source-fanout=4915 source-blocks=12 property-source-matches=4915 residual=2 label-groups=1 main-blocks=77 fanout-source=directory value-posting=label-slice index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=2 reason=large-terminal-fanout payload=id-only
                            Adjacency Join Order: component=_age_default_alias_0 solved=(b 3 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=983 fanout=32768 terminal-fanout=32768 composite-fanout=4915 source=adjacency-value candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                            Adjacency Parallel: safe=true aware=true workers=2 gather-cost=0.00 order-preserving=false shared-state=true shared-source=none:0/0 slice=shared-source-dynamic active=0/2
@@ -1298,7 +1308,7 @@ $$) AS (plan agtype);
                Output: n.id, n.properties
                Index Cond: (n.id = _age_default_alias_0.end_id)
                Filter: ((n.properties @> '{"bucket": 3}'::agtype) AND agtype_object_field_equals(n.properties, '"bucket"'::agtype, '3'::agtype))
-(29 rows)
+(30 rows)
 
 SELECT * FROM cypher('age_adj_parallel_match', $$
     MATCH (s:N)
@@ -1347,6 +1357,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no filtered=0
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
                Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1361,7 +1372,7 @@ $$) AS (plan agtype);
          Output: n.id, n.properties
          Filter: (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = ('1'::agtype + '0'::agtype))
          Rows Removed by Filter: 1
-(30 rows)
+(31 rows)
 
 SELECT * FROM cypher('age_adj_match_descriptor', $$
     EXPLAIN (VERBOSE, COSTS OFF)
@@ -1385,6 +1396,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=edge-row
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id,properties terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=3 residual=edge:yes/right-label:yes/right-props:join-verify edge-var:yes
+               Adjacency Edge Skip: cursor-pushdown=yes
                Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=3 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=205% index-credit=80% prefetch-threshold=2 reason=edge-payload-required payload=edge-row
                Adjacency Join Order: component=e solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1395,7 +1407,7 @@ $$) AS (plan agtype);
    ->  Seq Scan on age_adj_match_descriptor."N" n
          Output: n.id, n.properties
          Filter: ((n.properties @> '{"i": 1}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '1'::agtype))
-(25 rows)
+(26 rows)
 
 SELECT * FROM cypher('age_adj_match_descriptor', $$
     DROP INDEX n_i_source
@@ -1558,6 +1570,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=4 terminal-fanout=3 composite-fanout=3 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_adj payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no
                Adjacency Cost Input: fanout=4 terminal-fanout=3 composite-fanout=3 source-handoff=label-slice source-fanout=3 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=3 fanout=4 terminal-fanout=3 composite-fanout=3 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1570,7 +1583,7 @@ $$) AS (plan agtype);
          ->  Index Scan using "X_pkey" on age_adj_source_skew."X" x
                Output: x.properties, x.id
                Index Cond: (x.id = _age_default_alias_0.end_id)
-(27 rows)
+(28 rows)
 
 -- :B source -> terminal-fanout 1 (B runs 1/4 to X); directory cannot tell A from B
 SELECT * FROM cypher('age_adj_source_skew', $$
@@ -1594,6 +1607,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=4 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_adj payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no
                Adjacency Cost Input: fanout=4 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=4 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1604,7 +1618,7 @@ $$) AS (plan agtype);
    ->  Index Scan using "X_pkey" on age_adj_source_skew."X" x
          Output: x.id, x.properties
          Index Cond: (x.id = _age_default_alias_0.end_id)
-(25 rows)
+(26 rows)
 
 SELECT drop_graph('age_adj_source_skew', true);
 NOTICE:  drop cascades to 7 other objects
@@ -1729,6 +1743,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=4 terminal-fanout=2 composite-fanout=2 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_adj payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no
                Adjacency Cost Input: fanout=4 terminal-fanout=2 composite-fanout=2 source-handoff=label-slice source-fanout=2 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=2 fanout=4 terminal-fanout=2 composite-fanout=2 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1741,7 +1756,7 @@ $$) AS (plan agtype);
          ->  Index Scan using "T_pkey" on age_adj_degree."T" t
                Output: t.properties, t.id
                Index Cond: (t.id = _age_default_alias_0.end_id)
-(27 rows)
+(28 rows)
 
 SELECT ag_catalog.age_refresh_graph_edge_degree_stats('age_adj_degree')
        AS cached_rows;
@@ -1772,6 +1787,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=6 terminal-fanout=3 composite-fanout=3 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_adj payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no
                Adjacency Cost Input: fanout=6 terminal-fanout=3 composite-fanout=3 source-handoff=label-slice source-fanout=3 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=3 fanout=6 terminal-fanout=3 composite-fanout=3 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1784,7 +1800,7 @@ $$) AS (plan agtype);
          ->  Index Scan using "T_pkey" on age_adj_degree."T" t
                Output: t.properties, t.id
                Index Cond: (t.id = _age_default_alias_0.end_id)
-(27 rows)
+(28 rows)
 
 -- A :B source uses its own (2); the directory cannot distinguish A from B here.
 SELECT * FROM cypher('age_adj_degree', $$
@@ -1808,6 +1824,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=2 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_adj payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:deferred index-solved=1 residual-count=2 residual=edge:no/right-label:yes/right-props:yes edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no
                Adjacency Cost Input: fanout=2 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=170% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=2 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=2 declared-cover=2 cover=matched next=none/none/none alt-credit=inert
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1818,7 +1835,7 @@ $$) AS (plan agtype);
    ->  Index Scan using "T_pkey" on age_adj_degree."T" t
          Output: t.id, t.properties
          Index Cond: (t.id = _age_default_alias_0.end_id)
-(25 rows)
+(26 rows)
 
 SELECT drop_graph('age_adj_degree', true);
 NOTICE:  drop cascades to 6 other objects
@@ -1942,6 +1959,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=2 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_out payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no
                Adjacency Cost Input: fanout=2 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=1 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=2 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1951,7 +1969,7 @@ $$) AS (plan agtype);
          ->  Index Scan using "T_pkey" on age_adj_direction."T" t
                Output: t.id, t.properties
                Index Cond: (t.id = _age_default_alias_0.end_id)
-(23 rows)
+(24 rows)
 
 -- Incoming to :M uses in-degree (fanout=5) -- the directional difference.
 SELECT * FROM cypher('age_adj_direction', $$
@@ -1974,6 +1992,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=incoming endpoint=end_id fanout=5 terminal-fanout=3 composite-fanout=2 label-groups=0 main-blocks=0 fanout-source=statistics source=relcache-scan payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=in properties=0 metadata=no
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no
                Adjacency Cost Input: fanout=5 terminal-fanout=3 composite-fanout=2 source-handoff=label-slice source-fanout=3 source-blocks=0 property-source-matches=0 residual=1 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 7) connector=adjacency-composite-expand bound=end-bound property=query-order rows=2 fanout=5 terminal-fanout=3 composite-fanout=2 source=unknown candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -1985,7 +2004,7 @@ $$) AS (plan agtype);
                ->  Index Scan using "S_pkey" on age_adj_direction."S" s
                      Output: s.properties, s.id
                      Index Cond: (s.id = _age_default_alias_0.start_id)
-(25 rows)
+(26 rows)
 
 SELECT drop_graph('age_adj_direction', true);
 NOTICE:  drop cascades to 6 other objects
@@ -2088,6 +2107,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=incoming endpoint=end_id fanout=1 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=relcache-scan payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=in properties=0 metadata=no
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:yes
+               Adjacency Edge Skip: cursor-pushdown=no
                Adjacency Cost Input: fanout=1 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=1 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                Adjacency Join Order: component=_age_default_alias_0 solved=(b 5 6) connector=adjacency-composite-expand bound=end-bound property=query-order rows=1 fanout=1 terminal-fanout=1 composite-fanout=1 source=unknown candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -2096,7 +2116,7 @@ $$) AS (plan agtype);
                Adjacency Payload Columns: mode=id-only columns=start_id,end_id
    ->  Seq Scan on age_adj_reverse."A" a
          Output: a.id, a.properties
-(23 rows)
+(24 rows)
 
 SELECT drop_graph('age_adj_reverse', true);
 NOTICE:  drop cascades to 5 other objects
@@ -2239,6 +2259,7 @@ $$) AS (plan agtype);
                            Adjacency Index: direction=incoming endpoint=end_id fanout=1 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=relcache-scan payload=id-only
                            Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=in properties=0 metadata=no
                            Adjacency Pruning: required=id,start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:yes
+                           Adjacency Edge Skip: cursor-pushdown=no
                            Adjacency Cost Input: fanout=1 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=1 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
                            Adjacency Join Order: component=_age_default_alias_1 solved=(b 7 8) connector=adjacency-composite-expand bound=end-bound property=query-order rows=1 fanout=1 terminal-fanout=1 composite-fanout=1 source=unknown candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
                            Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -2251,7 +2272,7 @@ $$) AS (plan agtype);
                Output: a.id, a.properties
    ->  Seq Scan on age_adj_reverse2."B" b
          Output: b.id, b.properties
-(34 rows)
+(35 rows)
 
 SELECT drop_graph('age_adj_reverse2', true);
 NOTICE:  drop cascades to 7 other objects
@@ -2263,6 +2284,117 @@ drop cascades to table age_adj_reverse2."C"
 drop cascades to table age_adj_reverse2."E1"
 drop cascades to table age_adj_reverse2."E2"
 NOTICE:  graph "age_adj_reverse2" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
+-- Edge-only predicate cursor push-down (item 9, first slice).  An edge property
+-- predicate (r.w > 4) that references only the edge is evaluated inside the
+-- adjacency cursor, skipping non-matching edges before they reach the
+-- surrounding ExecScan.  The clause also stays in the scan qual, so results are
+-- identical to evaluating it there; the EXPLAIN line reports the push-down and
+-- (under ANALYZE) the count of edges the cursor filtered.
+SELECT create_graph('age_adj_edge_skip');
+NOTICE:  graph "age_adj_edge_skip" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_edge_skip', 'N');
+NOTICE:  VLabel "N" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_elabel('age_adj_edge_skip', 'E');
+NOTICE:  ELabel "E" has been created
+ create_elabel 
+---------------
+ 
+(1 row)
+
+SELECT * FROM cypher('age_adj_edge_skip', $$
+    CREATE (a:N {i: 1})-[:E {w: 1}]->(:N {i: 2}),
+           (a)-[:E {w: 5}]->(:N {i: 3}),
+           (a)-[:E {w: 9}]->(:N {i: 4})
+$$) AS (z agtype);
+ z 
+---
+(0 rows)
+
+SELECT * FROM cypher('age_adj_edge_skip', $$
+    CREATE INDEX e_adj FOR ()-[r:E]->() ON (ADJACENCY)
+$$) AS (c text);
+   c   
+-------
+ e_adj
+(1 row)
+
+ANALYZE age_adj_edge_skip."N"; ANALYZE age_adj_edge_skip."E";
+-- Correct rows: only edges with w > 4.
+SELECT w FROM cypher('age_adj_edge_skip', $$
+    MATCH (a:N {i: 1})-[r:E]->(b:N) WHERE r.w > 4 RETURN r.w AS w
+$$) AS (w agtype) ORDER BY w;
+ w 
+---
+ 5
+ 9
+(2 rows)
+
+-- No predicate: cursor push-down inactive, all edges returned.
+SELECT w FROM cypher('age_adj_edge_skip', $$
+    MATCH (a:N {i: 1})-[r:E]->(b:N) RETURN r.w AS w
+$$) AS (w agtype) ORDER BY w;
+ w 
+---
+ 1
+ 5
+ 9
+(3 rows)
+
+-- The plan reports the edge-only predicate pushed into the cursor.
+SELECT * FROM cypher('age_adj_edge_skip', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (a:N {i: 1})-[r:E]->(b:N) WHERE r.w > 4 RETURN b.i
+$$) AS (plan agtype);
+                                                                                                                                                                                 QUERY PLAN                                                                                                                                                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: agtype_object_field_agtype(b.properties, '"i"'::agtype)
+   Inner Unique: true
+   Join Filter: (r.end_id = b.id)
+   ->  Nested Loop
+         Output: r.end_id
+         ->  Seq Scan on age_adj_edge_skip."N" a
+               Output: a.id, a.properties
+               Filter: ((a.properties @> '{"i": 1}'::agtype) AND agtype_object_field_equals(a.properties, '"i"'::agtype, '1'::agtype))
+         ->  Custom Scan (AGE Adjacency Match) on age_adj_edge_skip."E" r
+               Output: r.start_id, r.end_id
+               Filter: ((a.id = r.start_id) AND (agtype_object_field_cmp(r.properties, '"w"'::agtype, '4'::agtype) > 0))
+               Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:e_adj payload=edge-row
+               Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
+               Adjacency Pruning: required=start_id,end_id,properties terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:yes
+               Adjacency Edge Skip: cursor-pushdown=yes
+               Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=1 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=edge-row
+               Adjacency Join Order: component=r solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=adjacency-anchored rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
+               Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+               Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=none value=none candidate-fanout=1 composite-fanout=1 value-posting=none planned=none threshold=0 reason=not-indexable
+               Adjacency Terminal Property: none
+               Adjacency Payload Columns: mode=edge-row columns=start_id,end_id,properties
+   ->  Seq Scan on age_adj_edge_skip."N" b
+         Output: b.id, b.properties
+(24 rows)
+
+SELECT drop_graph('age_adj_edge_skip', true);
+NOTICE:  drop cascades to 4 other objects
+DETAIL:  drop cascades to table age_adj_edge_skip._ag_label_vertex
+drop cascades to table age_adj_edge_skip._ag_label_edge
+drop cascades to table age_adj_edge_skip."N"
+drop cascades to table age_adj_edge_skip."E"
+NOTICE:  graph "age_adj_edge_skip" has been dropped
  drop_graph 
 ------------
  
@@ -2337,6 +2469,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=1 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no filtered=0
                Adjacency Cost Input: fanout=1 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=3 reason=small-terminal-fanout payload=id-only
                Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=1 terminal-fanout=1 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -2351,7 +2484,7 @@ $$) AS (plan agtype);
          Output: n.id, n.properties
          Filter: ((n.properties @> '{"i": 11}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '11'::agtype))
          Rows Removed by Filter: 1
-(30 rows)
+(31 rows)
 
 SELECT drop_graph('age_adj_match_prefetch_gate', true);
 NOTICE:  drop cascades to 4 other objects
@@ -2458,6 +2591,7 @@ $$) AS (plan agtype);
                Adjacency Index: direction=outgoing endpoint=start_id fanout=64 terminal-fanout=32 composite-fanout=1 composite-selectivity=0.015385 selectivity-source=typed-distinct label-groups=0 main-blocks=0 fanout-source=statistics source=graph-metadata:r_adj_out payload=id-only
                Adjacency Index Descriptor: kind=ADJACENCY provider=age_adjacency direction=out properties=0 metadata=yes
                Adjacency Pruning: required=start_id,end_id terminal-source=label-block+property-source right-prune=label:yes/props:source-prefetch index-solved=2 residual-count=2 residual=edge:no/right-label:yes/right-props:join-verify edge-var:no
+               Adjacency Edge Skip: cursor-pushdown=no filtered=0
                Adjacency Cost Input: fanout=64 terminal-fanout=32 composite-fanout=1 source-handoff=label-property-intersection source-fanout=1 source-blocks=0 property-source-matches=1 residual=2 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=2 residual-weight=170% index-credit=80% prefetch-threshold=2 reason=large-terminal-fanout payload=id-only
                Adjacency Join Order: component=_age_default_alias_1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=index-anchored rows=1 fanout=64 terminal-fanout=32 composite-fanout=1 source=adjacency-payload candidates=3 declared-cover=2 cover=matched next=node-property-index-seek/index-anchored/node-property-index alt-credit=active
                Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
@@ -2473,7 +2607,7 @@ $$) AS (plan agtype);
          Index Cond: (n.id = _age_default_alias_1.end_id)
          Filter: ((n.properties @> '{"i": 63}'::agtype) AND (agtype_access_operator(VARIADIC ARRAY[n.properties, '"i"'::agtype]) = '63'::agtype))
          Index Searches: 1
-(30 rows)
+(31 rows)
 
 SELECT drop_graph('age_adj_default_source_handoff', true);
 NOTICE:  drop cascades to 4 other objects
@@ -7689,3 +7823,393 @@ SELECT postings::text
 FROM age_adjacency_debug_stats('age_adjacency_smoke_start_idx'::regclass)
 ) TO STDOUT;
 3
+-- ============================================================================
+-- age_adj_multiway: WCOJ-style multiway intersection over the adjacency-AM
+-- sorted endpoint run scan (item 6 foundation).
+--
+-- Graph (edge label E, vertex label N):
+--   s1 -> t1, t2, t3
+--   s2 ->     t2, t3, t4
+--   s3 ->         t3, t4, t5
+-- Common out-neighbours: {s1,s2,s3} -> {t3}, {s1,s2} -> {t2,t3},
+--                        {s2,s3} -> {t3,t4}.
+-- age_adjacency_multiway_intersect() must return exactly the destinations the
+-- equivalent multi-pattern binary join would produce, computed in one leapfrog
+-- pass with no pairwise intermediate.
+-- ============================================================================
+SELECT create_graph('age_adj_multiway');
+NOTICE:  graph "age_adj_multiway" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_multiway', 'N');
+NOTICE:  VLabel "N" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_elabel('age_adj_multiway', 'E');
+NOTICE:  ELabel "E" has been created
+ create_elabel 
+---------------
+ 
+(1 row)
+
+INSERT INTO age_adj_multiway."N"(id, properties) VALUES
+(_graphid(_label_id('age_adj_multiway', 'N'), 1), '{"name": "s1"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 2), '{"name": "s2"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 3), '{"name": "s3"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 4), '{"name": "t1"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 5), '{"name": "t2"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 6), '{"name": "t3"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 7), '{"name": "t4"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 8), '{"name": "t5"}'::agtype);
+INSERT INTO age_adj_multiway."E"(id, start_id, end_id, properties) VALUES
+(_graphid(_label_id('age_adj_multiway', 'E'), 1),
+ _graphid(_label_id('age_adj_multiway', 'N'), 1),
+ _graphid(_label_id('age_adj_multiway', 'N'), 4), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 2),
+ _graphid(_label_id('age_adj_multiway', 'N'), 1),
+ _graphid(_label_id('age_adj_multiway', 'N'), 5), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 3),
+ _graphid(_label_id('age_adj_multiway', 'N'), 1),
+ _graphid(_label_id('age_adj_multiway', 'N'), 6), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 4),
+ _graphid(_label_id('age_adj_multiway', 'N'), 2),
+ _graphid(_label_id('age_adj_multiway', 'N'), 5), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 5),
+ _graphid(_label_id('age_adj_multiway', 'N'), 2),
+ _graphid(_label_id('age_adj_multiway', 'N'), 6), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 6),
+ _graphid(_label_id('age_adj_multiway', 'N'), 2),
+ _graphid(_label_id('age_adj_multiway', 'N'), 7), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 7),
+ _graphid(_label_id('age_adj_multiway', 'N'), 3),
+ _graphid(_label_id('age_adj_multiway', 'N'), 6), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 8),
+ _graphid(_label_id('age_adj_multiway', 'N'), 3),
+ _graphid(_label_id('age_adj_multiway', 'N'), 7), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 9),
+ _graphid(_label_id('age_adj_multiway', 'N'), 3),
+ _graphid(_label_id('age_adj_multiway', 'N'), 8), '{}'::agtype);
+CREATE INDEX age_adj_multiway_e_start_idx
+ON age_adj_multiway."E" USING age_adjacency (start_id, id, end_id);
+-- Reverse index so direction => 'in' can intersect in-neighbour sets.
+CREATE INDEX age_adj_multiway_e_end_idx
+ON age_adj_multiway."E" USING age_adjacency (end_id, id, start_id);
+-- Readable view of the 3-source intersection: destinations reachable from ALL
+-- of s1, s2, s3, mapped back to their names.  Expect only t3.
+SELECT vn.name::text AS common_target
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway', 'E',
+        (SELECT ids
+         FROM cypher('age_adj_multiway',
+                     $c$ MATCH (a:N) WHERE a.name IN ['s1','s2','s3']
+                         RETURN collect(id(a)) $c$) AS t(ids agtype))) AS m(dst)
+JOIN cypher('age_adj_multiway',
+            $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
+  ON (vn.id::text)::bigint = (m.dst::text)::bigint
+ORDER BY vn.name::text;
+ common_target 
+---------------
+ t3
+(1 row)
+
+-- The 2-source intersection {s1,s2}: expect t2 and t3.
+SELECT vn.name::text AS common_target
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway', 'E',
+        (SELECT ids
+         FROM cypher('age_adj_multiway',
+                     $c$ MATCH (a:N) WHERE a.name IN ['s1','s2']
+                         RETURN collect(id(a)) $c$) AS t(ids agtype))) AS m(dst)
+JOIN cypher('age_adj_multiway',
+            $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
+  ON (vn.id::text)::bigint = (m.dst::text)::bigint
+ORDER BY vn.name::text;
+ common_target 
+---------------
+ t2
+ t3
+(2 rows)
+
+-- direction => 'in': vertices that point into BOTH t3 and t4.  Expect s2, s3.
+SELECT vn.name::text AS common_source
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway', 'E',
+        (SELECT ids
+         FROM cypher('age_adj_multiway',
+                     $c$ MATCH (a:N) WHERE a.name IN ['t3','t4']
+                         RETURN collect(id(a)) $c$) AS t(ids agtype)),
+        'in') AS m(dst)
+JOIN cypher('age_adj_multiway',
+            $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
+  ON (vn.id::text)::bigint = (m.dst::text)::bigint
+ORDER BY vn.name::text;
+ common_source 
+---------------
+ s2
+ s3
+(2 rows)
+
+-- Correctness contract: the multiway intersection result must equal the
+-- multi-pattern binary join for the same pattern.  Asserted as id sets so the
+-- check is independent of output formatting.  Each case uses a static binary
+-- join that keeps destinations reached by ALL distinct sources (count(DISTINCT
+-- src) = number of sources).
+DO $age_adj_multiway$
+DECLARE
+    srf_ids bigint[];
+    join_ids bigint[];
+BEGIN
+    -- 3-source {s1,s2,s3}.
+    SELECT array_agg(x ORDER BY x) INTO srf_ids FROM (
+        SELECT (m.dst::text)::bigint AS x
+        FROM ag_catalog.age_adjacency_multiway_intersect('age_adj_multiway', 'E',
+                (SELECT ids FROM cypher('age_adj_multiway',
+                    $c$ MATCH (a:N) WHERE a.name IN ['s1','s2','s3']
+                        RETURN collect(id(a)) $c$) AS t(ids agtype))) AS m(dst)
+    ) s;
+    SELECT array_agg(x ORDER BY x) INTO join_ids FROM (
+        SELECT (cid::text)::bigint AS x
+        FROM cypher('age_adj_multiway',
+            $c$ MATCH (src:N)-[:E]->(c:N) WHERE src.name IN ['s1','s2','s3']
+                WITH c, count(DISTINCT src) AS hit WHERE hit = 3
+                RETURN id(c) AS cid $c$) AS t(cid agtype)
+    ) s;
+    IF srf_ids IS DISTINCT FROM join_ids THEN
+        RAISE EXCEPTION '3-source: SRF % <> join %', srf_ids, join_ids;
+    END IF;
+    RAISE NOTICE 'wcoj 3-source intersect == binary join (% targets)',
+                 coalesce(array_length(srf_ids, 1), 0);
+
+    -- 2-source {s2,s3}.
+    SELECT array_agg(x ORDER BY x) INTO srf_ids FROM (
+        SELECT (m.dst::text)::bigint AS x
+        FROM ag_catalog.age_adjacency_multiway_intersect('age_adj_multiway', 'E',
+                (SELECT ids FROM cypher('age_adj_multiway',
+                    $c$ MATCH (a:N) WHERE a.name IN ['s2','s3']
+                        RETURN collect(id(a)) $c$) AS t(ids agtype))) AS m(dst)
+    ) s;
+    SELECT array_agg(x ORDER BY x) INTO join_ids FROM (
+        SELECT (cid::text)::bigint AS x
+        FROM cypher('age_adj_multiway',
+            $c$ MATCH (src:N)-[:E]->(c:N) WHERE src.name IN ['s2','s3']
+                WITH c, count(DISTINCT src) AS hit WHERE hit = 2
+                RETURN id(c) AS cid $c$) AS t(cid agtype)
+    ) s;
+    IF srf_ids IS DISTINCT FROM join_ids THEN
+        RAISE EXCEPTION '2-source: SRF % <> join %', srf_ids, join_ids;
+    END IF;
+    RAISE NOTICE 'wcoj 2-source intersect == binary join (% targets)',
+                 coalesce(array_length(srf_ids, 1), 0);
+
+    -- Duplicate source key: passing id(s1) twice plus id(s2) must equal the
+    -- {s1,s2} intersection (the leapfrog dedups repeated keys per group).
+    SELECT array_agg(x ORDER BY x) INTO srf_ids FROM (
+        SELECT (m.dst::text)::bigint AS x
+        FROM ag_catalog.age_adjacency_multiway_intersect('age_adj_multiway', 'E',
+                (SELECT ('[' || s1 || ',' || s2 || ',' || s1 || ']')::agtype
+                 FROM (SELECT
+                          (SELECT id::text FROM age_adj_multiway."N"
+                           WHERE properties = '{"name": "s1"}'::agtype) AS s1,
+                          (SELECT id::text FROM age_adj_multiway."N"
+                           WHERE properties = '{"name": "s2"}'::agtype) AS s2
+                      ) ids)) AS m(dst)
+    ) s;
+    SELECT array_agg(x ORDER BY x) INTO join_ids FROM (
+        SELECT (cid::text)::bigint AS x
+        FROM cypher('age_adj_multiway',
+            $c$ MATCH (src:N)-[:E]->(c:N) WHERE src.name IN ['s1','s2']
+                WITH c, count(DISTINCT src) AS hit WHERE hit = 2
+                RETURN id(c) AS cid $c$) AS t(cid agtype)
+    ) s;
+    IF srf_ids IS DISTINCT FROM join_ids THEN
+        RAISE EXCEPTION 'duplicate-key: SRF % <> join %', srf_ids, join_ids;
+    END IF;
+    RAISE NOTICE 'wcoj duplicate-key intersect == {s1,s2} (% targets)',
+                 coalesce(array_length(srf_ids, 1), 0);
+
+    -- Empty intersection: a sink vertex (t1 has no out-edges) yields no common
+    -- target.
+    SELECT array_agg(x ORDER BY x) INTO srf_ids FROM (
+        SELECT (m.dst::text)::bigint AS x
+        FROM ag_catalog.age_adjacency_multiway_intersect('age_adj_multiway', 'E',
+                (SELECT ids FROM cypher('age_adj_multiway',
+                    $c$ MATCH (a:N) WHERE a.name = 't1'
+                        RETURN collect(id(a)) $c$) AS t(ids agtype))) AS m(dst)
+    ) s;
+    IF srf_ids IS NOT NULL THEN
+        RAISE EXCEPTION 'expected empty intersection for sink, got %', srf_ids;
+    END IF;
+    RAISE NOTICE 'wcoj sink-source intersect is empty';
+
+    -- direction => 'in': common in-neighbours of {t3,t4}.  t3 is reached from
+    -- s1,s2,s3; t4 from s2,s3; the intersection is {s2,s3}.  Compare against the
+    -- reverse binary join (vertices that point to BOTH t3 and t4).
+    SELECT array_agg(x ORDER BY x) INTO srf_ids FROM (
+        SELECT (m.dst::text)::bigint AS x
+        FROM ag_catalog.age_adjacency_multiway_intersect('age_adj_multiway', 'E',
+                (SELECT ids FROM cypher('age_adj_multiway',
+                    $c$ MATCH (a:N) WHERE a.name IN ['t3','t4']
+                        RETURN collect(id(a)) $c$) AS t(ids agtype)),
+                'in') AS m(dst)
+    ) s;
+    SELECT array_agg(x ORDER BY x) INTO join_ids FROM (
+        SELECT (cid::text)::bigint AS x
+        FROM cypher('age_adj_multiway',
+            $c$ MATCH (c:N)-[:E]->(tgt:N) WHERE tgt.name IN ['t3','t4']
+                WITH c, count(DISTINCT tgt) AS hit WHERE hit = 2
+                RETURN id(c) AS cid $c$) AS t(cid agtype)
+    ) s;
+    IF srf_ids IS DISTINCT FROM join_ids THEN
+        RAISE EXCEPTION 'in-direction: SRF % <> reverse join %',
+                        srf_ids, join_ids;
+    END IF;
+    RAISE NOTICE 'wcoj in-direction intersect == reverse binary join (% sources)',
+                 coalesce(array_length(srf_ids, 1), 0);
+END
+$age_adj_multiway$;
+NOTICE:  wcoj 3-source intersect == binary join (1 targets)
+NOTICE:  wcoj 2-source intersect == binary join (2 targets)
+NOTICE:  wcoj duplicate-key intersect == {s1,s2} (2 targets)
+NOTICE:  wcoj sink-source intersect is empty
+NOTICE:  wcoj in-direction intersect == reverse binary join (2 sources)
+SELECT drop_graph('age_adj_multiway', true);
+NOTICE:  drop cascades to 4 other objects
+DETAIL:  drop cascades to table age_adj_multiway._ag_label_vertex
+drop cascades to table age_adj_multiway._ag_label_edge
+drop cascades to table age_adj_multiway."N"
+drop cascades to table age_adj_multiway."E"
+NOTICE:  graph "age_adj_multiway" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
+-- ============================================================================
+-- age_adj_multiway_tri: mixed-direction intersection (triangle closure).
+-- A directed triangle v1->v2->v3->v1 closes when, given the driving edge
+-- (v1->v2), we find c in out(v2) intersect in(v1): c must be both a v2
+-- out-neighbour and a v1 in-neighbour.  Extra edges v2->v5 and v6->v1 widen the
+-- per-source sets so the intersection genuinely filters to {v3}.  This is the
+-- shape a worst-case-optimal triangle join uses, and the source list mixes
+-- per-source directions in one call: [{id:v2,dir:out},{id:v1,dir:in}].
+-- ============================================================================
+SELECT create_graph('age_adj_multiway_tri');
+NOTICE:  graph "age_adj_multiway_tri" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT create_vlabel('age_adj_multiway_tri', 'N');
+NOTICE:  VLabel "N" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_elabel('age_adj_multiway_tri', 'E');
+NOTICE:  ELabel "E" has been created
+ create_elabel 
+---------------
+ 
+(1 row)
+
+INSERT INTO age_adj_multiway_tri."N"(id, properties) VALUES
+(_graphid(_label_id('age_adj_multiway_tri', 'N'), 1), '{"name": "v1"}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'N'), 2), '{"name": "v2"}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'N'), 3), '{"name": "v3"}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'N'), 5), '{"name": "v5"}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'N'), 6), '{"name": "v6"}'::agtype);
+INSERT INTO age_adj_multiway_tri."E"(id, start_id, end_id, properties) VALUES
+(_graphid(_label_id('age_adj_multiway_tri', 'E'), 1),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 1),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 2), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'E'), 2),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 2),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 3), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'E'), 3),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 3),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 1), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'E'), 4),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 2),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 5), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'E'), 5),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 6),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 1), '{}'::agtype);
+CREATE INDEX age_adj_multiway_tri_e_start_idx
+ON age_adj_multiway_tri."E" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX age_adj_multiway_tri_e_end_idx
+ON age_adj_multiway_tri."E" USING age_adjacency (end_id, id, start_id);
+-- Readable: the triangle-closing vertex for driving edge (v1->v2) is v3.
+SELECT vn.name::text AS closing_vertex
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway_tri', 'E',
+        (SELECT ('[{"id": ' || b || ', "dir": "out"}, '
+                 || '{"id": ' || a || ', "dir": "in"}]')::agtype
+         FROM (SELECT
+                  (SELECT id::text FROM age_adj_multiway_tri."N"
+                   WHERE properties = '{"name": "v2"}'::agtype) AS b,
+                  (SELECT id::text FROM age_adj_multiway_tri."N"
+                   WHERE properties = '{"name": "v1"}'::agtype) AS a) ids)) AS m(dst)
+JOIN cypher('age_adj_multiway_tri',
+            $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
+  ON (vn.id::text)::bigint = (m.dst::text)::bigint
+ORDER BY vn.name::text;
+ closing_vertex 
+----------------
+ v3
+(1 row)
+
+-- Contract: mixed-direction intersection == the binary triangle-closure join
+-- (c reachable from v2 AND reaching v1).
+DO $age_adj_multiway_tri$
+DECLARE
+    srf_ids bigint[];
+    join_ids bigint[];
+BEGIN
+    SELECT array_agg(x ORDER BY x) INTO srf_ids FROM (
+        SELECT (m.dst::text)::bigint AS x
+        FROM ag_catalog.age_adjacency_multiway_intersect(
+                'age_adj_multiway_tri', 'E',
+                (SELECT ('[{"id": ' || b || ', "dir": "out"}, '
+                         || '{"id": ' || a || ', "dir": "in"}]')::agtype
+                 FROM (SELECT
+                          (SELECT id::text FROM age_adj_multiway_tri."N"
+                           WHERE properties = '{"name": "v2"}'::agtype) AS b,
+                          (SELECT id::text FROM age_adj_multiway_tri."N"
+                           WHERE properties = '{"name": "v1"}'::agtype) AS a) ids
+                )) AS m(dst)
+    ) s;
+    SELECT array_agg(x ORDER BY x) INTO join_ids FROM (
+        SELECT (cid::text)::bigint AS x
+        FROM cypher('age_adj_multiway_tri',
+            $c$ MATCH (b:N)-[:E]->(c:N)-[:E]->(a:N)
+                WHERE b.name = 'v2' AND a.name = 'v1'
+                RETURN id(c) AS cid $c$) AS t(cid agtype)
+    ) s;
+    IF srf_ids IS DISTINCT FROM join_ids THEN
+        RAISE EXCEPTION 'triangle closure: SRF % <> join %', srf_ids, join_ids;
+    END IF;
+    RAISE NOTICE 'wcoj triangle closure == binary join (% closing vertices)',
+                 coalesce(array_length(srf_ids, 1), 0);
+END
+$age_adj_multiway_tri$;
+NOTICE:  wcoj triangle closure == binary join (1 closing vertices)
+SELECT drop_graph('age_adj_multiway_tri', true);
+NOTICE:  drop cascades to 4 other objects
+DETAIL:  drop cascades to table age_adj_multiway_tri._ag_label_vertex
+drop cascades to table age_adj_multiway_tri._ag_label_edge
+drop cascades to table age_adj_multiway_tri."N"
+drop cascades to table age_adj_multiway_tri."E"
+NOTICE:  graph "age_adj_multiway_tri" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+

@@ -72,6 +72,7 @@
 #define FUNC_AGTYPE_TYPECAST_PG_BIGINT "agtype_to_int8"
 #define FUNC_AGTYPE_TYPECAST_PG_NUMERIC "agtype_to_numeric"
 #define FUNC_AGTYPE_TYPECAST_BOOL "agtype_typecast_bool"
+#define FUNC_AGTYPE_TYPECAST_PG_BOOL "agtype_to_bool"
 #define FUNC_AGTYPE_TYPECAST_PG_TEXT "agtype_to_text"
 
 typedef struct function_exists_cache_key
@@ -110,6 +111,7 @@ static Oid agtype_access_operator_oid = InvalidOid;
 static Oid agtype_object_field_agtype_oid = InvalidOid;
 static Oid agtype_object_field_int8_oid = InvalidOid;
 static Oid agtype_object_field_float8_oid = InvalidOid;
+static Oid agtype_object_field_bool_oid = InvalidOid;
 static Oid agtype_object_field_text_agtype_oid = InvalidOid;
 static Oid agtype_object_field_numeric_agtype_oid = InvalidOid;
 static Oid agtype_object_field_numeric_oid = InvalidOid;
@@ -997,6 +999,7 @@ static Oid get_agtype_access_operator_oid(void);
 static Oid get_agtype_object_field_agtype_oid(void);
 static Oid get_agtype_object_field_int8_oid(void);
 static Oid get_agtype_object_field_float8_oid(void);
+static Oid get_agtype_object_field_bool_oid(void);
 static Oid get_agtype_object_field_text_agtype_oid(void);
 static Oid get_agtype_object_field_numeric_agtype_oid(void);
 static Oid get_agtype_object_field_numeric_oid(void);
@@ -1632,6 +1635,12 @@ static bool is_pg_scalar_property_expr(Node *node, Oid *result_type)
     {
         if (result_type != NULL)
             *result_type = FLOAT8OID;
+        return true;
+    }
+    if (func->funcid == get_agtype_object_field_bool_oid())
+    {
+        if (result_type != NULL)
+            *result_type = BOOLOID;
         return true;
     }
     if (func->funcid == get_agtype_object_field_text_agtype_oid())
@@ -5255,6 +5264,13 @@ static Node *transform_cypher_typecast(cypher_parsestate *cpstate,
             fname = lappend(fname, makeString(FUNC_AGTYPE_TYPECAST_BOOL));
         }
         else if (typecast_len == 7 &&
+                 pg_strcasecmp(typecast, "pg_bool") == 0)
+        {
+            fname = lappend(fname, makeString(FUNC_AGTYPE_TYPECAST_PG_BOOL));
+            scalar_property_helper_oid = get_agtype_object_field_bool_oid();
+            scalar_property_result_type = BOOLOID;
+        }
+        else if (typecast_len == 7 &&
                  pg_strcasecmp(typecast, "pg_text") == 0)
         {
             fname = lappend(fname, makeString(FUNC_AGTYPE_TYPECAST_PG_TEXT));
@@ -5993,6 +6009,20 @@ static Oid get_agtype_object_field_float8_oid(void)
     }
 
     return agtype_object_field_float8_oid;
+}
+
+static Oid get_agtype_object_field_bool_oid(void)
+{
+    initialize_function_caches();
+
+    if (!OidIsValid(agtype_object_field_bool_oid))
+    {
+        agtype_object_field_bool_oid =
+            get_ag_func_oid("agtype_object_field_bool", 2,
+                            AGTYPEOID, AGTYPEOID);
+    }
+
+    return agtype_object_field_bool_oid;
 }
 
 static Oid get_agtype_object_field_text_agtype_oid(void)

@@ -180,6 +180,8 @@ typedef struct AgeAdjacencyMatchScanState
     AgeAdjacencyVisiblePayloadScan *payload_scan;
     ExprState *key_expr_state;
     ExprState *property_value_expr_state;
+    ExprState *edge_skip_qual;
+    int64 edge_skip_filtered;
     MemoryContext payload_scan_context;
     MemoryContext scan_context;
     bool payload_active;
@@ -436,6 +438,21 @@ static void begin_age_adjacency_match_scan(CustomScanState *node,
             ExecInitExpr(key_expr, (PlanState *)node);
         state->property_value_expr_state =
             ExecInitExpr(property_value_expr, (PlanState *)node);
+
+        /*
+         * Optional third entry: edge-only restriction clauses, evaluated against
+         * the produced edge tuple to skip non-matching edges early (item 9).
+         * These clauses also remain in the scan qual, so the skip is a pure
+         * optimization.
+         */
+        if (list_length(cscan->custom_exprs) >= 3)
+        {
+            List *edge_only_quals = (List *) lthird(cscan->custom_exprs);
+
+            if (edge_only_quals != NIL)
+                state->edge_skip_qual =
+                    ExecInitQual(edge_only_quals, (PlanState *)node);
+        }
     }
     {
         AgeAdjacencyMatchTerminalPropertyRequest request;
@@ -614,6 +631,24 @@ static TupleTableSlot *access_age_adjacency_match_scan(ScanState *node)
         }
 
         ExecStoreVirtualTuple(slot);
+
+        /*
+         * Early-skip edges that fail an edge-only restriction (item 9).  The
+         * same clauses remain in the surrounding ExecScan qual, so this only
+         * avoids propagating non-matching edges; it never changes results.
+         */
+        if (state->edge_skip_qual != NULL)
+        {
+            ExprContext *econtext = node->ps.ps_ExprContext;
+
+            econtext->ecxt_scantuple = slot;
+            if (!ExecQual(state->edge_skip_qual, econtext))
+            {
+                state->edge_skip_filtered++;
+                continue;
+            }
+        }
+
         state->rows_emitted++;
         return slot;
     }
@@ -693,6 +728,17 @@ static void explain_age_adjacency_match_scan(CustomScanState *node,
     ExplainPropertyText("Adjacency Pruning",
                         format_age_adjacency_match_pruning_descriptor(state),
                         es);
+    {
+        StringInfoData edge_skip;
+
+        initStringInfo(&edge_skip);
+        appendStringInfo(&edge_skip, "cursor-pushdown=%s",
+                         state->edge_skip_qual != NULL ? "yes" : "no");
+        if (es->analyze)
+            appendStringInfo(&edge_skip, " filtered=" INT64_FORMAT,
+                             state->edge_skip_filtered);
+        ExplainPropertyText("Adjacency Edge Skip", edge_skip.data, es);
+    }
     ExplainPropertyText("Adjacency Cost Input",
                         format_age_adjacency_match_cost_input(state),
                         es);

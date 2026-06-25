@@ -5799,6 +5799,61 @@ Datum agtype_object_field_int8(PG_FUNCTION_ARGS)
     PG_RETURN_INT64(result);
 }
 
+PG_FUNCTION_INFO_V1(agtype_object_field_bool);
+
+Datum agtype_object_field_bool(PG_FUNCTION_ARGS)
+{
+    agtype *agt = AG_GET_ARG_AGTYPE_P(0);
+    agtype *key = AG_GET_ARG_AGTYPE_P(1);
+    agtype_value key_value;
+    agtype_value *lookup_key = NULL;
+    agtype_value value;
+    bool key_needs_free = false;
+    bool value_needs_free = false;
+    bool result;
+
+    if (!AGT_ROOT_IS_OBJECT(agt) || !AGT_ROOT_IS_SCALAR(key))
+        PG_RETURN_NULL();
+
+    lookup_key = get_cached_access_operator_string_key(fcinfo);
+    if (lookup_key == NULL)
+    {
+        get_scalar_agtype_value_no_copy(key, &key_value, &key_needs_free);
+        lookup_key = &key_value;
+    }
+
+    if (lookup_key->type != AGTV_STRING)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    if (!find_agtype_value_from_container_no_copy(&agt->root, AGT_FOBJECT,
+                                                  lookup_key, &value,
+                                                  &value_needs_free) ||
+        value.type == AGTV_NULL)
+    {
+        free_agtype_value_no_copy(&key_value, key_needs_free);
+        PG_RETURN_NULL();
+    }
+
+    /* Mirror the agtype->boolean cast: only an actual boolean field matches. */
+    if (value.type != AGTV_BOOL)
+    {
+        cannot_cast_agtype_value(value.type, "boolean");
+        result = false;
+    }
+    else
+    {
+        result = value.val.boolean;
+    }
+
+    free_agtype_value_no_copy(&value, value_needs_free);
+    free_agtype_value_no_copy(&key_value, key_needs_free);
+
+    PG_RETURN_BOOL(result);
+}
+
 PG_FUNCTION_INFO_V1(agtype_object_field_float8);
 
 Datum agtype_object_field_float8(PG_FUNCTION_ARGS)
@@ -14629,6 +14684,67 @@ Datum age_collect_int8_finalfn(PG_FUNCTION_ARGS)
 
                 value.type = AGTV_INTEGER;
                 value.val.int_value = DatumGetInt64(state->dvalues[i]);
+                result.res = push_agtype_value(&result.parse_state,
+                                               WAGT_ELEM, &value);
+            }
+        }
+    }
+
+    result.res = push_agtype_value(&result.parse_state, WAGT_END_ARRAY, NULL);
+
+    AG_RETURN_AGTYPE_P(agtype_value_to_agtype(result.res));
+}
+
+PG_FUNCTION_INFO_V1(age_collect_bool_transfn);
+
+Datum age_collect_bool_transfn(PG_FUNCTION_ARGS)
+{
+    MemoryContext aggcontext;
+    ArrayBuildState *state;
+
+    if (!AggCheckCallContext(fcinfo, &aggcontext))
+        elog(ERROR, "age_collect_bool_transfn called in non-aggregate context");
+
+    if (PG_ARGISNULL(0))
+        state = initArrayResult(BOOLOID, aggcontext, false);
+    else
+        state = (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    if (!PG_ARGISNULL(1))
+    {
+        state = accumArrayResult(state, PG_GETARG_DATUM(1), false,
+                                 BOOLOID, aggcontext);
+    }
+
+    PG_RETURN_POINTER(state);
+}
+
+PG_FUNCTION_INFO_V1(age_collect_bool_finalfn);
+
+Datum age_collect_bool_finalfn(PG_FUNCTION_ARGS)
+{
+    ArrayBuildState *state;
+    agtype_in_state result;
+    int i;
+
+    Assert(AggCheckCallContext(fcinfo, NULL));
+
+    state = PG_ARGISNULL(0) ? NULL : (ArrayBuildState *)PG_GETARG_POINTER(0);
+
+    memset(&result, 0, sizeof(agtype_in_state));
+    result.res = push_agtype_value(&result.parse_state, WAGT_BEGIN_ARRAY,
+                                   NULL);
+
+    if (state != NULL)
+    {
+        for (i = 0; i < state->nelems; i++)
+        {
+            if (!state->dnulls[i])
+            {
+                agtype_value value;
+
+                value.type = AGTV_BOOL;
+                value.val.boolean = DatumGetBool(state->dvalues[i]);
                 result.res = push_agtype_value(&result.parse_state,
                                                WAGT_ELEM, &value);
             }

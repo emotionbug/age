@@ -1148,6 +1148,39 @@ SELECT * FROM cypher('age_adj_reverse2', $$
 $$) AS (plan agtype);
 SELECT drop_graph('age_adj_reverse2', true);
 
+-- Edge-only predicate cursor push-down (item 9, first slice).  An edge property
+-- predicate (r.w > 4) that references only the edge is evaluated inside the
+-- adjacency cursor, skipping non-matching edges before they reach the
+-- surrounding ExecScan.  The clause also stays in the scan qual, so results are
+-- identical to evaluating it there; the EXPLAIN line reports the push-down and
+-- (under ANALYZE) the count of edges the cursor filtered.
+SELECT create_graph('age_adj_edge_skip');
+SELECT create_vlabel('age_adj_edge_skip', 'N');
+SELECT create_elabel('age_adj_edge_skip', 'E');
+SELECT * FROM cypher('age_adj_edge_skip', $$
+    CREATE (a:N {i: 1})-[:E {w: 1}]->(:N {i: 2}),
+           (a)-[:E {w: 5}]->(:N {i: 3}),
+           (a)-[:E {w: 9}]->(:N {i: 4})
+$$) AS (z agtype);
+SELECT * FROM cypher('age_adj_edge_skip', $$
+    CREATE INDEX e_adj FOR ()-[r:E]->() ON (ADJACENCY)
+$$) AS (c text);
+ANALYZE age_adj_edge_skip."N"; ANALYZE age_adj_edge_skip."E";
+-- Correct rows: only edges with w > 4.
+SELECT w FROM cypher('age_adj_edge_skip', $$
+    MATCH (a:N {i: 1})-[r:E]->(b:N) WHERE r.w > 4 RETURN r.w AS w
+$$) AS (w agtype) ORDER BY w;
+-- No predicate: cursor push-down inactive, all edges returned.
+SELECT w FROM cypher('age_adj_edge_skip', $$
+    MATCH (a:N {i: 1})-[r:E]->(b:N) RETURN r.w AS w
+$$) AS (w agtype) ORDER BY w;
+-- The plan reports the edge-only predicate pushed into the cursor.
+SELECT * FROM cypher('age_adj_edge_skip', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (a:N {i: 1})-[r:E]->(b:N) WHERE r.w > 4 RETURN b.i
+$$) AS (plan agtype);
+SELECT drop_graph('age_adj_edge_skip', true);
+
 SELECT create_graph('age_adj_match_prefetch_gate');
 SELECT create_vlabel('age_adj_match_prefetch_gate', 'N');
 SELECT create_elabel('age_adj_match_prefetch_gate', 'R');
@@ -6400,3 +6433,323 @@ COPY (
 SELECT postings::text
 FROM age_adjacency_debug_stats('age_adjacency_smoke_start_idx'::regclass)
 ) TO STDOUT;
+
+-- ============================================================================
+-- age_adj_multiway: WCOJ-style multiway intersection over the adjacency-AM
+-- sorted endpoint run scan (item 6 foundation).
+--
+-- Graph (edge label E, vertex label N):
+--   s1 -> t1, t2, t3
+--   s2 ->     t2, t3, t4
+--   s3 ->         t3, t4, t5
+-- Common out-neighbours: {s1,s2,s3} -> {t3}, {s1,s2} -> {t2,t3},
+--                        {s2,s3} -> {t3,t4}.
+-- age_adjacency_multiway_intersect() must return exactly the destinations the
+-- equivalent multi-pattern binary join would produce, computed in one leapfrog
+-- pass with no pairwise intermediate.
+-- ============================================================================
+SELECT create_graph('age_adj_multiway');
+SELECT create_vlabel('age_adj_multiway', 'N');
+SELECT create_elabel('age_adj_multiway', 'E');
+
+INSERT INTO age_adj_multiway."N"(id, properties) VALUES
+(_graphid(_label_id('age_adj_multiway', 'N'), 1), '{"name": "s1"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 2), '{"name": "s2"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 3), '{"name": "s3"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 4), '{"name": "t1"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 5), '{"name": "t2"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 6), '{"name": "t3"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 7), '{"name": "t4"}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'N'), 8), '{"name": "t5"}'::agtype);
+
+INSERT INTO age_adj_multiway."E"(id, start_id, end_id, properties) VALUES
+(_graphid(_label_id('age_adj_multiway', 'E'), 1),
+ _graphid(_label_id('age_adj_multiway', 'N'), 1),
+ _graphid(_label_id('age_adj_multiway', 'N'), 4), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 2),
+ _graphid(_label_id('age_adj_multiway', 'N'), 1),
+ _graphid(_label_id('age_adj_multiway', 'N'), 5), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 3),
+ _graphid(_label_id('age_adj_multiway', 'N'), 1),
+ _graphid(_label_id('age_adj_multiway', 'N'), 6), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 4),
+ _graphid(_label_id('age_adj_multiway', 'N'), 2),
+ _graphid(_label_id('age_adj_multiway', 'N'), 5), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 5),
+ _graphid(_label_id('age_adj_multiway', 'N'), 2),
+ _graphid(_label_id('age_adj_multiway', 'N'), 6), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 6),
+ _graphid(_label_id('age_adj_multiway', 'N'), 2),
+ _graphid(_label_id('age_adj_multiway', 'N'), 7), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 7),
+ _graphid(_label_id('age_adj_multiway', 'N'), 3),
+ _graphid(_label_id('age_adj_multiway', 'N'), 6), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 8),
+ _graphid(_label_id('age_adj_multiway', 'N'), 3),
+ _graphid(_label_id('age_adj_multiway', 'N'), 7), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway', 'E'), 9),
+ _graphid(_label_id('age_adj_multiway', 'N'), 3),
+ _graphid(_label_id('age_adj_multiway', 'N'), 8), '{}'::agtype);
+
+CREATE INDEX age_adj_multiway_e_start_idx
+ON age_adj_multiway."E" USING age_adjacency (start_id, id, end_id);
+-- Reverse index so direction => 'in' can intersect in-neighbour sets.
+CREATE INDEX age_adj_multiway_e_end_idx
+ON age_adj_multiway."E" USING age_adjacency (end_id, id, start_id);
+
+-- Readable view of the 3-source intersection: destinations reachable from ALL
+-- of s1, s2, s3, mapped back to their names.  Expect only t3.
+SELECT vn.name::text AS common_target
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway', 'E',
+        (SELECT ids
+         FROM cypher('age_adj_multiway',
+                     $c$ MATCH (a:N) WHERE a.name IN ['s1','s2','s3']
+                         RETURN collect(id(a)) $c$) AS t(ids agtype))) AS m(dst)
+JOIN cypher('age_adj_multiway',
+            $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
+  ON (vn.id::text)::bigint = (m.dst::text)::bigint
+ORDER BY vn.name::text;
+
+-- The 2-source intersection {s1,s2}: expect t2 and t3.
+SELECT vn.name::text AS common_target
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway', 'E',
+        (SELECT ids
+         FROM cypher('age_adj_multiway',
+                     $c$ MATCH (a:N) WHERE a.name IN ['s1','s2']
+                         RETURN collect(id(a)) $c$) AS t(ids agtype))) AS m(dst)
+JOIN cypher('age_adj_multiway',
+            $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
+  ON (vn.id::text)::bigint = (m.dst::text)::bigint
+ORDER BY vn.name::text;
+
+-- direction => 'in': vertices that point into BOTH t3 and t4.  Expect s2, s3.
+SELECT vn.name::text AS common_source
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway', 'E',
+        (SELECT ids
+         FROM cypher('age_adj_multiway',
+                     $c$ MATCH (a:N) WHERE a.name IN ['t3','t4']
+                         RETURN collect(id(a)) $c$) AS t(ids agtype)),
+        'in') AS m(dst)
+JOIN cypher('age_adj_multiway',
+            $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
+  ON (vn.id::text)::bigint = (m.dst::text)::bigint
+ORDER BY vn.name::text;
+
+-- Correctness contract: the multiway intersection result must equal the
+-- multi-pattern binary join for the same pattern.  Asserted as id sets so the
+-- check is independent of output formatting.  Each case uses a static binary
+-- join that keeps destinations reached by ALL distinct sources (count(DISTINCT
+-- src) = number of sources).
+DO $age_adj_multiway$
+DECLARE
+    srf_ids bigint[];
+    join_ids bigint[];
+BEGIN
+    -- 3-source {s1,s2,s3}.
+    SELECT array_agg(x ORDER BY x) INTO srf_ids FROM (
+        SELECT (m.dst::text)::bigint AS x
+        FROM ag_catalog.age_adjacency_multiway_intersect('age_adj_multiway', 'E',
+                (SELECT ids FROM cypher('age_adj_multiway',
+                    $c$ MATCH (a:N) WHERE a.name IN ['s1','s2','s3']
+                        RETURN collect(id(a)) $c$) AS t(ids agtype))) AS m(dst)
+    ) s;
+    SELECT array_agg(x ORDER BY x) INTO join_ids FROM (
+        SELECT (cid::text)::bigint AS x
+        FROM cypher('age_adj_multiway',
+            $c$ MATCH (src:N)-[:E]->(c:N) WHERE src.name IN ['s1','s2','s3']
+                WITH c, count(DISTINCT src) AS hit WHERE hit = 3
+                RETURN id(c) AS cid $c$) AS t(cid agtype)
+    ) s;
+    IF srf_ids IS DISTINCT FROM join_ids THEN
+        RAISE EXCEPTION '3-source: SRF % <> join %', srf_ids, join_ids;
+    END IF;
+    RAISE NOTICE 'wcoj 3-source intersect == binary join (% targets)',
+                 coalesce(array_length(srf_ids, 1), 0);
+
+    -- 2-source {s2,s3}.
+    SELECT array_agg(x ORDER BY x) INTO srf_ids FROM (
+        SELECT (m.dst::text)::bigint AS x
+        FROM ag_catalog.age_adjacency_multiway_intersect('age_adj_multiway', 'E',
+                (SELECT ids FROM cypher('age_adj_multiway',
+                    $c$ MATCH (a:N) WHERE a.name IN ['s2','s3']
+                        RETURN collect(id(a)) $c$) AS t(ids agtype))) AS m(dst)
+    ) s;
+    SELECT array_agg(x ORDER BY x) INTO join_ids FROM (
+        SELECT (cid::text)::bigint AS x
+        FROM cypher('age_adj_multiway',
+            $c$ MATCH (src:N)-[:E]->(c:N) WHERE src.name IN ['s2','s3']
+                WITH c, count(DISTINCT src) AS hit WHERE hit = 2
+                RETURN id(c) AS cid $c$) AS t(cid agtype)
+    ) s;
+    IF srf_ids IS DISTINCT FROM join_ids THEN
+        RAISE EXCEPTION '2-source: SRF % <> join %', srf_ids, join_ids;
+    END IF;
+    RAISE NOTICE 'wcoj 2-source intersect == binary join (% targets)',
+                 coalesce(array_length(srf_ids, 1), 0);
+
+    -- Duplicate source key: passing id(s1) twice plus id(s2) must equal the
+    -- {s1,s2} intersection (the leapfrog dedups repeated keys per group).
+    SELECT array_agg(x ORDER BY x) INTO srf_ids FROM (
+        SELECT (m.dst::text)::bigint AS x
+        FROM ag_catalog.age_adjacency_multiway_intersect('age_adj_multiway', 'E',
+                (SELECT ('[' || s1 || ',' || s2 || ',' || s1 || ']')::agtype
+                 FROM (SELECT
+                          (SELECT id::text FROM age_adj_multiway."N"
+                           WHERE properties = '{"name": "s1"}'::agtype) AS s1,
+                          (SELECT id::text FROM age_adj_multiway."N"
+                           WHERE properties = '{"name": "s2"}'::agtype) AS s2
+                      ) ids)) AS m(dst)
+    ) s;
+    SELECT array_agg(x ORDER BY x) INTO join_ids FROM (
+        SELECT (cid::text)::bigint AS x
+        FROM cypher('age_adj_multiway',
+            $c$ MATCH (src:N)-[:E]->(c:N) WHERE src.name IN ['s1','s2']
+                WITH c, count(DISTINCT src) AS hit WHERE hit = 2
+                RETURN id(c) AS cid $c$) AS t(cid agtype)
+    ) s;
+    IF srf_ids IS DISTINCT FROM join_ids THEN
+        RAISE EXCEPTION 'duplicate-key: SRF % <> join %', srf_ids, join_ids;
+    END IF;
+    RAISE NOTICE 'wcoj duplicate-key intersect == {s1,s2} (% targets)',
+                 coalesce(array_length(srf_ids, 1), 0);
+
+    -- Empty intersection: a sink vertex (t1 has no out-edges) yields no common
+    -- target.
+    SELECT array_agg(x ORDER BY x) INTO srf_ids FROM (
+        SELECT (m.dst::text)::bigint AS x
+        FROM ag_catalog.age_adjacency_multiway_intersect('age_adj_multiway', 'E',
+                (SELECT ids FROM cypher('age_adj_multiway',
+                    $c$ MATCH (a:N) WHERE a.name = 't1'
+                        RETURN collect(id(a)) $c$) AS t(ids agtype))) AS m(dst)
+    ) s;
+    IF srf_ids IS NOT NULL THEN
+        RAISE EXCEPTION 'expected empty intersection for sink, got %', srf_ids;
+    END IF;
+    RAISE NOTICE 'wcoj sink-source intersect is empty';
+
+    -- direction => 'in': common in-neighbours of {t3,t4}.  t3 is reached from
+    -- s1,s2,s3; t4 from s2,s3; the intersection is {s2,s3}.  Compare against the
+    -- reverse binary join (vertices that point to BOTH t3 and t4).
+    SELECT array_agg(x ORDER BY x) INTO srf_ids FROM (
+        SELECT (m.dst::text)::bigint AS x
+        FROM ag_catalog.age_adjacency_multiway_intersect('age_adj_multiway', 'E',
+                (SELECT ids FROM cypher('age_adj_multiway',
+                    $c$ MATCH (a:N) WHERE a.name IN ['t3','t4']
+                        RETURN collect(id(a)) $c$) AS t(ids agtype)),
+                'in') AS m(dst)
+    ) s;
+    SELECT array_agg(x ORDER BY x) INTO join_ids FROM (
+        SELECT (cid::text)::bigint AS x
+        FROM cypher('age_adj_multiway',
+            $c$ MATCH (c:N)-[:E]->(tgt:N) WHERE tgt.name IN ['t3','t4']
+                WITH c, count(DISTINCT tgt) AS hit WHERE hit = 2
+                RETURN id(c) AS cid $c$) AS t(cid agtype)
+    ) s;
+    IF srf_ids IS DISTINCT FROM join_ids THEN
+        RAISE EXCEPTION 'in-direction: SRF % <> reverse join %',
+                        srf_ids, join_ids;
+    END IF;
+    RAISE NOTICE 'wcoj in-direction intersect == reverse binary join (% sources)',
+                 coalesce(array_length(srf_ids, 1), 0);
+END
+$age_adj_multiway$;
+
+SELECT drop_graph('age_adj_multiway', true);
+
+-- ============================================================================
+-- age_adj_multiway_tri: mixed-direction intersection (triangle closure).
+-- A directed triangle v1->v2->v3->v1 closes when, given the driving edge
+-- (v1->v2), we find c in out(v2) intersect in(v1): c must be both a v2
+-- out-neighbour and a v1 in-neighbour.  Extra edges v2->v5 and v6->v1 widen the
+-- per-source sets so the intersection genuinely filters to {v3}.  This is the
+-- shape a worst-case-optimal triangle join uses, and the source list mixes
+-- per-source directions in one call: [{id:v2,dir:out},{id:v1,dir:in}].
+-- ============================================================================
+SELECT create_graph('age_adj_multiway_tri');
+SELECT create_vlabel('age_adj_multiway_tri', 'N');
+SELECT create_elabel('age_adj_multiway_tri', 'E');
+
+INSERT INTO age_adj_multiway_tri."N"(id, properties) VALUES
+(_graphid(_label_id('age_adj_multiway_tri', 'N'), 1), '{"name": "v1"}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'N'), 2), '{"name": "v2"}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'N'), 3), '{"name": "v3"}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'N'), 5), '{"name": "v5"}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'N'), 6), '{"name": "v6"}'::agtype);
+
+INSERT INTO age_adj_multiway_tri."E"(id, start_id, end_id, properties) VALUES
+(_graphid(_label_id('age_adj_multiway_tri', 'E'), 1),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 1),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 2), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'E'), 2),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 2),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 3), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'E'), 3),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 3),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 1), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'E'), 4),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 2),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 5), '{}'::agtype),
+(_graphid(_label_id('age_adj_multiway_tri', 'E'), 5),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 6),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 1), '{}'::agtype);
+
+CREATE INDEX age_adj_multiway_tri_e_start_idx
+ON age_adj_multiway_tri."E" USING age_adjacency (start_id, id, end_id);
+CREATE INDEX age_adj_multiway_tri_e_end_idx
+ON age_adj_multiway_tri."E" USING age_adjacency (end_id, id, start_id);
+
+-- Readable: the triangle-closing vertex for driving edge (v1->v2) is v3.
+SELECT vn.name::text AS closing_vertex
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway_tri', 'E',
+        (SELECT ('[{"id": ' || b || ', "dir": "out"}, '
+                 || '{"id": ' || a || ', "dir": "in"}]')::agtype
+         FROM (SELECT
+                  (SELECT id::text FROM age_adj_multiway_tri."N"
+                   WHERE properties = '{"name": "v2"}'::agtype) AS b,
+                  (SELECT id::text FROM age_adj_multiway_tri."N"
+                   WHERE properties = '{"name": "v1"}'::agtype) AS a) ids)) AS m(dst)
+JOIN cypher('age_adj_multiway_tri',
+            $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
+  ON (vn.id::text)::bigint = (m.dst::text)::bigint
+ORDER BY vn.name::text;
+
+-- Contract: mixed-direction intersection == the binary triangle-closure join
+-- (c reachable from v2 AND reaching v1).
+DO $age_adj_multiway_tri$
+DECLARE
+    srf_ids bigint[];
+    join_ids bigint[];
+BEGIN
+    SELECT array_agg(x ORDER BY x) INTO srf_ids FROM (
+        SELECT (m.dst::text)::bigint AS x
+        FROM ag_catalog.age_adjacency_multiway_intersect(
+                'age_adj_multiway_tri', 'E',
+                (SELECT ('[{"id": ' || b || ', "dir": "out"}, '
+                         || '{"id": ' || a || ', "dir": "in"}]')::agtype
+                 FROM (SELECT
+                          (SELECT id::text FROM age_adj_multiway_tri."N"
+                           WHERE properties = '{"name": "v2"}'::agtype) AS b,
+                          (SELECT id::text FROM age_adj_multiway_tri."N"
+                           WHERE properties = '{"name": "v1"}'::agtype) AS a) ids
+                )) AS m(dst)
+    ) s;
+    SELECT array_agg(x ORDER BY x) INTO join_ids FROM (
+        SELECT (cid::text)::bigint AS x
+        FROM cypher('age_adj_multiway_tri',
+            $c$ MATCH (b:N)-[:E]->(c:N)-[:E]->(a:N)
+                WHERE b.name = 'v2' AND a.name = 'v1'
+                RETURN id(c) AS cid $c$) AS t(cid agtype)
+    ) s;
+    IF srf_ids IS DISTINCT FROM join_ids THEN
+        RAISE EXCEPTION 'triangle closure: SRF % <> join %', srf_ids, join_ids;
+    END IF;
+    RAISE NOTICE 'wcoj triangle closure == binary join (% closing vertices)',
+                 coalesce(array_length(srf_ids, 1), 0);
+END
+$age_adj_multiway_tri$;
+
+SELECT drop_graph('age_adj_multiway_tri', true);

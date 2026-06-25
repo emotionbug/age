@@ -448,6 +448,57 @@ SELECT count(*) AS typed_vs_agtype_group_divergences FROM (
 
 SELECT drop_graph('cypher_match_typed_key', true);
 
+-- bool as a typed physical type (item 22): n.flag::pg_bool projects a native
+-- boolean through the agtype_object_field_bool accessor, and collect() of a
+-- typed bool routes to the age_collect_bool aggregate.
+SELECT create_graph('cypher_match_bool');
+SELECT * FROM cypher('cypher_match_bool', $$
+  CREATE (:B {name: 'a', flag: true}),
+         (:B {name: 'b', flag: false}),
+         (:B {name: 'c', flag: true})
+$$) AS (r agtype);
+
+-- typed bool projection: a native boolean column via agtype_object_field_bool.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN n.flag::pg_bool$$) AS (flag boolean);
+
+SELECT * FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN n.name, n.flag::pg_bool$$)
+     AS (name agtype, flag boolean)
+ORDER BY name;
+
+-- typed bool collect: rewritten to age_collect_bool, returns an agtype array.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN collect(n.flag::pg_bool)$$) AS (flags agtype);
+
+SELECT * FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN collect(n.flag::pg_bool)$$) AS (flags agtype);
+
+-- typed DISTINCT and GROUP BY on the bool scalar key.
+SELECT * FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN DISTINCT n.flag::pg_bool$$) AS (flag boolean)
+ORDER BY flag;
+
+SELECT * FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN n.flag::pg_bool AS flag, count(*) AS c
+              ORDER BY n.flag::pg_bool$$) AS (flag boolean, c agtype);
+
+-- Equivalence: the typed bool grouping must produce the same (flag, count) set
+-- as the untyped agtype-keyed grouping, so the EXCEPT is empty.
+SELECT count(*) AS typed_vs_agtype_bool_divergences FROM (
+  (SELECT flag::text, c::text FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN n.flag::pg_bool AS flag, count(*) AS c$$)
+       AS (flag boolean, c agtype))
+  EXCEPT
+  (SELECT (k::text)::boolean::text, c::text FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN n.flag AS k, count(*) AS c$$)
+       AS (k agtype, c agtype))
+) d;
+
+SELECT drop_graph('cypher_match_bool', true);
+
 SELECT * FROM cypher('cypher_match_numeric_path', $$
     MATCH (n:NumericPath)
     RETURN collect(n.payload.a::numeric)

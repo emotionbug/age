@@ -137,6 +137,7 @@ static Datum property_projection_value_to_int8(agtype_value *value);
 static Datum property_projection_value_to_float8(agtype_value *value);
 static Datum property_projection_value_to_numeric(agtype_value *value);
 static Datum property_projection_value_to_text(agtype_value *value);
+static Datum property_projection_value_to_bool(agtype_value *value);
 static agtype *prepare_property_projection_buffer(
     AgePropertyProjectionScanState *state, int slot_index, Size required_size);
 static agtype *property_projection_integer_to_agtype(
@@ -955,6 +956,8 @@ static Datum property_projection_typed_value_to_datum(
         if (is_pointer != NULL)
             *is_pointer = true;
         return property_projection_value_to_text(value);
+    case BOOLOID:
+        return property_projection_value_to_bool(value);
     default:
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -1003,6 +1006,17 @@ static Datum property_projection_value_to_int8(agtype_value *value)
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("typecast expression must be an integer-compatible value")));
     }
+}
+
+static Datum property_projection_value_to_bool(agtype_value *value)
+{
+    /* Mirror the agtype->boolean cast: only an actual boolean matches. */
+    if (value->type != AGTV_BOOL)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("typecast expression must be a boolean value")));
+
+    return BoolGetDatum(value->val.boolean);
 }
 
 static Datum property_projection_value_to_float8(agtype_value *value)

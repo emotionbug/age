@@ -218,6 +218,14 @@ RETURNS NULL ON NULL INPUT
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
 
+CREATE FUNCTION ag_catalog.agtype_object_field_bool(agtype, agtype)
+    RETURNS boolean
+    LANGUAGE c
+    IMMUTABLE
+RETURNS NULL ON NULL INPUT
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
 CREATE FUNCTION ag_catalog.agtype_object_field_numeric_agtype(agtype, agtype)
     RETURNS agtype
     LANGUAGE c

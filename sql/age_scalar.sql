@@ -203,3 +203,29 @@ CREATE FUNCTION ag_catalog.age_label(agtype)
 RETURNS NULL ON NULL INPUT
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
+
+--
+-- WCOJ-style multiway intersection: given a set of source vertex ids, return
+-- every destination vertex that is an edge_label out-neighbour of EVERY source
+-- (the intersection of their adjacency lists), computed in a single leapfrog
+-- pass over the adjacency-AM sorted endpoint run scan -- no pairwise binary
+-- join intermediate.  This is the kernel a worst-case-optimal join uses to
+-- close a star/fork/cycle pattern.  source_ids is an agtype array whose
+-- elements are either a bare vertex id (e.g. collect(id(v))) using the scalar
+-- direction argument, or an object {"id": <int>, "dir": "out"|"in"} giving
+-- that source its own direction.  direction is the default for bare ids: 'out'
+-- intersects out-neighbour sets via (start_id, id, end_id); 'in' intersects
+-- in-neighbour sets via (end_id, id, start_id) for reverse/fan-in.  Mixing
+-- per-source directions expresses triangle closure: c in out(b) and in(a).
+-- Declared here, after the agtype type exists; the C implementation lives in
+-- age_global_graph.c beside the graph-statistics SRFs.
+--
+CREATE FUNCTION ag_catalog.age_adjacency_multiway_intersect(graph_name name,
+                                                            edge_label name,
+                                                            source_ids agtype,
+                                                            direction text
+                                                                DEFAULT 'out')
+    RETURNS TABLE(dst graphid)
+    LANGUAGE c
+    STABLE
+AS 'MODULE_PATHNAME';

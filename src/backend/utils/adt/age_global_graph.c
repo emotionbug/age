@@ -49,7 +49,12 @@
 #include "utils/age_global_graph.h"
 #include "catalog/ag_graph.h"
 #include "catalog/ag_label.h"
+#include "catalog/pg_am.h"
 #include "utils/ag_cache.h"
+#include "utils/agtype.h"
+#include "utils/rel.h"
+#include "utils/syscache.h"
+#include "access/age_adjacency.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 
@@ -5175,6 +5180,493 @@ Datum age_graph_edge_in_degree_stats(PG_FUNCTION_ARGS)
 {
     return age_edge_degree_stats_worker(fcinfo,
                                         Anum_ag_label_edge_table_end_id);
+}
+
+/*
+ * age_adjacency_multiway_intersect(graph_name, edge_label, source_ids,
+ *                                  direction)
+ *
+ * WCOJ-style multiway-intersection primitive (item 6 foundation).  Given a set
+ * of source vertices, returns every destination vertex reached from EVERY
+ * source -- i.e. the intersection of the sources' adjacency lists.  This is the
+ * kernel a worst-case-optimal join uses to close a star/fork/cycle in one pass
+ * instead of materializing pairwise binary-join intermediates.
+ *
+ * Each source carries a direction.  source_ids elements are either a bare
+ * integer id (using the scalar `direction` argument, default 'out') or an
+ * object {"id": <int>, "dir": "out"|"in"}.  'out' sources contribute their
+ * out-neighbours (start_id index); 'in' sources contribute their in-neighbours
+ * (end_id index).  Mixing directions in one call expresses triangle closure:
+ * c in out(b) intersect in(a) for a driving edge (a)->(b).
+ *
+ * Both the out- and in-direction run scans yield destinations globally ordered
+ * by next_vertex_id, so a two-way merge of their heads produces the combined
+ * stream in sorted order.  For each contiguous destination group we record
+ * which distinct sources reached it (one bit per source, deduped against
+ * multigraph edges and repeated keys) and emit the destination once all
+ * sources cover it.  No pairwise intermediate is built.
+ *
+ * The result must match the binary-join plan for the same pattern; that
+ * correctness contract is pinned in regress/sql/cypher_wcoj_semantics.sql and
+ * regress/sql/age_adjacency.sql.
+ */
+PG_FUNCTION_INFO_V1(age_adjacency_multiway_intersect);
+
+/*
+ * Resolve the age_adjacency index on an edge label whose key column order
+ * traverses in the requested direction: outgoing scans (start_id, id, end_id)
+ * so each posting's "next vertex" is the edge's end (an out-neighbour);
+ * incoming scans (end_id, id, start_id) so the next vertex is the edge's start
+ * (an in-neighbour).
+ */
+static Oid age_adjacency_resolve_index(Oid edge_relation_oid, bool outgoing)
+{
+    static Oid age_adjacency_am_oid = InvalidOid;
+    Relation edge_rel;
+    List *index_list;
+    ListCell *lc;
+    Oid result = InvalidOid;
+    AttrNumber first_attno = outgoing ? Anum_ag_label_edge_table_start_id :
+        Anum_ag_label_edge_table_end_id;
+    AttrNumber last_attno = outgoing ? Anum_ag_label_edge_table_end_id :
+        Anum_ag_label_edge_table_start_id;
+
+    if (!OidIsValid(age_adjacency_am_oid))
+        age_adjacency_am_oid = GetSysCacheOid1(AMNAME, Anum_pg_am_oid,
+                                               CStringGetDatum("age_adjacency"));
+    if (!OidIsValid(age_adjacency_am_oid))
+        return InvalidOid;
+
+    edge_rel = relation_open(edge_relation_oid, AccessShareLock);
+    index_list = RelationGetIndexList(edge_rel);
+    foreach(lc, index_list)
+    {
+        Oid index_oid = lfirst_oid(lc);
+        Relation index_rel = index_open(index_oid, AccessShareLock);
+        int2vector *indkey;
+
+        indkey = &index_rel->rd_index->indkey;
+        if (index_rel->rd_rel->relam == age_adjacency_am_oid &&
+            index_rel->rd_index->indisvalid &&
+            index_rel->rd_index->indisready &&
+            index_rel->rd_index->indnkeyatts == 3 &&
+            index_rel->rd_index->indnatts == 3 &&
+            indkey->values[0] == first_attno &&
+            indkey->values[1] == Anum_ag_label_edge_table_id &&
+            indkey->values[2] == last_attno)
+            result = index_oid;
+        index_close(index_rel, AccessShareLock);
+        if (OidIsValid(result))
+            break;
+    }
+    list_free(index_list);
+    relation_close(edge_rel, AccessShareLock);
+    return result;
+}
+
+/*
+ * A parsed source vertex plus the direction it expands in.  Triangle closure
+ * intersects out-neighbours of some sources with in-neighbours of others
+ * (c in out(b) and c in in(a)), so each source carries its own direction.
+ */
+typedef struct WcojSource
+{
+    graphid id;
+    bool outgoing;
+    int64 global_index;
+} WcojSource;
+
+static int age_wcoj_source_cmp(const void *a, const void *b)
+{
+    const WcojSource *l = (const WcojSource *) a;
+    const WcojSource *r = (const WcojSource *) b;
+
+    if (l->outgoing != r->outgoing)
+        return l->outgoing ? 1 : -1;
+    if (l->id < r->id)
+        return -1;
+    if (l->id > r->id)
+        return 1;
+    return 0;
+}
+
+/*
+ * A run scan plus a one-item lookahead head.  Both the out- and in-direction
+ * run scans emit destinations globally ordered by next_vertex_id, so a simple
+ * two-way merge of their heads yields the combined stream in sorted order --
+ * the leapfrog substrate for intersecting across both directions at once.
+ */
+typedef struct WcojMergeCursor
+{
+    AgeAdjacencyVisiblePayloadRunScan *scan;
+    AgeAdjacencyPayload head;
+    void *head_tag;
+    bool head_valid;
+} WcojMergeCursor;
+
+static void age_wcoj_merge_cursor_refill(WcojMergeCursor *c)
+{
+    if (c->scan == NULL)
+    {
+        c->head_valid = false;
+        return;
+    }
+    c->head_valid = age_adjacency_visible_payload_run_scan_next_tag(
+        c->scan, &c->head, &c->head_tag);
+}
+
+/* Index of the cursor whose head has the smallest next_vertex_id, or -1. */
+static int age_wcoj_merge_pick(WcojMergeCursor *cursors, int n)
+{
+    int best = -1;
+    int i;
+
+    for (i = 0; i < n; i++)
+    {
+        if (!cursors[i].head_valid)
+            continue;
+        if (best < 0 ||
+            cursors[i].head.next_vertex_id < cursors[best].head.next_vertex_id)
+            best = i;
+    }
+    return best;
+}
+
+Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
+{
+    char *graph_name;
+    char *edge_label_name;
+    agtype *source_arg;
+    bool default_outgoing = true;
+    Oid graph_oid;
+    Oid edge_relation_oid;
+    ReturnSetInfo *rsi;
+    TupleDesc ret_tdesc;
+    Tuplestorestate *tuple_store;
+    WcojSource *sources;
+    int64 source_count = 0;
+    int64 source_capacity = 0;
+    int64 out_count = 0;
+    int64 in_count = 0;
+    int64 i;
+    AgeAdjacencyVisiblePayloadRunKey *out_keys = NULL;
+    AgeAdjacencyVisiblePayloadRunKey *in_keys = NULL;
+    WcojMergeCursor cursors[2];
+    int sel;
+    graphid current_vertex = 0;
+    bool have_current = false;
+    uint64 *seen_words;
+    int64 word_count;
+    int64 distinct_seen = 0;
+    agtype_iterator *it;
+    agtype_value av;
+    agtype_iterator_token tok;
+    bool in_object = false;
+    bool obj_have_id = false;
+    bool obj_outgoing = true;
+    graphid obj_id = 0;
+    char *obj_pending_key = NULL;
+
+    if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("graph_name, edge_label, and source_ids must not be "
+                        "null")));
+
+    graph_name = NameStr(*PG_GETARG_NAME(0));
+    edge_label_name = NameStr(*PG_GETARG_NAME(1));
+    source_arg = AG_GET_ARG_AGTYPE_P(2);
+
+    if (!PG_ARGISNULL(3))
+    {
+        char *dir = text_to_cstring(PG_GETARG_TEXT_PP(3));
+
+        if (strcmp(dir, "out") == 0 || strcmp(dir, "outgoing") == 0)
+            default_outgoing = true;
+        else if (strcmp(dir, "in") == 0 || strcmp(dir, "incoming") == 0)
+            default_outgoing = false;
+        else
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("direction must be 'out' or 'in', got \"%s\"",
+                            dir)));
+    }
+
+    graph_oid = get_graph_oid(graph_name);
+    if (!OidIsValid(graph_oid))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("graph \"%s\" does not exist", graph_name)));
+
+    edge_relation_oid = get_label_relation(edge_label_name, graph_oid);
+    if (!OidIsValid(edge_relation_oid))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("edge label \"%s\" does not exist in graph \"%s\"",
+                        edge_label_name, graph_name)));
+
+    rsi = (ReturnSetInfo *) fcinfo->resultinfo;
+    if (rsi == NULL || !IsA(rsi, ReturnSetInfo) ||
+        (rsi->allowedModes & SFRM_Materialize) == 0)
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("set-valued function called in context that cannot "
+                        "accept a set")));
+
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+    tuple_store = rsi->setResult;
+    ret_tdesc = rsi->setDesc;
+
+    /*
+     * Collect the source vertices.  Each array element is either a bare integer
+     * vertex id (using the default direction) or an object {"id": <int>, "dir":
+     * "out"|"in"} giving that source its own direction -- which lets a single
+     * call intersect out-neighbours of some sources with in-neighbours of
+     * others, the shape triangle closure needs.
+     */
+    if (!AGT_ROOT_IS_ARRAY(source_arg) || AGT_ROOT_IS_SCALAR(source_arg))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("source_ids must be an agtype array of vertex ids")));
+
+    sources = NULL;
+    it = agtype_iterator_init(&source_arg->root);
+    while ((tok = agtype_iterator_next(&it, &av, false)) != WAGT_DONE)
+    {
+        graphid add_id;
+        bool add_outgoing;
+        bool emit_source = false;
+
+        switch (tok)
+        {
+        case WAGT_BEGIN_ARRAY:
+            break;
+        case WAGT_END_ARRAY:
+            break;
+        case WAGT_BEGIN_OBJECT:
+            in_object = true;
+            obj_have_id = false;
+            obj_outgoing = default_outgoing;
+            obj_pending_key = NULL;
+            break;
+        case WAGT_END_OBJECT:
+            if (!obj_have_id)
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("source_ids object element requires an \"id\"")));
+            in_object = false;
+            add_id = obj_id;
+            add_outgoing = obj_outgoing;
+            emit_source = true;
+            break;
+        case WAGT_KEY:
+            if (av.type != AGTV_STRING)
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("source_ids object keys must be strings")));
+            obj_pending_key = pnstrdup(av.val.string.val, av.val.string.len);
+            break;
+        case WAGT_VALUE:
+            /* object field value, paired with obj_pending_key */
+            if (obj_pending_key != NULL &&
+                strcmp(obj_pending_key, "id") == 0)
+            {
+                if (av.type != AGTV_INTEGER)
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                             errmsg("source_ids \"id\" must be an integer")));
+                obj_id = (graphid) av.val.int_value;
+                obj_have_id = true;
+            }
+            else if (obj_pending_key != NULL &&
+                     strcmp(obj_pending_key, "dir") == 0)
+            {
+                if (av.type != AGTV_STRING)
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                             errmsg("source_ids \"dir\" must be a string")));
+                if (av.val.string.len == 3 &&
+                    strncmp(av.val.string.val, "out", 3) == 0)
+                    obj_outgoing = true;
+                else if (av.val.string.len == 2 &&
+                         strncmp(av.val.string.val, "in", 2) == 0)
+                    obj_outgoing = false;
+                else
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                             errmsg("source_ids \"dir\" must be 'out' or "
+                                    "'in'")));
+            }
+            obj_pending_key = NULL;
+            break;
+        case WAGT_ELEM:
+            if (in_object)
+                break;
+            if (av.type != AGTV_INTEGER)
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("source_ids elements must be integer vertex "
+                                "ids or {\"id\":..,\"dir\":..} objects")));
+            add_id = (graphid) av.val.int_value;
+            add_outgoing = default_outgoing;
+            emit_source = true;
+            break;
+        default:
+            break;
+        }
+
+        if (!emit_source)
+            continue;
+
+        if (source_count == source_capacity)
+        {
+            source_capacity = source_capacity == 0 ? 16 : source_capacity * 2;
+            sources = (WcojSource *) (sources == NULL ?
+                palloc(sizeof(WcojSource) * source_capacity) :
+                repalloc(sources, sizeof(WcojSource) * source_capacity));
+        }
+        sources[source_count].id = add_id;
+        sources[source_count].outgoing = add_outgoing;
+        sources[source_count].global_index = 0;
+        source_count++;
+    }
+
+    if (source_count == 0)
+        PG_RETURN_NULL();
+
+    /*
+     * The intersection is over a set of distinct (vertex, direction) sources.
+     * Dedup so repeated entries collapse to one cursor and source_count is the
+     * number of distinct sources a destination must be reached from.  A vertex
+     * used both out- and in-direction stays two distinct sources.
+     */
+    qsort(sources, source_count, sizeof(WcojSource), age_wcoj_source_cmp);
+    {
+        int64 unique = 0;
+
+        for (i = 0; i < source_count; i++)
+        {
+            if (unique == 0 ||
+                sources[i].id != sources[unique - 1].id ||
+                sources[i].outgoing != sources[unique - 1].outgoing)
+                sources[unique++] = sources[i];
+        }
+        source_count = unique;
+    }
+
+    /* Assign a global bitmap index and split by direction. */
+    out_keys = (AgeAdjacencyVisiblePayloadRunKey *)
+        palloc(sizeof(AgeAdjacencyVisiblePayloadRunKey) * source_count);
+    in_keys = (AgeAdjacencyVisiblePayloadRunKey *)
+        palloc(sizeof(AgeAdjacencyVisiblePayloadRunKey) * source_count);
+    for (i = 0; i < source_count; i++)
+    {
+        sources[i].global_index = i;
+        if (sources[i].outgoing)
+        {
+            out_keys[out_count].key = sources[i].id;
+            out_keys[out_count].tag = (void *) (intptr_t) i;
+            out_count++;
+        }
+        else
+        {
+            in_keys[in_count].key = sources[i].id;
+            in_keys[in_count].tag = (void *) (intptr_t) i;
+            in_count++;
+        }
+    }
+
+    memset(cursors, 0, sizeof(cursors));
+    if (out_count > 0)
+    {
+        Oid out_index = age_adjacency_resolve_index(edge_relation_oid, true);
+
+        if (!OidIsValid(out_index))
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("edge label \"%s\" has no age_adjacency out-index",
+                            edge_label_name),
+                     errhint("Create an age_adjacency index on "
+                             "(start_id, id, end_id).")));
+        cursors[0].scan = age_adjacency_begin_visible_payload_run_scan_with_tags(
+            out_index, GetActiveSnapshot(), false, 0, out_keys, out_count);
+    }
+    if (in_count > 0)
+    {
+        Oid in_index = age_adjacency_resolve_index(edge_relation_oid, false);
+
+        if (!OidIsValid(in_index))
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("edge label \"%s\" has no age_adjacency in-index",
+                            edge_label_name),
+                     errhint("Create an age_adjacency index on "
+                             "(end_id, id, start_id).")));
+        cursors[1].scan = age_adjacency_begin_visible_payload_run_scan_with_tags(
+            in_index, GetActiveSnapshot(), false, 0, in_keys, in_count);
+    }
+
+    word_count = (source_count + 63) / 64;
+    seen_words = (uint64 *) palloc0(sizeof(uint64) * word_count);
+
+    age_wcoj_merge_cursor_refill(&cursors[0]);
+    age_wcoj_merge_cursor_refill(&cursors[1]);
+
+    while ((sel = age_wcoj_merge_pick(cursors, 2)) >= 0)
+    {
+        int64 kidx = (int64) (intptr_t) cursors[sel].head_tag;
+        graphid v = cursors[sel].head.next_vertex_id;
+
+        if (!have_current || v != current_vertex)
+        {
+            if (have_current && distinct_seen == source_count)
+            {
+                Datum values[1];
+                bool nulls[1] = {false};
+
+                values[0] = GRAPHID_GET_DATUM(current_vertex);
+                tuplestore_putvalues(tuple_store, ret_tdesc, values, nulls);
+            }
+            MemSet(seen_words, 0, sizeof(uint64) * word_count);
+            distinct_seen = 0;
+            current_vertex = v;
+            have_current = true;
+        }
+
+        if (kidx >= 0 && kidx < source_count)
+        {
+            uint64 bit = UINT64CONST(1) << (kidx & 63);
+
+            if (!(seen_words[kidx >> 6] & bit))
+            {
+                seen_words[kidx >> 6] |= bit;
+                distinct_seen++;
+            }
+        }
+
+        age_wcoj_merge_cursor_refill(&cursors[sel]);
+    }
+
+    if (have_current && distinct_seen == source_count)
+    {
+        Datum values[1];
+        bool nulls[1] = {false};
+
+        values[0] = GRAPHID_GET_DATUM(current_vertex);
+        tuplestore_putvalues(tuple_store, ret_tdesc, values, nulls);
+    }
+
+    if (cursors[0].scan != NULL)
+        age_adjacency_end_visible_payload_run_scan(cursors[0].scan);
+    if (cursors[1].scan != NULL)
+        age_adjacency_end_visible_payload_run_scan(cursors[1].scan);
+
+    pfree(seen_words);
+    pfree(out_keys);
+    pfree(in_keys);
+    pfree(sources);
+
+    PG_RETURN_NULL();
 }
 
 /*

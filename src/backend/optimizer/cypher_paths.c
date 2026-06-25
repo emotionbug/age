@@ -9820,6 +9820,43 @@ static List *make_adjacency_match_descriptor(
     return descriptor;
 }
 
+/*
+ * Collect the edge-only restriction clauses for the adjacency scan -- those that
+ * reference no relation other than the scanned edge rel (e.g. an edge property
+ * predicate r.weight > 4).  These can be evaluated against the produced edge
+ * tuple inside the cursor to skip non-matching edges early, before they reach
+ * the surrounding ExecScan qual/projection (item 9: reduce the payload-filtered
+ * count).  Join clauses (which reference an outer rel) are excluded -- their
+ * outer Vars are not available during cursor iteration.  The clauses remain in
+ * scan.plan.qual as well, so correctness never depends on the early skip.
+ */
+static List *collect_adjacency_match_edge_only_quals(Index scanrelid,
+                                                     List *clauses)
+{
+    List *edge_quals = NIL;
+    Relids self = bms_make_singleton(scanrelid);
+    ListCell *lc;
+
+    foreach(lc, clauses)
+    {
+        RestrictInfo *rinfo;
+        Node *clause = lfirst(lc);
+
+        if (!IsA(clause, RestrictInfo))
+            continue;
+        rinfo = (RestrictInfo *) clause;
+        if (rinfo->pseudoconstant)
+            continue;
+        if (rinfo->clause == NULL)
+            continue;
+        if (bms_is_subset(rinfo->clause_relids, self))
+            edge_quals = lappend(edge_quals, rinfo->clause);
+    }
+
+    bms_free(self);
+    return edge_quals;
+}
+
 static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
                                            RelOptInfo *rel,
                                            CustomPath *best_path,
@@ -9829,6 +9866,7 @@ static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
     CustomScan *cs;
     List *custom_scan_tlist;
     AdjacencyMatchPayloadRequest payload_request;
+    List *edge_only_quals;
 
     (void) root;
     (void) custom_plans;
@@ -9857,6 +9895,15 @@ static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
     cs->custom_plans = NIL;
     cs->custom_exprs = list_make2(linitial(best_path->custom_private),
                                   lsecond(best_path->custom_private));
+    /*
+     * Edge-only restriction clauses are appended as a third custom_exprs entry
+     * (a List, recursed by setrefs so its Vars are fixed) so the executor can
+     * skip non-matching edges in the cursor.  They also stay in scan.plan.qual,
+     * so the early skip is a pure optimization and never affects correctness.
+     */
+    edge_only_quals = collect_adjacency_match_edge_only_quals(rel->relid,
+                                                              clauses);
+    cs->custom_exprs = lappend(cs->custom_exprs, edge_only_quals);
     cs->custom_private = list_copy_tail(best_path->custom_private, 2);
     cs->custom_scan_tlist = custom_scan_tlist;
     cs->custom_relids = bms_make_singleton(rel->relid);

@@ -240,6 +240,22 @@ CREATE FUNCTION ag_catalog.age_collect_int8_finalfn(internal)
 PARALLEL SAFE
 AS 'MODULE_PATHNAME';
 
+-- collect transfer function for typed bool values
+CREATE FUNCTION ag_catalog.age_collect_bool_transfn(internal, boolean)
+    RETURNS internal
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
+-- collect final function for typed bool values
+CREATE FUNCTION ag_catalog.age_collect_bool_finalfn(internal)
+    RETURNS agtype
+    LANGUAGE c
+    IMMUTABLE
+PARALLEL SAFE
+AS 'MODULE_PATHNAME';
+
 -- collect transfer function for typed text values
 CREATE FUNCTION ag_catalog.age_collect_text_transfn(internal, text)
     RETURNS internal
@@ -433,6 +449,15 @@ CREATE AGGREGATE ag_catalog.age_collect_int8(int8)
     stype = internal,
     sfunc = ag_catalog.age_collect_int8_transfn,
     finalfunc = ag_catalog.age_collect_int8_finalfn,
+    parallel = safe
+);
+
+-- aggregate definition for age_collect_bool(boolean)
+CREATE AGGREGATE ag_catalog.age_collect_bool(boolean)
+(
+    stype = internal,
+    sfunc = ag_catalog.age_collect_bool_transfn,
+    finalfunc = ag_catalog.age_collect_bool_finalfn,
     parallel = safe
 );
 

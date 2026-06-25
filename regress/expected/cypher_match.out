@@ -911,6 +911,111 @@ NOTICE:  graph "cypher_match_typed_key" has been dropped
  
 (1 row)
 
+-- bool as a typed physical type (item 22): n.flag::pg_bool projects a native
+-- boolean through the agtype_object_field_bool accessor, and collect() of a
+-- typed bool routes to the age_collect_bool aggregate.
+SELECT create_graph('cypher_match_bool');
+NOTICE:  graph "cypher_match_bool" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT * FROM cypher('cypher_match_bool', $$
+  CREATE (:B {name: 'a', flag: true}),
+         (:B {name: 'b', flag: false}),
+         (:B {name: 'c', flag: true})
+$$) AS (r agtype);
+ r 
+---
+(0 rows)
+
+-- typed bool projection: a native boolean column via agtype_object_field_bool.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN n.flag::pg_bool$$) AS (flag boolean);
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Seq Scan on cypher_match_bool."B" n
+   Output: agtype_object_field_bool(n.properties, '"flag"'::agtype)
+(2 rows)
+
+SELECT * FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN n.name, n.flag::pg_bool$$)
+     AS (name agtype, flag boolean)
+ORDER BY name;
+ name | flag 
+------+------
+ "a"  | t
+ "b"  | f
+ "c"  | t
+(3 rows)
+
+-- typed bool collect: rewritten to age_collect_bool, returns an agtype array.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN collect(n.flag::pg_bool)$$) AS (flags agtype);
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Aggregate
+   Output: age_collect_bool((agtype_object_field_bool(n.properties, '"flag"'::agtype)))
+   ->  Seq Scan on cypher_match_bool."B" n
+         Output: agtype_object_field_bool(n.properties, '"flag"'::agtype)
+(4 rows)
+
+SELECT * FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN collect(n.flag::pg_bool)$$) AS (flags agtype);
+        flags        
+---------------------
+ [true, false, true]
+(1 row)
+
+-- typed DISTINCT and GROUP BY on the bool scalar key.
+SELECT * FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN DISTINCT n.flag::pg_bool$$) AS (flag boolean)
+ORDER BY flag;
+ flag 
+------
+ f
+ t
+(2 rows)
+
+SELECT * FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN n.flag::pg_bool AS flag, count(*) AS c
+              ORDER BY n.flag::pg_bool$$) AS (flag boolean, c agtype);
+ flag | c 
+------+---
+ f    | 1
+ t    | 2
+(2 rows)
+
+-- Equivalence: the typed bool grouping must produce the same (flag, count) set
+-- as the untyped agtype-keyed grouping, so the EXCEPT is empty.
+SELECT count(*) AS typed_vs_agtype_bool_divergences FROM (
+  (SELECT flag::text, c::text FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN n.flag::pg_bool AS flag, count(*) AS c$$)
+       AS (flag boolean, c agtype))
+  EXCEPT
+  (SELECT (k::text)::boolean::text, c::text FROM cypher('cypher_match_bool',
+            $$MATCH (n:B) RETURN n.flag AS k, count(*) AS c$$)
+       AS (k agtype, c agtype))
+) d;
+ typed_vs_agtype_bool_divergences 
+----------------------------------
+                                0
+(1 row)
+
+SELECT drop_graph('cypher_match_bool', true);
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to table cypher_match_bool._ag_label_vertex
+drop cascades to table cypher_match_bool._ag_label_edge
+drop cascades to table cypher_match_bool."B"
+NOTICE:  graph "cypher_match_bool" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
 SELECT * FROM cypher('cypher_match_numeric_path', $$
     MATCH (n:NumericPath)
     RETURN collect(n.payload.a::numeric)
