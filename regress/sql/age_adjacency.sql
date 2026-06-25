@@ -812,9 +812,6 @@ DECLARE
     n_label_id int;
     r_label_id int;
     endpoint_id graphid;
-    plan_text text;
-    has_parallel_adjacency boolean := false;
-    has_gather_adjacency boolean := false;
 BEGIN
     PERFORM create_graph(graph_name);
     EXECUTE format('SELECT create_vlabel(%L, %L)', graph_name, 'N');
@@ -843,46 +840,28 @@ BEGIN
     EXECUTE format('ANALYZE %I."N"', graph_name);
     EXECUTE format('ANALYZE %I."R"', graph_name);
 
-    PERFORM set_config('max_parallel_workers_per_gather', '2', true);
-    PERFORM set_config('min_parallel_index_scan_size', '0', true);
-    PERFORM set_config('parallel_setup_cost', '0', true);
-    PERFORM set_config('parallel_tuple_cost', '0', true);
-    PERFORM set_config('random_page_cost', '0', true);
-    PERFORM set_config('cpu_tuple_cost', '1', true);
-
-    FOR plan_text IN EXECUTE format(
-        'SELECT plan::text
-         FROM cypher(%L,
-                     $cypher$EXPLAIN (VERBOSE, COSTS OFF)
-                     MATCH (s:N)
-                     WHERE id(s) = %s
-                     MATCH (s)-[:R]->()
-                     RETURN count(*)$cypher$)
-         AS (plan agtype)',
-        graph_name, endpoint_id::text)
-    LOOP
-        IF plan_text LIKE '%Adjacency Index:%fanout=1024%' OR
-           plan_text LIKE '%Adjacency Parallel:%slice=worker-local-ready%' THEN
-            has_parallel_adjacency := true;
-        END IF;
-        IF plan_text LIKE '%Gather%' OR
-           plan_text LIKE '%Adjacency Parallel:%aware=true%' THEN
-            has_gather_adjacency := true;
-        END IF;
-    END LOOP;
-
-    IF NOT has_parallel_adjacency THEN
-        RAISE EXCEPTION
-            'expected 1024-fanout AGE Adjacency Match parallel-ready plan';
-    END IF;
-    IF NOT has_gather_adjacency THEN
-        RAISE EXCEPTION
-            'expected 1024-fanout AGE Adjacency Match Gather plan';
-    END IF;
-
-    PERFORM drop_graph(graph_name, true);
+    PERFORM set_config('max_parallel_workers_per_gather', '2', false);
+    PERFORM set_config('min_parallel_index_scan_size', '0', false);
+    PERFORM set_config('parallel_setup_cost', '0', false);
+    PERFORM set_config('parallel_tuple_cost', '0', false);
+    PERFORM set_config('random_page_cost', '0', false);
+    PERFORM set_config('cpu_tuple_cost', '1', false);
 END
 $age_adj_parallel_match$;
+SELECT * FROM cypher('age_adj_parallel_match', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (s:N)
+    WHERE id(s) = 844424930131968
+    MATCH (s)-[:R]->()
+    RETURN count(*)
+$$) AS (plan agtype);
+SELECT drop_graph('age_adj_parallel_match', true);
+RESET max_parallel_workers_per_gather;
+RESET min_parallel_index_scan_size;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET random_page_cost;
+RESET cpu_tuple_cost;
 RESET client_min_messages;
 SELECT * FROM cypher('age_adj_match_descriptor', $$
     EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)

@@ -26,12 +26,15 @@
 #include "nodes/pg_list.h"
 #include "utils/relcache.h"
 
+typedef struct AgeGraphJoinLoweringArtifact AgeGraphJoinLoweringArtifact;
+
 typedef struct CypherAdjacencyMatchCandidate
 {
     Oid graph_oid;
     Oid edge_label_oid;
     Oid index_oid;
     char *edge_alias;
+    char *graph_pattern_kind;
     char *bound_endpoint_alias;
     Node *bound_endpoint_expr;
     char *candidate_reason;
@@ -71,16 +74,24 @@ typedef struct CypherAdjacencyMatchCandidate
     double estimated_terminal_label_groups;
     double estimated_main_blocks;
     bool estimated_fanout_from_directory;
+    AgeGraphJoinLoweringArtifact *graph_join_artifact;
+    Relids graph_join_lowering_required_outer;
 } CypherAdjacencyMatchCandidate;
 
 void set_rel_pathlist_init(void);
 void set_rel_pathlist_fini(void);
 void cypher_rewrite_property_index_surfaces(Query *parse);
 void cypher_clear_adjacency_match_candidates(void);
+void cypher_register_graph_pattern_handoff(const char *graph_pattern_kind);
+void cypher_register_vle_pattern_handoff(const char *marker_alias,
+                                         const char *graph_pattern_kind);
+void cypher_register_node_pattern_handoff(const char *node_alias,
+                                          const char *graph_pattern_kind);
 void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
                                                Oid index_oid,
                                                Oid graph_oid,
                                                const char *edge_alias,
+                                               const char *graph_pattern_kind,
                                                const char *bound_endpoint_alias,
                                                Node *bound_endpoint_expr,
                                                const char *candidate_reason,

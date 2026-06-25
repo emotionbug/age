@@ -182,6 +182,11 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     cypher_parsestate *cpstate, cypher_relationship *rel,
     transform_entity *prev_entity, cypher_node *next_node,
     List **target_list, bool valid_label, bool outgoing);
+static char *make_match_graph_pattern_kind(
+    cypher_parsestate *cpstate, transform_entity *prev_entity,
+    cypher_relationship *rel, cypher_node *next_node, bool outgoing);
+static char *make_node_property_graph_pattern_kind(
+    cypher_parsestate *cpstate, cypher_node *node);
 static bool age_adjacency_match_endpoint_is_bound(transform_entity *entity);
 static Expr *transform_cypher_node(cypher_parsestate *cpstate,
                                    cypher_node *node, List **target_list,
@@ -270,7 +275,8 @@ static Node *create_property_constraints(cypher_parsestate *cpstate,
 static TargetEntry *findTarget(List *targetList, char *resname);
 static transform_entity *transform_VLE_edge_entity(cypher_parsestate *cpstate,
                                                    cypher_relationship *rel,
-                                                   Query *query);
+                                                   Query *query,
+                                                   const char *graph_pattern_kind);
 /* create clause */
 static Query *transform_cypher_create(cypher_parsestate *cpstate,
                                       cypher_clause *clause);
@@ -5489,7 +5495,8 @@ static List *transform_match_path(cypher_parsestate *cpstate, Query *query,
 
 static transform_entity *transform_VLE_edge_entity(cypher_parsestate *cpstate,
                                                    cypher_relationship *rel,
-                                                   Query *query)
+                                                   Query *query,
+                                                   const char *graph_pattern_kind)
 {
     ParseState *pstate = NULL;
     TargetEntry *te = NULL;
@@ -5546,6 +5553,9 @@ static transform_entity *transform_VLE_edge_entity(cypher_parsestate *cpstate,
         alias->colnames = lappend(alias->colnames, makeString("__age_vle_terminal_property"));
     if (vle_nargs > AGE_VLE_STREAM_ARG_TERMINAL_LABEL)
         alias->colnames = lappend(alias->colnames, makeString("__age_vle_terminal_label"));
+    cypher_register_graph_pattern_handoff(graph_pattern_kind);
+    cypher_register_vle_pattern_handoff(alias->aliasname,
+                                        graph_pattern_kind);
 
     /*
      * Add the VLE descriptor row to the FROM clause. The planner replaces this
@@ -5798,6 +5808,7 @@ static transform_entity *transform_match_node_entity(
         Node *n = NULL;
         Node *prop_var = NULL;
         Node *prop_expr = NULL;
+        char *graph_pattern_kind;
 
         if (node->name != NULL)
         {
@@ -5820,6 +5831,11 @@ static transform_entity *transform_match_node_entity(
         {
             ((cypher_map*)node->props)->keep_null = true;
         }
+        graph_pattern_kind = make_node_property_graph_pattern_kind(
+            cpstate, node);
+        cypher_register_graph_pattern_handoff(graph_pattern_kind);
+        cypher_register_node_pattern_handoff(node->name,
+                                             graph_pattern_kind);
         n = create_property_constraints(cpstate, entity, node->props,
                                         prop_expr);
 
@@ -6196,6 +6212,7 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
             {
                 transform_entity *vle_entity = NULL;
                 ListCell *next_lc = lnext(path->path, lc);
+                char *graph_pattern_kind = NULL;
 
                 /*
                  * Check to see if the previous node was originally created
@@ -6287,6 +6304,9 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                 {
                     cypher_node *next_node = lfirst(next_lc);
 
+                    graph_pattern_kind = make_match_graph_pattern_kind(
+                        cpstate, prev_entity, rel, next_node,
+                        rel->dir != CYPHER_REL_DIR_LEFT);
                     (void)mark_vle_terminal_label_result(cpstate, rel,
                                                          next_node);
                     if (next_node->name == NULL &&
@@ -6299,7 +6319,8 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                 }
 
                 /* make a transform entity for the vle */
-                vle_entity = transform_VLE_edge_entity(cpstate, rel, query);
+                vle_entity = transform_VLE_edge_entity(cpstate, rel, query,
+                                                       graph_pattern_kind);
 
                 if (pretransformed_node == NULL &&
                     list_length(path->path) == 3 &&
@@ -7662,6 +7683,7 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     Expr *key_expr;
     bool has_edge_variable_projection;
     int32 right_label_id = INVALID_LABEL_ID;
+    char *graph_pattern_kind;
 
     if (!valid_label ||
         rel->label == NULL ||
@@ -7732,10 +7754,13 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     key_arg = make_qual(cpstate, prev_entity, AG_VERTEX_COLNAME_ID);
     key_expr = (Expr *)transformExpr(pstate, copyObject(key_arg),
                                      EXPR_KIND_WHERE);
+    graph_pattern_kind = make_match_graph_pattern_kind(
+        cpstate, prev_entity, rel, next_node, outgoing);
+    cypher_register_graph_pattern_handoff(graph_pattern_kind);
 
     cypher_register_adjacency_match_candidate(
         edge_label_oid, index_oid, cpstate->graph_oid, rel->name,
-        get_entity_name(prev_entity),
+        graph_pattern_kind, get_entity_name(prev_entity),
         (Node *)key_expr, "default_custom_path",
         index_source != NULL ? index_source : "unknown",
         index_kind != NULL ? index_kind : "ADJACENCY",
@@ -7760,6 +7785,52 @@ static Expr *transform_cypher_adjacency_candidate_edge(
         outgoing ? Anum_ag_label_edge_table_start_id :
                    Anum_ag_label_edge_table_end_id);
     return NULL;
+}
+
+static char *make_match_graph_pattern_kind(
+    cypher_parsestate *cpstate, transform_entity *prev_entity,
+    cypher_relationship *rel, cypher_node *next_node, bool outgoing)
+{
+    const char *start_name;
+    const char *edge_name;
+    const char *edge_label;
+    const char *end_name;
+    const char *end_label;
+
+    start_name = get_entity_name(prev_entity);
+    edge_name = rel != NULL && rel->name != NULL ? rel->name : "_edge";
+    edge_label = rel != NULL && rel->label != NULL ? rel->label : "_";
+    end_label = next_node != NULL && next_node->label != NULL ?
+        next_node->label : "_";
+    end_name = next_node != NULL && next_node->name != NULL ?
+        next_node->name : end_label;
+
+    return psprintf("graph-pattern:%u:%s:%s:%s:%s:%s",
+                    cpstate != NULL ? cpstate->graph_oid : InvalidOid,
+                    start_name != NULL ? start_name : "_",
+                    outgoing ? "out" : "in",
+                    edge_name,
+                    edge_label,
+                    end_name != NULL && end_name[0] != '\0' ?
+                    end_name : "_");
+}
+
+static char *make_node_property_graph_pattern_kind(
+    cypher_parsestate *cpstate, cypher_node *node)
+{
+    const char *node_name;
+    const char *node_label;
+
+    if (node == NULL)
+        return NULL;
+
+    node_name = node->name != NULL ? node->name : "_node";
+    node_label = node->label != NULL ? node->label : "_";
+
+    return psprintf("graph-pattern:%u:node:%s:%s",
+                    cpstate != NULL ? cpstate->graph_oid : InvalidOid,
+                    node_name,
+                    node_label);
 }
 
 static Expr *transform_cypher_node(cypher_parsestate *cpstate,

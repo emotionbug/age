@@ -69,6 +69,7 @@ typedef struct AgeAdjacencyMatchScanState
     int64 estimated_composite_fanout;
     int64 composite_selectivity_ppm;
     int64 estimated_terminal_label_groups;
+    int64 estimated_main_blocks;
     char *fanout_source;
     char *composite_selectivity_source;
     char *value_posting_source;
@@ -743,6 +744,9 @@ static void load_age_adjacency_match_descriptor(
     state->estimated_terminal_label_groups =
         adjacency_match_descriptor_int64(
             descriptor, AGE_ADJACENCY_MATCH_DESC_ESTIMATED_LABEL_GROUPS);
+    state->estimated_main_blocks =
+        adjacency_match_descriptor_int64(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_ESTIMATED_MAIN_BLOCKS);
     state->fanout_source = adjacency_match_descriptor_text(
         descriptor, AGE_ADJACENCY_MATCH_DESC_FANOUT_SOURCE);
     state->index_source = adjacency_match_descriptor_text(
@@ -1014,9 +1018,10 @@ static char *format_age_adjacency_match_index_descriptor(
                          state->composite_selectivity_source != NULL ?
                          state->composite_selectivity_source : "none");
     appendStringInfo(&buf,
-                     " label-groups=%ld fanout-source=%s source=%s "
-                     "payload=%s",
+                     " label-groups=%ld main-blocks=%ld "
+                     "fanout-source=%s source=%s payload=%s",
                      (long)state->estimated_terminal_label_groups,
+                     (long)state->estimated_main_blocks,
                      state->fanout_source != NULL ?
                      state->fanout_source : "unknown",
                      state->index_source != NULL ?
@@ -1092,7 +1097,7 @@ static char *format_age_adjacency_match_cost_input(
 
     return psprintf("fanout=%ld terminal-fanout=%ld composite-fanout=%ld "
                     "residual=%d "
-                    "label-groups=%ld fanout-source=%s "
+                    "label-groups=%ld main-blocks=%ld fanout-source=%s "
                     "value-posting=%s "
                     "index-solved=%d residual-weight=%d%% "
                     "index-credit=%d%% prefetch-threshold=%ld "
@@ -1102,6 +1107,7 @@ static char *format_age_adjacency_match_cost_input(
                     (long)state->estimated_composite_fanout,
                     residual_count,
                     (long)state->estimated_terminal_label_groups,
+                    (long)state->estimated_main_blocks,
                     state->fanout_source != NULL ?
                     state->fanout_source : "unknown",
                     state->value_posting_source != NULL ?

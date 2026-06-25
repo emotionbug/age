@@ -27,6 +27,7 @@
 typedef enum AgeGraphJoinDescriptorField
 {
     AGE_GRAPH_JOIN_DESC_COMPONENT = 0,
+    AGE_GRAPH_JOIN_DESC_COMPONENT_FAMILY,
     AGE_GRAPH_JOIN_DESC_CONNECTOR,
     AGE_GRAPH_JOIN_DESC_BOUND,
     AGE_GRAPH_JOIN_DESC_ORDER_PROPERTY,
@@ -56,6 +57,7 @@ typedef enum AgeGraphJoinDescriptorField
 typedef struct AgeGraphJoinCandidateRequest
 {
     const char *component;
+    const char *component_family;
     const char *connector;
     const char *bound;
     const char *order_property;
@@ -75,9 +77,18 @@ typedef struct AgeGraphJoinCandidateRequest
     bool shared_state_required;
 } AgeGraphJoinCandidateRequest;
 
+typedef struct AgeGraphJoinLoweringInput
+{
+    Relids solved_relids;
+    Relids required_outer;
+    Relids provided_relids;
+    int output_width;
+} AgeGraphJoinLoweringInput;
+
 typedef struct AgeGraphJoinComponent
 {
     char *name;
+    char *family;
     Relids solved_relids;
     Relids required_outer;
     Relids provided_relids;
@@ -116,8 +127,21 @@ typedef struct AgeGraphJoinCandidateTable
     List *candidates;
 } AgeGraphJoinCandidateTable;
 
+typedef struct AgeGraphJoinLoweringArtifactEntry
+{
+    char *source_kind;
+    AgeGraphJoinCandidateTable *table;
+} AgeGraphJoinLoweringArtifactEntry;
+
+typedef struct AgeGraphJoinLoweringArtifact
+{
+    char *pattern_kind;
+    List *entries;
+} AgeGraphJoinLoweringArtifact;
+
 typedef struct AgeGraphJoinPathEvidence
 {
+    const char *component_family;
     const char *connector;
     const char *order_property;
     const char *source_evidence;
@@ -128,6 +152,7 @@ typedef struct AgeGraphJoinPathEvidence
     double selected_total_cost;
     double next_total_cost;
     int output_width;
+    bool physical_properties_known;
     bool parallel_safe;
     bool parallel_aware;
     int parallel_workers;
@@ -141,6 +166,7 @@ typedef struct AgeGraphJoinRelCandidate
 {
     Path *path;
     AgeGraphJoinPathEvidence evidence;
+    bool lowering_input;
 } AgeGraphJoinRelCandidate;
 
 typedef struct AgeGraphJoinRelPathEvidence
@@ -155,13 +181,16 @@ typedef struct AgeGraphJoinRelComponentCandidate
     AgeGraphJoinPathEvidence evidence;
     char *component;
     Cost total_cost;
+    bool lowering_input;
 } AgeGraphJoinRelComponentCandidate;
 
 typedef struct AgeGraphJoinRelMetadata
 {
     RelOptInfo *rel;
     List *candidates;
-    List *planner_candidates;
+    List *lowering_artifacts;
+    List *lowering_pool;
+    List *lowering_candidates;
     List *path_evidence;
     List *component_candidates;
 } AgeGraphJoinRelMetadata;
@@ -172,22 +201,53 @@ typedef bool (*AgeGraphJoinPathEvidenceCallback)(
 AgeGraphJoinCandidate *age_graph_join_make_candidate(
     const AgeGraphJoinCandidateRequest *request);
 AgeGraphJoinCandidateTable *age_graph_join_make_candidate_table(void);
+AgeGraphJoinLoweringArtifact *age_graph_join_make_pattern_lowering_artifact(
+    const char *pattern_kind, const char *source_kind,
+    AgeGraphJoinCandidateTable *table);
+AgeGraphJoinLoweringArtifact *age_graph_join_make_lowering_artifact(
+    const char *source_kind, AgeGraphJoinCandidateTable *table);
+void age_graph_join_lowering_artifact_add_table(
+    AgeGraphJoinLoweringArtifact *artifact, const char *source_kind,
+    AgeGraphJoinCandidateTable *table);
 AgeGraphJoinCandidate *age_graph_join_table_add_candidate(
     AgeGraphJoinCandidateTable *table,
     const AgeGraphJoinCandidateRequest *request);
 AgeGraphJoinCandidate *age_graph_join_table_add_path_candidate(
     AgeGraphJoinCandidateTable *table, Path *path, const char *component,
-    const char *connector, const char *bound, const char *order_property,
-    const char *source_evidence, bool shared_state_required);
+    const char *component_family, const char *connector, const char *bound,
+    const char *order_property, const char *source_evidence,
+    bool shared_state_required);
 void age_graph_join_init_path_request(
     AgeGraphJoinCandidateRequest *request, Path *path, const char *component,
-    const char *connector, const char *bound, const char *order_property,
-    const char *source_evidence, bool shared_state_required);
+    const char *component_family, const char *connector, const char *bound,
+    const char *order_property, const char *source_evidence,
+    bool shared_state_required);
+void age_graph_join_init_lowered_path_request(
+    AgeGraphJoinCandidateRequest *request, Path *path,
+    const AgeGraphJoinLoweringInput *lowering_input,
+    const char *component, const char *component_family,
+    const char *connector, const char *bound,
+    const char *order_property, const char *source_evidence,
+    bool shared_state_required);
 AgeGraphJoinCandidate *age_graph_join_table_add_scheduled_candidate(
     AgeGraphJoinCandidateTable *table, Path *path, const char *component,
-    const char *connector, const char *bound, const char *order_property,
-    const char *source_evidence, double rows, Cost startup_cost,
-    Cost total_cost, bool shared_state_required);
+    const char *component_family, const char *connector, const char *bound,
+    const char *order_property, const char *source_evidence, double rows,
+    Cost startup_cost, Cost total_cost, bool shared_state_required);
+AgeGraphJoinCandidate *age_graph_join_table_add_lowered_path_candidate(
+    AgeGraphJoinCandidateTable *table, Path *path,
+    const AgeGraphJoinLoweringInput *lowering_input,
+    const char *component, const char *component_family,
+    const char *connector, const char *bound,
+    const char *order_property, const char *source_evidence,
+    bool shared_state_required);
+AgeGraphJoinCandidate *age_graph_join_table_add_lowered_scheduled_candidate(
+    AgeGraphJoinCandidateTable *table, Path *path,
+    const AgeGraphJoinLoweringInput *lowering_input,
+    const char *component, const char *component_family,
+    const char *connector, const char *bound,
+    const char *order_property, const char *source_evidence, double rows,
+    Cost startup_cost, Cost total_cost, bool shared_state_required);
 AgeGraphJoinCandidate *age_graph_join_table_add_path_evidence_candidate(
     AgeGraphJoinCandidateTable *table, Path *path, const char *component,
     const AgeGraphJoinPathEvidence *evidence);
@@ -215,6 +275,22 @@ void age_graph_join_register_rel_path_evidence(
 void age_graph_join_register_rel_candidate_table(
     PlannerInfo *root, RelOptInfo *rel, Path *path,
     const AgeGraphJoinCandidateTable *table);
+void age_graph_join_register_rel_lowering_pool(
+    PlannerInfo *root, RelOptInfo *rel,
+    const AgeGraphJoinCandidateTable *table);
+AgeGraphJoinLoweringArtifact *age_graph_join_register_rel_lowering_artifact_pool(
+    PlannerInfo *root, RelOptInfo *rel,
+    const AgeGraphJoinLoweringArtifact *artifact);
+AgeGraphJoinCandidateTable *age_graph_join_bind_lowering_pool_to_path(
+    Path *path, const AgeGraphJoinCandidateTable *table);
+AgeGraphJoinCandidateTable *age_graph_join_bind_lowering_artifact_to_path(
+    Path *path, const AgeGraphJoinLoweringArtifact *artifact);
+void age_graph_join_register_rel_lowering_table(
+    PlannerInfo *root, RelOptInfo *rel, Path *path,
+    const AgeGraphJoinCandidateTable *table);
+void age_graph_join_register_rel_lowering_artifact_path(
+    PlannerInfo *root, RelOptInfo *rel, Path *path,
+    const AgeGraphJoinLoweringArtifact *artifact);
 double age_graph_join_path_evidence_credit(
     const AgeGraphJoinPathEvidence *outer_evidence,
     const AgeGraphJoinPathEvidence *inner_evidence);
