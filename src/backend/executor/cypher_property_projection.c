@@ -131,6 +131,8 @@ static agtype *property_projection_value_to_agtype(
 static bool property_projection_value_to_datum(
     AgePropertyProjectionScanState *state, AgePropertyProjectionSlot *slot,
     agtype_value *value, Datum *result);
+static Datum property_projection_typed_value_to_datum(
+    Oid field_result_type, agtype_value *value, bool *is_pointer);
 static Datum property_projection_value_to_int8(agtype_value *value);
 static Datum property_projection_value_to_float8(agtype_value *value);
 static Datum property_projection_value_to_numeric(agtype_value *value);
@@ -862,31 +864,9 @@ static bool build_property_projection_list_datum(
         }
         else
         {
-            Datum element_datum = (Datum) 0;
             bool is_pointer = false;
-
-            switch (element->field_result_type)
-            {
-            case INT8OID:
-                element_datum = property_projection_value_to_int8(&value);
-                break;
-            case FLOAT8OID:
-                element_datum = property_projection_value_to_float8(&value);
-                break;
-            case NUMERICOID:
-                element_datum = property_projection_value_to_numeric(&value);
-                is_pointer = true;
-                break;
-            case TEXTOID:
-                element_datum = property_projection_value_to_text(&value);
-                is_pointer = true;
-                break;
-            default:
-                ereport(ERROR,
-                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                         errmsg("unsupported cached property list field result "
-                                "type %u", element->field_result_type)));
-            }
+            Datum element_datum = property_projection_typed_value_to_datum(
+                element->field_result_type, &value, &is_pointer);
 
             add_agtype(element_datum, false, &list_state,
                        element->field_result_type, false);
@@ -945,6 +925,46 @@ static agtype *property_projection_value_to_agtype(
     return agtype_value_to_agtype(value);
 }
 
+/*
+ * Single typed-conversion dispatch for the scalar physical field result types.
+ * Both the scalar projection (property_projection_value_to_datum) and the list
+ * builder (build_property_projection_list_datum) route their non-agtype results
+ * through here, so the int8/float8/numeric/text cast vocabulary lives in exactly
+ * one switch instead of a duplicated chain at each call site.  *is_pointer (when
+ * non-NULL) reports whether the returned Datum is a freshly palloc'd pointer the
+ * caller may free after consuming it.  Adding a new scalar physical type means
+ * extending this one switch plus its property_projection_value_to_* helper.
+ */
+static Datum property_projection_typed_value_to_datum(
+    Oid field_result_type, agtype_value *value, bool *is_pointer)
+{
+    if (is_pointer != NULL)
+        *is_pointer = false;
+
+    switch (field_result_type)
+    {
+    case INT8OID:
+        return property_projection_value_to_int8(value);
+    case FLOAT8OID:
+        return property_projection_value_to_float8(value);
+    case NUMERICOID:
+        if (is_pointer != NULL)
+            *is_pointer = true;
+        return property_projection_value_to_numeric(value);
+    case TEXTOID:
+        if (is_pointer != NULL)
+            *is_pointer = true;
+        return property_projection_value_to_text(value);
+    default:
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("unsupported cached property field result type %u",
+                        field_result_type)));
+    }
+
+    return (Datum) 0; /* unreachable */
+}
+
 static bool property_projection_value_to_datum(
     AgePropertyProjectionScanState *state, AgePropertyProjectionSlot *slot,
     agtype_value *value, Datum *result)
@@ -958,32 +978,10 @@ static bool property_projection_value_to_datum(
             property_projection_value_to_agtype(state, slot_index, value));
         return true;
     }
-    if (slot->field_result_type == INT8OID)
-    {
-        *result = property_projection_value_to_int8(value);
-        return true;
-    }
-    if (slot->field_result_type == FLOAT8OID)
-    {
-        *result = property_projection_value_to_float8(value);
-        return true;
-    }
-    if (slot->field_result_type == NUMERICOID)
-    {
-        *result = property_projection_value_to_numeric(value);
-        return true;
-    }
-    if (slot->field_result_type == TEXTOID)
-    {
-        *result = property_projection_value_to_text(value);
-        return true;
-    }
 
-    ereport(ERROR,
-            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-             errmsg("unsupported cached property field result type %u",
-                    slot->field_result_type)));
-    return false;
+    *result = property_projection_typed_value_to_datum(slot->field_result_type,
+                                                       value, NULL);
+    return true;
 }
 
 static Datum property_projection_value_to_int8(agtype_value *value)

@@ -393,6 +393,61 @@ SELECT count(*) AS list_projection_divergences FROM (
 
 DROP FUNCTION cypher_match_normalized_explain(text, text);
 
+-- Typed GROUP BY/DISTINCT keys must hash/sort on the scalar physical value
+-- (agtype_object_field_int8/numeric/text result) rather than wrapping the key
+-- back into agtype and paying generic agtype hash/equality.  Lock in the scalar
+-- key plan shape (HashAggregate/GroupAggregate Group Key + Sort Key) and prove
+-- the grouping/ordering/count semantics match the untyped agtype key.
+SELECT create_graph('cypher_match_typed_key');
+SELECT * FROM cypher('cypher_match_typed_key', $$
+  CREATE (:K {payload: {n: 1, t: 'a'}}), (:K {payload: {n: 1, t: 'a'}}),
+         (:K {payload: {n: 2, t: 'b'}}), (:K {payload: {n: 2, t: 'b'}}),
+         (:K {payload: {n: 3, t: 'a'}})
+$$) AS (r agtype);
+
+-- typed GROUP BY: HashAggregate Group Key is the scalar int8 field accessor.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN n.payload.n::pg_bigint, count(*)$$)
+     AS (k agtype, c agtype);
+
+-- typed GROUP BY + ORDER BY: GroupAggregate Sort Key and Group Key both scalar.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN n.payload.n::pg_bigint, count(*)
+              ORDER BY n.payload.n::pg_bigint$$)
+     AS (k agtype, c agtype);
+
+-- typed DISTINCT (int8 and text): HashAggregate Group Key is the scalar key.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN DISTINCT n.payload.n::pg_bigint$$)
+     AS (k agtype);
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN DISTINCT n.payload.t::pg_text$$)
+     AS (k agtype);
+
+-- Result semantics: typed GROUP BY counts match, ordered by the scalar key.
+SELECT * FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN n.payload.n::pg_bigint AS k, count(*) AS c
+              ORDER BY n.payload.n::pg_bigint$$) AS (k bigint, c agtype);
+
+-- Equivalence vs the untyped agtype key: the typed int8 grouping must produce
+-- the same (key, count) set as the agtype-keyed grouping, so the EXCEPT is empty.
+SELECT count(*) AS typed_vs_agtype_group_divergences FROM (
+  (SELECT k::text, c::text FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN n.payload.n::pg_bigint AS k, count(*) AS c$$)
+       AS (k bigint, c agtype))
+  EXCEPT
+  (SELECT (k::text)::numeric::text, c::text FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN n.payload.n AS k, count(*) AS c$$)
+       AS (k agtype, c agtype))
+) d;
+
+SELECT drop_graph('cypher_match_typed_key', true);
+
 SELECT * FROM cypher('cypher_match_numeric_path', $$
     MATCH (n:NumericPath)
     RETURN collect(n.payload.a::numeric)

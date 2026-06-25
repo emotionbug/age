@@ -783,6 +783,134 @@ SELECT count(*) AS list_projection_divergences FROM (
 (1 row)
 
 DROP FUNCTION cypher_match_normalized_explain(text, text);
+-- Typed GROUP BY/DISTINCT keys must hash/sort on the scalar physical value
+-- (agtype_object_field_int8/numeric/text result) rather than wrapping the key
+-- back into agtype and paying generic agtype hash/equality.  Lock in the scalar
+-- key plan shape (HashAggregate/GroupAggregate Group Key + Sort Key) and prove
+-- the grouping/ordering/count semantics match the untyped agtype key.
+SELECT create_graph('cypher_match_typed_key');
+NOTICE:  graph "cypher_match_typed_key" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT * FROM cypher('cypher_match_typed_key', $$
+  CREATE (:K {payload: {n: 1, t: 'a'}}), (:K {payload: {n: 1, t: 'a'}}),
+         (:K {payload: {n: 2, t: 'b'}}), (:K {payload: {n: 2, t: 'b'}}),
+         (:K {payload: {n: 3, t: 'a'}})
+$$) AS (r agtype);
+ r 
+---
+(0 rows)
+
+-- typed GROUP BY: HashAggregate Group Key is the scalar int8 field accessor.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN n.payload.n::pg_bigint, count(*)$$)
+     AS (k agtype, c agtype);
+                                                                  QUERY PLAN                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------
+ Subquery Scan on _
+   Output: (_."?column?")::agtype, _.int8_to_agtype
+   ->  HashAggregate
+         Output: (agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"n"'::agtype)), (count(*))::agtype
+         Group Key: agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"n"'::agtype)
+         ->  Seq Scan on cypher_match_typed_key."K" n
+               Output: agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"n"'::agtype)
+(7 rows)
+
+-- typed GROUP BY + ORDER BY: GroupAggregate Sort Key and Group Key both scalar.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN n.payload.n::pg_bigint, count(*)
+              ORDER BY n.payload.n::pg_bigint$$)
+     AS (k agtype, c agtype);
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
+ Subquery Scan on _
+   Output: (_."?column?")::agtype, _.int8_to_agtype
+   ->  Result
+         Output: (agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"n"'::agtype)), ((count(*)))::agtype
+         ->  Sort
+               Output: (agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"n"'::agtype)), (count(*))
+               Sort Key: (agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"n"'::agtype))
+               ->  HashAggregate
+                     Output: (agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"n"'::agtype)), count(*)
+                     Group Key: agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"n"'::agtype)
+                     ->  Seq Scan on cypher_match_typed_key."K" n
+                           Output: agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"n"'::agtype)
+(12 rows)
+
+-- typed DISTINCT (int8 and text): HashAggregate Group Key is the scalar key.
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN DISTINCT n.payload.n::pg_bigint$$)
+     AS (k agtype);
+                                                          QUERY PLAN                                                          
+------------------------------------------------------------------------------------------------------------------------------
+ Subquery Scan on _
+   Output: (_."?column?")::agtype
+   ->  HashAggregate
+         Output: (agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"n"'::agtype))
+         Group Key: agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"n"'::agtype)
+         ->  Seq Scan on cypher_match_typed_key."K" n
+               Output: agtype_object_field_int8(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"n"'::agtype)
+(7 rows)
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN DISTINCT n.payload.t::pg_text$$)
+     AS (k agtype);
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
+ Subquery Scan on _
+   Output: (_."?column?")::agtype
+   ->  HashAggregate
+         Output: (agtype_object_field_text_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"t"'::agtype))
+         Group Key: agtype_object_field_text_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"t"'::agtype)
+         ->  Seq Scan on cypher_match_typed_key."K" n
+               Output: agtype_object_field_text_agtype(agtype_object_field_agtype(n.properties, '"payload"'::agtype), '"t"'::agtype)
+(7 rows)
+
+-- Result semantics: typed GROUP BY counts match, ordered by the scalar key.
+SELECT * FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN n.payload.n::pg_bigint AS k, count(*) AS c
+              ORDER BY n.payload.n::pg_bigint$$) AS (k bigint, c agtype);
+ k | c 
+---+---
+ 1 | 2
+ 2 | 2
+ 3 | 1
+(3 rows)
+
+-- Equivalence vs the untyped agtype key: the typed int8 grouping must produce
+-- the same (key, count) set as the agtype-keyed grouping, so the EXCEPT is empty.
+SELECT count(*) AS typed_vs_agtype_group_divergences FROM (
+  (SELECT k::text, c::text FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN n.payload.n::pg_bigint AS k, count(*) AS c$$)
+       AS (k bigint, c agtype))
+  EXCEPT
+  (SELECT (k::text)::numeric::text, c::text FROM cypher('cypher_match_typed_key',
+            $$MATCH (n:K) RETURN n.payload.n AS k, count(*) AS c$$)
+       AS (k agtype, c agtype))
+) d;
+ typed_vs_agtype_group_divergences 
+-----------------------------------
+                                 0
+(1 row)
+
+SELECT drop_graph('cypher_match_typed_key', true);
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to table cypher_match_typed_key._ag_label_vertex
+drop cascades to table cypher_match_typed_key._ag_label_edge
+drop cascades to table cypher_match_typed_key."K"
+NOTICE:  graph "cypher_match_typed_key" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
 SELECT * FROM cypher('cypher_match_numeric_path', $$
     MATCH (n:NumericPath)
     RETURN collect(n.payload.a::numeric)
