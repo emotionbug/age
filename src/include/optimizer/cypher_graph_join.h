@@ -119,6 +119,37 @@ typedef struct AgeGraphJoinPathEvidence
     bool bound;
 } AgeGraphJoinPathEvidence;
 
+typedef struct AgeGraphJoinRelCandidate
+{
+    Path *path;
+    AgeGraphJoinPathEvidence evidence;
+} AgeGraphJoinRelCandidate;
+
+typedef struct AgeGraphJoinRelPathEvidence
+{
+    Path *path;
+    AgeGraphJoinPathEvidence evidence;
+} AgeGraphJoinRelPathEvidence;
+
+typedef struct AgeGraphJoinRelComponentCandidate
+{
+    Path *path;
+    AgeGraphJoinPathEvidence evidence;
+    char *component;
+    Cost total_cost;
+} AgeGraphJoinRelComponentCandidate;
+
+typedef struct AgeGraphJoinRelMetadata
+{
+    RelOptInfo *rel;
+    List *candidates;
+    List *path_evidence;
+    List *component_candidates;
+} AgeGraphJoinRelMetadata;
+
+typedef bool (*AgeGraphJoinPathEvidenceCallback)(
+    Path *path, AgeGraphJoinPathEvidence *evidence);
+
 AgeGraphJoinCandidate *age_graph_join_make_candidate(
     const AgeGraphJoinCandidateRequest *request);
 AgeGraphJoinCandidateTable *age_graph_join_make_candidate_table(void);
@@ -148,6 +179,16 @@ bool age_graph_join_apply_selected_path_cost(
 bool age_graph_join_order_property_is_bound(const char *order_property);
 void age_graph_join_init_path_evidence(
     AgeGraphJoinPathEvidence *evidence);
+void age_graph_join_metadata_begin(PlannerInfo *root);
+bool age_graph_join_metadata_matches_root(PlannerInfo *root);
+AgeGraphJoinRelMetadata *age_graph_join_get_rel_metadata(RelOptInfo *rel,
+                                                         bool create);
+void age_graph_join_refresh_rel_metadata(
+    PlannerInfo *root, RelOptInfo *rel,
+    AgeGraphJoinPathEvidenceCallback evidence_callback);
+void age_graph_join_register_rel_path_evidence(
+    PlannerInfo *root, RelOptInfo *rel, Path *path,
+    const AgeGraphJoinPathEvidence *evidence);
 double age_graph_join_path_evidence_credit(
     const AgeGraphJoinPathEvidence *outer_evidence,
     const AgeGraphJoinPathEvidence *inner_evidence);

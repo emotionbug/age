@@ -27,11 +27,28 @@
 
 static char *copy_graph_join_text(const char *value,
                                   const char *fallback);
+static void graph_join_metadata_context_reset(void *arg);
+static bool graph_join_metadata_identity_matches(PlannerInfo *root);
 static const char *graph_join_component_from_evidence(
     const AgeGraphJoinPathEvidence *evidence);
+static void graph_join_metadata_rebuild_component_candidates(
+    AgeGraphJoinRelMetadata *metadata);
+static void graph_join_metadata_update_component_candidate(
+    AgeGraphJoinRelMetadata *metadata,
+    const AgeGraphJoinRelCandidate *candidate);
+static bool graph_join_metadata_lookup_path_evidence(
+    const AgeGraphJoinRelMetadata *metadata, Path *path,
+    AgeGraphJoinPathEvidence *evidence);
 static Const *make_graph_join_text_const(const char *value);
 static void set_graph_join_descriptor_value(List *descriptor, int index,
                                             Node *value);
+
+static PlannerInfo *graph_join_metadata_root = NULL;
+static PlannerGlobal *graph_join_metadata_glob = NULL;
+static Query *graph_join_metadata_parse = NULL;
+static MemoryContext graph_join_metadata_context = NULL;
+static Index graph_join_metadata_query_level = 0;
+static List *graph_join_rel_metadata = NIL;
 
 AgeGraphJoinCandidate *age_graph_join_make_candidate(
     const AgeGraphJoinCandidateRequest *request)
@@ -314,6 +331,270 @@ void age_graph_join_init_path_evidence(
 
     memset(evidence, 0, sizeof(*evidence));
     evidence->candidate_count = 1;
+}
+
+void age_graph_join_metadata_begin(PlannerInfo *root)
+{
+    if (root == NULL)
+        return;
+
+    if (graph_join_metadata_identity_matches(root))
+        return;
+
+    graph_join_metadata_root = root;
+    graph_join_metadata_glob = root->glob;
+    graph_join_metadata_parse = root->parse;
+    graph_join_metadata_context = root->planner_cxt;
+    graph_join_metadata_query_level = root->query_level;
+    graph_join_rel_metadata = NIL;
+    if (graph_join_metadata_context != NULL)
+    {
+        MemoryContextCallback *context_callback;
+
+        context_callback = MemoryContextAlloc(graph_join_metadata_context,
+                                              sizeof(*context_callback));
+        context_callback->func = graph_join_metadata_context_reset;
+        context_callback->arg = graph_join_metadata_context;
+        MemoryContextRegisterResetCallback(
+            graph_join_metadata_context, context_callback);
+    }
+}
+
+bool age_graph_join_metadata_matches_root(PlannerInfo *root)
+{
+    return graph_join_metadata_identity_matches(root);
+}
+
+static void graph_join_metadata_context_reset(void *arg)
+{
+    if (arg != graph_join_metadata_context)
+        return;
+
+    graph_join_metadata_root = NULL;
+    graph_join_metadata_glob = NULL;
+    graph_join_metadata_parse = NULL;
+    graph_join_metadata_context = NULL;
+    graph_join_metadata_query_level = 0;
+    graph_join_rel_metadata = NIL;
+}
+
+static bool graph_join_metadata_identity_matches(PlannerInfo *root)
+{
+    return root != NULL &&
+           graph_join_metadata_root == root &&
+           graph_join_metadata_glob == root->glob &&
+           graph_join_metadata_parse == root->parse &&
+           graph_join_metadata_context == root->planner_cxt &&
+           graph_join_metadata_query_level == root->query_level;
+}
+
+AgeGraphJoinRelMetadata *age_graph_join_get_rel_metadata(RelOptInfo *rel,
+                                                         bool create)
+{
+    ListCell *lc;
+    AgeGraphJoinRelMetadata *metadata;
+
+    if (rel == NULL)
+        return NULL;
+
+    foreach(lc, graph_join_rel_metadata)
+    {
+        metadata = lfirst(lc);
+
+        if (metadata->rel == rel)
+            return metadata;
+    }
+
+    if (!create)
+        return NULL;
+
+    metadata = palloc0(sizeof(*metadata));
+    metadata->rel = rel;
+    graph_join_rel_metadata = lappend(graph_join_rel_metadata, metadata);
+
+    return metadata;
+}
+
+void age_graph_join_refresh_rel_metadata(
+    PlannerInfo *root, RelOptInfo *rel,
+    AgeGraphJoinPathEvidenceCallback evidence_callback)
+{
+    AgeGraphJoinRelMetadata *metadata;
+    ListCell *lc;
+
+    if (rel == NULL)
+        return;
+
+    if (!age_graph_join_metadata_matches_root(root))
+        age_graph_join_metadata_begin(root);
+    metadata = age_graph_join_get_rel_metadata(rel, true);
+    metadata->candidates = NIL;
+
+    foreach(lc, rel->pathlist)
+    {
+        Path *path = lfirst(lc);
+        AgeGraphJoinRelCandidate *candidate;
+        AgeGraphJoinPathEvidence evidence;
+        bool has_evidence = false;
+
+        age_graph_join_init_path_evidence(&evidence);
+        if (evidence_callback != NULL)
+            has_evidence = evidence_callback(path, &evidence);
+        if (!has_evidence)
+            has_evidence = graph_join_metadata_lookup_path_evidence(
+                metadata, path, &evidence);
+
+        candidate = palloc0(sizeof(*candidate));
+        candidate->path = path;
+        if (has_evidence)
+            candidate->evidence = evidence;
+        else
+            age_graph_join_init_path_evidence(&candidate->evidence);
+        metadata->candidates = lappend(metadata->candidates, candidate);
+    }
+
+    if (metadata->candidates != NIL)
+    {
+        graph_join_metadata_rebuild_component_candidates(metadata);
+        ereport(DEBUG2,
+                (errmsg_internal("AGE graph join rel metadata refreshed: "
+                                 "relids=%s candidates=%d components=%d "
+                                 "paths=%d",
+                                 bmsToString(rel->relids),
+                                 list_length(metadata->candidates),
+                                 list_length(metadata->component_candidates),
+                                 list_length(rel->pathlist))));
+    }
+}
+
+static void graph_join_metadata_rebuild_component_candidates(
+    AgeGraphJoinRelMetadata *metadata)
+{
+    ListCell *lc;
+
+    if (metadata == NULL)
+        return;
+
+    metadata->component_candidates = NIL;
+    foreach(lc, metadata->candidates)
+    {
+        AgeGraphJoinRelCandidate *candidate = lfirst(lc);
+
+        graph_join_metadata_update_component_candidate(metadata, candidate);
+    }
+}
+
+static void graph_join_metadata_update_component_candidate(
+    AgeGraphJoinRelMetadata *metadata,
+    const AgeGraphJoinRelCandidate *candidate)
+{
+    const char *component;
+    Cost total_cost;
+    ListCell *lc;
+    AgeGraphJoinRelComponentCandidate *component_candidate;
+
+    if (metadata == NULL ||
+        candidate == NULL ||
+        candidate->path == NULL ||
+        candidate->evidence.order_property == NULL)
+    {
+        return;
+    }
+
+    component = graph_join_component_from_evidence(&candidate->evidence);
+    total_cost = candidate->evidence.selected_total_cost > 0 ?
+        candidate->evidence.selected_total_cost : candidate->path->total_cost;
+
+    foreach(lc, metadata->component_candidates)
+    {
+        component_candidate = lfirst(lc);
+
+        if (strcmp(component_candidate->component, component) == 0)
+        {
+            if (component_candidate->total_cost <= total_cost)
+                return;
+
+            component_candidate->path = candidate->path;
+            component_candidate->evidence = candidate->evidence;
+            component_candidate->total_cost = total_cost;
+            return;
+        }
+    }
+
+    component_candidate = palloc0(sizeof(*component_candidate));
+    component_candidate->path = candidate->path;
+    component_candidate->evidence = candidate->evidence;
+    component_candidate->component = copy_graph_join_text(component,
+                                                          "graph-component");
+    component_candidate->total_cost = total_cost;
+    metadata->component_candidates = lappend(metadata->component_candidates,
+                                             component_candidate);
+}
+
+void age_graph_join_register_rel_path_evidence(
+    PlannerInfo *root, RelOptInfo *rel, Path *path,
+    const AgeGraphJoinPathEvidence *evidence)
+{
+    AgeGraphJoinRelMetadata *metadata;
+    AgeGraphJoinRelPathEvidence *path_evidence;
+    ListCell *lc;
+
+    if (root == NULL ||
+        rel == NULL ||
+        path == NULL ||
+        evidence == NULL ||
+        evidence->order_property == NULL)
+    {
+        return;
+    }
+
+    if (!age_graph_join_metadata_matches_root(root))
+        age_graph_join_metadata_begin(root);
+    metadata = age_graph_join_get_rel_metadata(rel, true);
+
+    foreach(lc, metadata->path_evidence)
+    {
+        path_evidence = lfirst(lc);
+
+        if (path_evidence->path == path)
+        {
+            path_evidence->evidence = *evidence;
+            return;
+        }
+    }
+
+    path_evidence = palloc0(sizeof(*path_evidence));
+    path_evidence->path = path;
+    path_evidence->evidence = *evidence;
+    metadata->path_evidence = lappend(metadata->path_evidence,
+                                      path_evidence);
+}
+
+static bool graph_join_metadata_lookup_path_evidence(
+    const AgeGraphJoinRelMetadata *metadata, Path *path,
+    AgeGraphJoinPathEvidence *evidence)
+{
+    ListCell *lc;
+
+    if (metadata == NULL ||
+        path == NULL ||
+        evidence == NULL)
+    {
+        return false;
+    }
+
+    foreach(lc, metadata->path_evidence)
+    {
+        AgeGraphJoinRelPathEvidence *path_evidence = lfirst(lc);
+
+        if (path_evidence->path == path)
+        {
+            *evidence = path_evidence->evidence;
+            return evidence->order_property != NULL;
+        }
+    }
+
+    return false;
 }
 
 double age_graph_join_path_evidence_credit(

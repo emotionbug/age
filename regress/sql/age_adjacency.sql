@@ -805,6 +805,79 @@ SELECT * FROM cypher('age_adj_match_descriptor', $$
     MATCH (:N {i: 0})-[:R]->(:Z)
     RETURN count(*)
 $$) AS (plan agtype);
+SET client_min_messages = warning;
+DO $age_adj_parallel_match$
+DECLARE
+    graph_name text := 'age_adj_parallel_match';
+    n_label_id int;
+    r_label_id int;
+    endpoint_id graphid;
+    plan_text text;
+    has_gather boolean := false;
+    has_parallel_adjacency boolean := false;
+BEGIN
+    PERFORM create_graph(graph_name);
+    EXECUTE format('SELECT create_vlabel(%L, %L)', graph_name, 'N');
+    EXECUTE format('SELECT create_elabel(%L, %L)', graph_name, 'R');
+
+    n_label_id := _label_id(graph_name, 'N');
+    r_label_id := _label_id(graph_name, 'R');
+    endpoint_id := _graphid(n_label_id, 0);
+
+    EXECUTE format(
+        'INSERT INTO %I."N"(id, properties)
+         SELECT ag_catalog._graphid(%s, i::bigint),
+                ''{}''::ag_catalog.agtype
+         FROM generate_series(0, 252) AS g(i)',
+        graph_name, n_label_id);
+    EXECUTE format(
+        'INSERT INTO %I."R"(id, start_id, end_id, properties)
+         SELECT ag_catalog._graphid(%s, i::bigint),
+                ag_catalog._graphid(%s, 0),
+                ag_catalog._graphid(%s, i::bigint),
+                ''{}''::ag_catalog.agtype
+         FROM generate_series(1, 252) AS g(i)',
+        graph_name, r_label_id, n_label_id, n_label_id);
+    EXECUTE format('CREATE INDEX ON %I."R" USING age_adjacency ' ||
+                   '(start_id, id, end_id)', graph_name);
+    EXECUTE format('ANALYZE %I."N"', graph_name);
+    EXECUTE format('ANALYZE %I."R"', graph_name);
+
+    PERFORM set_config('max_parallel_workers_per_gather', '2', true);
+    PERFORM set_config('min_parallel_index_scan_size', '0', true);
+    PERFORM set_config('parallel_setup_cost', '0', true);
+    PERFORM set_config('parallel_tuple_cost', '0', true);
+
+    FOR plan_text IN EXECUTE format(
+        'SELECT plan::text
+         FROM cypher(%L,
+                     $cypher$EXPLAIN (VERBOSE, COSTS OFF)
+                     MATCH (s:N)
+                     WHERE id(s) = %s
+                     MATCH (s)-[:R]->()
+                     RETURN count(*)$cypher$)
+         AS (plan agtype)',
+        graph_name, endpoint_id::text)
+    LOOP
+        IF plan_text LIKE '%Gather%' THEN
+            has_gather := true;
+        END IF;
+        IF plan_text LIKE '%Custom Scan (AGE Adjacency Match)%' OR
+           plan_text LIKE '%Adjacency Parallel:%aware=true%' THEN
+            has_parallel_adjacency := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_gather OR NOT has_parallel_adjacency THEN
+        RAISE EXCEPTION
+            'expected parallel AGE Adjacency Match plan, gather=%, adjacency=%',
+            has_gather, has_parallel_adjacency;
+    END IF;
+
+    PERFORM drop_graph(graph_name, true);
+END
+$age_adj_parallel_match$;
+RESET client_min_messages;
 SELECT * FROM cypher('age_adj_match_descriptor', $$
     EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
     MATCH (:N {i: 0})-[:R]->(n:N {i: 1 + 0})

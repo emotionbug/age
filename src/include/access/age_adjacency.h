@@ -132,6 +132,9 @@ extern void age_adjacency_visible_payload_scan_set_composite_terminal_filter(
     const AgeAdjacencyCompositeTerminalFilter *filter);
 extern bool age_adjacency_visible_payload_scan_begin_key(
     AgeAdjacencyVisiblePayloadScan *scan, graphid key);
+extern void age_adjacency_visible_payload_scan_set_parallel_slice(
+    AgeAdjacencyVisiblePayloadScan *scan, int32 slice_index,
+    int32 slice_count);
 extern int64 age_adjacency_visible_payload_scan_run_postings(
     AgeAdjacencyVisiblePayloadScan *scan);
 extern int64 age_adjacency_visible_payload_scan_active_postings(

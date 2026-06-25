@@ -1225,7 +1225,7 @@ ANALYZE vle_value_posting_feedback."N";
 ANALYZE vle_value_posting_feedback."R";
 
 SELECT * FROM cypher('vle_value_posting_feedback',
-                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..1]->(n:N) WHERE n.i = 59 RETURN n.i$$)
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..1]->(n:N) WHERE n.i = 59 RETURN n.i$$)
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_value_posting_feedback',
@@ -1237,7 +1237,7 @@ SELECT * FROM cypher('vle_value_posting_feedback',
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_value_posting_feedback',
-                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..3]->(n:N) WHERE n.i = 59 RETURN n.i$$)
+                    $$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) MATCH (s:N) WHERE id(s) = 844424930132167 MATCH (s)-[:R*1..3]->(n:N) WHERE n.i = 59 RETURN n.i$$)
 AS (plan agtype);
 
 SELECT * FROM cypher('vle_value_posting_feedback',

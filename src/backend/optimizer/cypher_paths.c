@@ -98,6 +98,25 @@ typedef struct GraphPropertySourceSelectivity
     char *source;
 } GraphPropertySourceSelectivity;
 
+typedef enum GraphJoinNestLoopComponentIndex
+{
+    GRAPH_JOIN_NEST_NODE_PROPERTY = 0,
+    GRAPH_JOIN_NEST_VLE,
+    GRAPH_JOIN_NEST_ADJACENCY,
+    GRAPH_JOIN_NEST_COMPONENT_COUNT
+} GraphJoinNestLoopComponentIndex;
+
+typedef struct GraphJoinNestLoopCandidate
+{
+    Path *outer_path;
+    Path *inner_path;
+    AgeGraphJoinPathEvidence outer_evidence;
+    AgeGraphJoinPathEvidence inner_evidence;
+    AgeGraphJoinCandidateTable *table;
+    AgeGraphJoinCandidate *candidate;
+    Cost total_cost;
+} GraphJoinNestLoopCandidate;
+
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook;
 static set_join_pathlist_hook_type prev_set_join_pathlist_hook;
 static create_upper_paths_hook_type prev_create_upper_paths_hook;
@@ -125,21 +144,30 @@ static void invalidate_cypher_clause_function_oids(Datum arg, int cache_id,
 static void replace_with_cypher_dml_path(PlannerInfo *root, RelOptInfo *rel,
                                          RangeTblEntry *rte,
                                          cypher_path_factory factory);
+typedef struct AdjacencyMatchPayloadRequest AdjacencyMatchPayloadRequest;
 static void add_adjacency_match_custom_path(
     PlannerInfo *root, RelOptInfo *rel,
     CypherAdjacencyMatchCandidate *candidate);
+static bool adjacency_match_can_add_partial_path(
+    RelOptInfo *rel, CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request,
+    Relids path_required_outer, int *parallel_workers);
+static void add_adjacency_match_partial_custom_path(
+    RelOptInfo *rel, CustomPath *serial_path, int parallel_workers);
+static void set_adjacency_match_descriptor_value(List *descriptor, int index,
+                                                 Node *value);
 static Const *find_endpoint_graphid_const(PlannerInfo *root,
                                           CypherAdjacencyMatchCandidate *candidate);
 static bool adjacency_match_bound_expr_uses_age_id(Node *node);
 static bool adjacency_match_bound_expr_uses_age_id_walker(Node *node,
                                                           void *context);
-typedef struct AdjacencyMatchPayloadRequest
+struct AdjacencyMatchPayloadRequest
 {
     Bitmapset *attrs;
     int attr_mask;
     bool unsupported;
     bool fetch_properties;
-} AdjacencyMatchPayloadRequest;
+};
 
 static void cost_adjacency_match_custom_path(PlannerInfo *root,
                                              RelOptInfo *rel,
@@ -189,8 +217,13 @@ static AgeGraphJoinCandidateTable *make_adjacency_match_graph_join_table(
     const AdjacencyMatchPayloadRequest *payload_request);
 static double adjacency_match_connector_scheduled_work(
     const CypherAdjacencyMatchCandidate *candidate);
+static Cost adjacency_match_connector_scheduled_cost(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request,
+    Cost startup_cost);
 static const char *adjacency_match_connector_source_evidence(
-    const CypherAdjacencyMatchCandidate *candidate);
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request);
 static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
                                            RelOptInfo *rel,
                                            CustomPath *best_path,
@@ -220,6 +253,24 @@ static void add_graph_join_candidate_nestloop_path(PlannerInfo *root,
                                                    RelOptInfo *innerrel,
                                                    JoinType jointype,
                                                    JoinPathExtraData *extra);
+static bool path_get_graph_join_rel_evidence(
+    Path *path, AgeGraphJoinPathEvidence *evidence);
+static int graph_join_nestloop_component_index(const char *component);
+static void graph_join_nestloop_candidate_update(
+    GraphJoinNestLoopCandidate *slot, Path *outer_path, Path *inner_path,
+    const AgeGraphJoinPathEvidence *outer_evidence,
+    const AgeGraphJoinPathEvidence *inner_evidence,
+    AgeGraphJoinCandidateTable *table, AgeGraphJoinCandidate *candidate);
+static void add_graph_join_candidate_nestloop_alternative(
+    PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
+    RelOptInfo *innerrel, JoinType jointype, JoinPathExtraData *extra,
+    GraphJoinNestLoopCandidate *candidate_slot);
+static void graph_join_consider_nestloop_candidate_pair(
+    RelOptInfo *outerrel, RelOptInfo *innerrel,
+    Path *outer_path, Path *inner_path,
+    const AgeGraphJoinPathEvidence *outer_evidence,
+    const AgeGraphJoinPathEvidence *inner_evidence,
+    GraphJoinNestLoopCandidate *component_candidates);
 static void adjust_graph_expansion_join_rows(RelOptInfo *joinrel,
                                              JoinType jointype);
 static AgeGraphJoinCandidateTable *make_graph_expansion_join_candidate_table(
@@ -686,6 +737,8 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
     if (prev_set_rel_pathlist_hook)
         prev_set_rel_pathlist_hook(root, rel, rti, rte);
 
+    age_graph_join_metadata_begin(root);
+
     if (cypher_rewrite_property_equals_restrictions(root, rel, rti))
     {
         cypher_canonicalize_property_index_predicates(rel);
@@ -776,12 +829,21 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
     default:
         ereport(ERROR, (errmsg_internal("invalid cypher_clause_kind")));
     }
+
+    age_graph_join_refresh_rel_metadata(root, rel,
+                                        path_get_graph_join_rel_evidence);
 }
 
 static void set_join_pathlist(PlannerInfo *root, RelOptInfo *joinrel,
                               RelOptInfo *outerrel, RelOptInfo *innerrel,
                               JoinType jointype, JoinPathExtraData *extra)
 {
+    age_graph_join_metadata_begin(root);
+    age_graph_join_refresh_rel_metadata(root, outerrel,
+                                        path_get_graph_join_rel_evidence);
+    age_graph_join_refresh_rel_metadata(root, innerrel,
+                                        path_get_graph_join_rel_evidence);
+
     if (prev_set_join_pathlist_hook)
         prev_set_join_pathlist_hook(root, joinrel, outerrel, innerrel,
                                     jointype, extra);
@@ -790,6 +852,8 @@ static void set_join_pathlist(PlannerInfo *root, RelOptInfo *joinrel,
                                            jointype, extra);
     adjust_graph_expansion_join_rows(joinrel, jointype);
     log_graph_expansion_join_paths(joinrel, outerrel, innerrel, jointype);
+    age_graph_join_refresh_rel_metadata(root, joinrel,
+                                        path_get_graph_join_rel_evidence);
 }
 
 static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
@@ -898,6 +962,74 @@ static void log_graph_expansion_join_paths(RelOptInfo *joinrel,
     }
 }
 
+static bool path_get_graph_join_rel_evidence(
+    Path *path, AgeGraphJoinPathEvidence *evidence)
+{
+    AgeGraphJoinPathEvidence local_evidence;
+
+    if (path == NULL)
+        return false;
+    if (evidence == NULL)
+        evidence = &local_evidence;
+    age_graph_join_init_path_evidence(evidence);
+
+    if (IsA(path, CustomPath))
+    {
+        CustomPath *custom_path = (CustomPath *)path;
+
+        if (custom_path->methods == &age_adjacency_match_path_methods)
+        {
+            if (!custom_path_adjacency_join_evidence(custom_path, evidence))
+                return false;
+        }
+        else if (custom_path->methods == &age_vle_stream_path_methods)
+        {
+            if (!custom_path_vle_join_evidence(custom_path, evidence))
+                return false;
+        }
+        else
+            return false;
+
+        return evidence->order_property != NULL;
+    }
+
+    if (!IsA(path, CustomPath))
+    {
+        const char *property;
+
+        property = index_path_join_order_property(path);
+        if (property != NULL)
+        {
+            evidence->connector = "postgres-index-seek";
+            evidence->order_property = property;
+            evidence->source_evidence = "postgres-index-path";
+            evidence->candidate_count = 1;
+            evidence->selected_total_cost = path->total_cost;
+            evidence->next_total_cost = 0;
+            evidence->bound = age_graph_join_order_property_is_bound(property);
+            return true;
+        }
+    }
+
+    if (IsA(path, MaterialPath))
+        return path_get_graph_join_rel_evidence(
+            ((MaterialPath *)path)->subpath, evidence);
+
+    if (IsA(path, MemoizePath))
+        return path_get_graph_join_rel_evidence(
+            ((MemoizePath *)path)->subpath, evidence);
+
+    if (IsA(path, ProjectionPath))
+        return path_get_graph_join_rel_evidence(
+            ((ProjectionPath *)path)->subpath, evidence);
+
+    if (IsA(path, SubqueryScanPath))
+        return path_get_graph_join_rel_evidence(
+            ((SubqueryScanPath *)path)->subpath, evidence);
+
+    return false;
+}
+
 static void add_graph_join_candidate_nestloop_path(PlannerInfo *root,
                                                    RelOptInfo *joinrel,
                                                    RelOptInfo *outerrel,
@@ -905,21 +1037,12 @@ static void add_graph_join_candidate_nestloop_path(PlannerInfo *root,
                                                    JoinType jointype,
                                                    JoinPathExtraData *extra)
 {
+    AgeGraphJoinRelMetadata *outer_metadata;
+    AgeGraphJoinRelMetadata *inner_metadata;
     ListCell *outer_lc;
-    Path *best_outer_path = NULL;
-    Path *best_inner_path = NULL;
-    AgeGraphJoinPathEvidence best_outer_evidence;
-    AgeGraphJoinPathEvidence best_inner_evidence;
-    AgeGraphJoinCandidateTable *best_table = NULL;
-    AgeGraphJoinCandidate *best_candidate = NULL;
-    Cost best_total_cost = 0;
-    JoinCostWorkspace workspace;
-    Relids required_outer;
-    NestPath *nest_path;
-    double adjusted_rows;
-    double row_ratio;
-    double candidate_credit;
-    Cost adjusted_total_cost;
+    GraphJoinNestLoopCandidate component_candidates[
+        GRAPH_JOIN_NEST_COMPONENT_COUNT];
+    int i;
 
     if (root == NULL ||
         joinrel == NULL ||
@@ -936,93 +1059,193 @@ static void add_graph_join_candidate_nestloop_path(PlannerInfo *root,
         return;
     }
 
-    age_graph_join_init_path_evidence(&best_outer_evidence);
-    age_graph_join_init_path_evidence(&best_inner_evidence);
+    if (!age_graph_join_metadata_matches_root(root))
+        return;
 
-    foreach(outer_lc, outerrel->pathlist)
+    outer_metadata = age_graph_join_get_rel_metadata(outerrel, false);
+    inner_metadata = age_graph_join_get_rel_metadata(innerrel, false);
+    if (outer_metadata == NULL ||
+        inner_metadata == NULL ||
+        outer_metadata->candidates == NIL ||
+        inner_metadata->candidates == NIL)
     {
-        Path *outer_path = lfirst(outer_lc);
+        return;
+    }
+
+    memset(component_candidates, 0, sizeof(component_candidates));
+
+    foreach(outer_lc, outer_metadata->component_candidates)
+    {
+        AgeGraphJoinRelComponentCandidate *outer_component = lfirst(outer_lc);
         ListCell *inner_lc;
 
-        foreach(inner_lc, innerrel->pathlist)
+        foreach(inner_lc, inner_metadata->candidates)
         {
-            Path *inner_path = lfirst(inner_lc);
-            AgeGraphJoinPathEvidence outer_evidence;
-            AgeGraphJoinPathEvidence inner_evidence;
-            AgeGraphJoinCandidateTable *candidate_table;
-            AgeGraphJoinCandidate *candidate;
+            AgeGraphJoinRelCandidate *inner_rel_candidate = lfirst(inner_lc);
 
-            if (!path_contains_graph_expansion(outer_path) &&
-                !path_contains_graph_expansion(inner_path))
-            {
-                continue;
-            }
-            if (!graph_join_candidate_nestloop_pair_is_legal(
-                    outerrel, innerrel, outer_path, inner_path))
-            {
-                continue;
-            }
-
-            age_graph_join_init_path_evidence(&outer_evidence);
-            age_graph_join_init_path_evidence(&inner_evidence);
-
-            if (inner_path->parent != NULL)
-            {
-                (void) path_get_graph_expansion_join_evidence(
-                    outer_path, inner_path->parent->relids,
-                    &outer_evidence);
-            }
-            if (outer_path->parent != NULL)
-            {
-                (void) path_get_graph_expansion_join_evidence(
-                    inner_path, outer_path->parent->relids,
-                    &inner_evidence);
-            }
-
-            candidate_table = make_graph_expansion_join_candidate_table(
-                outer_path, inner_path, &outer_evidence, &inner_evidence);
-            candidate = age_graph_join_table_select_cheapest(
-                candidate_table);
-            if (candidate == NULL)
-                continue;
-
-            if (best_candidate == NULL ||
-                candidate->connector.total_cost < best_total_cost)
-            {
-                best_outer_path = outer_path;
-                best_inner_path = inner_path;
-                best_outer_evidence = outer_evidence;
-                best_inner_evidence = inner_evidence;
-                best_table = candidate_table;
-                best_candidate = candidate;
-                best_total_cost = candidate->connector.total_cost;
-            }
+            graph_join_consider_nestloop_candidate_pair(
+                outerrel, innerrel, outer_component->path,
+                inner_rel_candidate->path, &outer_component->evidence,
+                &inner_rel_candidate->evidence, component_candidates);
         }
     }
 
-    if (best_candidate == NULL ||
-        best_outer_path == NULL ||
-        best_inner_path == NULL)
+    foreach(outer_lc, outer_metadata->candidates)
+    {
+        AgeGraphJoinRelCandidate *outer_rel_candidate = lfirst(outer_lc);
+        ListCell *inner_lc;
+
+        foreach(inner_lc, inner_metadata->component_candidates)
+        {
+            AgeGraphJoinRelComponentCandidate *inner_component =
+                lfirst(inner_lc);
+
+            graph_join_consider_nestloop_candidate_pair(
+                outerrel, innerrel, outer_rel_candidate->path,
+                inner_component->path, &outer_rel_candidate->evidence,
+                &inner_component->evidence, component_candidates);
+        }
+    }
+
+    for (i = 0; i < GRAPH_JOIN_NEST_COMPONENT_COUNT; i++)
+    {
+        add_graph_join_candidate_nestloop_alternative(
+            root, joinrel, outerrel, innerrel, jointype, extra,
+            &component_candidates[i]);
+    }
+}
+
+static int graph_join_nestloop_component_index(const char *component)
+{
+    if (component == NULL)
+        return -1;
+    if (strcmp(component, "node-property-seek") == 0)
+        return GRAPH_JOIN_NEST_NODE_PROPERTY;
+    if (strcmp(component, "vle-expansion") == 0)
+        return GRAPH_JOIN_NEST_VLE;
+    if (strcmp(component, "adjacency-expansion") == 0)
+        return GRAPH_JOIN_NEST_ADJACENCY;
+
+    return -1;
+}
+
+static void graph_join_consider_nestloop_candidate_pair(
+    RelOptInfo *outerrel, RelOptInfo *innerrel,
+    Path *outer_path, Path *inner_path,
+    const AgeGraphJoinPathEvidence *outer_evidence,
+    const AgeGraphJoinPathEvidence *inner_evidence,
+    GraphJoinNestLoopCandidate *component_candidates)
+{
+    AgeGraphJoinCandidateTable *candidate_table;
+    AgeGraphJoinCandidate *candidate;
+    int component_index;
+
+    if (outer_evidence == NULL ||
+        inner_evidence == NULL ||
+        component_candidates == NULL)
+    {
+        return;
+    }
+
+    if (!path_contains_graph_expansion(outer_path) &&
+        !path_contains_graph_expansion(inner_path))
+    {
+        return;
+    }
+
+    if (!graph_join_candidate_nestloop_pair_is_legal(
+            outerrel, innerrel, outer_path, inner_path))
+    {
+        return;
+    }
+
+    candidate_table = make_graph_expansion_join_candidate_table(
+        outer_path, inner_path, outer_evidence, inner_evidence);
+    candidate = age_graph_join_table_select_cheapest(candidate_table);
+    if (candidate == NULL)
+        return;
+
+    component_index = graph_join_nestloop_component_index(
+        candidate->component.name);
+    if (component_index < 0)
+        return;
+
+    graph_join_nestloop_candidate_update(
+        &component_candidates[component_index], outer_path, inner_path,
+        outer_evidence, inner_evidence, candidate_table, candidate);
+}
+
+static void graph_join_nestloop_candidate_update(
+    GraphJoinNestLoopCandidate *slot, Path *outer_path, Path *inner_path,
+    const AgeGraphJoinPathEvidence *outer_evidence,
+    const AgeGraphJoinPathEvidence *inner_evidence,
+    AgeGraphJoinCandidateTable *table, AgeGraphJoinCandidate *candidate)
+{
+    if (slot == NULL ||
+        candidate == NULL)
+    {
+        return;
+    }
+
+    if (slot->candidate != NULL &&
+        slot->total_cost <= candidate->connector.total_cost)
+    {
+        return;
+    }
+
+    slot->outer_path = outer_path;
+    slot->inner_path = inner_path;
+    if (outer_evidence != NULL)
+        slot->outer_evidence = *outer_evidence;
+    if (inner_evidence != NULL)
+        slot->inner_evidence = *inner_evidence;
+    slot->table = table;
+    slot->candidate = candidate;
+    slot->total_cost = candidate->connector.total_cost;
+}
+
+static void add_graph_join_candidate_nestloop_alternative(
+    PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
+    RelOptInfo *innerrel, JoinType jointype, JoinPathExtraData *extra,
+    GraphJoinNestLoopCandidate *candidate_slot)
+{
+    JoinCostWorkspace workspace;
+    Relids required_outer;
+    NestPath *nest_path;
+    double adjusted_rows;
+    double row_ratio;
+    double candidate_credit;
+    Cost adjusted_total_cost;
+    AgeGraphJoinCandidate *next_best;
+    AgeGraphJoinPathEvidence join_evidence;
+
+    if (candidate_slot == NULL ||
+        candidate_slot->candidate == NULL ||
+        candidate_slot->outer_path == NULL ||
+        candidate_slot->inner_path == NULL)
     {
         return;
     }
 
     required_outer = calc_nestloop_required_outer(
-        outerrel->relids, PATH_REQ_OUTER(best_outer_path),
-        innerrel->relids, PATH_REQ_OUTER(best_inner_path));
-    initial_cost_nestloop(root, &workspace, jointype, best_outer_path,
-                          best_inner_path, extra);
+        outerrel->relids, PATH_REQ_OUTER(candidate_slot->outer_path),
+        innerrel->relids, PATH_REQ_OUTER(candidate_slot->inner_path));
+    initial_cost_nestloop(root, &workspace, jointype,
+                          candidate_slot->outer_path,
+                          candidate_slot->inner_path, extra);
     nest_path = create_nestloop_path(root, joinrel, jointype, &workspace,
-                                     extra, best_outer_path,
-                                     best_inner_path, extra->restrictlist,
-                                     NIL, required_outer);
+                                     extra, candidate_slot->outer_path,
+                                     candidate_slot->inner_path,
+                                     extra->restrictlist, NIL,
+                                     required_outer);
 
-    adjusted_rows = clamp_row_est(Max(best_candidate->connector.rows, 1.0));
+    adjusted_rows = clamp_row_est(Max(
+        candidate_slot->candidate->connector.rows, 1.0));
     adjusted_rows = Min(nest_path->jpath.path.rows, adjusted_rows);
     row_ratio = adjusted_rows / Max(nest_path->jpath.path.rows, 1.0);
     row_ratio = Max(row_ratio, 0.01);
     candidate_credit = age_graph_join_path_evidence_credit(
-        &best_outer_evidence, &best_inner_evidence);
+        &candidate_slot->outer_evidence, &candidate_slot->inner_evidence);
     adjusted_total_cost = nest_path->jpath.path.startup_cost +
         (nest_path->jpath.path.total_cost -
          nest_path->jpath.path.startup_cost) * row_ratio * candidate_credit;
@@ -1031,6 +1254,23 @@ static void add_graph_join_candidate_nestloop_path(PlannerInfo *root,
 
     nest_path->jpath.path.rows = adjusted_rows;
     nest_path->jpath.path.total_cost = adjusted_total_cost;
+    age_graph_join_init_path_evidence(&join_evidence);
+    join_evidence.connector = candidate_slot->candidate->connector.kind;
+    join_evidence.order_property =
+        candidate_slot->candidate->connector.order_property;
+    join_evidence.source_evidence =
+        candidate_slot->candidate->connector.source_evidence;
+    join_evidence.candidate_count =
+        age_graph_join_table_candidate_count(candidate_slot->table);
+    join_evidence.selected_total_cost = nest_path->jpath.path.total_cost;
+    next_best = age_graph_join_table_select_next_best(
+        candidate_slot->table, candidate_slot->candidate);
+    join_evidence.next_total_cost = next_best != NULL ?
+        next_best->connector.total_cost : 0;
+    join_evidence.bound = age_graph_join_order_property_is_bound(
+        join_evidence.order_property);
+    age_graph_join_register_rel_path_evidence(
+        root, joinrel, (Path *)nest_path, &join_evidence);
 
     ereport(DEBUG2,
             (errmsg_internal("AGE graph join candidate nestloop added: "
@@ -1040,17 +1280,22 @@ static void add_graph_join_candidate_nestloop_path(PlannerInfo *root,
                              "provided=%s",
                              (int)jointype,
                              bmsToString(joinrel->relids),
-                             best_candidate->component.name,
-                             best_candidate->connector.kind,
-                             best_candidate->connector.order_property,
-                             best_candidate->connector.source_evidence,
+                             candidate_slot->candidate->component.name,
+                             candidate_slot->candidate->connector.kind,
+                             candidate_slot->candidate->
+                             connector.order_property,
+                             candidate_slot->candidate->
+                             connector.source_evidence,
                              nest_path->jpath.path.rows,
                              nest_path->jpath.path.total_cost,
-                             age_graph_join_table_candidate_count(best_table),
+                             age_graph_join_table_candidate_count(
+                                 candidate_slot->table),
                              bmsToString(
-                                 best_candidate->component.required_outer),
+                                 candidate_slot->candidate->
+                                 component.required_outer),
                              bmsToString(
-                                 best_candidate->component.provided_relids))));
+                                 candidate_slot->candidate->
+                                 component.provided_relids))));
 
     add_path(joinrel, (Path *)nest_path);
 }
@@ -5568,6 +5813,7 @@ static void add_adjacency_match_custom_path(
     AdjacencyMatchPayloadRequest payload_request;
     AgeGraphJoinCandidateTable *graph_join_table;
     AgeGraphJoinCandidate *graph_join_candidate;
+    int partial_workers = 0;
 
     if (candidate == NULL ||
         candidate->bound_endpoint_expr == NULL ||
@@ -5624,6 +5870,13 @@ static void add_adjacency_match_custom_path(
     cp->methods = &age_adjacency_match_path_methods;
 
     add_path(rel, (Path *)cp);
+    if (adjacency_match_can_add_partial_path(rel, candidate,
+                                             &payload_request,
+                                             path_required_outer,
+                                             &partial_workers))
+    {
+        add_adjacency_match_partial_custom_path(rel, cp, partial_workers);
+    }
 
     ereport(DEBUG2,
             (errmsg_internal("AGE adjacency MATCH CustomPath added: "
@@ -5644,6 +5897,109 @@ static void add_adjacency_match_custom_path(
                              "true" : "false",
                              cp->path.rows,
                              cp->path.total_cost)));
+}
+
+static bool adjacency_match_can_add_partial_path(
+    RelOptInfo *rel, CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request,
+    Relids path_required_outer, int *parallel_workers)
+{
+    double index_pages;
+
+    if (parallel_workers != NULL)
+        *parallel_workers = 0;
+    if (rel == NULL || candidate == NULL || payload_request == NULL)
+        return false;
+    if (!rel->consider_parallel || path_required_outer != NULL)
+        return false;
+    if (payload_request->fetch_properties)
+        return false;
+    if (candidate->has_right_property_predicate ||
+        candidate->has_edge_property_predicate ||
+        candidate->has_edge_variable_projection)
+    {
+        return false;
+    }
+    if (candidate->estimated_terminal_fanout < 2.0)
+        return false;
+
+    index_pages = Max(1.0, ceil(candidate->estimated_terminal_fanout / 128.0));
+    if (parallel_workers != NULL)
+    {
+        *parallel_workers = compute_parallel_worker(
+            rel, -1, index_pages, max_parallel_workers_per_gather);
+        if (*parallel_workers <= 0 &&
+            candidate->estimated_terminal_fanout >= 2.0)
+        {
+            *parallel_workers = 1;
+        }
+    }
+
+    return parallel_workers != NULL && *parallel_workers > 0;
+}
+
+static void add_adjacency_match_partial_custom_path(
+    RelOptInfo *rel, CustomPath *serial_path, int parallel_workers)
+{
+    CustomPath *partial_path;
+    List *descriptor;
+    double divisor;
+
+    Assert(rel != NULL);
+    Assert(serial_path != NULL);
+    Assert(parallel_workers > 0);
+
+    partial_path = makeNode(CustomPath);
+    partial_path->path = serial_path->path;
+    partial_path->path.parallel_safe = true;
+    partial_path->path.parallel_aware = true;
+    partial_path->path.parallel_workers = parallel_workers;
+    divisor = (double)parallel_workers + 0.5;
+    partial_path->path.rows =
+        clamp_row_est(Max(serial_path->path.rows / divisor, 1.0));
+    partial_path->path.total_cost =
+        serial_path->path.startup_cost +
+        (serial_path->path.total_cost - serial_path->path.startup_cost) /
+        divisor;
+    partial_path->flags = serial_path->flags;
+    partial_path->custom_paths = copyObject(serial_path->custom_paths);
+    partial_path->custom_private = copyObject(serial_path->custom_private);
+    partial_path->methods = serial_path->methods;
+
+    descriptor = llast(partial_path->custom_private);
+    set_adjacency_match_descriptor_value(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_SAFE,
+        (Node *)makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                          BoolGetDatum(true), false, true));
+    set_adjacency_match_descriptor_value(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_AWARE,
+        (Node *)makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                          BoolGetDatum(true), false, true));
+    set_adjacency_match_descriptor_value(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_WORKERS,
+        (Node *)makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                          Int32GetDatum(parallel_workers), false, true));
+    set_adjacency_match_descriptor_value(
+        descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_GATHER_COST,
+        (Node *)makeConst(FLOAT8OID, -1, InvalidOid, sizeof(float8),
+                          Float8GetDatum(parallel_setup_cost +
+                                         parallel_tuple_cost *
+                                         serial_path->path.rows),
+                          false, true));
+
+    add_partial_path(rel, (Path *)partial_path);
+}
+
+static void set_adjacency_match_descriptor_value(List *descriptor, int index,
+                                                 Node *value)
+{
+    ListCell *cell;
+
+    Assert(descriptor != NIL);
+    Assert(index >= 0 && index < list_length(descriptor));
+
+    cell = list_nth_cell(descriptor, index);
+    lfirst(cell) = value;
 }
 
 static Const *find_endpoint_graphid_const(PlannerInfo *root,
@@ -6108,10 +6464,14 @@ static AgeGraphJoinCandidateTable *make_adjacency_match_graph_join_table(
 {
     AgeGraphJoinCandidateTable *table;
     double scheduled_work;
+    Cost scheduled_cost;
 
     (void)rel;
 
     table = age_graph_join_make_candidate_table();
+    scheduled_work = adjacency_match_connector_scheduled_work(candidate);
+    scheduled_cost = adjacency_match_connector_scheduled_cost(
+        candidate, payload_request, cp->path.startup_cost);
     if (adjacency_match_has_terminal_property_prefetch(candidate))
     {
         (void) age_graph_join_table_add_scheduled_candidate(
@@ -6125,7 +6485,9 @@ static AgeGraphJoinCandidateTable *make_adjacency_match_graph_join_table(
             cp->path.rows, cp->path.startup_cost,
             cp->path.startup_cost +
             Max(candidate->estimated_composite_fanout, 1.0) *
-            cpu_operator_cost * 0.10,
+            cpu_operator_cost * (payload_request != NULL &&
+                                 payload_request->fetch_properties ?
+                                 0.18 : 0.08),
             false);
     }
     if (adjacency_match_has_terminal_property_prefetch(candidate))
@@ -6140,18 +6502,14 @@ static AgeGraphJoinCandidateTable *make_adjacency_match_graph_join_table(
             candidate->right_property_index_source : "property-source",
             false);
     }
-    scheduled_work = adjacency_match_connector_scheduled_work(candidate);
     (void) age_graph_join_table_add_scheduled_candidate(
         table, &cp->path,
         candidate->edge_alias != NULL ? candidate->edge_alias : "edge",
         adjacency_match_join_order_connector(candidate),
         adjacency_match_join_order_bound(candidate),
         adjacency_match_join_order_property(candidate, payload_request),
-        adjacency_match_connector_source_evidence(candidate),
-        clamp_row_est(scheduled_work), cp->path.startup_cost,
-        cp->path.startup_cost +
-        scheduled_work * cpu_operator_cost * 0.12 +
-        scheduled_work * cpu_tuple_cost * 0.08,
+        adjacency_match_connector_source_evidence(candidate, payload_request),
+        clamp_row_est(scheduled_work), cp->path.startup_cost, scheduled_cost,
         false);
 
     return table;
@@ -6175,21 +6533,75 @@ static double adjacency_match_connector_scheduled_work(
     return scheduled_work;
 }
 
-static const char *adjacency_match_connector_source_evidence(
-    const CypherAdjacencyMatchCandidate *candidate)
+static Cost adjacency_match_connector_scheduled_cost(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request,
+    Cost startup_cost)
 {
+    double scheduled_work;
+    double payload_weight;
+    double residual_weight;
+    double index_credit;
+    int residual_count;
+    int index_solved_count;
+    bool fetch_properties;
+
     Assert(candidate != NULL);
+
+    scheduled_work = adjacency_match_connector_scheduled_work(candidate);
+    fetch_properties = payload_request != NULL ?
+        payload_request->fetch_properties :
+        adjacency_match_requires_edge_payload(candidate);
+    payload_weight = fetch_properties ? 1.65 : 0.70;
+    residual_count = adjacency_match_residual_predicate_count(candidate);
+    index_solved_count =
+        adjacency_match_index_solved_predicate_count(candidate,
+                                                     payload_request);
+    residual_weight = 1.0 + (0.20 * residual_count);
+    index_credit = Max(0.60, 1.0 - (0.12 * index_solved_count));
+
+    if (candidate->estimated_fanout_from_directory)
+        index_credit = Min(index_credit, 0.82);
+    if (adjacency_match_plans_terminal_property_prefetch(candidate,
+                                                        payload_request))
+    {
+        index_credit = Min(index_credit, 0.72);
+    }
+
+    return startup_cost +
+        scheduled_work * cpu_operator_cost * 0.12 * residual_weight *
+        index_credit +
+        scheduled_work * cpu_tuple_cost * payload_weight * residual_weight *
+        index_credit;
+}
+
+static const char *adjacency_match_connector_source_evidence(
+    const CypherAdjacencyMatchCandidate *candidate,
+    const AdjacencyMatchPayloadRequest *payload_request)
+{
+    bool fetch_properties;
+
+    Assert(candidate != NULL);
+
+    fetch_properties = payload_request != NULL ?
+        payload_request->fetch_properties :
+        adjacency_match_requires_edge_payload(candidate);
 
     if (candidate->estimated_fanout_from_directory &&
         candidate->estimated_value_posting_source != NULL &&
         strcmp(candidate->estimated_value_posting_source, "none") != 0)
-        return "directory-value-posting-schedule";
+    {
+        return fetch_properties ?
+            "directory-value-posting-edge-row" :
+            "directory-value-posting-id-only";
+    }
     if (candidate->estimated_fanout_from_directory)
-        return "directory-schedule";
+        return fetch_properties ? "directory-edge-row" : "directory-id-only";
     if (candidate->index_metadata_backed)
-        return "adjacency-index-metadata";
+        return fetch_properties ? "adjacency-index-edge-row" :
+            "adjacency-index-id-only";
 
-    return "statistics";
+    return fetch_properties ? "statistics-edge-row" : "statistics-id-only";
 }
 
 static List *make_adjacency_match_descriptor(
@@ -6468,6 +6880,43 @@ static List *make_adjacency_match_descriptor(
                                    Float8GetDatum(
                                        next_best != NULL ?
                                        next_best->connector.total_cost : 0),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                                   BoolGetDatum(
+                                       graph_join_candidate->
+                                       component.parallel_safe),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                                   BoolGetDatum(
+                                       graph_join_candidate->
+                                       component.parallel_aware),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+                                   Int32GetDatum(
+                                       graph_join_candidate->
+                                       component.parallel_workers),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(FLOAT8OID, -1, InvalidOid,
+                                   sizeof(float8),
+                                   Float8GetDatum(
+                                       graph_join_candidate->
+                                       component.gather_cost),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                                   BoolGetDatum(
+                                       graph_join_candidate->
+                                       component.order_preserving),
+                                   false, true));
+    descriptor = lappend(descriptor,
+                         makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
+                                   BoolGetDatum(
+                                       graph_join_candidate->
+                                       component.shared_state_required),
                                    false, true));
     descriptor = lappend(descriptor,
                          candidate->right_property_value != NULL ?

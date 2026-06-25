@@ -352,6 +352,10 @@ struct AgeAdjacencyVisiblePayloadScan
     int main_cache_index;
     BlockNumber delta_blkno;
     OffsetNumber delta_offnum;
+    int32 parallel_slice_index;
+    int32 parallel_slice_count;
+    uint64 main_posting_ordinal;
+    uint64 delta_posting_ordinal;
 };
 
 typedef struct AgeAdjacencyVisiblePayloadKeyCursor
@@ -670,6 +674,8 @@ static int64 age_adjacency_scan_payload_with_meta(Relation index_rel,
                                                   graphid key,
                                                   AgeAdjacencyScanTarget *target,
                                                   const AgeAdjacencyMetaPageData *meta);
+static bool age_adjacency_visible_payload_scan_accept_slice(
+    AgeAdjacencyVisiblePayloadScan *scan, bool main_posting);
 static IndexBuildResult *age_adjacency_build(Relation heap_rel,
                                              Relation index_rel,
                                              struct IndexInfo *index_info);
@@ -5187,8 +5193,41 @@ age_adjacency_visible_payload_scan_begin_key(
     scan->main_cache_index = cursor.main_cache_index;
     scan->delta_blkno = cursor.delta_blkno;
     scan->delta_offnum = cursor.delta_offnum;
+    scan->main_posting_ordinal = 0;
+    scan->delta_posting_ordinal = 0;
 
     return true;
+}
+
+void
+age_adjacency_visible_payload_scan_set_parallel_slice(
+    AgeAdjacencyVisiblePayloadScan *scan, int32 slice_index,
+    int32 slice_count)
+{
+    if (scan == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload scan is required")));
+    }
+
+    if (slice_count <= 1)
+    {
+        scan->parallel_slice_index = 0;
+        scan->parallel_slice_count = 0;
+        return;
+    }
+
+    if (slice_index < 0 || slice_index >= slice_count)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency parallel slice requires "
+                        "0 <= slice_index < slice_count")));
+    }
+
+    scan->parallel_slice_index = slice_index;
+    scan->parallel_slice_count = slice_count;
 }
 
 int64
@@ -6081,6 +6120,9 @@ age_adjacency_visible_payload_key_cursor_next_main(
             posting.edge_id = cached->posting.edge_id;
             posting.next_vertex_id = cached->posting.next_vertex_id;
 
+            if (!age_adjacency_visible_payload_scan_accept_slice(scan, true))
+                continue;
+
             if (age_adjacency_posting_visible_payload(&posting,
                                                       &scan->target,
                                                       payload))
@@ -6167,6 +6209,9 @@ age_adjacency_visible_payload_key_cursor_next_delta(
                 cursor->delta_blkno = next_blkno;
                 cursor->delta_offnum = FirstOffsetNumber;
             }
+            if (!age_adjacency_visible_payload_scan_accept_slice(scan, false))
+                continue;
+
             if (age_adjacency_posting_visible_payload(&posting,
                                                       &scan->target,
                                                       payload))
@@ -6207,6 +6252,9 @@ age_adjacency_visible_payload_scan_next_main(
             ItemPointerCopy(&cached->posting.heap_tid, &posting.heap_tid);
             posting.edge_id = cached->posting.edge_id;
             posting.next_vertex_id = cached->posting.next_vertex_id;
+
+            if (!age_adjacency_visible_payload_scan_accept_slice(scan, true))
+                continue;
 
             if (age_adjacency_posting_visible_payload(&posting,
                                                       &scan->target,
@@ -6297,6 +6345,10 @@ age_adjacency_visible_payload_scan_next_delta(
                 scan->delta_blkno = next_blkno;
                 scan->delta_offnum = FirstOffsetNumber;
             }
+            if (!age_adjacency_visible_payload_scan_accept_slice(scan, false))
+            {
+                continue;
+            }
             if (age_adjacency_posting_visible_payload(&posting,
                                                       &scan->target,
                                                       payload))
@@ -6312,6 +6364,26 @@ age_adjacency_visible_payload_scan_next_delta(
     }
 
     return false;
+}
+
+static bool
+age_adjacency_visible_payload_scan_accept_slice(
+    AgeAdjacencyVisiblePayloadScan *scan, bool main_posting)
+{
+    uint64 ordinal;
+
+    Assert(scan != NULL);
+
+    if (main_posting)
+        ordinal = scan->main_posting_ordinal++;
+    else
+        ordinal = scan->delta_posting_ordinal++;
+
+    if (scan->parallel_slice_count <= 1)
+        return true;
+
+    return (ordinal % (uint64)scan->parallel_slice_count) ==
+           (uint64)scan->parallel_slice_index;
 }
 
 void

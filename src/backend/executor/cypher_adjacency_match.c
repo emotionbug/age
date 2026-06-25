@@ -20,6 +20,7 @@
 #include "postgres.h"
 
 #include "access/age_adjacency.h"
+#include "access/parallel.h"
 #include "catalog/ag_label.h"
 #include "commands/explain_format.h"
 #include "commands/explain_state.h"
@@ -41,6 +42,12 @@ typedef struct AgeAdjacencyMatchTuple
     Datum properties;
     bool properties_isnull;
 } AgeAdjacencyMatchTuple;
+
+typedef struct AgeAdjacencyMatchParallelState
+{
+    uint32 magic;
+    int32 planned_workers;
+} AgeAdjacencyMatchParallelState;
 
 typedef struct AgeAdjacencyMatchScanState
 {
@@ -91,6 +98,16 @@ typedef struct AgeAdjacencyMatchScanState
     char *join_order_next_connector;
     char *join_order_next_property;
     char *join_order_next_source_evidence;
+    bool graph_join_parallel_safe;
+    bool graph_join_parallel_aware;
+    int64 graph_join_parallel_workers;
+    double graph_join_gather_cost;
+    bool graph_join_order_preserving;
+    bool graph_join_shared_state_required;
+    char *payload_slice_mode;
+    int32 payload_slice_index;
+    int32 payload_slice_count;
+    int32 payload_parallel_workers;
     Datum right_property_value;
     bool right_property_value_isnull;
     AgeAdjacencyMatchTerminalPropertyLookup *terminal_property_lookup;
@@ -118,6 +135,17 @@ static bool recheck_age_adjacency_match_scan(ScanState *node,
                                              TupleTableSlot *slot);
 static void end_age_adjacency_match_scan(CustomScanState *node);
 static void rescan_age_adjacency_match_scan(CustomScanState *node);
+static Size estimate_age_adjacency_match_dsm(CustomScanState *node,
+                                             ParallelContext *pcxt);
+static void initialize_age_adjacency_match_dsm(CustomScanState *node,
+                                               ParallelContext *pcxt,
+                                               void *coordinate);
+static void reinitialize_age_adjacency_match_dsm(CustomScanState *node,
+                                                 ParallelContext *pcxt,
+                                                 void *coordinate);
+static void initialize_age_adjacency_match_worker(CustomScanState *node,
+                                                  shm_toc *toc,
+                                                  void *coordinate);
 static void explain_age_adjacency_match_scan(CustomScanState *node,
                                              List *ancestors,
                                              ExplainState *es);
@@ -125,6 +153,7 @@ static void load_age_adjacency_match_descriptor(
     AgeAdjacencyMatchScanState *state, CustomScan *cscan);
 static bool adjacency_match_descriptor_bool(List *descriptor, int index);
 static int64 adjacency_match_descriptor_int64(List *descriptor, int index);
+static double adjacency_match_descriptor_float8(List *descriptor, int index);
 static char *adjacency_match_descriptor_text(List *descriptor, int index);
 static char *format_age_adjacency_match_index_descriptor(
     AgeAdjacencyMatchScanState *state);
@@ -188,9 +217,15 @@ static void store_age_adjacency_match_tuple(
 static AgeAdjacencyMatchTerminalPropertyRequest
 make_age_adjacency_match_terminal_property_request(
     AgeAdjacencyMatchScanState *state);
+static void configure_age_adjacency_match_payload_slice(
+    AgeAdjacencyMatchScanState *state);
+static void initialize_age_adjacency_match_parallel_state(
+    AgeAdjacencyMatchParallelState *parallel_state, ParallelContext *pcxt);
 
 const CustomScanMethods age_adjacency_match_scan_methods = {
     AGE_ADJACENCY_MATCH_SCAN_NAME, create_age_adjacency_match_scan_state};
+
+#define AGE_ADJACENCY_MATCH_PARALLEL_MAGIC 0x41475053U
 
 static const CustomExecMethods age_adjacency_match_exec_methods = {
     AGE_ADJACENCY_MATCH_SCAN_NAME,
@@ -200,10 +235,10 @@ static const CustomExecMethods age_adjacency_match_exec_methods = {
     rescan_age_adjacency_match_scan,
     NULL,
     NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
+    estimate_age_adjacency_match_dsm,
+    initialize_age_adjacency_match_dsm,
+    reinitialize_age_adjacency_match_dsm,
+    initialize_age_adjacency_match_worker,
     NULL,
     explain_age_adjacency_match_scan};
 
@@ -280,6 +315,7 @@ static void begin_age_adjacency_match_scan(CustomScanState *node,
     oldcontext = MemoryContextSwitchTo(state->payload_scan_context);
     state->payload_scan = age_adjacency_begin_visible_payload_scan(
         state->index_oid, estate->es_snapshot, state->fetch_properties);
+    configure_age_adjacency_match_payload_slice(state);
     memset(&terminal_filter, 0, sizeof(terminal_filter));
     terminal_filter.terminal_label_id = state->right_label_id;
     terminal_filter.source = "label";
@@ -594,6 +630,28 @@ static void explain_age_adjacency_match_scan(CustomScanState *node,
     ExplainPropertyText("Adjacency Join Order",
                         format_age_adjacency_match_join_order(state),
                         es);
+    ExplainPropertyText("Adjacency Parallel",
+                        psprintf("safe=%s aware=%s workers=%ld "
+                                 "gather-cost=%.2f order-preserving=%s "
+                                 "shared-state=%s slice=%s active=%s",
+                                 state->graph_join_parallel_safe ?
+                                 "true" : "false",
+                                 state->graph_join_parallel_aware ?
+                                 "true" : "false",
+                                 (long)state->graph_join_parallel_workers,
+                                 state->graph_join_gather_cost,
+                                 state->graph_join_order_preserving ?
+                                 "true" : "false",
+                                 state->graph_join_shared_state_required ?
+                                 "true" : "false",
+                                 state->payload_slice_mode != NULL ?
+                                 state->payload_slice_mode : "unknown",
+                                 state->payload_slice_count > 1 ?
+                                 psprintf("%d/%d",
+                                          state->payload_slice_index,
+                                          state->payload_slice_count) :
+                                 "serial"),
+                        es);
     if (state->has_right_label_constraint ||
         state->has_right_property_predicate)
     {
@@ -748,6 +806,28 @@ static void load_age_adjacency_match_descriptor(
     state->join_order_next_source_evidence = adjacency_match_descriptor_text(
         descriptor,
         AGE_ADJACENCY_MATCH_DESC_JOIN_ORDER_NEXT_SOURCE_EVIDENCE);
+    state->graph_join_parallel_safe =
+        adjacency_match_descriptor_bool(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_SAFE);
+    state->graph_join_parallel_aware =
+        adjacency_match_descriptor_bool(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_AWARE);
+    state->graph_join_parallel_workers =
+        adjacency_match_descriptor_int64(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_WORKERS);
+    state->graph_join_gather_cost =
+        adjacency_match_descriptor_float8(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_PARALLEL_GATHER_COST);
+    state->graph_join_order_preserving =
+        adjacency_match_descriptor_bool(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_ORDER_PRESERVING);
+    state->graph_join_shared_state_required =
+        adjacency_match_descriptor_bool(
+            descriptor, AGE_ADJACENCY_MATCH_DESC_SHARED_STATE_REQUIRED);
+    state->payload_slice_mode = "serial-only";
+    state->payload_slice_index = 0;
+    state->payload_slice_count = 0;
+    state->payload_parallel_workers = 0;
     {
         Const *value_const;
 
@@ -758,6 +838,108 @@ static void load_age_adjacency_match_descriptor(
         state->right_property_value = value_const->constvalue;
         state->right_property_value_isnull = value_const->constisnull;
     }
+}
+
+static Size estimate_age_adjacency_match_dsm(CustomScanState *node,
+                                             ParallelContext *pcxt)
+{
+    (void)node;
+    (void)pcxt;
+
+    return MAXALIGN(sizeof(AgeAdjacencyMatchParallelState));
+}
+
+static void initialize_age_adjacency_match_dsm(CustomScanState *node,
+                                               ParallelContext *pcxt,
+                                               void *coordinate)
+{
+    AgeAdjacencyMatchScanState *state =
+        (AgeAdjacencyMatchScanState *)node;
+    AgeAdjacencyMatchParallelState *parallel_state = coordinate;
+
+    Assert(parallel_state != NULL);
+    initialize_age_adjacency_match_parallel_state(parallel_state, pcxt);
+    state->payload_parallel_workers = parallel_state->planned_workers;
+}
+
+static void reinitialize_age_adjacency_match_dsm(CustomScanState *node,
+                                                 ParallelContext *pcxt,
+                                                 void *coordinate)
+{
+    initialize_age_adjacency_match_dsm(node, pcxt, coordinate);
+}
+
+static void initialize_age_adjacency_match_worker(CustomScanState *node,
+                                                  shm_toc *toc,
+                                                  void *coordinate)
+{
+    AgeAdjacencyMatchScanState *state =
+        (AgeAdjacencyMatchScanState *)node;
+    AgeAdjacencyMatchParallelState *parallel_state = coordinate;
+
+    (void)toc;
+
+    if (parallel_state == NULL ||
+        parallel_state->magic != AGE_ADJACENCY_MATCH_PARALLEL_MAGIC)
+    {
+        elog(ERROR, "invalid AGE adjacency match parallel state");
+    }
+
+    state->payload_parallel_workers = parallel_state->planned_workers;
+    if (state->payload_scan != NULL)
+        configure_age_adjacency_match_payload_slice(state);
+}
+
+static void initialize_age_adjacency_match_parallel_state(
+    AgeAdjacencyMatchParallelState *parallel_state, ParallelContext *pcxt)
+{
+    int planned_workers;
+
+    Assert(parallel_state != NULL);
+    Assert(pcxt != NULL);
+
+    planned_workers = pcxt->nworkers_to_launch > 0 ?
+        pcxt->nworkers_to_launch : pcxt->nworkers;
+    parallel_state->magic = AGE_ADJACENCY_MATCH_PARALLEL_MAGIC;
+    parallel_state->planned_workers = planned_workers > 0 ?
+        planned_workers : 0;
+}
+
+static void configure_age_adjacency_match_payload_slice(
+    AgeAdjacencyMatchScanState *state)
+{
+    int32 slice_index = 0;
+    int32 slice_count = state->payload_parallel_workers;
+
+    Assert(state != NULL);
+    Assert(state->payload_scan != NULL);
+
+    if (state->graph_join_parallel_aware &&
+        slice_count > 1 &&
+        !state->graph_join_shared_state_required &&
+        IsParallelWorker())
+    {
+        slice_index = ParallelWorkerNumber % slice_count;
+        state->payload_slice_mode = "worker-local";
+    }
+    else if (state->graph_join_parallel_safe &&
+             !state->graph_join_shared_state_required)
+    {
+        state->payload_slice_mode = "worker-local-ready";
+    }
+    else if (state->graph_join_shared_state_required)
+    {
+        state->payload_slice_mode = "shared-state-required";
+    }
+    else
+    {
+        state->payload_slice_mode = "serial-only";
+    }
+
+    state->payload_slice_index = slice_index;
+    state->payload_slice_count = slice_count;
+    age_adjacency_visible_payload_scan_set_parallel_slice(
+        state->payload_scan, slice_index, slice_count);
 }
 
 static bool adjacency_match_descriptor_bool(List *descriptor, int index)
@@ -784,6 +966,16 @@ static int64 adjacency_match_descriptor_int64(List *descriptor, int index)
 
     Assert(value->consttype == INT8OID);
     return DatumGetInt64(value->constvalue);
+}
+
+static double adjacency_match_descriptor_float8(List *descriptor, int index)
+{
+    Const *value;
+
+    value = list_nth_node(Const, descriptor, index);
+    Assert(value->consttype == FLOAT8OID && !value->constisnull);
+
+    return DatumGetFloat8(value->constvalue);
 }
 
 static char *adjacency_match_descriptor_text(List *descriptor, int index)
