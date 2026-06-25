@@ -22,6 +22,35 @@
 #include "utils/guc.h"
 #include "utils/ag_guc.h"
 
+bool age_enable_wcoj = true;
+int age_wcoj_engine = AGE_WCOJ_ENGINE_AUTO;
+
+static const struct config_enum_entry age_wcoj_engine_options[] = {
+    {"auto", AGE_WCOJ_ENGINE_AUTO, false},
+    {"progressive", AGE_WCOJ_ENGINE_PROGRESSIVE, false},
+    {"leapfrog", AGE_WCOJ_ENGINE_LEAPFROG, false},
+    {"merge", AGE_WCOJ_ENGINE_MERGE, false},
+    {NULL, 0, false}
+};
+
+const char *
+age_wcoj_engine_name(AgeWCOJEngineKind engine)
+{
+    switch (engine)
+    {
+    case AGE_WCOJ_ENGINE_AUTO:
+        return "auto";
+    case AGE_WCOJ_ENGINE_PROGRESSIVE:
+        return "progressive";
+    case AGE_WCOJ_ENGINE_LEAPFROG:
+        return "leapfrog";
+    case AGE_WCOJ_ENGINE_MERGE:
+        return "merge";
+    }
+
+    return "unknown";
+}
+
 /*
  * Defines AGE's custom configuration parameters.
  *
@@ -30,5 +59,30 @@
  */
 void define_config_params(void)
 {
+    DefineCustomBoolVariable(
+        "age.enable_wcoj",
+        "Enables AGE multiway WCOJ paths for eligible Cypher MATCH patterns.",
+        NULL,
+        &age_enable_wcoj,
+        true,
+        PGC_USERSET,
+        0,
+        NULL,
+        NULL,
+        NULL);
+
+    DefineCustomEnumVariable(
+        "age.wcoj_engine",
+        "Selects the AGE WCOJ terminal-intersection engine.",
+        NULL,
+        &age_wcoj_engine,
+        AGE_WCOJ_ENGINE_AUTO,
+        age_wcoj_engine_options,
+        PGC_USERSET,
+        0,
+        NULL,
+        NULL,
+        NULL);
+
     EmitWarningsOnPlaceholders("age");
 }

@@ -102,6 +102,10 @@ static AgeGraphJoinLoweringArtifactEntry *
 graph_join_lowering_artifact_find_entry(
     AgeGraphJoinLoweringArtifact *artifact,
     AgeGraphJoinSourceKind source_kind_id, bool require_empty_table);
+static AgeGraphJoinCandidate *graph_join_copy_candidate(
+    const AgeGraphJoinCandidate *source);
+static AgeGraphJoinCandidateTable *graph_join_copy_candidate_table(
+    const AgeGraphJoinCandidateTable *source, MemoryContext context);
 static AgeGraphJoinCandidateTable *graph_join_make_declared_entry_table(
     RelOptInfo *rel, const AgeGraphJoinLoweringArtifact *artifact,
     const AgeGraphJoinLoweringArtifactEntry *entry);
@@ -222,6 +226,8 @@ void age_graph_join_lowering_artifact_add_typed_table(
     AgeGraphJoinCandidateTable *table)
 {
     AgeGraphJoinLoweringArtifactEntry *entry;
+    MemoryContext artifact_context;
+    MemoryContext table_context;
     ListCell *lc;
 
     if (artifact == NULL ||
@@ -230,6 +236,11 @@ void age_graph_join_lowering_artifact_add_typed_table(
     {
         return;
     }
+
+    artifact_context = GetMemoryChunkContext(artifact);
+    table_context = GetMemoryChunkContext(table);
+    if (table_context != artifact_context)
+        table = graph_join_copy_candidate_table(table, artifact_context);
 
     entry = graph_join_lowering_artifact_find_entry(
         artifact, source_kind_id, true);
@@ -263,8 +274,7 @@ void age_graph_join_lowering_artifact_add_typed_table(
      * same transaction) crashes iterating it.
      */
     {
-        MemoryContext oldcontext =
-            MemoryContextSwitchTo(GetMemoryChunkContext(artifact));
+        MemoryContext oldcontext = MemoryContextSwitchTo(artifact_context);
 
         entry = palloc0(sizeof(*entry));
         entry->source_kind_id = source_kind_id;
@@ -276,20 +286,27 @@ void age_graph_join_lowering_artifact_add_typed_table(
     }
 
 apply_identity:
-    table->declared_entry_count = Max(table->declared_entry_count,
-                                      list_length(artifact->entries));
-    table->cover_match_kind = AGE_GRAPH_JOIN_COVER_MATCHED;
-    table->pattern_key = copy_graph_join_text(artifact->pattern_key,
-                                               "graph-pattern");
-    table->source_kind_id = entry->source_kind_id;
-    table->component_family_kind = entry->component_family_kind;
-    foreach(lc, table->candidates)
     {
-        AgeGraphJoinCandidate *candidate = lfirst(lc);
+        MemoryContext oldcontext =
+            MemoryContextSwitchTo(GetMemoryChunkContext(table));
 
-        if (candidate == NULL)
-            continue;
-        graph_join_candidate_table_apply_defaults(table, candidate);
+        table->declared_entry_count = Max(table->declared_entry_count,
+                                          list_length(artifact->entries));
+        table->cover_match_kind = AGE_GRAPH_JOIN_COVER_MATCHED;
+        table->pattern_key = copy_graph_join_text(artifact->pattern_key,
+                                                   "graph-pattern");
+        table->source_kind_id = entry->source_kind_id;
+        table->component_family_kind = entry->component_family_kind;
+        foreach(lc, table->candidates)
+        {
+            AgeGraphJoinCandidate *candidate = lfirst(lc);
+
+            if (candidate == NULL)
+                continue;
+            graph_join_candidate_table_apply_defaults(table, candidate);
+        }
+
+        MemoryContextSwitchTo(oldcontext);
     }
 }
 
@@ -299,6 +316,7 @@ void age_graph_join_lowering_artifact_declare_typed_entry(
     AgeGraphJoinComponentKind component_family_kind)
 {
     AgeGraphJoinLoweringArtifactEntry *entry;
+    MemoryContext oldcontext;
 
     if (artifact == NULL ||
         source_kind_id == AGE_GRAPH_JOIN_SOURCE_UNKNOWN)
@@ -315,10 +333,12 @@ void age_graph_join_lowering_artifact_declare_typed_entry(
         return;
     }
 
+    oldcontext = MemoryContextSwitchTo(GetMemoryChunkContext(artifact));
     entry = palloc0(sizeof(*entry));
     entry->source_kind_id = source_kind_id;
     entry->component_family_kind = component_family_kind;
     artifact->entries = lappend(artifact->entries, entry);
+    MemoryContextSwitchTo(oldcontext);
 }
 
 AgeGraphJoinCandidateTable *
@@ -346,6 +366,7 @@ age_graph_join_lowering_artifact_declared_entry_table(
     AgeGraphJoinComponentKind component_family_kind)
 {
     AgeGraphJoinLoweringArtifactEntry *entry;
+    MemoryContext oldcontext;
 
     if (artifact == NULL ||
         source_kind_id == AGE_GRAPH_JOIN_SOURCE_UNKNOWN)
@@ -358,6 +379,7 @@ age_graph_join_lowering_artifact_declared_entry_table(
     if (entry == NULL)
         return NULL;
 
+    oldcontext = MemoryContextSwitchTo(GetMemoryChunkContext(artifact));
     if (entry->table == NULL)
         entry->table = age_graph_join_make_candidate_table();
     else
@@ -372,6 +394,7 @@ age_graph_join_lowering_artifact_declared_entry_table(
         artifact->pattern_key, "graph-pattern");
     entry->table->source_kind_id = entry->source_kind_id;
     entry->table->component_family_kind = entry->component_family_kind;
+    MemoryContextSwitchTo(oldcontext);
 
     return entry->table;
 }
@@ -381,13 +404,16 @@ AgeGraphJoinCandidate *age_graph_join_table_add_candidate(
     const AgeGraphJoinCandidateRequest *request)
 {
     AgeGraphJoinCandidate *candidate;
+    MemoryContext oldcontext;
 
     Assert(table != NULL);
     Assert(request != NULL);
 
+    oldcontext = MemoryContextSwitchTo(GetMemoryChunkContext(table));
     candidate = age_graph_join_make_candidate(request);
     graph_join_candidate_table_apply_defaults(table, candidate);
     table->candidates = lappend(table->candidates, candidate);
+    MemoryContextSwitchTo(oldcontext);
 
     return candidate;
 }
@@ -1005,8 +1031,21 @@ void age_graph_join_complete_path_evidence(
 
 void age_graph_join_metadata_begin(PlannerInfo *root)
 {
+    MemoryContext metadata_context;
+
     if (root == NULL)
         return;
+
+    /*
+     * GEQO evaluates candidate join trees in a short-lived child context while
+     * reusing the same PlannerInfo.  Rel/path metadata allocated there must not
+     * remain reachable after geqo_eval() deletes that context.  Include the
+     * active allocation context in the identity and register the reset callback
+     * on it, so every GEQO evaluation gets an isolated metadata registry.
+     */
+    metadata_context = CurrentMemoryContext;
+    if (metadata_context == NULL)
+        metadata_context = root->planner_cxt;
 
     if (graph_join_metadata_identity_matches(root))
         return;
@@ -1014,7 +1053,7 @@ void age_graph_join_metadata_begin(PlannerInfo *root)
     graph_join_metadata_root = root;
     graph_join_metadata_glob = root->glob;
     graph_join_metadata_parse = root->parse;
-    graph_join_metadata_context = root->planner_cxt;
+    graph_join_metadata_context = metadata_context;
     graph_join_metadata_query_level = root->query_level;
     graph_join_rel_metadata = NIL;
     if (graph_join_metadata_context != NULL)
@@ -1054,7 +1093,7 @@ static bool graph_join_metadata_identity_matches(PlannerInfo *root)
            graph_join_metadata_root == root &&
            graph_join_metadata_glob == root->glob &&
            graph_join_metadata_parse == root->parse &&
-           graph_join_metadata_context == root->planner_cxt &&
+           graph_join_metadata_context == CurrentMemoryContext &&
            graph_join_metadata_query_level == root->query_level;
 }
 
@@ -1677,6 +1716,92 @@ static bool graph_join_text_matches(const char *existing,
         return existing == candidate;
 
     return strcmp(existing, candidate) == 0;
+}
+
+static AgeGraphJoinCandidate *graph_join_copy_candidate(
+    const AgeGraphJoinCandidate *source)
+{
+    AgeGraphJoinCandidate *candidate;
+
+    Assert(source != NULL);
+
+    candidate = palloc0(sizeof(*candidate));
+    if (source->component.display_name != NULL)
+        candidate->component.display_name =
+            pstrdup(source->component.display_name);
+    candidate->component.family_kind = source->component.family_kind;
+    candidate->component.solved_relids =
+        bms_copy(source->component.solved_relids);
+    candidate->component.required_outer =
+        bms_copy(source->component.required_outer);
+    candidate->component.provided_relids =
+        bms_copy(source->component.provided_relids);
+    candidate->component.estimated_rows = source->component.estimated_rows;
+    candidate->component.output_width = source->component.output_width;
+    candidate->component.parallel_safe = source->component.parallel_safe;
+    candidate->component.parallel_aware = source->component.parallel_aware;
+    candidate->component.parallel_workers = source->component.parallel_workers;
+    candidate->component.gather_cost = source->component.gather_cost;
+    candidate->component.order_preserving =
+        source->component.order_preserving;
+    candidate->component.shared_state_required =
+        source->component.shared_state_required;
+
+    candidate->connector.kind_id = source->connector.kind_id;
+    candidate->connector.bound_kind = source->connector.bound_kind;
+    candidate->connector.order_property_kind =
+        source->connector.order_property_kind;
+    candidate->connector.source_evidence_kind =
+        source->connector.source_evidence_kind;
+    candidate->connector.solved_relids =
+        bms_copy(source->connector.solved_relids);
+    candidate->connector.required_outer =
+        bms_copy(source->connector.required_outer);
+    candidate->connector.provided_relids =
+        bms_copy(source->connector.provided_relids);
+    candidate->connector.rows = source->connector.rows;
+    candidate->connector.startup_cost = source->connector.startup_cost;
+    candidate->connector.total_cost = source->connector.total_cost;
+
+    if (source->pattern_key != NULL)
+        candidate->pattern_key = pstrdup(source->pattern_key);
+    candidate->source_kind_id = source->source_kind_id;
+
+    return candidate;
+}
+
+static AgeGraphJoinCandidateTable *graph_join_copy_candidate_table(
+    const AgeGraphJoinCandidateTable *source, MemoryContext context)
+{
+    AgeGraphJoinCandidateTable *table;
+    MemoryContext oldcontext;
+    ListCell *lc;
+
+    Assert(source != NULL);
+    Assert(context != NULL);
+
+    oldcontext = MemoryContextSwitchTo(context);
+
+    table = age_graph_join_make_candidate_table();
+    table->declared_entry_count = source->declared_entry_count;
+    table->cover_match_kind = source->cover_match_kind;
+    if (source->pattern_key != NULL)
+        table->pattern_key = pstrdup(source->pattern_key);
+    table->source_kind_id = source->source_kind_id;
+    table->component_family_kind = source->component_family_kind;
+    foreach(lc, source->candidates)
+    {
+        AgeGraphJoinCandidate *candidate = lfirst(lc);
+
+        if (candidate == NULL)
+            continue;
+        table->candidates = lappend(table->candidates,
+                                    graph_join_copy_candidate(candidate));
+    }
+
+    MemoryContextSwitchTo(oldcontext);
+
+    return table;
 }
 
 static AgeGraphJoinLoweringArtifactEntry *

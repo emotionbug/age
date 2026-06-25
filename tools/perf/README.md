@@ -52,6 +52,49 @@ VLE_WORKLIST_MIN_SPEEDUP=10 \
   tools/perf/verify_vle_level_batch_worklist.sh
 ```
 
+## WCOJ progressive multiway intersection
+
+`verify_wcoj_progressive_intersection.sh` isolates the high-arity intersection
+algorithm without requiring PostgreSQL.  It compares the former global merge
+with full per-destination bitmap clears, the sparse dirty-word reset, and the
+progressive exact-set algorithm.  The sparse fixture gives every source private
+destinations, so the progressive path can prove the result empty after the
+second source.  A dense fixture verifies that retaining more than 75% of the
+seed falls back to the streaming global merge without excessive overhead.
+
+```sh
+tools/perf/verify_wcoj_progressive_intersection.sh
+```
+
+The default guard checks 1,024, 4,096, and 8,192 sources at fanout 32, requires
+at least 10x algorithmic speedup, and limits dense fallback overhead to 1.25x.
+Override the dimensions or thresholds as follows:
+
+```sh
+WCOJ_PROGRESSIVE_SOURCES="2048 8192" \
+WCOJ_PROGRESSIVE_FANOUT=64 \
+WCOJ_PROGRESSIVE_MIN_SPEEDUP=10 \
+WCOJ_PROGRESSIVE_MAX_DENSE_OVERHEAD=1.25 \
+  tools/perf/verify_wcoj_progressive_intersection.sh
+```
+
+The C result is a complexity/regression guard, not a whole-query latency claim.
+For an installed release AGE build, create matched sparse and dense graph data
+and collect five `EXPLAIN ANALYZE` samples per shape:
+
+```sh
+psql --set=ON_ERROR_STOP=1 --set=sources=8192 --set=fanout=32 \
+  --file=tools/perf/wcoj_progressive_setup.sql
+psql --set=ON_ERROR_STOP=1 --set=runs=5 \
+  --file=tools/perf/wcoj_progressive_benchmark.sql
+```
+
+For a before/after comparison, run the benchmark against separately installed
+baseline and candidate extension builds with the same PostgreSQL release,
+configuration, graph dimensions, and warmup policy.  The progressive kernel is
+currently exposed through `age_adjacency_multiway_intersect`; automatic
+cyclic/fork Cypher lowering remains a separate planner task.
+
 ## Exact endpoint / expand-into indexes
 
 A Cypher closing edge such as `(a)-[:R]->(b)` has both endpoint graphids

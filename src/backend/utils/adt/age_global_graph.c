@@ -5273,6 +5273,9 @@ static Oid age_adjacency_resolve_index(Oid edge_relation_oid, bool outgoing)
 typedef struct WcojSource
 {
     graphid id;
+    Oid index_oid;
+    int64 estimated_postings;
+    bool estimate_found;
     bool outgoing;
     int64 global_index;
     int64 run_index;
@@ -5305,6 +5308,395 @@ typedef struct WcojMergeCursor
     void *head_tag;
     bool head_valid;
 } WcojMergeCursor;
+
+/*
+ * Per-destination source coverage.  A full bitmap clear at every destination
+ * makes a sparse intersection O(destination_groups * source_count / 64), even
+ * when each group is reached by only one source.  Track the words dirtied in
+ * the current group and clear only those words at the next group boundary.
+ * Each posting can dirty at most one word, so reset work is O(postings).
+ */
+typedef struct WcojSeenSet
+{
+    uint64 *words;
+    int64 *dirty_word_indexes;
+    int64 word_count;
+    int64 dirty_word_count;
+} WcojSeenSet;
+
+static void age_wcoj_seen_set_init(WcojSeenSet *seen, int64 source_count)
+{
+    Assert(seen != NULL);
+    Assert(source_count > 0);
+
+    seen->word_count = source_count / 64 + (source_count % 64 != 0);
+    seen->dirty_word_count = 0;
+    seen->words = palloc0_array(uint64, seen->word_count);
+    seen->dirty_word_indexes = palloc_array(int64, seen->word_count);
+}
+
+static void age_wcoj_seen_set_reset(WcojSeenSet *seen)
+{
+    int64 i;
+
+    Assert(seen != NULL);
+    Assert(seen->dirty_word_count >= 0);
+    Assert(seen->dirty_word_count <= seen->word_count);
+
+    for (i = 0; i < seen->dirty_word_count; i++)
+        seen->words[seen->dirty_word_indexes[i]] = 0;
+    seen->dirty_word_count = 0;
+}
+
+static bool age_wcoj_seen_set_add(WcojSeenSet *seen, int64 source_index)
+{
+    int64 word_index;
+    uint64 word;
+    uint64 bit;
+
+    Assert(seen != NULL);
+    Assert(source_index >= 0);
+    Assert(source_index < seen->word_count * 64);
+
+    word_index = source_index >> 6;
+    word = seen->words[word_index];
+    bit = UINT64CONST(1) << (source_index & 63);
+    if (word & bit)
+        return false;
+
+    if (word == 0)
+    {
+        Assert(seen->dirty_word_count < seen->word_count);
+        seen->dirty_word_indexes[seen->dirty_word_count++] = word_index;
+    }
+    seen->words[word_index] = word | bit;
+    return true;
+}
+
+static void age_wcoj_seen_set_destroy(WcojSeenSet *seen)
+{
+    if (seen->dirty_word_indexes != NULL)
+        pfree(seen->dirty_word_indexes);
+    if (seen->words != NULL)
+        pfree(seen->words);
+    memset(seen, 0, sizeof(*seen));
+}
+
+static bool age_wcoj_seen_set_contains(const WcojSeenSet *seen,
+                                       int64 source_index)
+{
+    uint64 bit;
+
+    Assert(seen != NULL);
+    Assert(source_index >= 0);
+    Assert(source_index < seen->word_count * 64);
+
+    bit = UINT64CONST(1) << (source_index & 63);
+    return (seen->words[source_index >> 6] & bit) != 0;
+}
+
+#define AGE_WCOJ_PROGRESSIVE_MIN_SOURCES 8
+#define AGE_WCOJ_PROGRESSIVE_MAX_SEED_POSTINGS 65536
+
+static int age_wcoj_graphid_cmp(const void *a, const void *b)
+{
+    graphid l = *((const graphid *) a);
+    graphid r = *((const graphid *) b);
+
+    if (l < r)
+        return -1;
+    if (l > r)
+        return 1;
+    return 0;
+}
+
+static int age_wcoj_estimated_source_cmp(const void *a, const void *b)
+{
+    const WcojSource *l = *((WcojSource *const *) a);
+    const WcojSource *r = *((WcojSource *const *) b);
+
+    if (l->estimated_postings < r->estimated_postings)
+        return -1;
+    if (l->estimated_postings > r->estimated_postings)
+        return 1;
+    return age_wcoj_source_cmp(l, r);
+}
+
+static int64 age_wcoj_candidate_index(const graphid *candidates,
+                                       int64 candidate_count,
+                                       graphid vertex_id)
+{
+    int64 lo = 0;
+    int64 hi = candidate_count;
+
+    while (lo < hi)
+    {
+        int64 mid = lo + (hi - lo) / 2;
+
+        if (candidates[mid] < vertex_id)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo < candidate_count && candidates[lo] == vertex_id)
+        return lo;
+    return -1;
+}
+
+/*
+ * Collect and deduplicate one source's sorted adjacency list.  The directory
+ * estimate can omit an unmerged delta tail, so cap the observed posting count
+ * as well as the estimate.  Crossing the cap returns -1 and lets the caller
+ * use the streaming global merge without materializing an unexpectedly large
+ * seed.
+ */
+static int64 age_wcoj_collect_seed_candidates(const WcojSource *source,
+                                               int64 posting_limit,
+                                               graphid **candidates_out)
+{
+    AgeAdjacencyVisiblePayloadScan *scan;
+    AgeAdjacencyPayload payload;
+    graphid *candidates;
+    int64 capacity;
+    int64 count = 0;
+    int64 unique;
+    int64 i;
+
+    Assert(source != NULL);
+    Assert(candidates_out != NULL);
+    Assert(OidIsValid(source->index_oid));
+    Assert(posting_limit > 0);
+
+    capacity = Min(Max(source->estimated_postings, INT64CONST(16)),
+                   posting_limit);
+    candidates = palloc_array(graphid, capacity);
+    scan = age_adjacency_begin_visible_payload_scan(
+        source->index_oid, GetActiveSnapshot(), false);
+    if (age_adjacency_visible_payload_scan_begin_key(scan, source->id))
+    {
+        while (age_adjacency_visible_payload_scan_next(scan, &payload))
+        {
+            int64 new_capacity;
+
+            if (count == posting_limit)
+            {
+                age_adjacency_end_visible_payload_scan(scan);
+                pfree(candidates);
+                *candidates_out = NULL;
+                return -1;
+            }
+            if (count == capacity)
+            {
+                new_capacity = Min(capacity * 2, posting_limit);
+                Assert(new_capacity > capacity);
+                capacity = new_capacity;
+                candidates = repalloc_array(candidates, graphid, capacity);
+            }
+            candidates[count++] = payload.next_vertex_id;
+        }
+    }
+    age_adjacency_end_visible_payload_scan(scan);
+
+    if (count == 0)
+    {
+        pfree(candidates);
+        *candidates_out = NULL;
+        return 0;
+    }
+
+    qsort(candidates, count, sizeof(graphid), age_wcoj_graphid_cmp);
+    unique = 1;
+    for (i = 1; i < count; i++)
+    {
+        if (candidates[i] != candidates[unique - 1])
+            candidates[unique++] = candidates[i];
+    }
+    *candidates_out = candidates;
+    return unique;
+}
+
+/*
+ * Push the current candidate set into one source scan.  The adjacency AM uses
+ * the sorted exact set and range to skip unrelated run blocks/postings; the
+ * local sparse bitmap deduplicates multigraph edges without allocating output
+ * proportional to edge multiplicity.
+ */
+static int64 age_wcoj_filter_candidates(const WcojSource *source,
+                                         graphid *candidates,
+                                         int64 candidate_count,
+                                         WcojSeenSet *matched)
+{
+    AgeAdjacencyVisiblePayloadScan *scan;
+    AgeAdjacencyVertexSetFilter filter;
+    AgeAdjacencyPayload payload;
+    int64 output_count = 0;
+    int64 i;
+
+    Assert(source != NULL);
+    Assert(candidates != NULL);
+    Assert(candidate_count > 0);
+    Assert(matched != NULL);
+
+    memset(&filter, 0, sizeof(filter));
+    filter.sorted_vertex_ids = candidates;
+    filter.source = "wcoj-progressive";
+    filter.matches = candidate_count;
+    filter.sorted_vertex_count = candidate_count;
+    filter.min_vertex_id = candidates[0];
+    filter.max_vertex_id = candidates[candidate_count - 1];
+    filter.has_range = true;
+    filter.has_sorted_vertex_ids = true;
+
+    age_wcoj_seen_set_reset(matched);
+    scan = age_adjacency_begin_visible_payload_scan(
+        source->index_oid, GetActiveSnapshot(), false);
+    age_adjacency_visible_payload_scan_set_terminal_vertex_set_filter(
+        scan, &filter);
+    if (age_adjacency_visible_payload_scan_begin_key(scan, source->id))
+    {
+        while (age_adjacency_visible_payload_scan_next(scan, &payload))
+        {
+            int64 candidate_index;
+
+            candidate_index = age_wcoj_candidate_index(
+                candidates, candidate_count, payload.next_vertex_id);
+            if (candidate_index >= 0)
+                age_wcoj_seen_set_add(matched, candidate_index);
+        }
+    }
+    age_adjacency_end_visible_payload_scan(scan);
+
+    for (i = 0; i < candidate_count; i++)
+    {
+        if (age_wcoj_seen_set_contains(matched, i))
+            candidates[output_count++] = candidates[i];
+    }
+    return output_count;
+}
+
+/* Fill per-source directory estimates while preserving the source tags. */
+static bool age_wcoj_estimate_sources(
+    Oid index_oid, AgeAdjacencyVisiblePayloadRunKey *keys, int64 key_count)
+{
+    AgeAdjacencyTerminalLabelPostingEstimate *estimates;
+    int64 i;
+    bool estimated;
+
+    if (key_count <= 0)
+        return true;
+
+    estimates = palloc0_array(AgeAdjacencyTerminalLabelPostingEstimate,
+                              key_count);
+    for (i = 0; i < key_count; i++)
+        estimates[i].key = keys[i].key;
+    estimated = age_adjacency_estimate_terminal_label_postings_batch(
+        index_oid, 0, estimates, key_count);
+    if (estimated)
+    {
+        for (i = 0; i < key_count; i++)
+        {
+            WcojSource *source = (WcojSource *) keys[i].tag;
+
+            Assert(source != NULL);
+            source->index_oid = index_oid;
+            source->estimate_found = estimates[i].found;
+            source->estimated_postings = estimates[i].found ?
+                estimates[i].run_postings : 0;
+        }
+    }
+    pfree(estimates);
+    return estimated;
+}
+
+/*
+ * For high-arity intersections with a small seed list, progressive exact-set
+ * pushdown is asymptotically preferable to merging every posting from every
+ * source.  It processes the shortest source first, intersects the next source,
+ * and abandons the candidate immediately when it becomes empty.  If the first
+ * probe does not shrink the set, fall back to the global merge path so dense,
+ * highly-overlapping workloads retain its lower per-posting overhead.
+ */
+static bool age_wcoj_try_progressive_intersection(
+    WcojSource *sources, int64 source_count,
+    AgeAdjacencyVisiblePayloadRunKey *out_keys, int64 out_count, Oid out_index,
+    AgeAdjacencyVisiblePayloadRunKey *in_keys, int64 in_count, Oid in_index,
+    Tuplestorestate *tuple_store, TupleDesc ret_tdesc)
+{
+    WcojSource **ordered;
+    graphid *candidates = NULL;
+    WcojSeenSet matched = {0};
+    int64 seed_count;
+    int64 candidate_count;
+    int64 i;
+    bool handled = false;
+
+    if (source_count < AGE_WCOJ_PROGRESSIVE_MIN_SOURCES)
+        return false;
+    if (!age_wcoj_estimate_sources(out_index, out_keys, out_count) ||
+        !age_wcoj_estimate_sources(in_index, in_keys, in_count))
+        return false;
+
+    ordered = palloc_array(WcojSource *, source_count);
+    for (i = 0; i < source_count; i++)
+    {
+        /* Directory estimates do not prove delta-only keys empty. */
+        if (!sources[i].estimate_found ||
+            sources[i].estimated_postings <= 0)
+            goto done;
+        ordered[i] = &sources[i];
+    }
+    qsort(ordered, source_count, sizeof(WcojSource *),
+          age_wcoj_estimated_source_cmp);
+    if (ordered[0]->estimated_postings >
+        AGE_WCOJ_PROGRESSIVE_MAX_SEED_POSTINGS)
+        goto done;
+
+    candidate_count = age_wcoj_collect_seed_candidates(
+        ordered[0], AGE_WCOJ_PROGRESSIVE_MAX_SEED_POSTINGS, &candidates);
+    if (candidate_count < 0)
+        goto done;
+    if (candidate_count == 0)
+    {
+        handled = true;
+        goto done;
+    }
+    seed_count = candidate_count;
+    age_wcoj_seen_set_init(&matched, seed_count);
+
+    for (i = 1; i < source_count && candidate_count > 0; i++)
+    {
+        candidate_count = age_wcoj_filter_candidates(
+            ordered[i], candidates, candidate_count, &matched);
+
+        /* Dense overlap is better served by the existing global merge. */
+        if (i == 1)
+        {
+            int64 dense_threshold;
+
+            dense_threshold = (seed_count / 4) * 3 +
+                              ((seed_count % 4) * 3) / 4;
+            if (candidate_count > dense_threshold)
+                goto done;
+        }
+    }
+
+    for (i = 0; i < candidate_count; i++)
+    {
+        Datum values[1];
+        bool nulls[1] = {false};
+
+        values[0] = GRAPHID_GET_DATUM(candidates[i]);
+        tuplestore_putvalues(tuple_store, ret_tdesc, values, nulls);
+    }
+    handled = true;
+
+done:
+    age_wcoj_seen_set_destroy(&matched);
+    if (candidates != NULL)
+        pfree(candidates);
+    pfree(ordered);
+    return handled;
+}
 
 static void age_wcoj_merge_cursor_refill(WcojMergeCursor *c)
 {
@@ -5375,6 +5767,8 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
     bool default_outgoing = true;
     Oid graph_oid;
     Oid edge_relation_oid;
+    Oid out_index = InvalidOid;
+    Oid in_index = InvalidOid;
     ReturnSetInfo *rsi;
     TupleDesc ret_tdesc;
     Tuplestorestate *tuple_store;
@@ -5390,8 +5784,7 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
     int sel;
     graphid current_vertex = 0;
     bool have_current = false;
-    uint64 *seen_words = NULL;
-    int64 word_count;
+    WcojSeenSet seen = {0};
     int64 distinct_seen = 0;
     agtype_iterator *it;
     agtype_value av;
@@ -5561,6 +5954,9 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
                 repalloc(sources, sizeof(WcojSource) * source_capacity));
         }
         sources[source_count].id = add_id;
+        sources[source_count].index_oid = InvalidOid;
+        sources[source_count].estimated_postings = 0;
+        sources[source_count].estimate_found = false;
         sources[source_count].outgoing = add_outgoing;
         sources[source_count].global_index = 0;
         sources[source_count].run_index = 0;
@@ -5617,8 +6013,7 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
     memset(cursors, 0, sizeof(cursors));
     if (out_count > 0)
     {
-        Oid out_index = age_adjacency_resolve_index(edge_relation_oid, true);
-
+        out_index = age_adjacency_resolve_index(edge_relation_oid, true);
         if (!OidIsValid(out_index))
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -5626,13 +6021,10 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
                             edge_label_name),
                      errhint("Create an age_adjacency index on "
                              "(start_id, id, end_id).")));
-        cursors[0].scan = age_adjacency_begin_visible_payload_run_scan_with_tags(
-            out_index, GetActiveSnapshot(), false, 0, out_keys, out_count);
     }
     if (in_count > 0)
     {
-        Oid in_index = age_adjacency_resolve_index(edge_relation_oid, false);
-
+        in_index = age_adjacency_resolve_index(edge_relation_oid, false);
         if (!OidIsValid(in_index))
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -5640,9 +6032,19 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
                             edge_label_name),
                      errhint("Create an age_adjacency index on "
                              "(end_id, id, start_id).")));
+    }
+
+    if (age_wcoj_try_progressive_intersection(
+            sources, source_count, out_keys, out_count, out_index,
+            in_keys, in_count, in_index, tuple_store, ret_tdesc))
+        goto done;
+
+    if (out_count > 0)
+        cursors[0].scan = age_adjacency_begin_visible_payload_run_scan_with_tags(
+            out_index, GetActiveSnapshot(), false, 0, out_keys, out_count);
+    if (in_count > 0)
         cursors[1].scan = age_adjacency_begin_visible_payload_run_scan_with_tags(
             in_index, GetActiveSnapshot(), false, 0, in_keys, in_count);
-    }
 
     /*
      * Intersection is impossible when any requested source key has no first
@@ -5657,8 +6059,7 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
              cursors[1].scan) < in_count))
         goto done;
 
-    word_count = (source_count + 63) / 64;
-    seen_words = (uint64 *) palloc0(sizeof(uint64) * word_count);
+    age_wcoj_seen_set_init(&seen, source_count);
 
     age_wcoj_merge_cursor_refill(&cursors[0]);
     age_wcoj_merge_cursor_refill(&cursors[1]);
@@ -5697,7 +6098,7 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
                 break;
             }
 
-            MemSet(seen_words, 0, sizeof(uint64) * word_count);
+            age_wcoj_seen_set_reset(&seen);
             distinct_seen = 0;
             current_vertex = v;
             have_current = true;
@@ -5705,13 +6106,8 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
 
         if (kidx >= 0 && kidx < source_count)
         {
-            uint64 bit = UINT64CONST(1) << (kidx & 63);
-
-            if (!(seen_words[kidx >> 6] & bit))
-            {
-                seen_words[kidx >> 6] |= bit;
+            if (age_wcoj_seen_set_add(&seen, kidx))
                 distinct_seen++;
-            }
         }
 
         age_wcoj_merge_cursor_refill(&cursors[sel]);
@@ -5732,8 +6128,7 @@ done:
     if (cursors[1].scan != NULL)
         age_adjacency_end_visible_payload_run_scan(cursors[1].scan);
 
-    if (seen_words != NULL)
-        pfree(seen_words);
+    age_wcoj_seen_set_destroy(&seen);
     pfree(out_keys);
     pfree(in_keys);
     pfree(sources);

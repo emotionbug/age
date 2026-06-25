@@ -41,6 +41,7 @@ typedef struct CypherAdjacencyMatchCandidate
     Node *bound_endpoint_expr;
     char *bound_terminal_alias;
     Node *bound_terminal_expr;
+    char *terminal_alias;
     char *index_source;
     AgeAdjacencyMatchIndexKind index_kind_id;
     char *index_provider;
@@ -116,6 +117,7 @@ void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
                                                Node *bound_endpoint_expr,
                                                const char *bound_terminal_alias,
                                                Node *bound_terminal_expr,
+                                               const char *terminal_alias,
                                                const char *index_source,
                                                AgeAdjacencyMatchIndexKind index_kind_id,
                                                const char *index_provider,

@@ -20,6 +20,14 @@
 #ifndef AG_GUC_H
 #define AG_GUC_H
 
+typedef enum AgeWCOJEngineKind
+{
+    AGE_WCOJ_ENGINE_AUTO = 0,
+    AGE_WCOJ_ENGINE_PROGRESSIVE,
+    AGE_WCOJ_ENGINE_LEAPFROG,
+    AGE_WCOJ_ENGINE_MERGE
+} AgeWCOJEngineKind;
+
 /*
  * AGE configuration parameters.
  *
@@ -31,6 +39,10 @@
  * regular Postgres parameters. See guc.h for more details.
  */
 
+extern bool age_enable_wcoj;
+extern int age_wcoj_engine;
+
 void define_config_params(void);
+const char *age_wcoj_engine_name(AgeWCOJEngineKind engine);
 
 #endif

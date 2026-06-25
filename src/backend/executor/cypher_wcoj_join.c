@@ -1,0 +1,2235 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+#include "postgres.h"
+
+#include "access/age_adjacency.h"
+#include "catalog/ag_label.h"
+#include "commands/explain_format.h"
+#include "commands/explain_state.h"
+#include "executor/cypher_wcoj_join.h"
+#include "executor/executor.h"
+#include "lib/stringinfo.h"
+#include "nodes/pg_list.h"
+#include "utils/ag_guc.h"
+#include "utils/graphid.h"
+#include "utils/memutils.h"
+
+#define AGE_WCOJ_PROGRESSIVE_DENSE_SAMPLE 1024
+#define AGE_WCOJ_PROGRESSIVE_DENSE_NUMERATOR 3
+#define AGE_WCOJ_PROGRESSIVE_DENSE_DENOMINATOR 4
+#define AGE_WCOJ_PROGRESSIVE_MAX_SEED_POSTINGS 65536
+
+/*
+ * One duplicate group per input stream.  Rows are copied because every child
+ * PlanState reuses its result slot on the next ExecProcNode() call.
+ */
+typedef struct AgeWCOJTupleGroup
+{
+    MinimalTuple *tuples;
+    graphid *edge_ids;
+    bool *edge_id_valid;
+    int count;
+    int capacity;
+} AgeWCOJTupleGroup;
+
+typedef struct AgeWCOJJoinScanState AgeWCOJJoinScanState;
+typedef struct AgeWCOJPostingProvider AgeWCOJPostingProvider;
+
+typedef struct AgeWCOJSourceRow
+{
+    graphid key;
+    MinimalTuple tuple;
+} AgeWCOJSourceRow;
+
+typedef struct AgeWCOJSourceKeyBag
+{
+    graphid key;
+    int first_row;
+    int row_count;
+} AgeWCOJSourceKeyBag;
+
+typedef enum AgeWCOJAdjacencyBuildResult
+{
+    AGE_WCOJ_ADJACENCY_BUILD_EMPTY = 0,
+    AGE_WCOJ_ADJACENCY_BUILD_READY,
+    AGE_WCOJ_ADJACENCY_BUILD_OVERSIZE
+} AgeWCOJAdjacencyBuildResult;
+
+typedef struct AgeWCOJPostingProviderOps
+{
+    bool (*first_distinct)(AgeWCOJPostingProvider *provider);
+    bool (*next_distinct)(AgeWCOJPostingProvider *provider);
+    bool (*seek_ge)(AgeWCOJPostingProvider *provider, graphid target);
+    bool (*materialize_group)(AgeWCOJPostingProvider *provider,
+                              graphid terminal);
+    void (*rescan)(AgeWCOJPostingProvider *provider);
+    void (*close)(AgeWCOJPostingProvider *provider);
+} AgeWCOJPostingProviderOps;
+
+/*
+ * The first provider implementation deliberately wraps the already-planned,
+ * sorted child PlanState.  It gives the intersection engines one contract and
+ * remains the correctness fallback when a direct adjacency provider is not
+ * available.  seek_ge() is an emulated seek over the sorted stream; a future
+ * adjacency provider can replace it with an index-level seek without changing
+ * the survivor or bag-restoration code.
+ */
+struct AgeWCOJPostingProvider
+{
+    const AgeWCOJPostingProviderOps *ops;
+    AgeWCOJProviderKind kind;
+    AgeWCOJJoinScanState *owner;
+    PlanState *plan_state;
+    AttrNumber key_attno;
+    TupleTableSlot *current_slot;
+    graphid current_key;
+    graphid last_key;
+    bool has_current;
+    bool has_last_key;
+    bool exhausted;
+    bool seekable;
+    int source_index;
+    Oid edge_rel_oid;
+    Oid index_oid;
+    bool outgoing;
+    AttrNumber terminal_attno;
+    int32 terminal_label_id;
+    AttrNumber source_key_attno;
+    int *output_map;
+    int output_width;
+    int output_offset;
+    int payload_mask;
+    AttrNumber edge_id_output_attno;
+    bool estimate_trusted;
+    ExprState *local_qual;
+    TupleTableSlot *source_slot;
+    TupleTableSlot *output_slot;
+    MemoryContext provider_context;
+    AgeWCOJSourceRow *source_rows;
+    int source_row_count;
+    int source_row_capacity;
+    AgeWCOJSourceKeyBag *source_bags;
+    int source_bag_count;
+    graphid *terminals;
+    int terminal_count;
+    int terminal_capacity;
+    int terminal_index;
+    AgeAdjacencyVisiblePayloadScan *terminal_scan;
+    AgeAdjacencyVisiblePayloadScan *payload_scan;
+    bool fetch_properties;
+    bool built;
+    int64 rows_scanned;
+    int64 cursor_advances;
+    int64 seek_calls;
+};
+
+struct AgeWCOJJoinScanState
+{
+    CustomScanState css;
+    int arity;
+    AttrNumber *key_attnos;
+    double *estimated_postings;
+    int *source_order;
+    List *provider_descs;
+    List *uniqueness_group_descs;
+    Bitmapset **uniqueness_groups;
+    int uniqueness_group_count;
+    AgeWCOJPostingProvider *providers;
+    TupleTableSlot **group_slots;
+    AgeWCOJTupleGroup *groups;
+    int *combination_indexes;
+    int *enumeration_order;
+    graphid *selected_edge_ids;
+    bool *selected_edge_id_valid;
+    bool enumeration_started;
+    int64 *stage_survivors;
+    MemoryContext group_context;
+    graphid group_key;
+    AgeWCOJEngineKind requested_engine;
+    AgeWCOJEngineKind planned_engine;
+    AgeWCOJEngineKind actual_engine;
+    const char *fallback_reason;
+    int seed_index;
+    bool group_active;
+    bool exhausted;
+    int64 input_rows;
+    int64 groups_matched;
+    int64 candidate_combinations;
+    int64 cursor_advances;
+    int64 seek_calls;
+    int64 posting_rows_scanned;
+    int64 payload_rows_fetched;
+    int64 uniqueness_rejects;
+    int64 rows_emitted;
+    int64 rescans;
+    int64 progressive_probes;
+    int64 progressive_matches;
+    int64 source_rows_scanned;
+    int64 distinct_source_keys;
+    int64 intersection_builds;
+    int64 local_predicate_rejects;
+    int64 exact_set_filters;
+    int64 exact_set_candidates_tested;
+    bool progressive_setup_done;
+    bool progressive_exact_set;
+    Size peak_memory;
+};
+
+static Node *create_age_wcoj_join_scan_state(CustomScan *cscan);
+static void begin_age_wcoj_join_scan(CustomScanState *node, EState *estate,
+                                     int eflags);
+static TupleTableSlot *exec_age_wcoj_join_scan(CustomScanState *node);
+static TupleTableSlot *access_age_wcoj_join_scan(ScanState *node);
+static bool recheck_age_wcoj_join_scan(ScanState *node,
+                                       TupleTableSlot *slot);
+static void end_age_wcoj_join_scan(CustomScanState *node);
+static void rescan_age_wcoj_join_scan(CustomScanState *node);
+static void explain_age_wcoj_join_scan(CustomScanState *node,
+                                       List *ancestors, ExplainState *es);
+static bool plan_stream_first_distinct(AgeWCOJPostingProvider *provider);
+static bool plan_stream_next_distinct(AgeWCOJPostingProvider *provider);
+static bool plan_stream_seek_ge(AgeWCOJPostingProvider *provider,
+                                graphid target);
+static bool plan_stream_materialize_group(AgeWCOJPostingProvider *provider,
+                                          graphid terminal);
+static void plan_stream_rescan(AgeWCOJPostingProvider *provider);
+static void plan_stream_close(AgeWCOJPostingProvider *provider);
+static bool adjacency_first_distinct(AgeWCOJPostingProvider *provider);
+static bool adjacency_next_distinct(AgeWCOJPostingProvider *provider);
+static bool adjacency_seek_ge(AgeWCOJPostingProvider *provider,
+                              graphid target);
+static bool adjacency_materialize_group(AgeWCOJPostingProvider *provider,
+                                        graphid terminal);
+static void adjacency_rescan(AgeWCOJPostingProvider *provider);
+static void adjacency_close(AgeWCOJPostingProvider *provider);
+static bool build_adjacency_provider(AgeWCOJPostingProvider *provider);
+static AgeWCOJAdjacencyBuildResult build_adjacency_provider_filtered(
+    AgeWCOJPostingProvider *provider, const graphid *candidates,
+    int candidate_count, int posting_limit);
+static int intersect_age_wcoj_graphids(graphid *candidates,
+                                       int candidate_count,
+                                       const graphid *matches,
+                                       int match_count);
+static void rescan_age_wcoj_providers(AgeWCOJJoinScanState *state);
+static bool prepare_age_wcoj_progressive_exact_set(
+    AgeWCOJJoinScanState *state);
+static void update_age_wcoj_peak_memory(AgeWCOJJoinScanState *state);
+static void clear_age_wcoj_group(AgeWCOJJoinScanState *state);
+static bool align_age_wcoj_leapfrog(AgeWCOJJoinScanState *state,
+                                    graphid *matched_key);
+static bool align_age_wcoj_merge(AgeWCOJJoinScanState *state,
+                                 graphid *matched_key);
+static bool align_age_wcoj_progressive(AgeWCOJJoinScanState *state,
+                                       graphid *matched_key);
+static void append_age_wcoj_group_tuple(AgeWCOJJoinScanState *state,
+                                        int child_index,
+                                        TupleTableSlot *slot,
+                                        bool edge_id_valid,
+                                        graphid edge_id);
+static bool collect_age_wcoj_group(AgeWCOJJoinScanState *state,
+                                   graphid matched_key);
+static bool prepare_age_wcoj_group(AgeWCOJJoinScanState *state);
+static bool next_age_wcoj_combination(AgeWCOJJoinScanState *state);
+static TupleTableSlot *materialize_age_wcoj_combination(
+    AgeWCOJJoinScanState *state);
+
+const CustomScanMethods age_wcoj_join_scan_methods = {
+    AGE_WCOJ_JOIN_SCAN_NAME,
+    create_age_wcoj_join_scan_state
+};
+
+static const CustomExecMethods age_wcoj_join_exec_methods = {
+    AGE_WCOJ_JOIN_SCAN_NAME,
+    begin_age_wcoj_join_scan,
+    exec_age_wcoj_join_scan,
+    end_age_wcoj_join_scan,
+    rescan_age_wcoj_join_scan,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    explain_age_wcoj_join_scan
+};
+
+static const AgeWCOJPostingProviderOps plan_stream_provider_ops = {
+    plan_stream_first_distinct,
+    plan_stream_next_distinct,
+    plan_stream_seek_ge,
+    plan_stream_materialize_group,
+    plan_stream_rescan,
+    plan_stream_close
+};
+
+static const AgeWCOJPostingProviderOps adjacency_provider_ops = {
+    adjacency_first_distinct,
+    adjacency_next_distinct,
+    adjacency_seek_ge,
+    adjacency_materialize_group,
+    adjacency_rescan,
+    adjacency_close
+};
+
+static bool
+valid_wcoj_engine(int engine)
+{
+    return engine >= AGE_WCOJ_ENGINE_AUTO &&
+        engine <= AGE_WCOJ_ENGINE_MERGE;
+}
+
+static Node *
+create_age_wcoj_join_scan_state(CustomScan *cscan)
+{
+    AgeWCOJJoinScanState *state;
+    List *key_attnos;
+    List *estimated_postings;
+    List *provider_descs;
+    List *uniqueness_group_descs;
+    ListCell *lc;
+    int arity;
+    int requested_engine;
+    int planned_engine;
+    int index;
+
+    if (list_length(cscan->custom_private) !=
+        AGE_WCOJ_JOIN_PRIVATE_COUNT)
+    {
+        elog(ERROR, "invalid AGE WCOJ join private descriptor");
+    }
+
+    arity = intVal(list_nth(cscan->custom_private,
+                            AGE_WCOJ_JOIN_PRIVATE_ARITY));
+    key_attnos = list_nth(cscan->custom_private,
+                          AGE_WCOJ_JOIN_PRIVATE_KEY_ATTNOS);
+    requested_engine = intVal(list_nth(
+        cscan->custom_private, AGE_WCOJ_JOIN_PRIVATE_REQUESTED_ENGINE));
+    planned_engine = intVal(list_nth(
+        cscan->custom_private, AGE_WCOJ_JOIN_PRIVATE_PLANNED_ENGINE));
+    estimated_postings = list_nth(
+        cscan->custom_private, AGE_WCOJ_JOIN_PRIVATE_ESTIMATED_POSTINGS);
+    provider_descs = list_nth(
+        cscan->custom_private, AGE_WCOJ_JOIN_PRIVATE_PROVIDER_DESCS);
+    uniqueness_group_descs = list_nth(
+        cscan->custom_private, AGE_WCOJ_JOIN_PRIVATE_UNIQUENESS_GROUPS);
+    if (arity < 2 || list_length(key_attnos) != arity ||
+        list_length(estimated_postings) != arity ||
+        list_length(provider_descs) != arity ||
+        list_length(uniqueness_group_descs) != arity)
+    {
+        elog(ERROR, "invalid AGE WCOJ join arity");
+    }
+    if (!valid_wcoj_engine(requested_engine) ||
+        !valid_wcoj_engine(planned_engine) ||
+        planned_engine == AGE_WCOJ_ENGINE_AUTO)
+    {
+        elog(ERROR, "invalid AGE WCOJ engine descriptor");
+    }
+
+    state = palloc0(sizeof(*state));
+    state->css.ss.ps.type = T_CustomScanState;
+    state->css.flags = cscan->flags;
+    state->css.methods = &age_wcoj_join_exec_methods;
+    state->arity = arity;
+    state->requested_engine = (AgeWCOJEngineKind)requested_engine;
+    state->planned_engine = (AgeWCOJEngineKind)planned_engine;
+    state->actual_engine = state->planned_engine;
+    state->fallback_reason = "none";
+    state->key_attnos = palloc0(sizeof(AttrNumber) * arity);
+    state->estimated_postings = palloc0(sizeof(double) * arity);
+    state->source_order = palloc0(sizeof(int) * arity);
+    state->provider_descs = provider_descs;
+    state->uniqueness_group_descs = uniqueness_group_descs;
+
+    index = 0;
+    foreach(lc, key_attnos)
+    {
+        int attno = intVal(lfirst(lc));
+
+        if (attno < 0 || attno > MaxAttrNumber)
+            elog(ERROR, "invalid AGE WCOJ join key attribute %d", attno);
+        state->key_attnos[index++] = (AttrNumber)attno;
+    }
+
+    index = 0;
+    foreach(lc, estimated_postings)
+    {
+        Node *value = lfirst(lc);
+        double estimate;
+
+        if (!IsA(value, Float))
+            elog(ERROR, "invalid AGE WCOJ posting estimate");
+        estimate = floatVal(value);
+        if (estimate < 0)
+            estimate = 0;
+        state->estimated_postings[index] = estimate;
+        state->source_order[index] = index;
+        index++;
+    }
+
+    /* Stable insertion sort keeps equal estimates in planner child order. */
+    for (index = 1; index < arity; index++)
+    {
+        int source = state->source_order[index];
+        int position = index;
+
+        while (position > 0 &&
+               state->estimated_postings[state->source_order[position - 1]] >
+                   state->estimated_postings[source])
+        {
+            state->source_order[position] =
+                state->source_order[position - 1];
+            position--;
+        }
+        state->source_order[position] = source;
+    }
+    state->seed_index = state->source_order[0];
+
+    return (Node *)state;
+}
+
+static Oid
+age_wcoj_provider_desc_oid(List *desc, int field)
+{
+    Const *value;
+
+    value = castNode(Const, list_nth(desc, field));
+    if (value->consttype != OIDOID || value->constisnull)
+        elog(ERROR, "invalid AGE WCOJ provider OID");
+    return DatumGetObjectId(value->constvalue);
+}
+
+static TupleDesc
+age_wcoj_provider_output_desc(CustomScan *cscan, int output_offset,
+                              int output_width)
+{
+    List *segment = NIL;
+    int index;
+
+    if (output_offset <= 0 || output_width <= 0 ||
+        output_offset + output_width - 1 >
+            list_length(cscan->custom_scan_tlist))
+    {
+        elog(ERROR, "invalid AGE WCOJ provider output range");
+    }
+    for (index = 0; index < output_width; index++)
+    {
+        TargetEntry *tle = copyObject(list_nth(
+            cscan->custom_scan_tlist, output_offset - 1 + index));
+
+        tle->resno = index + 1;
+        segment = lappend(segment, tle);
+    }
+
+    return ExecTypeFromTL(segment);
+}
+
+static void
+begin_age_wcoj_join_scan(CustomScanState *node, EState *estate, int eflags)
+{
+    AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
+    CustomScan *cscan = (CustomScan *)node->ss.ps.plan;
+    ListCell *plan_cell;
+    ListCell *desc_cell;
+    ListCell *qual_cell;
+    ListCell *group_desc_cell;
+    int child_index;
+
+    foreach(plan_cell, cscan->custom_plans)
+    {
+        Plan *subplan = (Plan *)lfirst(plan_cell);
+
+        node->custom_ps = lappend(node->custom_ps,
+                                  ExecInitNode(subplan, estate, eflags));
+    }
+    if (list_length(node->custom_ps) != state->arity ||
+        list_length(state->provider_descs) != state->arity ||
+        list_length(cscan->custom_exprs) != state->arity)
+    {
+        elog(ERROR, "AGE WCOJ join child count does not match arity");
+    }
+
+    state->providers = palloc0(sizeof(AgeWCOJPostingProvider) * state->arity);
+    state->group_slots = palloc0(sizeof(TupleTableSlot *) * state->arity);
+    state->groups = palloc0(sizeof(AgeWCOJTupleGroup) * state->arity);
+    state->combination_indexes = palloc0(sizeof(int) * state->arity);
+    state->enumeration_order = palloc0(sizeof(int) * state->arity);
+    state->selected_edge_ids = palloc0(sizeof(graphid) * state->arity);
+    state->selected_edge_id_valid = palloc0(sizeof(bool) * state->arity);
+    state->uniqueness_groups = palloc0(sizeof(Bitmapset *) * state->arity);
+    state->stage_survivors = palloc0(sizeof(int64) * state->arity);
+    state->group_context = AllocSetContextCreate(
+        estate->es_query_cxt, "AGE WCOJ duplicate group",
+        ALLOCSET_DEFAULT_SIZES);
+
+    child_index = 0;
+    foreach(group_desc_cell, state->uniqueness_group_descs)
+    {
+        List *group_ids = (List *)lfirst(group_desc_cell);
+        ListCell *group_cell;
+
+        foreach(group_cell, group_ids)
+        {
+            int group_id = intVal(lfirst(group_cell));
+
+            if (group_id < 0)
+                elog(ERROR, "invalid AGE WCOJ uniqueness group");
+            state->uniqueness_groups[child_index] = bms_add_member(
+                state->uniqueness_groups[child_index], group_id);
+            state->uniqueness_group_count = Max(
+                state->uniqueness_group_count, group_id + 1);
+        }
+        child_index++;
+    }
+
+    child_index = 0;
+    forthree(plan_cell, node->custom_ps,
+             desc_cell, state->provider_descs,
+             qual_cell, cscan->custom_exprs)
+    {
+        PlanState *child_state = (PlanState *)lfirst(plan_cell);
+        TupleDesc child_desc = ExecGetResultType(child_state);
+        List *desc = (List *)lfirst(desc_cell);
+        List *local_quals = (List *)lfirst(qual_cell);
+        AgeWCOJPostingProvider *provider = &state->providers[child_index];
+        List *output_map;
+        ListCell *map_cell;
+        int map_index;
+        int provider_kind;
+        int output_width;
+        int output_offset;
+
+        if (list_length(desc) != AGE_WCOJ_PROVIDER_DESC_COUNT)
+            elog(ERROR, "invalid AGE WCOJ provider descriptor");
+        provider_kind = intVal(list_nth(desc, AGE_WCOJ_PROVIDER_DESC_KIND));
+        output_width = intVal(list_nth(
+            desc, AGE_WCOJ_PROVIDER_DESC_OUTPUT_WIDTH));
+        output_offset = intVal(list_nth(
+            desc, AGE_WCOJ_PROVIDER_DESC_OUTPUT_OFFSET));
+        output_map = list_nth(desc, AGE_WCOJ_PROVIDER_DESC_OUTPUT_MAP);
+
+        provider->kind = (AgeWCOJProviderKind)provider_kind;
+        provider->owner = state;
+        provider->plan_state = child_state;
+        provider->source_index = child_index;
+        provider->edge_rel_oid = age_wcoj_provider_desc_oid(
+            desc, AGE_WCOJ_PROVIDER_DESC_EDGE_REL_OID);
+        provider->index_oid = age_wcoj_provider_desc_oid(
+            desc, AGE_WCOJ_PROVIDER_DESC_INDEX_OID);
+        provider->outgoing = intVal(list_nth(
+            desc, AGE_WCOJ_PROVIDER_DESC_OUTGOING)) != 0;
+        provider->terminal_attno = (AttrNumber)intVal(list_nth(
+            desc, AGE_WCOJ_PROVIDER_DESC_TERMINAL_ATTNO));
+        provider->terminal_label_id = intVal(list_nth(
+            desc, AGE_WCOJ_PROVIDER_DESC_TERMINAL_LABEL_ID));
+        provider->source_key_attno = (AttrNumber)intVal(list_nth(
+            desc, AGE_WCOJ_PROVIDER_DESC_SOURCE_KEY_ATTNO));
+        provider->output_width = output_width;
+        provider->output_offset = output_offset;
+        provider->payload_mask = intVal(list_nth(
+            desc, AGE_WCOJ_PROVIDER_DESC_PAYLOAD_MASK));
+        provider->edge_id_output_attno = (AttrNumber)intVal(list_nth(
+            desc, AGE_WCOJ_PROVIDER_DESC_EDGE_ID_OUTPUT_ATTNO));
+        provider->estimate_trusted = intVal(list_nth(
+            desc, AGE_WCOJ_PROVIDER_DESC_ESTIMATE_TRUSTED)) != 0;
+        provider->local_qual = local_quals != NIL ?
+            ExecInitQual(local_quals, (PlanState *)node) : NULL;
+
+        if (provider_kind == AGE_WCOJ_PROVIDER_PLAN_STREAM)
+        {
+            if (state->key_attnos[child_index] <= 0 ||
+                state->key_attnos[child_index] > child_desc->natts)
+            {
+                elog(ERROR,
+                     "AGE WCOJ key attribute %d exceeds child %d width %d",
+                     state->key_attnos[child_index], child_index + 1,
+                     child_desc->natts);
+            }
+            provider->ops = &plan_stream_provider_ops;
+            provider->key_attno = state->key_attnos[child_index];
+            provider->seekable = true;
+            state->group_slots[child_index] = ExecInitExtraTupleSlot(
+                estate, child_desc, &TTSOpsMinimalTuple);
+        }
+        else if (provider_kind == AGE_WCOJ_PROVIDER_ADJACENCY)
+        {
+            TupleDesc output_desc;
+
+            if (!OidIsValid(provider->index_oid) ||
+                provider->source_key_attno <= 0 ||
+                provider->source_key_attno > child_desc->natts ||
+                provider->terminal_attno <= 0 || output_width <= 0 ||
+                list_length(output_map) != output_width)
+            {
+                elog(ERROR, "invalid AGE WCOJ adjacency provider");
+            }
+            provider->ops = &adjacency_provider_ops;
+            provider->seekable = true;
+            provider->fetch_properties =
+                (provider->payload_mask &
+                 (1 << (Anum_ag_label_edge_table_properties - 1))) != 0;
+            provider->provider_context = AllocSetContextCreate(
+                estate->es_query_cxt, "AGE WCOJ adjacency provider",
+                ALLOCSET_DEFAULT_SIZES);
+            output_desc = age_wcoj_provider_output_desc(
+                cscan, output_offset, output_width);
+            state->group_slots[child_index] = ExecInitExtraTupleSlot(
+                estate, output_desc, &TTSOpsMinimalTuple);
+            provider->output_slot = ExecInitExtraTupleSlot(
+                estate, output_desc, &TTSOpsVirtual);
+            provider->source_slot = ExecInitExtraTupleSlot(
+                estate, child_desc, &TTSOpsMinimalTuple);
+            provider->output_map = palloc0(sizeof(int) * output_width);
+            map_index = 0;
+            foreach(map_cell, output_map)
+                provider->output_map[map_index++] = intVal(lfirst(map_cell));
+            provider->terminal_scan =
+                age_adjacency_begin_visible_payload_scan(
+                    provider->index_oid, estate->es_snapshot, false);
+            provider->payload_scan =
+                age_adjacency_begin_visible_payload_scan(
+                    provider->index_oid, estate->es_snapshot,
+                    provider->fetch_properties);
+            age_adjacency_visible_payload_scan_set_terminal_label(
+                provider->terminal_scan, provider->terminal_label_id);
+            age_adjacency_visible_payload_scan_set_terminal_label(
+                provider->payload_scan, provider->terminal_label_id);
+        }
+        else
+        {
+            elog(ERROR, "invalid AGE WCOJ provider kind %d", provider_kind);
+        }
+        child_index++;
+    }
+
+    if (state->actual_engine == AGE_WCOJ_ENGINE_LEAPFROG)
+    {
+        for (child_index = 0; child_index < state->arity; child_index++)
+        {
+            if (!state->providers[child_index].seekable)
+            {
+                state->actual_engine = AGE_WCOJ_ENGINE_MERGE;
+                state->fallback_reason = "provider does not support seek_ge";
+                break;
+            }
+        }
+    }
+}
+
+static TupleTableSlot *
+exec_age_wcoj_join_scan(CustomScanState *node)
+{
+    AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
+    TupleTableSlot *slot;
+
+    slot = ExecScan(&node->ss, access_age_wcoj_join_scan,
+                    recheck_age_wcoj_join_scan);
+    if (!TupIsNull(slot) && state->rows_emitted < PG_INT64_MAX)
+        state->rows_emitted++;
+
+    return slot;
+}
+
+static bool
+plan_stream_fetch_row(AgeWCOJPostingProvider *provider)
+{
+    AgeWCOJJoinScanState *state = provider->owner;
+    TupleTableSlot *slot;
+    Datum value;
+    graphid key;
+    bool isnull;
+
+    for (;;)
+    {
+        slot = ExecProcNode(provider->plan_state);
+        if (TupIsNull(slot))
+        {
+            provider->current_slot = NULL;
+            provider->has_current = false;
+            provider->exhausted = true;
+            return false;
+        }
+
+        if (provider->rows_scanned < PG_INT64_MAX)
+            provider->rows_scanned++;
+        if (state->input_rows < PG_INT64_MAX)
+            state->input_rows++;
+        if (state->posting_rows_scanned < PG_INT64_MAX)
+            state->posting_rows_scanned++;
+        /*
+         * PLAN_STREAM_PROVIDER receives an already materialized child row.
+         * Count it as a payload fetch even when its terminal is rejected so
+         * EXPLAIN does not imply that this fallback provides true late edge
+         * materialization.  A direct adjacency provider can instead increment
+         * this counter only while materializing survivor groups.
+         */
+        if (state->payload_rows_fetched < PG_INT64_MAX)
+            state->payload_rows_fetched++;
+
+        value = slot_getattr(slot, provider->key_attno, &isnull);
+        if (isnull)
+            continue;
+        key = DATUM_GET_GRAPHID(value);
+        if (provider->has_last_key && key < provider->last_key)
+        {
+            elog(ERROR,
+                 "AGE WCOJ plan-stream provider received unsorted graphids");
+        }
+        provider->last_key = key;
+        provider->has_last_key = true;
+        provider->current_slot = slot;
+        provider->current_key = key;
+        provider->has_current = true;
+        return true;
+    }
+}
+
+static bool
+plan_stream_first_distinct(AgeWCOJPostingProvider *provider)
+{
+    if (provider->has_current)
+        return true;
+    if (provider->exhausted)
+        return false;
+    return plan_stream_fetch_row(provider);
+}
+
+static void
+record_provider_advance(AgeWCOJPostingProvider *provider)
+{
+    if (provider->cursor_advances < PG_INT64_MAX)
+        provider->cursor_advances++;
+    if (provider->owner->cursor_advances < PG_INT64_MAX)
+        provider->owner->cursor_advances++;
+}
+
+static bool
+plan_stream_next_distinct(AgeWCOJPostingProvider *provider)
+{
+    graphid previous_key;
+
+    if (!plan_stream_first_distinct(provider))
+        return false;
+    previous_key = provider->current_key;
+    for (;;)
+    {
+        if (!plan_stream_fetch_row(provider))
+        {
+            record_provider_advance(provider);
+            return false;
+        }
+        if (provider->current_key != previous_key)
+        {
+            record_provider_advance(provider);
+            return true;
+        }
+    }
+}
+
+static bool
+plan_stream_seek_ge(AgeWCOJPostingProvider *provider, graphid target)
+{
+    if (provider->seek_calls < PG_INT64_MAX)
+        provider->seek_calls++;
+    if (provider->owner->seek_calls < PG_INT64_MAX)
+        provider->owner->seek_calls++;
+
+    if (!plan_stream_first_distinct(provider))
+        return false;
+    while (provider->current_key < target)
+    {
+        if (!plan_stream_next_distinct(provider))
+            return false;
+    }
+    return true;
+}
+
+static void
+update_age_wcoj_peak_memory(AgeWCOJJoinScanState *state)
+{
+    Size current_memory = 0;
+    int source_index;
+
+    if (state->group_context != NULL)
+    {
+        current_memory += MemoryContextMemAllocated(state->group_context,
+                                                    true);
+    }
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        MemoryContext provider_context =
+            state->providers[source_index].provider_context;
+
+        if (provider_context != NULL)
+        {
+            current_memory += MemoryContextMemAllocated(provider_context,
+                                                        true);
+        }
+    }
+    if (current_memory > state->peak_memory)
+        state->peak_memory = current_memory;
+}
+
+static void
+clear_age_wcoj_group(AgeWCOJJoinScanState *state)
+{
+    int child_index;
+
+    if (state->group_context == NULL)
+        return;
+
+    for (child_index = 0; child_index < state->arity; child_index++)
+    {
+        if (state->group_slots[child_index] != NULL)
+            ExecClearTuple(state->group_slots[child_index]);
+        state->groups[child_index].tuples = NULL;
+        state->groups[child_index].edge_ids = NULL;
+        state->groups[child_index].edge_id_valid = NULL;
+        state->groups[child_index].count = 0;
+        state->groups[child_index].capacity = 0;
+        state->combination_indexes[child_index] = -1;
+        state->enumeration_order[child_index] = child_index;
+        state->selected_edge_ids[child_index] = 0;
+        state->selected_edge_id_valid[child_index] = false;
+    }
+    MemoryContextReset(state->group_context);
+    state->enumeration_started = false;
+    state->group_active = false;
+}
+
+static void
+append_age_wcoj_group_tuple(AgeWCOJJoinScanState *state, int child_index,
+                            TupleTableSlot *slot, bool edge_id_valid,
+                            graphid edge_id)
+{
+    AgeWCOJTupleGroup *group = &state->groups[child_index];
+    MemoryContext old_context;
+
+    old_context = MemoryContextSwitchTo(state->group_context);
+    if (group->count == group->capacity)
+    {
+        int new_capacity;
+
+        if (group->capacity > (MaxAllocSize / sizeof(MinimalTuple)) / 2)
+            ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                            errmsg("AGE WCOJ duplicate group is too large")));
+        new_capacity = group->capacity == 0 ? 8 : group->capacity * 2;
+        if (group->tuples == NULL)
+        {
+            group->tuples = palloc(sizeof(MinimalTuple) * new_capacity);
+            group->edge_ids = palloc(sizeof(graphid) * new_capacity);
+            group->edge_id_valid = palloc(sizeof(bool) * new_capacity);
+        }
+        else
+        {
+            group->tuples = repalloc(group->tuples,
+                                     sizeof(MinimalTuple) * new_capacity);
+            group->edge_ids = repalloc(group->edge_ids,
+                                       sizeof(graphid) * new_capacity);
+            group->edge_id_valid = repalloc(group->edge_id_valid,
+                                            sizeof(bool) * new_capacity);
+        }
+        group->capacity = new_capacity;
+    }
+    group->tuples[group->count] = ExecCopySlotMinimalTuple(slot);
+    group->edge_ids[group->count] = edge_id;
+    group->edge_id_valid[group->count] = edge_id_valid;
+    group->count++;
+    MemoryContextSwitchTo(old_context);
+}
+
+static bool
+plan_stream_materialize_group(AgeWCOJPostingProvider *provider,
+                              graphid terminal)
+{
+    AgeWCOJJoinScanState *state = provider->owner;
+    int source_index = provider->source_index;
+
+    if (!plan_stream_first_distinct(provider) ||
+        provider->current_key != terminal)
+    {
+        return false;
+    }
+
+    for (;;)
+    {
+        graphid edge_id = 0;
+        bool edge_id_valid = false;
+
+        if (provider->edge_id_output_attno > 0)
+        {
+            Datum edge_value;
+            bool edge_isnull;
+
+            edge_value = slot_getattr(provider->current_slot,
+                                      provider->edge_id_output_attno,
+                                      &edge_isnull);
+            if (!edge_isnull)
+            {
+                edge_id = DATUM_GET_GRAPHID(edge_value);
+                edge_id_valid = true;
+            }
+        }
+        append_age_wcoj_group_tuple(state, source_index,
+                                    provider->current_slot,
+                                    edge_id_valid, edge_id);
+        if (!plan_stream_fetch_row(provider))
+        {
+            record_provider_advance(provider);
+            break;
+        }
+        if (provider->current_key != terminal)
+        {
+            record_provider_advance(provider);
+            break;
+        }
+    }
+
+    return state->groups[source_index].count > 0;
+}
+
+static void
+plan_stream_rescan(AgeWCOJPostingProvider *provider)
+{
+    ExecReScan(provider->plan_state);
+    provider->current_slot = NULL;
+    provider->has_current = false;
+    provider->has_last_key = false;
+    provider->exhausted = false;
+}
+
+static void
+plan_stream_close(AgeWCOJPostingProvider *provider)
+{
+    ExecEndNode(provider->plan_state);
+    provider->current_slot = NULL;
+    provider->has_current = false;
+    provider->exhausted = true;
+}
+
+static int
+compare_age_wcoj_source_rows(const void *left, const void *right)
+{
+    const AgeWCOJSourceRow *a = left;
+    const AgeWCOJSourceRow *b = right;
+
+    if (a->key < b->key)
+        return -1;
+    if (a->key > b->key)
+        return 1;
+    return 0;
+}
+
+static int
+compare_age_wcoj_graphids(const void *left, const void *right)
+{
+    graphid a = *((const graphid *)left);
+    graphid b = *((const graphid *)right);
+
+    if (a < b)
+        return -1;
+    if (a > b)
+        return 1;
+    return 0;
+}
+
+static void
+append_age_wcoj_source_row(AgeWCOJPostingProvider *provider, graphid key,
+                           TupleTableSlot *slot)
+{
+    MemoryContext oldcontext;
+
+    oldcontext = MemoryContextSwitchTo(provider->provider_context);
+    if (provider->source_row_count == provider->source_row_capacity)
+    {
+        int new_capacity = provider->source_row_capacity == 0 ? 16 :
+            provider->source_row_capacity * 2;
+
+        if (new_capacity <= provider->source_row_capacity ||
+            (Size)new_capacity >
+                MaxAllocSize / sizeof(AgeWCOJSourceRow))
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                     errmsg("AGE WCOJ source bag is too large")));
+        }
+        if (provider->source_rows == NULL)
+        {
+            provider->source_rows = palloc(
+                sizeof(AgeWCOJSourceRow) * new_capacity);
+        }
+        else
+        {
+            provider->source_rows = repalloc(
+                provider->source_rows,
+                sizeof(AgeWCOJSourceRow) * new_capacity);
+        }
+        provider->source_row_capacity = new_capacity;
+    }
+    provider->source_rows[provider->source_row_count].key = key;
+    provider->source_rows[provider->source_row_count].tuple =
+        ExecCopySlotMinimalTuple(slot);
+    provider->source_row_count++;
+    MemoryContextSwitchTo(oldcontext);
+}
+
+static void
+append_age_wcoj_terminal(AgeWCOJPostingProvider *provider, graphid terminal)
+{
+    MemoryContext oldcontext;
+
+    oldcontext = MemoryContextSwitchTo(provider->provider_context);
+    if (provider->terminal_count == provider->terminal_capacity)
+    {
+        int new_capacity = provider->terminal_capacity == 0 ? 64 :
+            provider->terminal_capacity * 2;
+
+        if (new_capacity <= provider->terminal_capacity ||
+            (Size)new_capacity > MaxAllocSize / sizeof(graphid))
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                     errmsg("AGE WCOJ terminal set is too large")));
+        }
+        if (provider->terminals == NULL)
+            provider->terminals = palloc(sizeof(graphid) * new_capacity);
+        else
+            provider->terminals = repalloc(
+                provider->terminals, sizeof(graphid) * new_capacity);
+        provider->terminal_capacity = new_capacity;
+    }
+    provider->terminals[provider->terminal_count++] = terminal;
+    MemoryContextSwitchTo(oldcontext);
+}
+
+static AgeWCOJAdjacencyBuildResult
+build_adjacency_provider_filtered(AgeWCOJPostingProvider *provider,
+                                  const graphid *candidates,
+                                  int candidate_count, int posting_limit)
+{
+    AgeWCOJJoinScanState *state = provider->owner;
+    AgeAdjacencyVertexSetFilter filter;
+    TupleTableSlot *slot;
+    MemoryContext oldcontext;
+    int row_index;
+    int bag_index;
+    int write_index;
+    bool oversize = false;
+
+    if (provider->built)
+    {
+        return provider->terminal_count > 0 ?
+            AGE_WCOJ_ADJACENCY_BUILD_READY :
+            AGE_WCOJ_ADJACENCY_BUILD_EMPTY;
+    }
+    if (candidates != NULL && candidate_count <= 0)
+        return AGE_WCOJ_ADJACENCY_BUILD_EMPTY;
+    if (posting_limit < 0)
+        elog(ERROR, "invalid AGE WCOJ posting limit");
+
+    if (candidates != NULL)
+    {
+        memset(&filter, 0, sizeof(filter));
+        filter.sorted_vertex_ids = candidates;
+        filter.source = "wcoj-progressive";
+        filter.matches = candidate_count;
+        filter.sorted_vertex_count = candidate_count;
+        filter.min_vertex_id = candidates[0];
+        filter.max_vertex_id = candidates[candidate_count - 1];
+        filter.has_range = true;
+        filter.has_sorted_vertex_ids = true;
+        age_adjacency_visible_payload_scan_set_terminal_vertex_set_filter(
+            provider->terminal_scan, &filter);
+    }
+    else
+    {
+        age_adjacency_visible_payload_scan_set_terminal_vertex_set_filter(
+            provider->terminal_scan, NULL);
+    }
+
+    for (;;)
+    {
+        Datum value;
+        graphid key;
+        bool isnull;
+
+        slot = ExecProcNode(provider->plan_state);
+        if (TupIsNull(slot))
+            break;
+        if (state->source_rows_scanned < PG_INT64_MAX)
+            state->source_rows_scanned++;
+        value = slot_getattr(slot, provider->source_key_attno, &isnull);
+        if (isnull)
+            continue;
+        key = DATUM_GET_GRAPHID(value);
+        append_age_wcoj_source_row(provider, key, slot);
+    }
+
+    if (provider->source_row_count == 0)
+    {
+        provider->built = true;
+        provider->exhausted = true;
+        return AGE_WCOJ_ADJACENCY_BUILD_EMPTY;
+    }
+
+    qsort(provider->source_rows, provider->source_row_count,
+          sizeof(AgeWCOJSourceRow), compare_age_wcoj_source_rows);
+    oldcontext = MemoryContextSwitchTo(provider->provider_context);
+    provider->source_bags = palloc0(sizeof(AgeWCOJSourceKeyBag) *
+                                     provider->source_row_count);
+    MemoryContextSwitchTo(oldcontext);
+
+    bag_index = -1;
+    for (row_index = 0; row_index < provider->source_row_count; row_index++)
+    {
+        if (bag_index < 0 ||
+            provider->source_bags[bag_index].key !=
+                provider->source_rows[row_index].key)
+        {
+            bag_index++;
+            provider->source_bags[bag_index].key =
+                provider->source_rows[row_index].key;
+            provider->source_bags[bag_index].first_row = row_index;
+        }
+        provider->source_bags[bag_index].row_count++;
+    }
+    provider->source_bag_count = bag_index + 1;
+    if (state->distinct_source_keys <=
+        PG_INT64_MAX - provider->source_bag_count)
+    {
+        state->distinct_source_keys += provider->source_bag_count;
+    }
+
+    for (bag_index = 0; bag_index < provider->source_bag_count; bag_index++)
+    {
+        AgeAdjacencyPayload payload;
+        bool active;
+
+        if (state->intersection_builds < PG_INT64_MAX)
+            state->intersection_builds++;
+        active = age_adjacency_visible_payload_scan_begin_key(
+            provider->terminal_scan, provider->source_bags[bag_index].key);
+        while (active && age_adjacency_visible_payload_scan_next(
+                             provider->terminal_scan, &payload))
+        {
+            if (provider->rows_scanned < PG_INT64_MAX)
+                provider->rows_scanned++;
+            if (state->posting_rows_scanned < PG_INT64_MAX)
+                state->posting_rows_scanned++;
+            if (state->input_rows < PG_INT64_MAX)
+                state->input_rows++;
+            if (posting_limit > 0 &&
+                provider->rows_scanned > posting_limit)
+            {
+                oversize = true;
+                break;
+            }
+            append_age_wcoj_terminal(provider, payload.next_vertex_id);
+        }
+        if (oversize)
+            break;
+    }
+
+    if (oversize)
+    {
+        provider->has_current = false;
+        provider->exhausted = false;
+        provider->built = false;
+        return AGE_WCOJ_ADJACENCY_BUILD_OVERSIZE;
+    }
+
+    if (provider->terminal_count > 1)
+    {
+        qsort(provider->terminals, provider->terminal_count,
+              sizeof(graphid), compare_age_wcoj_graphids);
+        write_index = 1;
+        for (row_index = 1; row_index < provider->terminal_count; row_index++)
+        {
+            if (provider->terminals[row_index] !=
+                provider->terminals[write_index - 1])
+            {
+                provider->terminals[write_index++] =
+                    provider->terminals[row_index];
+            }
+        }
+        provider->terminal_count = write_index;
+    }
+
+    provider->terminal_index = 0;
+    provider->built = true;
+    provider->exhausted = provider->terminal_count == 0;
+    update_age_wcoj_peak_memory(state);
+    if (!provider->exhausted)
+    {
+        provider->current_key = provider->terminals[0];
+        provider->has_current = true;
+    }
+    return provider->exhausted ? AGE_WCOJ_ADJACENCY_BUILD_EMPTY :
+        AGE_WCOJ_ADJACENCY_BUILD_READY;
+}
+
+static bool
+build_adjacency_provider(AgeWCOJPostingProvider *provider)
+{
+    return build_adjacency_provider_filtered(provider, NULL, 0, 0) ==
+        AGE_WCOJ_ADJACENCY_BUILD_READY;
+}
+
+static int
+intersect_age_wcoj_graphids(graphid *candidates, int candidate_count,
+                            const graphid *matches, int match_count)
+{
+    int candidate_index = 0;
+    int match_index = 0;
+    int output_count = 0;
+
+    while (candidate_index < candidate_count && match_index < match_count)
+    {
+        graphid candidate = candidates[candidate_index];
+        graphid match = matches[match_index];
+
+        if (candidate < match)
+        {
+            candidate_index++;
+        }
+        else if (candidate > match)
+        {
+            match_index++;
+        }
+        else
+        {
+            candidates[output_count++] = candidate;
+            candidate_index++;
+            match_index++;
+        }
+    }
+    return output_count;
+}
+
+static void
+rescan_age_wcoj_providers(AgeWCOJJoinScanState *state)
+{
+    int source_index;
+
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        state->providers[source_index].ops->rescan(
+            &state->providers[source_index]);
+    }
+}
+
+/*
+ * Build a bounded adjacency seed and push its sorted exact terminal set into
+ * every other direct adjacency provider.  The seed's terminal array is
+ * compacted in place after each filter, so the existing progressive cursor
+ * loop only probes plan-stream providers for terminals already known to
+ * survive all direct adjacency sources.
+ */
+static bool
+prepare_age_wcoj_progressive_exact_set(AgeWCOJJoinScanState *state)
+{
+    AgeWCOJPostingProvider *seed;
+    AgeWCOJAdjacencyBuildResult build_result;
+    int candidate_count;
+    int seed_count;
+    int filter_count = 0;
+    int stage;
+
+    if (state->progressive_setup_done)
+        return true;
+    state->progressive_setup_done = true;
+
+    seed = &state->providers[state->seed_index];
+    if (seed->kind != AGE_WCOJ_PROVIDER_ADJACENCY)
+        return true;
+
+    build_result = build_adjacency_provider_filtered(
+        seed, NULL, 0, AGE_WCOJ_PROGRESSIVE_MAX_SEED_POSTINGS);
+    if (build_result == AGE_WCOJ_ADJACENCY_BUILD_OVERSIZE)
+    {
+        rescan_age_wcoj_providers(state);
+        if (state->requested_engine == AGE_WCOJ_ENGINE_AUTO)
+        {
+            state->actual_engine = AGE_WCOJ_ENGINE_MERGE;
+            state->fallback_reason = "progressive seed exceeds exact-set cap";
+        }
+        return true;
+    }
+    if (build_result == AGE_WCOJ_ADJACENCY_BUILD_EMPTY)
+        return false;
+
+    candidate_count = seed->terminal_count;
+    seed_count = candidate_count;
+    for (stage = 1; stage < state->arity && candidate_count > 0; stage++)
+    {
+        AgeWCOJPostingProvider *provider =
+            &state->providers[state->source_order[stage]];
+
+        if (provider->kind != AGE_WCOJ_PROVIDER_ADJACENCY)
+            continue;
+
+        if (state->exact_set_filters < PG_INT64_MAX)
+            state->exact_set_filters++;
+        if (state->exact_set_candidates_tested <=
+            PG_INT64_MAX - candidate_count)
+        {
+            state->exact_set_candidates_tested += candidate_count;
+        }
+        build_result = build_adjacency_provider_filtered(
+            provider, seed->terminals, candidate_count, 0);
+        filter_count++;
+        if (build_result == AGE_WCOJ_ADJACENCY_BUILD_EMPTY)
+        {
+            candidate_count = 0;
+        }
+        else
+        {
+            candidate_count = intersect_age_wcoj_graphids(
+                seed->terminals, candidate_count, provider->terminals,
+                provider->terminal_count);
+        }
+
+        if (filter_count == 1 &&
+            state->requested_engine == AGE_WCOJ_ENGINE_AUTO &&
+            (int64)candidate_count *
+                    AGE_WCOJ_PROGRESSIVE_DENSE_DENOMINATOR >=
+                (int64)seed_count * AGE_WCOJ_PROGRESSIVE_DENSE_NUMERATOR)
+        {
+            rescan_age_wcoj_providers(state);
+            state->actual_engine = AGE_WCOJ_ENGINE_MERGE;
+            state->fallback_reason = "dense progressive exact-set overlap";
+            state->progressive_exact_set = false;
+            return true;
+        }
+    }
+
+    seed->terminal_count = candidate_count;
+    seed->terminal_index = 0;
+    seed->has_current = candidate_count > 0;
+    seed->exhausted = candidate_count == 0;
+    if (candidate_count > 0)
+        seed->current_key = seed->terminals[0];
+    state->progressive_exact_set = filter_count > 0;
+    update_age_wcoj_peak_memory(state);
+
+    return candidate_count > 0;
+}
+
+static bool
+adjacency_first_distinct(AgeWCOJPostingProvider *provider)
+{
+    if (!provider->built && !build_adjacency_provider(provider))
+        return false;
+    if (provider->exhausted || provider->terminal_index >=
+        provider->terminal_count)
+    {
+        provider->has_current = false;
+        return false;
+    }
+    provider->current_key = provider->terminals[provider->terminal_index];
+    provider->has_current = true;
+    return true;
+}
+
+static bool
+adjacency_next_distinct(AgeWCOJPostingProvider *provider)
+{
+    if (!adjacency_first_distinct(provider))
+        return false;
+    provider->terminal_index++;
+    record_provider_advance(provider);
+    if (provider->terminal_index >= provider->terminal_count)
+    {
+        provider->has_current = false;
+        provider->exhausted = true;
+        return false;
+    }
+    provider->current_key = provider->terminals[provider->terminal_index];
+    return true;
+}
+
+static bool
+adjacency_seek_ge(AgeWCOJPostingProvider *provider, graphid target)
+{
+    int low;
+    int high;
+
+    if (provider->seek_calls < PG_INT64_MAX)
+        provider->seek_calls++;
+    if (provider->owner->seek_calls < PG_INT64_MAX)
+        provider->owner->seek_calls++;
+    if (!adjacency_first_distinct(provider))
+        return false;
+    if (provider->current_key >= target)
+        return true;
+
+    low = provider->terminal_index + 1;
+    high = provider->terminal_count;
+    while (low < high)
+    {
+        int middle = low + (high - low) / 2;
+
+        if (provider->terminals[middle] < target)
+            low = middle + 1;
+        else
+            high = middle;
+    }
+    record_provider_advance(provider);
+    provider->terminal_index = low;
+    if (low >= provider->terminal_count)
+    {
+        provider->has_current = false;
+        provider->exhausted = true;
+        return false;
+    }
+    provider->current_key = provider->terminals[low];
+    return true;
+}
+
+
+static void
+fill_age_wcoj_adjacency_output(AgeWCOJPostingProvider *provider,
+                               int bag_index, int source_row_index,
+                               const AgeAdjacencyPayload *payload)
+{
+    TupleTableSlot *slot = provider->output_slot;
+    AgeWCOJSourceKeyBag *bag = &provider->source_bags[bag_index];
+    int index;
+
+    ExecClearTuple(slot);
+    ExecStoreMinimalTuple(provider->source_rows[source_row_index].tuple,
+                          provider->source_slot, false);
+    slot_getallattrs(provider->source_slot);
+
+    for (index = 0; index < provider->output_width; index++)
+    {
+        int map = provider->output_map[index];
+
+        if (map > 0)
+        {
+            slot->tts_values[index] = slot_getattr(provider->source_slot,
+                                                   map,
+                                                   &slot->tts_isnull[index]);
+        }
+        else if (map < 0)
+        {
+            AttrNumber attno = (AttrNumber)(-map);
+            graphid start_id;
+            graphid end_id;
+
+            if (provider->outgoing)
+            {
+                start_id = bag->key;
+                end_id = payload->next_vertex_id;
+            }
+            else
+            {
+                start_id = payload->next_vertex_id;
+                end_id = bag->key;
+            }
+            slot->tts_isnull[index] = false;
+            switch (attno)
+            {
+            case Anum_ag_label_edge_table_id:
+                slot->tts_values[index] =
+                    GRAPHID_GET_DATUM(payload->edge_id);
+                break;
+            case Anum_ag_label_edge_table_start_id:
+                slot->tts_values[index] = GRAPHID_GET_DATUM(start_id);
+                break;
+            case Anum_ag_label_edge_table_end_id:
+                slot->tts_values[index] = GRAPHID_GET_DATUM(end_id);
+                break;
+            case Anum_ag_label_edge_table_properties:
+                slot->tts_values[index] = payload->properties;
+                slot->tts_isnull[index] = payload->properties_isnull;
+                break;
+            default:
+                elog(ERROR, "invalid AGE WCOJ edge output attribute %d",
+                     attno);
+            }
+        }
+        else
+        {
+            elog(ERROR, "invalid AGE WCOJ output mapping");
+        }
+    }
+    ExecStoreVirtualTuple(slot);
+}
+
+static bool
+age_wcoj_adjacency_local_qual(AgeWCOJPostingProvider *provider)
+{
+    AgeWCOJJoinScanState *state = provider->owner;
+    TupleTableSlot *raw_slot;
+    ExprContext *econtext;
+    TupleTableSlot *saved_scan_tuple;
+    int index;
+    bool result;
+
+    if (provider->local_qual == NULL)
+        return true;
+
+    raw_slot = state->css.ss.ss_ScanTupleSlot;
+    ExecClearTuple(raw_slot);
+    memset(raw_slot->tts_values, 0,
+           sizeof(Datum) * raw_slot->tts_tupleDescriptor->natts);
+    memset(raw_slot->tts_isnull, true,
+           sizeof(bool) * raw_slot->tts_tupleDescriptor->natts);
+    slot_getallattrs(provider->output_slot);
+    for (index = 0; index < provider->output_width; index++)
+    {
+        int raw_index = provider->output_offset - 1 + index;
+
+        raw_slot->tts_values[raw_index] =
+            provider->output_slot->tts_values[index];
+        raw_slot->tts_isnull[raw_index] =
+            provider->output_slot->tts_isnull[index];
+    }
+    ExecStoreVirtualTuple(raw_slot);
+
+    econtext = state->css.ss.ps.ps_ExprContext;
+    saved_scan_tuple = econtext->ecxt_scantuple;
+    econtext->ecxt_scantuple = raw_slot;
+    result = ExecQual(provider->local_qual, econtext);
+    econtext->ecxt_scantuple = saved_scan_tuple;
+    return result;
+}
+
+static bool
+adjacency_materialize_group(AgeWCOJPostingProvider *provider,
+                            graphid terminal)
+{
+    AgeWCOJJoinScanState *state = provider->owner;
+    int source_index = provider->source_index;
+    int bag_index;
+
+    if (!adjacency_first_distinct(provider) ||
+        provider->current_key != terminal)
+    {
+        return false;
+    }
+
+    for (bag_index = 0; bag_index < provider->source_bag_count; bag_index++)
+    {
+        AgeWCOJSourceKeyBag *bag = &provider->source_bags[bag_index];
+        AgeAdjacencyPayload payload;
+        bool active;
+
+        active = age_adjacency_visible_payload_scan_begin_key(
+            provider->payload_scan, bag->key);
+        while (active && age_adjacency_visible_payload_scan_next(
+                             provider->payload_scan, &payload))
+        {
+            int source_row_index;
+
+            if (payload.next_vertex_id != terminal)
+                continue;
+            if (state->payload_rows_fetched < PG_INT64_MAX)
+                state->payload_rows_fetched++;
+
+            source_row_index = bag->first_row;
+            fill_age_wcoj_adjacency_output(provider, bag_index,
+                                           source_row_index, &payload);
+            if (!age_wcoj_adjacency_local_qual(provider))
+            {
+                if (state->local_predicate_rejects < PG_INT64_MAX)
+                    state->local_predicate_rejects++;
+                continue;
+            }
+
+            for (source_row_index = bag->first_row;
+                 source_row_index < bag->first_row + bag->row_count;
+                 source_row_index++)
+            {
+                fill_age_wcoj_adjacency_output(provider, bag_index,
+                                               source_row_index, &payload);
+                append_age_wcoj_group_tuple(state, source_index,
+                                            provider->output_slot, true,
+                                            payload.edge_id);
+            }
+        }
+    }
+
+    (void)adjacency_next_distinct(provider);
+    return state->groups[source_index].count > 0;
+}
+
+static void
+adjacency_rescan(AgeWCOJPostingProvider *provider)
+{
+    ExecReScan(provider->plan_state);
+    if (provider->terminal_scan != NULL)
+    {
+        age_adjacency_visible_payload_scan_set_terminal_vertex_set_filter(
+            provider->terminal_scan, NULL);
+        age_adjacency_visible_payload_scan_reset_runtime(
+            provider->terminal_scan);
+    }
+    if (provider->payload_scan != NULL)
+        age_adjacency_visible_payload_scan_reset_runtime(
+            provider->payload_scan);
+    if (provider->provider_context != NULL)
+        MemoryContextReset(provider->provider_context);
+    provider->source_rows = NULL;
+    provider->source_row_count = 0;
+    provider->source_row_capacity = 0;
+    provider->source_bags = NULL;
+    provider->source_bag_count = 0;
+    provider->terminals = NULL;
+    provider->terminal_count = 0;
+    provider->terminal_capacity = 0;
+    provider->terminal_index = 0;
+    provider->has_current = false;
+    provider->exhausted = false;
+    provider->built = false;
+}
+
+static void
+adjacency_close(AgeWCOJPostingProvider *provider)
+{
+    if (provider->terminal_scan != NULL)
+    {
+        age_adjacency_end_visible_payload_scan(provider->terminal_scan);
+        provider->terminal_scan = NULL;
+    }
+    if (provider->payload_scan != NULL)
+    {
+        age_adjacency_end_visible_payload_scan(provider->payload_scan);
+        provider->payload_scan = NULL;
+    }
+    if (provider->plan_state != NULL)
+        ExecEndNode(provider->plan_state);
+    if (provider->provider_context != NULL)
+    {
+        MemoryContextDelete(provider->provider_context);
+        provider->provider_context = NULL;
+    }
+    provider->has_current = false;
+    provider->exhausted = true;
+}
+
+static bool
+initialize_age_wcoj_providers(AgeWCOJJoinScanState *state)
+{
+    int source_index;
+
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        if (!state->providers[source_index].ops->first_distinct(
+                &state->providers[source_index]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * Leapfrog alignment over the provider contract.  PLAN_STREAM_PROVIDER
+ * implements seek_ge() by consuming sorted groups; ADJACENCY_PROVIDER can
+ * later implement the same call as a true index cursor seek.
+ */
+static bool
+align_age_wcoj_leapfrog(AgeWCOJJoinScanState *state, graphid *matched_key)
+{
+    graphid max_key;
+    bool aligned;
+    int source_index;
+
+    if (!initialize_age_wcoj_providers(state))
+        return false;
+
+    for (;;)
+    {
+        max_key = state->providers[0].current_key;
+        for (source_index = 1; source_index < state->arity; source_index++)
+        {
+            if (state->providers[source_index].current_key > max_key)
+                max_key = state->providers[source_index].current_key;
+        }
+
+        aligned = true;
+        for (source_index = 0; source_index < state->arity; source_index++)
+        {
+            AgeWCOJPostingProvider *provider =
+                &state->providers[source_index];
+
+            if (provider->current_key < max_key &&
+                !provider->ops->seek_ge(provider, max_key))
+            {
+                return false;
+            }
+            if (provider->current_key != max_key)
+                aligned = false;
+        }
+
+        if (aligned)
+        {
+            *matched_key = max_key;
+            return true;
+        }
+    }
+}
+
+/*
+ * Dense streaming merge.  It never seeks ahead to a maximum key; instead it
+ * discards the current minimum terminal group from every source that owns it.
+ */
+static bool
+align_age_wcoj_merge(AgeWCOJJoinScanState *state, graphid *matched_key)
+{
+    graphid min_key;
+    graphid max_key;
+    int source_index;
+
+    if (!initialize_age_wcoj_providers(state))
+        return false;
+
+    for (;;)
+    {
+        min_key = state->providers[0].current_key;
+        max_key = min_key;
+        for (source_index = 1; source_index < state->arity; source_index++)
+        {
+            graphid key = state->providers[source_index].current_key;
+
+            if (key < min_key)
+                min_key = key;
+            if (key > max_key)
+                max_key = key;
+        }
+        if (min_key == max_key)
+        {
+            *matched_key = min_key;
+            return true;
+        }
+
+        for (source_index = 0; source_index < state->arity; source_index++)
+        {
+            AgeWCOJPostingProvider *provider =
+                &state->providers[source_index];
+
+            if (provider->current_key == min_key &&
+                !provider->ops->next_distinct(provider))
+            {
+                return false;
+            }
+        }
+    }
+}
+
+/*
+ * Progressive seed-driven filtering.  The smallest estimated source supplies
+ * candidate terminals and the remaining providers filter them in increasing
+ * estimated-posting order.  With PLAN_STREAM_PROVIDER this is a streaming
+ * exact-key probe; the same control flow can use adjacency exact-set probes
+ * when that provider is introduced.
+ */
+static bool
+align_age_wcoj_progressive(AgeWCOJJoinScanState *state,
+                           graphid *matched_key)
+{
+    AgeWCOJPostingProvider *seed = &state->providers[state->seed_index];
+
+    if (!prepare_age_wcoj_progressive_exact_set(state))
+        return false;
+    if (state->actual_engine != AGE_WCOJ_ENGINE_PROGRESSIVE)
+        return align_age_wcoj_merge(state, matched_key);
+    if (!initialize_age_wcoj_providers(state))
+        return false;
+
+    for (;;)
+    {
+        graphid candidate = seed->current_key;
+        bool restart = false;
+        int stage;
+
+        if (state->progressive_probes < PG_INT64_MAX)
+            state->progressive_probes++;
+        if (state->stage_survivors[0] < PG_INT64_MAX)
+            state->stage_survivors[0]++;
+
+        for (stage = 1; stage < state->arity; stage++)
+        {
+            AgeWCOJPostingProvider *provider =
+                &state->providers[state->source_order[stage]];
+
+            if (!provider->ops->seek_ge(provider, candidate))
+                return false;
+            if (provider->current_key > candidate)
+            {
+                if (!seed->ops->seek_ge(seed, provider->current_key))
+                    return false;
+                restart = true;
+                break;
+            }
+            if (state->stage_survivors[stage] < PG_INT64_MAX)
+                state->stage_survivors[stage]++;
+        }
+        if (restart)
+            continue;
+
+        if (state->progressive_matches < PG_INT64_MAX)
+            state->progressive_matches++;
+        *matched_key = candidate;
+        return true;
+    }
+}
+
+static bool
+collect_age_wcoj_group(AgeWCOJJoinScanState *state, graphid matched_key)
+{
+    int source_index;
+    bool all_nonempty = true;
+
+    state->group_key = matched_key;
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        AgeWCOJPostingProvider *provider =
+            &state->providers[source_index];
+
+        if (!provider->ops->materialize_group(provider, matched_key))
+            all_nonempty = false;
+    }
+
+    if (!all_nonempty)
+        return false;
+
+    if (state->groups_matched < PG_INT64_MAX)
+        state->groups_matched++;
+
+    /*
+     * Enumerate the smallest surviving edge bag first.  This makes an edge-id
+     * conflict cut off the largest possible suffix of the Cartesian product.
+     * The output tuple is still assembled in provider order, so this ordering
+     * is an execution detail and cannot change bag semantics.
+     */
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        state->enumeration_order[source_index] = source_index;
+        state->combination_indexes[source_index] = -1;
+        state->selected_edge_id_valid[source_index] = false;
+    }
+    for (source_index = 1; source_index < state->arity; source_index++)
+    {
+        int provider_index = state->enumeration_order[source_index];
+        int position = source_index;
+
+        while (position > 0 &&
+               state->groups[state->enumeration_order[position - 1]].count >
+                   state->groups[provider_index].count)
+        {
+            state->enumeration_order[position] =
+                state->enumeration_order[position - 1];
+            position--;
+        }
+        state->enumeration_order[position] = provider_index;
+    }
+    state->enumeration_started = false;
+    update_age_wcoj_peak_memory(state);
+    state->group_active = true;
+    return true;
+}
+
+static void
+maybe_fallback_from_progressive(AgeWCOJJoinScanState *state)
+{
+    if (state->requested_engine != AGE_WCOJ_ENGINE_AUTO ||
+        state->actual_engine != AGE_WCOJ_ENGINE_PROGRESSIVE ||
+        state->progressive_probes < AGE_WCOJ_PROGRESSIVE_DENSE_SAMPLE)
+    {
+        return;
+    }
+    if (state->progressive_matches *
+            AGE_WCOJ_PROGRESSIVE_DENSE_DENOMINATOR >=
+        state->progressive_probes * AGE_WCOJ_PROGRESSIVE_DENSE_NUMERATOR)
+    {
+        state->actual_engine = AGE_WCOJ_ENGINE_MERGE;
+        state->fallback_reason = "dense progressive overlap";
+    }
+}
+
+static bool
+prepare_age_wcoj_group(AgeWCOJJoinScanState *state)
+{
+    for (;;)
+    {
+        graphid matched_key;
+        bool matched;
+
+        clear_age_wcoj_group(state);
+        if (state->exhausted)
+            return false;
+
+        maybe_fallback_from_progressive(state);
+        switch (state->actual_engine)
+        {
+        case AGE_WCOJ_ENGINE_PROGRESSIVE:
+            matched = align_age_wcoj_progressive(state, &matched_key);
+            break;
+        case AGE_WCOJ_ENGINE_LEAPFROG:
+            matched = align_age_wcoj_leapfrog(state, &matched_key);
+            break;
+        case AGE_WCOJ_ENGINE_MERGE:
+            matched = align_age_wcoj_merge(state, &matched_key);
+            break;
+        case AGE_WCOJ_ENGINE_AUTO:
+        default:
+            elog(ERROR, "invalid AGE WCOJ execution engine");
+            matched = false;
+            break;
+        }
+        if (!matched)
+        {
+            state->exhausted = true;
+            return false;
+        }
+        if (collect_age_wcoj_group(state, matched_key))
+            return true;
+    }
+}
+
+static bool
+next_age_wcoj_combination(AgeWCOJJoinScanState *state)
+{
+    int depth;
+
+    if (!state->group_active)
+        return false;
+
+    /* Resume at the leaf after an emitted row; otherwise start at the root. */
+    depth = state->enumeration_started ? state->arity - 1 : 0;
+    state->enumeration_started = true;
+
+    while (depth >= 0)
+    {
+        int source_index = state->enumeration_order[depth];
+        AgeWCOJTupleGroup *group = &state->groups[source_index];
+        int tuple_index = state->combination_indexes[source_index] + 1;
+
+        state->selected_edge_id_valid[depth] = false;
+        while (tuple_index < group->count)
+        {
+            bool conflict = false;
+            int previous_depth;
+
+            state->combination_indexes[source_index] = tuple_index;
+            if (group->edge_id_valid[tuple_index])
+            {
+                graphid edge_id = group->edge_ids[tuple_index];
+
+                for (previous_depth = 0;
+                     previous_depth < depth;
+                     previous_depth++)
+                {
+                    int previous_source =
+                        state->enumeration_order[previous_depth];
+
+                    if (state->selected_edge_id_valid[previous_depth] &&
+                        state->selected_edge_ids[previous_depth] == edge_id &&
+                        bms_overlap(state->uniqueness_groups[source_index],
+                                    state->uniqueness_groups[previous_source]))
+                    {
+                        conflict = true;
+                        break;
+                    }
+                }
+                if (conflict)
+                {
+                    if (state->uniqueness_rejects < PG_INT64_MAX)
+                        state->uniqueness_rejects++;
+                    tuple_index++;
+                    continue;
+                }
+                state->selected_edge_ids[depth] = edge_id;
+                state->selected_edge_id_valid[depth] = true;
+            }
+
+            if (depth == state->arity - 1)
+            {
+                if (state->candidate_combinations < PG_INT64_MAX)
+                    state->candidate_combinations++;
+                return true;
+            }
+
+            depth++;
+            source_index = state->enumeration_order[depth];
+            state->combination_indexes[source_index] = -1;
+            state->selected_edge_id_valid[depth] = false;
+            break;
+        }
+
+        if (tuple_index < group->count)
+            continue;
+
+        state->combination_indexes[source_index] = -1;
+        state->selected_edge_id_valid[depth] = false;
+        depth--;
+    }
+
+    state->group_active = false;
+    state->enumeration_started = false;
+    return false;
+}
+
+static TupleTableSlot *
+materialize_age_wcoj_combination(AgeWCOJJoinScanState *state)
+{
+    TupleTableSlot *raw_slot = state->css.ss.ss_ScanTupleSlot;
+    int raw_index;
+    int child_index;
+
+    ExecClearTuple(raw_slot);
+    raw_index = 0;
+    for (child_index = 0; child_index < state->arity; child_index++)
+    {
+        TupleTableSlot *group_slot = state->group_slots[child_index];
+        MinimalTuple tuple;
+        int attr_index;
+
+        tuple = state->groups[child_index].tuples[
+            state->combination_indexes[child_index]];
+        ExecStoreMinimalTuple(tuple, group_slot, false);
+        slot_getallattrs(group_slot);
+        for (attr_index = 0;
+             attr_index < group_slot->tts_tupleDescriptor->natts;
+             attr_index++)
+        {
+            if (raw_index >= raw_slot->tts_tupleDescriptor->natts)
+                elog(ERROR, "AGE WCOJ raw tuple width overflow");
+            raw_slot->tts_values[raw_index] = group_slot->tts_values[attr_index];
+            raw_slot->tts_isnull[raw_index] =
+                group_slot->tts_isnull[attr_index];
+            raw_index++;
+        }
+    }
+    if (raw_index != raw_slot->tts_tupleDescriptor->natts)
+    {
+        elog(ERROR, "AGE WCOJ raw tuple width mismatch: %d versus %d",
+             raw_index, raw_slot->tts_tupleDescriptor->natts);
+    }
+    ExecStoreVirtualTuple(raw_slot);
+
+    return raw_slot;
+}
+
+static TupleTableSlot *
+access_age_wcoj_join_scan(ScanState *node)
+{
+    AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
+
+    for (;;)
+    {
+        if (!state->group_active && !prepare_age_wcoj_group(state))
+            return ExecClearTuple(node->ss_ScanTupleSlot);
+        if (next_age_wcoj_combination(state))
+            return materialize_age_wcoj_combination(state);
+    }
+}
+
+static bool
+recheck_age_wcoj_join_scan(ScanState *node, TupleTableSlot *slot)
+{
+    (void)node;
+    (void)slot;
+    return true;
+}
+
+static void
+end_age_wcoj_join_scan(CustomScanState *node)
+{
+    AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
+    int source_index;
+
+    clear_age_wcoj_group(state);
+    /*
+     * group_slots were allocated with ExecInitExtraTupleSlot(), so they are
+     * owned by the estate tuple table and released by ExecutorEnd.  Dropping
+     * them here would leave dangling entries for ExecResetTupleTable().
+     */
+    for (source_index = 0; source_index < state->arity; source_index++)
+        state->providers[source_index].ops->close(
+            &state->providers[source_index]);
+    if (state->group_context != NULL)
+    {
+        MemoryContextDelete(state->group_context);
+        state->group_context = NULL;
+    }
+}
+
+static void
+rescan_age_wcoj_join_scan(CustomScanState *node)
+{
+    AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
+    int source_index;
+
+    clear_age_wcoj_group(state);
+    for (source_index = 0; source_index < state->arity; source_index++)
+        state->providers[source_index].ops->rescan(
+            &state->providers[source_index]);
+    state->actual_engine = state->planned_engine;
+    state->fallback_reason = "none";
+    state->exhausted = false;
+    state->progressive_setup_done = false;
+    state->progressive_exact_set = false;
+    if (state->rescans < PG_INT64_MAX)
+        state->rescans++;
+}
+
+static const char *
+age_wcoj_algorithm_name(AgeWCOJEngineKind engine)
+{
+    switch (engine)
+    {
+    case AGE_WCOJ_ENGINE_PROGRESSIVE:
+        return "progressive seed filtering with delayed bag product";
+    case AGE_WCOJ_ENGINE_LEAPFROG:
+        return "provider leapfrog intersection with delayed bag product";
+    case AGE_WCOJ_ENGINE_MERGE:
+        return "streaming merge intersection with delayed bag product";
+    case AGE_WCOJ_ENGINE_AUTO:
+    default:
+        return "unknown";
+    }
+}
+
+static char *
+format_estimated_postings(AgeWCOJJoinScanState *state)
+{
+    StringInfoData buffer;
+    int source_index;
+
+    initStringInfo(&buffer);
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        appendStringInfo(&buffer, "%s%d=%.0f",
+                         source_index == 0 ? "" : ", ", source_index + 1,
+                         state->estimated_postings[source_index]);
+    }
+    return buffer.data;
+}
+
+static char *
+format_observed_postings(AgeWCOJJoinScanState *state)
+{
+    StringInfoData buffer;
+    int source_index;
+
+    initStringInfo(&buffer);
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        appendStringInfo(&buffer, "%s%d=" INT64_FORMAT,
+                         source_index == 0 ? "" : ", ", source_index + 1,
+                         state->providers[source_index].rows_scanned);
+    }
+    return buffer.data;
+}
+
+static char *
+format_stage_survivors(AgeWCOJJoinScanState *state)
+{
+    StringInfoData buffer;
+    int stage;
+
+    initStringInfo(&buffer);
+    for (stage = 0; stage < state->arity; stage++)
+    {
+        appendStringInfo(&buffer, "%s%d=" INT64_FORMAT,
+                         stage == 0 ? "" : ", ", stage + 1,
+                         state->stage_survivors[stage]);
+    }
+    return buffer.data;
+}
+
+static void
+explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
+                           ExplainState *es)
+{
+    AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
+    char *estimated_postings;
+    ListCell *lc;
+    int adjacency_provider_count = 0;
+
+    (void)ancestors;
+    foreach(lc, state->provider_descs)
+    {
+        List *desc = lfirst(lc);
+
+        if (intVal(list_nth(desc, AGE_WCOJ_PROVIDER_DESC_KIND)) ==
+            AGE_WCOJ_PROVIDER_ADJACENCY)
+        {
+            adjacency_provider_count++;
+        }
+    }
+    estimated_postings = format_estimated_postings(state);
+    ExplainPropertyText("WCOJ Algorithm",
+                        age_wcoj_algorithm_name(state->actual_engine), es);
+    ExplainPropertyText("Planned Engine",
+                        age_wcoj_engine_name(state->planned_engine), es);
+    ExplainPropertyText("Actual Engine",
+                        age_wcoj_engine_name(state->actual_engine), es);
+    ExplainPropertyText("Fallback Reason", state->fallback_reason, es);
+    ExplainPropertyInteger("Source Count", NULL, state->arity, es);
+    ExplainPropertyInteger("Adjacency Providers", NULL,
+                           adjacency_provider_count, es);
+    ExplainPropertyInteger("WCOJ Arity", NULL, state->arity, es);
+    ExplainPropertyInteger("Seed Source", NULL, state->seed_index + 1, es);
+    ExplainPropertyText("Estimated Postings", estimated_postings, es);
+    pfree(estimated_postings);
+    if (es->analyze)
+    {
+        char *observed_postings = format_observed_postings(state);
+        char *stage_survivors = format_stage_survivors(state);
+
+        ExplainPropertyText("Observed Postings", observed_postings, es);
+        ExplainPropertyText("Stage Survivors", stage_survivors, es);
+        ExplainPropertyInteger("Cursor Advances", NULL,
+                               state->cursor_advances, es);
+        ExplainPropertyInteger("Seek Calls", NULL, state->seek_calls, es);
+        ExplainPropertyInteger("Posting Rows Scanned", NULL,
+                               state->posting_rows_scanned, es);
+        ExplainPropertyInteger("Payload Rows Fetched", NULL,
+                               state->payload_rows_fetched, es);
+        ExplainPropertyInteger("Source Rows Scanned", NULL,
+                               state->source_rows_scanned, es);
+        ExplainPropertyInteger("Distinct Source Keys", NULL,
+                               state->distinct_source_keys, es);
+        ExplainPropertyInteger("Intersection Builds", NULL,
+                               state->intersection_builds, es);
+        ExplainPropertyInteger("Local Predicate Rejects", NULL,
+                               state->local_predicate_rejects, es);
+        ExplainPropertyInteger("Matched Terminal Groups", NULL,
+                               state->groups_matched, es);
+        ExplainPropertyInteger("Candidate Bag Combinations", NULL,
+                               state->candidate_combinations, es);
+        ExplainPropertyInteger("Uniqueness Constraint Groups", NULL,
+                               state->uniqueness_group_count, es);
+        ExplainPropertyInteger("Uniqueness Rejects", NULL,
+                               state->uniqueness_rejects, es);
+        ExplainPropertyInteger("Rows Emitted", NULL, state->rows_emitted, es);
+        ExplainPropertyInteger("Rescans", NULL, state->rescans, es);
+        ExplainPropertyInteger("Peak WCOJ Memory", "bytes",
+                               (int64)state->peak_memory, es);
+        pfree(observed_postings);
+        pfree(stage_survivors);
+    }
+}

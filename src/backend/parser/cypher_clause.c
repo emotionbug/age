@@ -8133,6 +8133,7 @@ static Expr *transform_cypher_adjacency_candidate_edge(
                 bound_terminal_entity != NULL ?
                     get_entity_name(bound_terminal_entity) : NULL,
                 (Node *)terminal_key_expr,
+                next_node != NULL ? next_node->name : NULL,
                 index_source != NULL ? index_source : "unknown",
                 index_kind_id,
                 index_provider != NULL ? index_provider : "unknown",
@@ -8292,6 +8293,7 @@ static void register_reverse_adjacency_candidate(
                 (Node *)key_expr,
                 NULL,
                 NULL,
+                terminal_node->name,
                 index_source != NULL ? index_source : "unknown",
                 index_kind_id,
                 index_provider != NULL ? index_provider : "unknown",

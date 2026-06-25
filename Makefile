@@ -63,6 +63,8 @@ OBJS = src/backend/age.o \
        src/backend/executor/cypher_adjacency_count.o \
        src/backend/executor/cypher_adjacency_match.o \
        src/backend/executor/cypher_adjacency_match_terminal.o \
+       src/backend/executor/cypher_wcoj_join.o \
+       src/backend/executor/cypher_generic_join.o \
        src/backend/executor/cypher_property_projection.o \
        src/backend/executor/cypher_vle_stream.o \
        src/backend/executor/cypher_vle_stream_descriptor.o \

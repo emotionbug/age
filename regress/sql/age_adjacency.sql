@@ -7087,3 +7087,163 @@ RETURN count(*)
 $c$) AS (count agtype);
 
 SELECT drop_graph('age_adj_multiway_tri', true);
+
+-- ============================================================================
+-- age_adj_multiway_progressive: adaptive high-arity WCOJ intersection.
+--
+-- The progressive path orders sources by directory posting count, materializes
+-- the shortest adjacency set, and pushes the shrinking exact candidate set into
+-- each subsequent adjacency scan.  These cases pin sparse shrink-to-one,
+-- shrink-to-empty, dense-overlap fallback, mixed directions, and delta-only
+-- source correctness.
+-- ============================================================================
+SELECT create_graph('age_adj_multiway_progressive');
+SELECT create_vlabel('age_adj_multiway_progressive', 'N');
+SELECT create_elabel('age_adj_multiway_progressive', 'E');
+
+-- 130 two-posting sources: one private target plus one common target.  This
+-- forces the progressive path to retain exactly one candidate across a
+-- high-arity intersection.
+INSERT INTO age_adj_multiway_progressive."E"(id, start_id, end_id, properties)
+SELECT _graphid(_label_id('age_adj_multiway_progressive', 'E'), s * 2 - 1),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), s),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 1000 + s),
+       '{}'::agtype
+FROM generate_series(1, 130) s
+UNION ALL
+SELECT _graphid(_label_id('age_adj_multiway_progressive', 'E'), s * 2),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), s),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 9000),
+       '{}'::agtype
+FROM generate_series(1, 130) s;
+
+-- Eight mutually-disjoint one-posting sources: the progressive candidate must
+-- become empty after the second source and stop without scanning the rest.
+INSERT INTO age_adj_multiway_progressive."E"(id, start_id, end_id, properties)
+SELECT _graphid(_label_id('age_adj_multiway_progressive', 'E'), 1000 + s),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), s),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 2000 + s),
+       '{}'::agtype
+FROM generate_series(131, 138) s;
+
+-- 130 dense-overlap sources.  The first exact-set probe does not shrink, so the
+-- adaptive path must abandon progressive probing and use the global merge.
+-- The fallback source-coverage bitmap spans three 64-bit words.
+INSERT INTO age_adj_multiway_progressive."E"(id, start_id, end_id, properties)
+SELECT _graphid(_label_id('age_adj_multiway_progressive', 'E'),
+                2000 + (s - 201) * 4 + r),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), s),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 9100 + r),
+       '{}'::agtype
+FROM generate_series(201, 330) s,
+     generate_series(1, 4) r;
+
+-- Four outgoing and four incoming sources whose only common candidate is 9200.
+INSERT INTO age_adj_multiway_progressive."E"(id, start_id, end_id, properties)
+SELECT _graphid(_label_id('age_adj_multiway_progressive', 'E'), 3000 + s * 2),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 300 + s),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 9200),
+       '{}'::agtype
+FROM generate_series(1, 4) s
+UNION ALL
+SELECT _graphid(_label_id('age_adj_multiway_progressive', 'E'), 3001 + s * 2),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 300 + s),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 9300 + s),
+       '{}'::agtype
+FROM generate_series(1, 4) s
+UNION ALL
+SELECT _graphid(_label_id('age_adj_multiway_progressive', 'E'), 4000 + s * 2),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 9200),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 400 + s),
+       '{}'::agtype
+FROM generate_series(1, 4) s
+UNION ALL
+SELECT _graphid(_label_id('age_adj_multiway_progressive', 'E'), 4001 + s * 2),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 9400 + s),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 400 + s),
+       '{}'::agtype
+FROM generate_series(1, 4) s;
+
+CREATE INDEX age_adj_multiway_progressive_e_start_idx
+ON age_adj_multiway_progressive."E"
+USING age_adjacency (start_id, id, end_id);
+CREATE INDEX age_adj_multiway_progressive_e_end_idx
+ON age_adj_multiway_progressive."E"
+USING age_adjacency (end_id, id, start_id);
+
+SELECT count(*) AS progressive_common_count,
+       bool_and(dst = _graphid(
+                    _label_id('age_adj_multiway_progressive', 'N'), 9000))
+           AS progressive_only_common
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway_progressive', 'E',
+        (SELECT ('[' || string_agg(
+                            _graphid(_label_id(
+                                'age_adj_multiway_progressive', 'N'), s)::text,
+                            ',' ORDER BY s) || ']')::agtype
+         FROM generate_series(1, 130) s)) AS m(dst);
+
+SELECT count(*) AS progressive_empty_count
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway_progressive', 'E',
+        (SELECT ('[' || string_agg(
+                            _graphid(_label_id(
+                                'age_adj_multiway_progressive', 'N'), s)::text,
+                            ',' ORDER BY s) || ']')::agtype
+         FROM generate_series(131, 138) s)) AS m(dst);
+
+SELECT count(*) AS progressive_dense_fallback_count
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway_progressive', 'E',
+        (SELECT ('[' || string_agg(
+                            _graphid(_label_id(
+                                'age_adj_multiway_progressive', 'N'), s)::text,
+                            ',' ORDER BY s) || ']')::agtype
+         FROM generate_series(201, 330) s)) AS m(dst);
+
+SELECT count(*) AS progressive_mixed_count,
+       bool_and(dst = _graphid(
+                    _label_id('age_adj_multiway_progressive', 'N'), 9200))
+           AS progressive_mixed_only_common
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway_progressive', 'E',
+        (SELECT ('[' || string_agg(
+                    format('{"id": %s, "dir": "%s"}', id, dir),
+                    ',' ORDER BY ord) || ']')::agtype
+         FROM (
+             SELECT s AS ord,
+                    _graphid(_label_id(
+                        'age_adj_multiway_progressive', 'N'), 300 + s) AS id,
+                    'out'::text AS dir
+             FROM generate_series(1, 4) s
+             UNION ALL
+             SELECT 4 + s AS ord,
+                    _graphid(_label_id(
+                        'age_adj_multiway_progressive', 'N'), 400 + s) AS id,
+                    'in'::text AS dir
+             FROM generate_series(1, 4) s
+         ) sources)) AS m(dst);
+
+-- Insert eight new source keys after both indexes exist.  Directory estimates
+-- may not cover delta-only keys, so the adaptive path must fall back rather than
+-- treating a missing estimate as proof of an empty adjacency list.
+INSERT INTO age_adj_multiway_progressive."E"(id, start_id, end_id, properties)
+SELECT _graphid(_label_id('age_adj_multiway_progressive', 'E'), 5000 + s),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 500 + s),
+       _graphid(_label_id('age_adj_multiway_progressive', 'N'), 9500),
+       '{}'::agtype
+FROM generate_series(1, 8) s;
+
+SELECT count(*) AS progressive_delta_fallback_count,
+       bool_and(dst = _graphid(
+                    _label_id('age_adj_multiway_progressive', 'N'), 9500))
+           AS progressive_delta_only_common
+FROM ag_catalog.age_adjacency_multiway_intersect(
+        'age_adj_multiway_progressive', 'E',
+        (SELECT ('[' || string_agg(
+                            _graphid(_label_id(
+                                'age_adj_multiway_progressive', 'N'), 500 + s)::text,
+                            ',' ORDER BY s) || ']')::agtype
+         FROM generate_series(1, 8) s)) AS m(dst);
+
+SELECT drop_graph('age_adj_multiway_progressive', true);
