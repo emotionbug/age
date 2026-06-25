@@ -152,3 +152,23 @@ Run the same fixture against separately installed baseline and candidate
 builds.  Discard the first sample and compare the median of the next five.
 `wcoj_survivor_batch_results.md` records the reference environment, raw
 samples, telemetry, and correctness checks.
+
+## Query-wide semijoin reduction for acyclic multiway joins
+
+`wcoj_semijoin_setup.sql` creates a high-pressure three-edge chain whose two C
+endpoint domains overlap at one key.  `wcoj_semijoin_benchmark.sql` compares the
+written-order binary plan with auto Generic Join while leaving all PostgreSQL
+join methods enabled.  Generic Join performs repeated endpoint semijoins and
+compacts provider rows before variable DFS.
+
+```sh
+psql --set=ON_ERROR_STOP=1 --set=fanout=128 \
+  --file=tools/perf/wcoj_semijoin_setup.sql
+psql --set=ON_ERROR_STOP=1 --set=runs=5 \
+  --file=tools/perf/wcoj_semijoin_benchmark.sql
+```
+
+The benchmark fixes `join_collapse_limit` and `from_collapse_limit` to one so
+that the binary control retains the written chain order; `age.enable_wcoj` is
+the only path switch.  See `wcoj_semijoin_results.md` for raw samples,
+telemetry, and the multiset correctness contract.
