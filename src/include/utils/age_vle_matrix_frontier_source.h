@@ -64,15 +64,19 @@ typedef struct VLEMatrixFrontierSourceBlock
     VLEContextAgeAdjacencyPayloadSource **run_sources;
     VLEMatrixFrontierRunInput *run_inputs;
     AgeAdjacencyVisiblePayloadRunKey *raw_keys;
+    AgeAdjacencyCompositeTerminalFilter raw_filter;
     int64 run_source_count;
     int64 run_source_capacity;
     int64 run_input_count;
     int64 run_input_capacity;
     int64 raw_source_count;
+    int64 raw_prefiltered_source_count;
     VLEMatrixFrontierCacheKey matrix_key;
     bool matrix_key_valid;
     bool matrix_key_counted;
     bool active_empty_suppressed;
+    bool raw_filter_prepared;
+    bool raw_filter_known_empty;
     bool run_batch_active;
 } VLEMatrixFrontierSourceBlock;
 

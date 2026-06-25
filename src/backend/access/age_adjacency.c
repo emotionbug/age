@@ -388,8 +388,11 @@ struct AgeAdjacencyVisiblePayloadRunScan
     int64 *active_cursor_indexes;
     AgeAdjacencyVisiblePayloadRunPayloadCallback payload_callback;
     void *payload_callback_state;
+    AgeAdjacencyVisiblePayloadRunFilteredKeyCallback filtered_key_callback;
+    void *filtered_key_callback_state;
     int64 cursor_count;
     int64 active_cursor_count;
+    int64 initial_active_key_count;
     bool known_empty;
 };
 
@@ -3965,6 +3968,128 @@ age_adjacency_estimate_terminal_label_postings(
     return found;
 }
 
+bool
+age_adjacency_estimate_terminal_label_postings_batch(
+    Oid index_oid, int32 terminal_label_id,
+    AgeAdjacencyTerminalLabelPostingEstimate *estimates,
+    int64 estimate_count)
+{
+    Relation index_rel;
+    AgeAdjacencyMetaPageData meta;
+    int64 i;
+
+    if (estimates == NULL || estimate_count <= 0)
+        return false;
+    for (i = 0; i < estimate_count; i++)
+    {
+        estimates[i].run_postings = 0;
+        estimates[i].terminal_postings = 0;
+        estimates[i].label_groups = 0;
+        estimates[i].value_posting_source = "none";
+        estimates[i].main_blocks = 0;
+        estimates[i].composite_matches = true;
+        estimates[i].label_mismatch = false;
+        estimates[i].property_mismatch = false;
+        estimates[i].found = false;
+    }
+    if (!OidIsValid(index_oid))
+        return false;
+
+    index_rel = index_open(index_oid, AccessShareLock);
+    age_adjacency_read_meta(index_rel, &meta);
+    for (i = 0; i < estimate_count; i++)
+    {
+        AgeAdjacencyDirectoryEntryData entry;
+
+        if (!age_adjacency_find_directory_entry_with_meta(
+                index_rel, estimates[i].key, &meta, &entry))
+            continue;
+
+        estimates[i].found = true;
+        estimates[i].run_postings = entry.posting_count;
+        estimates[i].terminal_postings =
+            age_adjacency_directory_entry_terminal_label_postings(
+                &entry, terminal_label_id);
+        estimates[i].label_groups = entry.next_label_count;
+        estimates[i].value_posting_source =
+            age_adjacency_directory_entry_value_posting_source(
+                &entry, terminal_label_id);
+        estimates[i].main_blocks = entry.main_block_count;
+    }
+    index_close(index_rel, AccessShareLock);
+
+    return true;
+}
+
+bool
+age_adjacency_estimate_composite_terminal_postings_batch(
+    Oid index_oid, const AgeAdjacencyCompositeTerminalFilter *filter,
+    AgeAdjacencyTerminalLabelPostingEstimate *estimates,
+    int64 estimate_count)
+{
+    Relation index_rel;
+    AgeAdjacencyMetaPageData meta;
+    AgeAdjacencyScanTarget target;
+    int64 i;
+
+    if (filter == NULL || estimates == NULL || estimate_count <= 0)
+        return false;
+    for (i = 0; i < estimate_count; i++)
+    {
+        estimates[i].run_postings = 0;
+        estimates[i].terminal_postings = 0;
+        estimates[i].label_groups = 0;
+        estimates[i].value_posting_source = "none";
+        estimates[i].main_blocks = 0;
+        estimates[i].composite_matches = true;
+        estimates[i].label_mismatch = false;
+        estimates[i].property_mismatch = false;
+        estimates[i].found = false;
+    }
+    if (!OidIsValid(index_oid))
+        return false;
+
+    memset(&target, 0, sizeof(target));
+    target.terminal_label_id = filter->terminal_label_id;
+    target.terminal_property_index_oid = filter->property_index_oid;
+    target.terminal_property_filter_id = filter->property_filter_id;
+    target.terminal_property_match_count = filter->property_match_count;
+    target.has_terminal_property_summary = filter->has_property_summary;
+    target.terminal_vertex_filter = filter->vertex_filter;
+    target.terminal_vertex_filter_state = filter->vertex_filter_state;
+    if (filter->has_vertex_set_filter)
+        target.terminal_vertex_set_filter = filter->vertex_set_filter;
+
+    index_rel = index_open(index_oid, AccessShareLock);
+    age_adjacency_read_meta(index_rel, &meta);
+    for (i = 0; i < estimate_count; i++)
+    {
+        AgeAdjacencyDirectoryEntryData entry;
+
+        if (!age_adjacency_find_directory_entry_with_meta(
+                index_rel, estimates[i].key, &meta, &entry))
+            continue;
+
+        estimates[i].found = true;
+        estimates[i].run_postings = entry.posting_count;
+        estimates[i].terminal_postings =
+            age_adjacency_directory_entry_terminal_label_postings(
+                &entry, filter->terminal_label_id);
+        estimates[i].label_groups = entry.next_label_count;
+        estimates[i].value_posting_source =
+            age_adjacency_directory_entry_value_posting_source(
+                &entry, filter->terminal_label_id);
+        estimates[i].main_blocks = entry.main_block_count;
+        estimates[i].composite_matches =
+            age_adjacency_directory_entry_matches_composite_target(
+                &entry, &target, &estimates[i].label_mismatch,
+                &estimates[i].property_mismatch);
+    }
+    index_close(index_rel, AccessShareLock);
+
+    return true;
+}
+
 static void
 age_adjacency_load_directory_cache(AgeAdjacencyVisiblePayloadScan *scan,
                                    BlockNumber blkno)
@@ -5406,6 +5531,9 @@ age_adjacency_begin_visible_payload_run_scan_with_options(
             run_scan->scan, options->terminal_label_id);
         run_scan->payload_callback = options->payload_callback;
         run_scan->payload_callback_state = options->payload_callback_state;
+        run_scan->filtered_key_callback = options->filtered_key_callback;
+        run_scan->filtered_key_callback_state =
+            options->filtered_key_callback_state;
     }
     run_scan->cursors = palloc0_array(AgeAdjacencyVisiblePayloadKeyCursor,
                                       key_count);
@@ -5417,12 +5545,14 @@ age_adjacency_begin_visible_payload_run_scan_with_options(
     for (i = 0; i < key_count; i++)
     {
         AgeAdjacencyVisiblePayloadKeyCursor *cursor;
+        bool cursor_begun;
 
         cursor = &run_scan->cursors[i];
-        if (!age_adjacency_visible_payload_key_cursor_begin(
-                run_scan->scan, cursor, keys[i].key))
-            continue;
+        cursor_begun = age_adjacency_visible_payload_key_cursor_begin(
+            run_scan->scan, cursor, keys[i].key);
         cursor->tag = keys[i].tag;
+        if (!cursor_begun)
+            continue;
         run_postings += cursor->main_remaining;
         active_postings += cursor->main_label_candidate_count;
     }
@@ -5440,14 +5570,14 @@ age_adjacency_begin_visible_payload_run_scan_with_options(
         for (i = 0; i < key_count; i++)
         {
             AgeAdjacencyVisiblePayloadKeyCursor *cursor;
-            void *tag;
+            bool cursor_begun;
 
             cursor = &run_scan->cursors[i];
-            tag = keys[i].tag;
-            if (!age_adjacency_visible_payload_key_cursor_begin(
-                    run_scan->scan, cursor, keys[i].key))
+            cursor_begun = age_adjacency_visible_payload_key_cursor_begin(
+                run_scan->scan, cursor, keys[i].key);
+            cursor->tag = keys[i].tag;
+            if (!cursor_begun)
                 continue;
-            cursor->tag = tag;
         }
     }
 
@@ -5463,13 +5593,26 @@ age_adjacency_begin_visible_payload_run_scan_with_options(
 
         cursor = &run_scan->cursors[i];
         if (!cursor->key_active)
+        {
+            cursor->seen = true;
+            if (run_scan->filtered_key_callback != NULL)
+                run_scan->filtered_key_callback(
+                    cursor->tag, run_scan->filtered_key_callback_state);
             continue;
+        }
         cursor->payload_valid =
             age_adjacency_visible_payload_key_cursor_next(
                 run_scan->scan, cursor, &cursor->payload);
-        if (cursor->payload_valid)
-            age_adjacency_visible_payload_run_scan_activate_cursor(run_scan,
-                                                                   i);
+        if (!cursor->payload_valid)
+        {
+            cursor->seen = true;
+            if (run_scan->filtered_key_callback != NULL)
+                run_scan->filtered_key_callback(
+                    cursor->tag, run_scan->filtered_key_callback_state);
+            continue;
+        }
+        run_scan->initial_active_key_count++;
+        age_adjacency_visible_payload_run_scan_activate_cursor(run_scan, i);
     }
 
     return run_scan;
@@ -5655,6 +5798,21 @@ age_adjacency_visible_payload_run_scan_key_evidence(
     evidence->known_empty = scan->known_empty || !evidence->active;
 
     return evidence->active;
+}
+
+int64
+age_adjacency_visible_payload_run_scan_active_keys(
+    AgeAdjacencyVisiblePayloadRunScan *scan)
+{
+    if (scan == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload run scan active key "
+                        "count requires scan")));
+    }
+
+    return scan->initial_active_key_count;
 }
 
 void

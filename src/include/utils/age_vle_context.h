@@ -355,6 +355,12 @@ extern void age_vle_context_record_matrix_frontier_source_run(
 extern void age_vle_context_record_matrix_frontier_source_run_evidence(
     VLE_local_context *vlelctx, int64 run_postings,
     int64 terminal_postings);
+extern void age_vle_context_record_matrix_frontier_source_run_active_keys(
+    VLE_local_context *vlelctx, int64 active_keys);
+extern void age_vle_context_record_matrix_frontier_source_run_filtered_keys(
+    VLE_local_context *vlelctx, int64 filtered_keys);
+extern void age_vle_context_record_matrix_frontier_source_run_prefiltered_keys(
+    VLE_local_context *vlelctx, int64 prefiltered_keys);
 extern int64 age_vle_context_empty_lifecycle_batch_size(
     VLE_local_context *vlelctx);
 extern void age_vle_context_record_source_scan(
@@ -570,6 +576,8 @@ extern void age_vle_context_age_adjacency_payload_source_accept_scanned_payload(
 extern void age_vle_context_age_adjacency_payload_source_accept_matrix_replay(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
 extern void age_vle_context_age_adjacency_payload_source_mark_empty(
+    VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
+extern void age_vle_context_age_adjacency_payload_source_mark_empty_no_matrix(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source);
 extern bool age_vle_context_prepare_age_adjacency_payload_source_run_filter(
     VLE_local_context *vlelctx, VLEContextAgeAdjacencyPayloadSource *source,

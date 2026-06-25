@@ -29,6 +29,8 @@ static bool matrix_frontier_prefetch_sources_for_direction(
 static bool matrix_frontier_prefetch_label_sources_for_direction(
     VLEMatrixFrontierPrefetchCollector *collector,
     VLE_local_context *vlelctx, bool outgoing);
+static void matrix_frontier_prefetch_collector_drain(
+    VLEMatrixFrontierPrefetchCollector *collector, VLE_local_context *vlelctx);
 static void matrix_frontier_prefetch_age_adjacency_cursors(
     VLE_local_context *vlelctx, VLEContextSourceCursor *source_cursors,
     int64 source_cursor_count);
@@ -74,11 +76,13 @@ void age_vle_matrix_frontier_prefetch_collector_init(
 
 void age_vle_matrix_frontier_prefetch_collector_add(
     VLEMatrixFrontierPrefetchCollector *collector,
+    VLE_local_context *vlelctx,
     const VLETraversalCandidate *candidate)
 {
     int64 i;
 
-    if (collector == NULL || !collector->enabled || candidate == NULL)
+    if (collector == NULL || !collector->enabled || vlelctx == NULL ||
+        candidate == NULL)
         return;
 
     for (i = 0; i < collector->source_count; i++)
@@ -88,7 +92,7 @@ void age_vle_matrix_frontier_prefetch_collector_add(
     }
 
     if (collector->source_count >= collector->source_capacity)
-        return;
+        matrix_frontier_prefetch_collector_drain(collector, vlelctx);
 
     collector->source_vertex_ids[collector->source_count++] =
         candidate->next_vertex_id;
@@ -100,6 +104,17 @@ void age_vle_matrix_frontier_prefetch_collector_flush(
 {
     if (collector == NULL || !collector->enabled)
         return;
+
+    matrix_frontier_prefetch_collector_drain(collector, vlelctx);
+    pfree_if_not_null(collector->source_vertex_ids);
+    memset(collector, 0, sizeof(*collector));
+}
+
+static void matrix_frontier_prefetch_collector_drain(
+    VLEMatrixFrontierPrefetchCollector *collector, VLE_local_context *vlelctx)
+{
+    Assert(collector != NULL);
+    Assert(vlelctx != NULL);
 
     if (collector->source_count > 1)
     {
@@ -113,8 +128,7 @@ void age_vle_matrix_frontier_prefetch_collector_flush(
             collector, vlelctx, false);
     }
 
-    pfree_if_not_null(collector->source_vertex_ids);
-    memset(collector, 0, sizeof(*collector));
+    collector->source_count = 0;
 }
 
 static bool matrix_frontier_prefetch_sources_for_direction(

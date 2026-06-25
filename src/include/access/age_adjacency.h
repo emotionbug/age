@@ -92,12 +92,28 @@ typedef struct AgeAdjacencyVisiblePayloadRunKeyEvidence
     bool known_empty;
 } AgeAdjacencyVisiblePayloadRunKeyEvidence;
 
+typedef struct AgeAdjacencyTerminalLabelPostingEstimate
+{
+    graphid key;
+    int64 run_postings;
+    int64 terminal_postings;
+    int64 label_groups;
+    const char *value_posting_source;
+    int64 main_blocks;
+    bool composite_matches;
+    bool label_mismatch;
+    bool property_mismatch;
+    bool found;
+} AgeAdjacencyTerminalLabelPostingEstimate;
+
 typedef bool (*AgeAdjacencyVisiblePayloadRunFilterCallback) (
     int64 run_postings, int64 active_postings,
     AgeAdjacencyCompositeTerminalFilter *filter, bool *known_empty,
     void *callback_state);
 typedef void (*AgeAdjacencyVisiblePayloadRunPayloadCallback) (
     void *tag, const AgeAdjacencyPayload *payload, void *callback_state);
+typedef void (*AgeAdjacencyVisiblePayloadRunFilteredKeyCallback) (
+    void *tag, void *callback_state);
 
 typedef struct AgeAdjacencyVisiblePayloadRunOptions
 {
@@ -106,6 +122,8 @@ typedef struct AgeAdjacencyVisiblePayloadRunOptions
     void *filter_callback_state;
     AgeAdjacencyVisiblePayloadRunPayloadCallback payload_callback;
     void *payload_callback_state;
+    AgeAdjacencyVisiblePayloadRunFilteredKeyCallback filtered_key_callback;
+    void *filtered_key_callback_state;
 } AgeAdjacencyVisiblePayloadRunOptions;
 
 extern uint32 age_adjacency_property_filter_id(Oid property_index_oid,
@@ -143,6 +161,14 @@ extern bool age_adjacency_estimate_terminal_label_postings(
     Oid index_oid, graphid key, int32 terminal_label_id,
     int64 *run_postings, int64 *terminal_postings, int64 *label_groups,
     const char **value_posting_source, int64 *main_blocks);
+extern bool age_adjacency_estimate_terminal_label_postings_batch(
+    Oid index_oid, int32 terminal_label_id,
+    AgeAdjacencyTerminalLabelPostingEstimate *estimates,
+    int64 estimate_count);
+extern bool age_adjacency_estimate_composite_terminal_postings_batch(
+    Oid index_oid, const AgeAdjacencyCompositeTerminalFilter *filter,
+    AgeAdjacencyTerminalLabelPostingEstimate *estimates,
+    int64 estimate_count);
 extern bool age_adjacency_visible_payload_scan_key_known_empty(
     AgeAdjacencyVisiblePayloadScan *scan, graphid key);
 extern bool age_adjacency_visible_payload_scan_next(
@@ -172,6 +198,8 @@ extern bool age_adjacency_visible_payload_run_scan_key_seen(
 extern bool age_adjacency_visible_payload_run_scan_key_evidence(
     AgeAdjacencyVisiblePayloadRunScan *scan, int64 key_index,
     AgeAdjacencyVisiblePayloadRunKeyEvidence *evidence);
+extern int64 age_adjacency_visible_payload_run_scan_active_keys(
+    AgeAdjacencyVisiblePayloadRunScan *scan);
 extern void age_adjacency_end_visible_payload_run_scan(
     AgeAdjacencyVisiblePayloadRunScan *scan);
 extern int64 age_adjacency_visible_payload_scan_label_filtered(

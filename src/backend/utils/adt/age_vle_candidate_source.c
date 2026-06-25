@@ -487,7 +487,7 @@ static int64 push_candidates_from_source(
                 vlelctx, &candidate, source->trace_name))
         {
             age_vle_context_record_source_push(vlelctx);
-            age_vle_matrix_frontier_prefetch_collector_add(prefetch,
+            age_vle_matrix_frontier_prefetch_collector_add(prefetch, vlelctx,
                                                            &candidate);
         }
     }

@@ -40,6 +40,7 @@ extern void age_vle_matrix_frontier_prefetch_collector_init(
     int64 source_cursor_count);
 extern void age_vle_matrix_frontier_prefetch_collector_add(
     VLEMatrixFrontierPrefetchCollector *collector,
+    VLE_local_context *vlelctx,
     const VLETraversalCandidate *candidate);
 extern void age_vle_matrix_frontier_prefetch_collector_flush(
     VLEMatrixFrontierPrefetchCollector *collector,

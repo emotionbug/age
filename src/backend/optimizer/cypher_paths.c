@@ -428,7 +428,8 @@ static void add_vle_stream_expand_candidate(
     double base_fanout);
 static double vle_stream_matrix_frontier_scheduled_work(
     List *edge_source, const char *bound, double base_fanout,
-    double path_rows);
+    double path_rows, double composite_fanout,
+    const char *composite_planned);
 static const char *vle_stream_base_join_order_property(List *func_args,
                                                        List *edge_source);
 static bool vle_stream_func_args_have_bound_endpoints(List *func_args);
@@ -2783,7 +2784,12 @@ static AgeGraphJoinCandidateTable *make_vle_stream_graph_join_table(
         {
             matrix_scheduled_work =
                 vle_stream_matrix_frontier_scheduled_work(
-                    edge_source, bound, base_fanout, cp->path.rows);
+                    edge_source, bound, base_fanout, cp->path.rows,
+                    (double)vle_stream_descriptor_int8_field(
+                        edge_source,
+                        AGE_VLE_STREAM_EDGE_SOURCE_COMPOSITE_SOURCE_FANOUT,
+                        0),
+                    composite_planned);
             (void) age_graph_join_table_add_scheduled_candidate(
                 table, &cp->path, "vle", "matrix-frontier-expand", bound,
                 "matrix-frontier-anchored",
@@ -2862,7 +2868,8 @@ static void add_vle_stream_expand_candidate(
 
 static double vle_stream_matrix_frontier_scheduled_work(
     List *edge_source, const char *bound, double base_fanout,
-    double path_rows)
+    double path_rows, double composite_fanout,
+    const char *composite_planned)
 {
     const char *fanout_source;
     const char *value_posting_source;
@@ -2894,6 +2901,11 @@ static double vle_stream_matrix_frontier_scheduled_work(
         {
             scheduled_work = Max(1.0, scheduled_work * 0.50);
         }
+    }
+    if (composite_fanout > 0.0 && composite_planned != NULL &&
+        strcmp(composite_planned, "none") != 0)
+    {
+        scheduled_work = Min(scheduled_work, Max(composite_fanout, 1.0));
     }
 
     return scheduled_work;

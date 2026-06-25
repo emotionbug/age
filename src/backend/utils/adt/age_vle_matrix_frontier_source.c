@@ -26,6 +26,9 @@ typedef struct VLEMatrixFrontierRawRunFilterState
 {
     VLE_local_context *vlelctx;
     VLEContextAgeAdjacencyPayloadSource *source;
+    const AgeAdjacencyCompositeTerminalFilter *prepared_filter;
+    bool prepared_filter_valid;
+    bool prepared_known_empty;
 } VLEMatrixFrontierRawRunFilterState;
 
 static int age_vle_matrix_frontier_source_cursor_compare(
@@ -72,6 +75,8 @@ static void age_vle_matrix_frontier_source_block_append_raw_merge_input(
     VLEMatrixFrontierRunInputState **raw_scan_state,
     VLEContextAgeAdjacencyPayloadSource *source,
     const VLEContextSourceCursor *cursor);
+static void age_vle_matrix_frontier_source_block_prefilter_raw_merge_inputs(
+    VLEMatrixFrontierSourceBlock *block, const VLEContextSourceCursor *cursor);
 static void age_vle_matrix_frontier_source_block_begin_raw_merge_scan(
     VLEMatrixFrontierSourceBlock *block,
     const VLEContextSourceCursor *first_cursor,
@@ -110,6 +115,8 @@ static bool age_vle_matrix_frontier_source_block_prepare_raw_run_filter(
     void *callback_state);
 static void age_vle_matrix_frontier_source_block_accept_raw_run_payload(
     void *tag, const AgeAdjacencyPayload *payload, void *callback_state);
+static void age_vle_matrix_frontier_source_block_accept_filtered_raw_key(
+    void *tag, void *callback_state);
 static bool age_vle_matrix_frontier_source_block_drain_run(
     VLEMatrixFrontierSourceBlock *block);
 static bool age_vle_matrix_frontier_source_block_advance(
@@ -237,6 +244,10 @@ static void age_vle_matrix_frontier_source_block_cleanup_run(
     age_vle_matrix_frontier_source_block_release_run_input_states(block);
     block->run_input_count = 0;
     block->raw_source_count = 0;
+    block->raw_prefiltered_source_count = 0;
+    memset(&block->raw_filter, 0, sizeof(block->raw_filter));
+    block->raw_filter_prepared = false;
+    block->raw_filter_known_empty = false;
     block->run_batch_active = false;
 }
 
@@ -438,6 +449,121 @@ static void age_vle_matrix_frontier_source_block_append_raw_merge_input(
     block->raw_source_count++;
 }
 
+static void age_vle_matrix_frontier_source_block_prefilter_raw_merge_inputs(
+    VLEMatrixFrontierSourceBlock *block, const VLEContextSourceCursor *cursor)
+{
+    AgeAdjacencyTerminalLabelPostingEstimate *estimates;
+    int64 kept_count;
+    int64 run_postings;
+    int64 terminal_postings;
+    int64 i;
+
+    Assert(block != NULL);
+    Assert(cursor != NULL);
+
+    if (block->raw_source_count <= 0 ||
+        !label_id_is_valid(cursor->terminal_label_id))
+    {
+        return;
+    }
+
+    estimates = palloc_array(AgeAdjacencyTerminalLabelPostingEstimate,
+                             block->raw_source_count);
+    for (i = 0; i < block->raw_source_count; i++)
+        estimates[i].key = block->raw_keys[i].key;
+
+    if (!age_adjacency_estimate_terminal_label_postings_batch(
+            cursor->index_oid, cursor->terminal_label_id, estimates,
+            block->raw_source_count))
+    {
+        pfree(estimates);
+        return;
+    }
+
+    kept_count = 0;
+    run_postings = 0;
+    terminal_postings = 0;
+    for (i = 0; i < block->raw_source_count; i++)
+    {
+        VLEMatrixFrontierRunInput *input;
+
+        input = block->raw_keys[i].tag;
+        Assert(input != NULL);
+        if (estimates[i].found && estimates[i].terminal_postings <= 0)
+        {
+            age_vle_context_age_adjacency_payload_source_mark_empty_no_matrix(
+                block->vlelctx, input->source);
+            block->raw_prefiltered_source_count++;
+            continue;
+        }
+
+        if (kept_count != i)
+            block->raw_keys[kept_count] = block->raw_keys[i];
+        run_postings += estimates[i].run_postings;
+        terminal_postings += estimates[i].terminal_postings;
+        kept_count++;
+    }
+
+    block->raw_source_count = kept_count;
+    if (block->raw_source_count > 0)
+    {
+        VLEMatrixFrontierRunInput *first_input;
+
+        first_input = block->raw_keys[0].tag;
+        Assert(first_input != NULL);
+        block->raw_filter_prepared =
+            age_vle_context_prepare_age_adjacency_payload_source_run_filter(
+                block->vlelctx, first_input->source, run_postings,
+                terminal_postings, &block->raw_filter,
+                &block->raw_filter_known_empty);
+    }
+    if (block->raw_filter_prepared && block->raw_filter_known_empty)
+    {
+        for (i = 0; i < block->raw_source_count; i++)
+        {
+            VLEMatrixFrontierRunInput *input;
+
+            input = block->raw_keys[i].tag;
+            Assert(input != NULL);
+            age_vle_context_age_adjacency_payload_source_mark_empty_no_matrix(
+                block->vlelctx, input->source);
+        }
+        block->raw_prefiltered_source_count += block->raw_source_count;
+        block->raw_source_count = 0;
+    }
+    else if (block->raw_filter_prepared)
+    {
+        for (i = 0; i < block->raw_source_count; i++)
+            estimates[i].key = block->raw_keys[i].key;
+        if (age_adjacency_estimate_composite_terminal_postings_batch(
+                cursor->index_oid, &block->raw_filter, estimates,
+                block->raw_source_count))
+        {
+            kept_count = 0;
+            for (i = 0; i < block->raw_source_count; i++)
+            {
+                VLEMatrixFrontierRunInput *input;
+
+                input = block->raw_keys[i].tag;
+                Assert(input != NULL);
+                if (estimates[i].found && !estimates[i].composite_matches)
+                {
+                    age_vle_context_age_adjacency_payload_source_mark_empty_no_matrix(
+                        block->vlelctx, input->source);
+                    block->raw_prefiltered_source_count++;
+                    continue;
+                }
+
+                if (kept_count != i)
+                    block->raw_keys[kept_count] = block->raw_keys[i];
+                kept_count++;
+            }
+            block->raw_source_count = kept_count;
+        }
+    }
+    pfree(estimates);
+}
+
 static void age_vle_matrix_frontier_source_block_begin_raw_merge_scan(
     VLEMatrixFrontierSourceBlock *block,
     const VLEContextSourceCursor *first_cursor,
@@ -471,6 +597,9 @@ static void age_vle_matrix_frontier_source_block_begin_raw_merge_scan(
     filter_state.vlelctx = block->vlelctx;
     filter_state.source =
         ((VLEMatrixFrontierRunInput *) block->raw_keys[0].tag)->source;
+    filter_state.prepared_filter = &block->raw_filter;
+    filter_state.prepared_filter_valid = block->raw_filter_prepared;
+    filter_state.prepared_known_empty = block->raw_filter_known_empty;
     options.terminal_label_id = first_cursor->terminal_label_id;
     options.filter_callback =
         age_vle_matrix_frontier_source_block_prepare_raw_run_filter;
@@ -478,6 +607,9 @@ static void age_vle_matrix_frontier_source_block_begin_raw_merge_scan(
     options.payload_callback =
         age_vle_matrix_frontier_source_block_accept_raw_run_payload;
     options.payload_callback_state = block->vlelctx;
+    options.filtered_key_callback =
+        age_vle_matrix_frontier_source_block_accept_filtered_raw_key;
+    options.filtered_key_callback_state = block->vlelctx;
     raw_scan_state->raw_run_scan =
         age_adjacency_begin_visible_payload_run_scan_with_options(
             first_cursor->index_oid, NULL, false, &options,
@@ -547,6 +679,20 @@ static void age_vle_matrix_frontier_source_block_close_raw_scan(
     if (state == NULL || state->raw_run_scan == NULL)
         return;
 
+    {
+        int64 active_keys;
+
+        active_keys = age_adjacency_visible_payload_run_scan_active_keys(
+            state->raw_run_scan);
+        age_vle_context_record_matrix_frontier_source_run_active_keys(
+            block->vlelctx, active_keys);
+        age_vle_context_record_matrix_frontier_source_run_filtered_keys(
+            block->vlelctx, block->raw_prefiltered_source_count +
+            block->raw_source_count - active_keys);
+        age_vle_context_record_matrix_frontier_source_run_prefiltered_keys(
+            block->vlelctx, block->raw_prefiltered_source_count);
+    }
+
     for (i = 0; i < block->raw_source_count; i++)
     {
         VLEMatrixFrontierRunInput *input;
@@ -563,7 +709,7 @@ static void age_vle_matrix_frontier_source_block_close_raw_scan(
         }
         if (!age_adjacency_visible_payload_run_scan_key_seen(
                 state->raw_run_scan, i))
-            age_vle_context_age_adjacency_payload_source_mark_empty(
+            age_vle_context_age_adjacency_payload_source_mark_empty_no_matrix(
                 block->vlelctx, input->source);
     }
     age_adjacency_end_visible_payload_run_scan(state->raw_run_scan);
@@ -734,6 +880,14 @@ static bool age_vle_matrix_frontier_source_block_prepare_raw_run_filter(
     Assert(callback_state != NULL);
 
     state = callback_state;
+    if (state->prepared_filter_valid)
+    {
+        *known_empty = state->prepared_known_empty;
+        if (!state->prepared_known_empty)
+            *filter = *state->prepared_filter;
+        return true;
+    }
+
     return age_vle_context_prepare_age_adjacency_payload_source_run_filter(
         state->vlelctx, state->source, run_postings, active_postings,
         filter, known_empty);
@@ -753,6 +907,21 @@ static void age_vle_matrix_frontier_source_block_accept_raw_run_payload(
     vlelctx = callback_state;
     age_vle_context_age_adjacency_payload_source_accept_scanned_payload(
         vlelctx, raw_source->source, payload);
+}
+
+static void age_vle_matrix_frontier_source_block_accept_filtered_raw_key(
+    void *tag, void *callback_state)
+{
+    VLEMatrixFrontierRunInput *raw_source;
+    VLE_local_context *vlelctx;
+
+    Assert(tag != NULL);
+    Assert(callback_state != NULL);
+
+    raw_source = tag;
+    vlelctx = callback_state;
+    age_vle_context_age_adjacency_payload_source_mark_empty_no_matrix(
+        vlelctx, raw_source->source);
 }
 
 static bool age_vle_matrix_frontier_source_block_drain_run(
@@ -828,8 +997,20 @@ static bool age_vle_matrix_frontier_source_block_drain_run(
     }
 
     if (block->raw_source_count > 0)
+        age_vle_matrix_frontier_source_block_prefilter_raw_merge_inputs(
+            block, first_cursor);
+    if (block->raw_source_count > 0)
         age_vle_matrix_frontier_source_block_begin_raw_merge_scan(
             block, first_cursor, raw_scan_state);
+    else if (block->raw_prefiltered_source_count > 0)
+    {
+        age_vle_context_record_matrix_frontier_source_run_active_keys(
+            block->vlelctx, 0);
+        age_vle_context_record_matrix_frontier_source_run_filtered_keys(
+            block->vlelctx, block->raw_prefiltered_source_count);
+        age_vle_context_record_matrix_frontier_source_run_prefiltered_keys(
+            block->vlelctx, block->raw_prefiltered_source_count);
+    }
 
     block->cursor_index = block->run_end_index;
     block->run_batch_active = block->run_source_count > 0;
