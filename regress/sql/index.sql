@@ -482,6 +482,31 @@ SELECT * FROM cypher('cypher_index', $$
 $$) as (name agtype);
 
 --
+-- Section 6a: Typed boolean property expression index
+--
+SELECT create_vlabel('cypher_index', 'TypedBoolIndex');
+
+SELECT * FROM cypher('cypher_index', $$
+    CREATE (:TypedBoolIndex {flag: false, name: 'off'}),
+           (:TypedBoolIndex {flag: true, name: 'on'})
+$$) as (a agtype);
+
+SELECT create_property_index('cypher_index', 'TypedBoolIndex',
+                             'flag', 'pg_bool');
+
+SELECT * FROM cypher('cypher_index', $$
+    EXPLAIN (costs off) MATCH (n:TypedBoolIndex)
+    WHERE n.flag::pg_bool = true
+    RETURN n.name
+$$) as (plan agtype);
+
+SELECT * FROM cypher('cypher_index', $$
+    MATCH (n:TypedBoolIndex)
+    WHERE n.flag::pg_bool = true
+    RETURN n.name
+$$) as (name agtype);
+
+--
 -- Section 7: Nested typed scalar property expression index
 --
 SELECT create_vlabel('cypher_index', 'NestedTypedIndex');

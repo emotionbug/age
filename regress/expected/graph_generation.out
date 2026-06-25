@@ -155,11 +155,11 @@ SELECT * FROM cypher('gp1', $$MATCH (a)-[e]->(b) RETURN e$$) as (n agtype);
  {"id": 1125899906842637, "label": "edges", "end_id": 844424930131977, "start_id": 844424930131974, "properties": {}}::edge
  {"id": 1125899906842640, "label": "edges", "end_id": 844424930131977, "start_id": 844424930131975, "properties": {}}::edge
  {"id": 1125899906842642, "label": "edges", "end_id": 844424930131977, "start_id": 844424930131976, "properties": {}}::edge
+ {"id": 1125899906842645, "label": "edges", "end_id": 844424930131978, "start_id": 844424930131969, "properties": {}}::edge
  {"id": 1125899906842638, "label": "edges", "end_id": 844424930131978, "start_id": 844424930131974, "properties": {}}::edge
  {"id": 1125899906842641, "label": "edges", "end_id": 844424930131978, "start_id": 844424930131975, "properties": {}}::edge
  {"id": 1125899906842643, "label": "edges", "end_id": 844424930131978, "start_id": 844424930131976, "properties": {}}::edge
  {"id": 1125899906842644, "label": "edges", "end_id": 844424930131978, "start_id": 844424930131977, "properties": {}}::edge
- {"id": 1125899906842645, "label": "edges", "end_id": 844424930131978, "start_id": 844424930131969, "properties": {}}::edge
 (21 rows)
 
 SELECT * FROM age_create_barbell_graph('gp1',5,0,'vertices',NULL,'edges',NULL);

@@ -179,15 +179,18 @@ typedef struct AgeAdjacencyMatchScanState
     int scan_nattrs;
     AttrNumber *scan_attnos;
     graphid current_key;
+    graphid exact_terminal_id;
     AgeAdjacencyVisiblePayloadScan *payload_scan;
     ExprState *key_expr_state;
     ExprState *property_value_expr_state;
+    ExprState *terminal_expr_state;
     ExprState *edge_skip_qual;
     int64 edge_skip_filtered;
     MemoryContext payload_scan_context;
     MemoryContext scan_context;
     bool payload_active;
     bool scanned;
+    bool exact_terminal_bound;
     int64 payload_candidates;
     int64 terminal_filtered;
     int64 rows_emitted;
@@ -435,21 +438,29 @@ static void begin_age_adjacency_match_scan(CustomScanState *node,
     {
         Expr *key_expr = linitial(cscan->custom_exprs);
         Expr *property_value_expr = lsecond(cscan->custom_exprs);
+        Expr *terminal_expr = lthird(cscan->custom_exprs);
 
         state->key_expr_state =
             ExecInitExpr(key_expr, (PlanState *)node);
         state->property_value_expr_state =
             ExecInitExpr(property_value_expr, (PlanState *)node);
+        if (!(IsA(terminal_expr, Const) &&
+              castNode(Const, terminal_expr)->constisnull))
+        {
+            state->terminal_expr_state =
+                ExecInitExpr(terminal_expr, (PlanState *)node);
+            state->exact_terminal_bound = true;
+        }
 
         /*
-         * Optional third entry: edge-only restriction clauses, evaluated against
+         * Optional fourth entry: edge-only restriction clauses, evaluated against
          * the produced edge tuple to skip non-matching edges early (item 9).
          * These clauses also remain in the scan qual, so the skip is a pure
          * optimization.
          */
-        if (list_length(cscan->custom_exprs) >= 3)
+        if (list_length(cscan->custom_exprs) >= 4)
         {
-            List *edge_only_quals = (List *) lthird(cscan->custom_exprs);
+            List *edge_only_quals = (List *) lfourth(cscan->custom_exprs);
 
             if (edge_only_quals != NIL)
                 state->edge_skip_qual =
@@ -484,8 +495,10 @@ static TupleTableSlot *access_age_adjacency_match_scan(ScanState *node)
         MemoryContext oldcontext;
         Datum key_datum;
         Datum property_value_datum;
+        Datum terminal_datum = (Datum)0;
         bool isnull = false;
         bool property_value_isnull = true;
+        bool terminal_isnull = true;
 
         state->scanned = true;
         MemoryContextReset(state->scan_context);
@@ -501,14 +514,36 @@ static TupleTableSlot *access_age_adjacency_match_scan(ScanState *node)
                                                 &property_value_isnull);
         else
             property_value_datum = (Datum)0;
+        if (state->terminal_expr_state != NULL)
+            terminal_datum = ExecEvalExpr(state->terminal_expr_state,
+                                          econtext, &terminal_isnull);
         age_adjacency_match_terminal_property_set_value(
             state->terminal_property_lookup, property_value_datum,
             property_value_isnull);
         age_adjacency_visible_payload_scan_set_terminal_vertex_filter(
             state->payload_scan, NULL, NULL);
         state->shared_source_active = false;
+        if (state->exact_terminal_bound && terminal_isnull)
+            return ExecClearTuple(slot);
         if (!isnull)
         {
+            if (state->exact_terminal_bound)
+            {
+                AgeAdjacencyVertexSetFilter exact_filter;
+
+                state->exact_terminal_id = DATUM_GET_GRAPHID(terminal_datum);
+                memset(&exact_filter, 0, sizeof(exact_filter));
+                exact_filter.sorted_vertex_ids = &state->exact_terminal_id;
+                exact_filter.sorted_vertex_count = 1;
+                exact_filter.min_vertex_id = state->exact_terminal_id;
+                exact_filter.max_vertex_id = state->exact_terminal_id;
+                exact_filter.matches = 1;
+                exact_filter.source = "expand-into";
+                exact_filter.has_range = true;
+                exact_filter.has_sorted_vertex_ids = true;
+                age_adjacency_visible_payload_scan_set_terminal_vertex_set_filter(
+                    state->payload_scan, &exact_filter);
+            }
             state->current_key = DATUM_GET_GRAPHID(key_datum);
             prepare_age_adjacency_match_parallel_work(
                 state, state->current_key);
@@ -800,6 +835,8 @@ static void explain_age_adjacency_match_scan(CustomScanState *node,
     ExplainPropertyText("Adjacency Index Descriptor",
                         format_age_adjacency_match_index_metadata(state),
                         es);
+    if (state->exact_terminal_bound)
+        ExplainPropertyText("Adjacency Expand Into", "exact-terminal", es);
     ExplainPropertyText("Adjacency Pruning",
                         format_age_adjacency_match_pruning_descriptor(state),
                         es);

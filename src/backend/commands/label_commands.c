@@ -91,6 +91,11 @@ static void create_index_on_column(char *schema_name,
                                    char *rel_name,
                                    char *colname,
                                    bool unique);
+static void create_index_on_columns(char *schema_name,
+                                    char *rel_name,
+                                    char *first_colname,
+                                    char *second_colname,
+                                    bool unique);
 static char *create_index_on_property(char *schema_name, char *rel_name,
                                       char *property_name,
                                       char *property_type,
@@ -829,8 +834,10 @@ static void create_table_for_label(char *graph_name, char *label_name,
     }
     else if (label_type == LABEL_TYPE_EDGE)
     {
-        create_index_on_column(schema_name, rel_name, "start_id", false);
-        create_index_on_column(schema_name, rel_name, "end_id", false);
+        create_index_on_columns(schema_name, rel_name, "start_id",
+                                "end_id", false);
+        create_index_on_columns(schema_name, rel_name, "end_id",
+                                "start_id", false);
     }
 
     /*
@@ -897,25 +904,41 @@ static void create_index_on_column(char *schema_name,
                                    char *colname,
                                    bool unique)
 {
+    create_index_on_columns(schema_name, rel_name, colname, NULL, unique);
+}
+
+static void create_index_on_columns(char *schema_name,
+                                    char *rel_name,
+                                    char *first_colname,
+                                    char *second_colname,
+                                    bool unique)
+{
     IndexStmt *index_stmt;
-    IndexElem *index_col;
     PlannedStmt *index_wrapper;
 
     index_stmt = makeNode(IndexStmt);
-    index_col = makeNode(IndexElem);
-    index_col->name = colname;
-    index_col->expr = NULL;
-    index_col->indexcolname = NULL;
-    index_col->collation = NIL;
-    index_col->opclass = list_make1(makeString("graphid_ops"));
-    index_col->opclassopts = NIL;
-    index_col->ordering = SORTBY_DEFAULT;
-    index_col->nulls_ordering = SORTBY_NULLS_DEFAULT;
-
     index_stmt->relation = makeRangeVar(schema_name, rel_name, -1);
     index_stmt->accessMethod = "btree";
     index_stmt->tableSpace = NULL;
-    index_stmt->indexParams = list_make1(index_col);
+    index_stmt->indexParams = list_make1(
+        make_graphid_index_elem(first_colname, "graphid_ops"));
+    if (second_colname != NULL)
+    {
+        Oid namespace_oid = get_namespace_oid(schema_name, false);
+
+        index_stmt->indexParams = lappend(
+            index_stmt->indexParams,
+            make_graphid_index_elem(second_colname, "graphid_ops"));
+
+        /*
+         * Keep the historical <relation>_<endpoint>_idx name.  Existing
+         * monitoring, migrations, and operator runbooks can therefore treat
+         * the wider endpoint-pair index as an in-place replacement.
+         */
+        index_stmt->idxname = ChooseRelationName(rel_name, first_colname,
+                                                 "idx", namespace_oid,
+                                                 false);
+    }
     index_stmt->options = NIL;
     index_stmt->whereClause = NULL;
     index_stmt->excludeOpNames = NIL;
@@ -1139,6 +1162,12 @@ static char *property_index_helper_for_type(char *property_type)
         pg_strcasecmp(property_type, "text") == 0)
     {
         return "agtype_object_field_text_agtype";
+    }
+    if (pg_strcasecmp(property_type, "pg_bool") == 0 ||
+        pg_strcasecmp(property_type, "bool") == 0 ||
+        pg_strcasecmp(property_type, "boolean") == 0)
+    {
+        return "agtype_object_field_bool";
     }
     if (pg_strcasecmp(property_type, "pg_numeric") == 0)
     {

@@ -38,6 +38,7 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/pathnodes.h"
 #include "nodes/tidbitmap.h"
+#include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "port/atomics.h"
 #include "storage/bufmgr.h"
@@ -78,6 +79,7 @@
 #define AGE_ADJACENCY_MAIN_BLOCK_FULL 0x0001
 #define AGE_ADJACENCY_MAIN_BLOCK_COMPACT 0x0002
 #define AGE_ADJACENCY_DELTA_PAGE_COMPACT 0x0001
+#define AGE_ADJACENCY_META_COUNTS_EXACT 0x0001
 #define AGE_ADJACENCY_DELTA_REINDEX_THRESHOLD 4096
 #define AGE_ADJACENCY_PAGE_USABLE_BYTES \
     (BLCKSZ - MAXALIGN(SizeOfPageHeaderData) - \
@@ -878,6 +880,7 @@ static bool age_adjacency_read_planner_meta(Oid index_oid,
                                             BlockNumber *pages_out);
 static bool age_adjacency_extract_constant_index_key(IndexPath *path,
                                                      graphid *key_out);
+static bool age_adjacency_index_path_supported(IndexPath *path);
 static bool age_adjacency_probe_planner_delta(Oid index_oid, graphid key,
                                               AgeAdjacencyDeltaProbeStats *stats);
 static void age_adjacency_cost_estimate(struct PlannerInfo *root,
@@ -955,6 +958,7 @@ age_adjacency_init_metapage(Relation heap_rel, Relation index_rel)
     memset(&meta, 0, sizeof(meta));
     meta.magic = AGE_ADJACENCY_MAGIC;
     meta.version = AGE_ADJACENCY_VERSION;
+    meta.flags = AGE_ADJACENCY_META_COUNTS_EXACT;
     meta.heap_relid = RelationGetRelid(heap_rel);
     meta.key_attno = 1;
     meta.first_directory_blkno = InvalidBlockNumber;
@@ -3068,6 +3072,7 @@ age_adjacency_append_item(Relation index_rel, uint16 page_type,
         meta->postings += posting_units;
         if (page_type == AGE_ADJACENCY_PAGE_DELTA)
         {
+            meta->flags &= ~AGE_ADJACENCY_META_COUNTS_EXACT;
             meta->delta_postings += posting_units;
         }
     }
@@ -5023,6 +5028,7 @@ age_adjacency_bulk_delete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 
         if (removed > 0)
         {
+            meta->flags &= ~AGE_ADJACENCY_META_COUNTS_EXACT;
             opaque->posting_count -= removed;
             if (meta->postings >= removed)
             {
@@ -5121,6 +5127,20 @@ age_adjacency_read_planner_meta(Oid index_oid,
 
     index_close(index_rel, AccessShareLock);
     return true;
+}
+
+static bool
+age_adjacency_index_path_supported(IndexPath *path)
+{
+    IndexClause *iclause;
+
+    if (path == NULL || list_length(path->indexclauses) != 1)
+        return false;
+
+    iclause = linitial_node(IndexClause, path->indexclauses);
+    return iclause->indexcol == 0 &&
+           iclause->indexcols == NIL &&
+           list_length(iclause->indexquals) == 1;
 }
 
 static bool
@@ -5332,6 +5352,26 @@ age_adjacency_cost_estimate(struct PlannerInfo *root, struct IndexPath *path,
     graphid constant_key = 0;
 
     (void) root;
+
+    /*
+     * The generic index planner can form paths with equality clauses on the
+     * payload columns of this three-column storage format.  The bitmap AM
+     * contract, however, accepts exactly one equality key on the first
+     * column; assigning a normal cost to any wider path can select a plan
+     * that age_adjacency_get_bitmap() cannot execute.  Keep those paths as
+     * disabled fallbacks so a composite endpoint B-tree or a sequential scan
+     * wins instead.
+     */
+    if (!age_adjacency_index_path_supported(path))
+    {
+        *index_startup_cost = disable_cost;
+        *index_total_cost = disable_cost;
+        *index_selectivity = 1.0;
+        *index_correlation = 0.0;
+        *index_pages = path != NULL && path->indexinfo != NULL ?
+            Max(path->indexinfo->pages, 1) : 1;
+        return;
+    }
 
     if (path != NULL && path->indexinfo != NULL)
     {
@@ -7436,6 +7476,46 @@ age_adjacency_visible_payload_run_scan_active_keys(
     return scan->initial_active_key_count;
 }
 
+/*
+ * Return the number of source-key cursors that still have a payload queued in
+ * the run-scan heap.  Unlike active_keys(), this is a live count and therefore
+ * decreases as source lists are exhausted.
+ *
+ * A caller that has already popped an item into an external lookahead slot
+ * must account for that detached item separately.  key_is_queued() lets such a
+ * caller avoid double-counting the source when it also has a later payload in
+ * the heap.
+ */
+int64
+age_adjacency_visible_payload_run_scan_queued_keys(
+    AgeAdjacencyVisiblePayloadRunScan *scan)
+{
+    if (scan == NULL)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload run scan queued key "
+                        "count requires scan")));
+    }
+
+    return scan->active_cursor_count;
+}
+
+bool
+age_adjacency_visible_payload_run_scan_key_is_queued(
+    AgeAdjacencyVisiblePayloadRunScan *scan, int64 key_index)
+{
+    if (scan == NULL || key_index < 0 || key_index >= scan->cursor_count)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("age_adjacency visible payload run scan queued key "
+                        "test requires scan and valid key_index")));
+    }
+
+    return scan->cursors[key_index].payload_valid;
+}
+
 void
 age_adjacency_end_visible_payload_run_scan(
     AgeAdjacencyVisiblePayloadRunScan *scan)
@@ -8668,6 +8748,139 @@ age_adjacency_foreach_visible_payload(Oid index_oid, graphid key,
     age_adjacency_end_visible_payload_scan(scan);
 
     return matches;
+}
+
+/*
+ * Return the exact visible posting count for one bound endpoint.
+ *
+ * The directory stores the physical posting cardinality of each main run.
+ * It is safe to use that summary as a query result only while both of these
+ * invariants hold:
+ *
+ *  - the index has not accepted delta postings or removed postings since its
+ *    last build, so the directory cardinality still describes the index; and
+ *  - every heap page is all-visible, so no posting needs per-tuple MVCC
+ *    rechecking for the active snapshot.
+ *
+ * Inserts invalidate the first invariant in age_adjacency_append_item().
+ * VACUUM invalidates it when it removes a posting.  A DELETE/UPDATE that has
+ * not yet reached VACUUM clears the affected heap visibility-map bit, which
+ * invalidates the second invariant.  Any uncertain state falls back to the
+ * normal visible-payload cursor.
+ */
+int64
+age_adjacency_count_visible_payloads(Oid index_oid, graphid key,
+                                     Snapshot snapshot,
+                                     AgeAdjacencyCountMode *mode)
+{
+    Relation index_rel;
+    Relation heap_rel = NULL;
+    Buffer metabuf;
+    Page metapage;
+    AgeAdjacencyPageOpaque meta_opaque;
+    AgeAdjacencyMetaPage meta_page;
+    AgeAdjacencyMetaPageData meta;
+    AgeAdjacencyDirectoryEntryData entry;
+    BlockNumber heap_blocks;
+    BlockNumber all_visible = 0;
+    BlockNumber all_frozen = 0;
+    bool summary_safe = false;
+    int64 count = 0;
+
+    if (snapshot == NULL)
+        snapshot = GetActiveSnapshot();
+    if (mode != NULL)
+        *mode = AGE_ADJACENCY_COUNT_VISIBLE_SCAN;
+
+    index_rel = index_open(index_oid, AccessShareLock);
+    age_adjacency_validate_index(index_rel);
+
+    /*
+     * Keep a shared content lock on the metapage through the visibility-map
+     * check and directory lookup.  Index insert and bulk-delete paths take an
+     * exclusive metapage lock before changing postings or clearing the exact
+     * count flag.  Without this lock, VACUUM could clear the flag, remove a
+     * posting, and set the heap page all-visible between our two observations,
+     * leaving us with a stale exact=true copy and a stale directory count.
+     */
+    metabuf = ReadBuffer(index_rel, AGE_ADJACENCY_METAPAGE_BLKNO);
+    LockBuffer(metabuf, BUFFER_LOCK_SHARE);
+    metapage = BufferGetPage(metabuf);
+    meta_opaque = (AgeAdjacencyPageOpaque) PageGetSpecialPointer(metapage);
+    if (meta_opaque->magic != AGE_ADJACENCY_MAGIC ||
+        meta_opaque->version != AGE_ADJACENCY_VERSION ||
+        meta_opaque->page_type != AGE_ADJACENCY_PAGE_META)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INDEX_CORRUPTED),
+                 errmsg("age_adjacency metapage is invalid")));
+    }
+
+    meta_page = age_adjacency_get_meta(metapage);
+    if (meta_page->magic != AGE_ADJACENCY_MAGIC ||
+        meta_page->version != AGE_ADJACENCY_VERSION)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INDEX_CORRUPTED),
+                 errmsg("age_adjacency metapage metadata is invalid")));
+    }
+    memcpy(&meta, meta_page, sizeof(meta));
+
+    if (IsMVCCSnapshot(snapshot) &&
+        (meta.flags & AGE_ADJACENCY_META_COUNTS_EXACT) != 0 &&
+        meta.delta_postings == 0 &&
+        !BlockNumberIsValid(meta.first_delta_blkno))
+    {
+        heap_rel = relation_open(meta.heap_relid, AccessShareLock);
+        heap_blocks = RelationGetNumberOfBlocks(heap_rel);
+        visibilitymap_count(heap_rel, &all_visible, &all_frozen);
+        summary_safe = all_visible == heap_blocks;
+    }
+
+    if (summary_safe)
+    {
+        if (age_adjacency_find_directory_entry_with_meta(index_rel, key,
+                                                         &meta, &entry))
+        {
+            if (entry.posting_count > PG_INT64_MAX)
+                ereport(ERROR,
+                        (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                         errmsg("bigint out of range")));
+            count = (int64)entry.posting_count;
+        }
+
+        relation_close(heap_rel, AccessShareLock);
+        UnlockReleaseBuffer(metabuf);
+        index_close(index_rel, AccessShareLock);
+        if (mode != NULL)
+            *mode = AGE_ADJACENCY_COUNT_DIRECTORY_SUMMARY;
+        return count;
+    }
+
+    if (heap_rel != NULL)
+        relation_close(heap_rel, AccessShareLock);
+    UnlockReleaseBuffer(metabuf);
+    index_close(index_rel, AccessShareLock);
+
+    {
+        AgeAdjacencyVisiblePayloadScan *scan;
+        AgeAdjacencyPayload payload;
+
+        scan = age_adjacency_begin_visible_payload_scan(index_oid, snapshot,
+                                                        false);
+        (void)age_adjacency_visible_payload_scan_begin_key(scan, key);
+        while (age_adjacency_visible_payload_scan_next(scan, &payload))
+        {
+            if (count == PG_INT64_MAX)
+                ereport(ERROR,
+                        (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                         errmsg("bigint out of range")));
+            count++;
+        }
+        age_adjacency_end_visible_payload_scan(scan);
+    }
+
+    return count;
 }
 
 Datum

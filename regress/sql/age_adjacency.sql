@@ -919,6 +919,94 @@ SELECT * FROM cypher('age_adj_match_descriptor', $$
     MATCH (:N {i: 0})-[e:R {kind: "keep"}]->(n:N {i: 1})
     RETURN n.i
 $$) AS (plan agtype);
+
+-- A repeated terminal variable is an expand-into edge probe.  New edge
+-- labels carry endpoint-pair B-trees, so an exact probe should hand off to a
+-- regular two-column index path instead of enumerating an adjacency run.
+SELECT * FROM cypher('age_adj_match_descriptor', $$
+    MATCH (a:N {i: 0})
+    MATCH (b:N {i: 1})
+    MATCH (a)-[:R]->(b)
+    RETURN count(*)
+$$) AS (matched agtype);
+SET enable_seqscan = off;
+DO $age_adj_expand_into_pair$
+DECLARE
+    plan_text text;
+    source_id graphid;
+    terminal_id graphid;
+    has_pair_index boolean := false;
+    has_pair_condition boolean := false;
+    has_adjacency_custom_scan boolean := false;
+BEGIN
+    SELECT id INTO source_id
+    FROM age_adj_match_descriptor."N"
+    WHERE properties @> '{"i": 0}'::agtype;
+    SELECT id INTO terminal_id
+    FROM age_adj_match_descriptor."N"
+    WHERE properties @> '{"i": 1}'::agtype;
+
+    FOR plan_text IN EXECUTE format(
+        'SELECT plan::text
+         FROM cypher(''age_adj_match_descriptor'',
+                     $cypher$EXPLAIN (VERBOSE, COSTS OFF)
+                     MATCH (a:N), (b:N), (a)-[:R]->(b)
+                     WHERE id(a) = %s AND id(b) = %s
+                     RETURN b.i$cypher$)
+         AS (plan agtype)', source_id, terminal_id)
+    LOOP
+        IF plan_text LIKE '%Index%Scan using "R_start_id_idx"%' OR
+           plan_text LIKE '%Index%Scan using "R_end_id_idx"%' THEN
+            has_pair_index := true;
+        END IF;
+        IF plan_text LIKE '%Index Cond:%start_id%end_id%' OR
+           plan_text LIKE '%Index Cond:%end_id%start_id%' THEN
+            has_pair_condition := true;
+        END IF;
+        IF plan_text LIKE '%Custom Scan (AGE Adjacency Match)%' THEN
+            has_adjacency_custom_scan := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_pair_index OR NOT has_pair_condition OR
+       has_adjacency_custom_scan THEN
+        RAISE EXCEPTION 'expected endpoint-pair B-tree expand-into handoff';
+    END IF;
+END
+$age_adj_expand_into_pair$;
+RESET enable_seqscan;
+
+-- Keep the exact-terminal adjacency implementation covered as the fallback
+-- when ordinary B-tree and bitmap paths are disabled.
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+DO $age_adj_expand_into_custom$
+DECLARE
+    plan_text text;
+    has_exact_terminal boolean := false;
+BEGIN
+    FOR plan_text IN EXECUTE
+        'SELECT plan::text
+         FROM cypher(''age_adj_match_descriptor'',
+                     $cypher$EXPLAIN (VERBOSE, COSTS OFF)
+                     MATCH (a:N {i: 0})
+                     MATCH (b:N {i: 1})
+                     MATCH (a)-[:R]->(b)
+                     RETURN b.i$cypher$)
+         AS (plan agtype)'
+    LOOP
+        IF plan_text LIKE '%Adjacency Expand Into: exact-terminal%' THEN
+            has_exact_terminal := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_exact_terminal THEN
+        RAISE EXCEPTION 'expected exact-terminal adjacency expand-into';
+    END IF;
+END
+$age_adj_expand_into_custom$;
+RESET enable_indexscan;
+RESET enable_bitmapscan;
 SELECT * FROM cypher('age_adj_match_descriptor', $$
     DROP INDEX n_i_source
 $$) AS (drop_index text);
@@ -1262,6 +1350,179 @@ SELECT * FROM cypher('age_adj_default_source_handoff', $$
     RETURN n.i
 $$) AS (plan agtype);
 SELECT drop_graph('age_adj_default_source_handoff', true);
+
+-- A typed boolean source index must use the same one-shot prefetch path as
+-- the existing scalar domains.  Without a bool scan key this shape falls
+-- back to one vertex-id B-tree lookup per adjacency candidate.
+SELECT create_graph('age_adj_bool_source_prefetch');
+SELECT create_vlabel('age_adj_bool_source_prefetch', 'N');
+SELECT create_elabel('age_adj_bool_source_prefetch', 'R');
+DO $age_adj_bool_source_data$
+DECLARE
+    graph_name text := 'age_adj_bool_source_prefetch';
+    vertex_label_id int;
+    edge_label_id int;
+BEGIN
+    vertex_label_id := _label_id(graph_name, 'N');
+    edge_label_id := _label_id(graph_name, 'R');
+
+    EXECUTE format(
+        'INSERT INTO %I."N"(id, properties)
+         SELECT ag_catalog._graphid(%s, i::bigint),
+                format(''{"i": %%s, "flag": %%s}'', i,
+                       CASE WHEN i = 64 THEN ''true'' ELSE ''false'' END)
+                    ::ag_catalog.agtype
+         FROM generate_series(0, 64) AS g(i)',
+        graph_name, vertex_label_id);
+    EXECUTE format(
+        'INSERT INTO %I."R"(id, start_id, end_id, properties)
+         SELECT ag_catalog._graphid(%s, i::bigint),
+                ag_catalog._graphid(%s, 0),
+                ag_catalog._graphid(%s, i::bigint),
+                ''{}''::ag_catalog.agtype
+         FROM generate_series(1, 64) AS g(i)',
+        graph_name, edge_label_id, vertex_label_id, vertex_label_id);
+END
+$age_adj_bool_source_data$;
+SELECT * FROM cypher('age_adj_bool_source_prefetch', $$
+    CREATE INDEX r_adj_out FOR ()-[r:R]->() ON (ADJACENCY)
+$$) AS (create_index text);
+SELECT create_property_source_index_named(
+    'age_adj_bool_source_prefetch', 'N', 'flag',
+    'n_flag_bool_source', 'pg_bool');
+ANALYZE age_adj_bool_source_prefetch."N";
+ANALYZE age_adj_bool_source_prefetch."R";
+SELECT i FROM cypher('age_adj_bool_source_prefetch', $$
+    MATCH (:N {i: 0})-[:R]->(n:N {flag: true})
+    RETURN n.i
+$$) AS (i agtype);
+DO $age_adj_bool_source_prefetch$
+DECLARE
+    plan_text text;
+    has_bool_source boolean := false;
+    has_prefetch boolean := false;
+    has_zero_lookups boolean := false;
+BEGIN
+    FOR plan_text IN EXECUTE
+        'SELECT plan::text
+         FROM cypher(''age_adj_bool_source_prefetch'',
+                     $cypher$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF,
+                                     TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+                     MATCH (:N {i: 0})-[:R]->(n:N {flag: true})
+                     RETURN n.i$cypher$)
+         AS (plan agtype)'
+    LOOP
+        IF plan_text LIKE '%domain=pg_bool%' AND
+           plan_text LIKE '%index=graph-metadata:n_flag_bool_source%' THEN
+            has_bool_source := true;
+        END IF;
+        IF plan_text LIKE '%mode=property-index-prefetch%' THEN
+            has_prefetch := true;
+        END IF;
+        IF plan_text LIKE '%prefetch-matches=1%' AND
+           plan_text LIKE '%index-lookups=0%' THEN
+            has_zero_lookups := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_bool_source OR NOT has_prefetch OR NOT has_zero_lookups THEN
+        RAISE EXCEPTION
+            'expected typed bool terminal source to prefetch with zero id lookups';
+    END IF;
+END
+$age_adj_bool_source_prefetch$;
+SELECT drop_graph('age_adj_bool_source_prefetch', true);
+
+-- Every indexed conjunct in a terminal map must become a competing adjacency
+-- prefilter.  The leading broad property used to hide the selective `rare`
+-- index, leaving one vertex-id lookup per outgoing edge.
+SELECT create_graph('age_adj_multi_property_prefetch');
+SELECT create_vlabel('age_adj_multi_property_prefetch', 'N');
+SELECT create_elabel('age_adj_multi_property_prefetch', 'R');
+DO $age_adj_multi_property_data$
+DECLARE
+    graph_name text := 'age_adj_multi_property_prefetch';
+    vertex_label_id int;
+    edge_label_id int;
+BEGIN
+    vertex_label_id := _label_id(graph_name, 'N');
+    edge_label_id := _label_id(graph_name, 'R');
+
+    EXECUTE format(
+        'INSERT INTO %I."N"(id, properties)
+         SELECT ag_catalog._graphid(%s, i::bigint),
+                format(''{"i": %%s, "broad": 1, "rare": %%s}'', i, i)
+                    ::ag_catalog.agtype
+         FROM generate_series(0, 64) AS g(i)',
+        graph_name, vertex_label_id);
+    EXECUTE format(
+        'INSERT INTO %I."R"(id, start_id, end_id, properties)
+         SELECT ag_catalog._graphid(%s, i::bigint),
+                ag_catalog._graphid(%s, 0),
+                ag_catalog._graphid(%s, i::bigint),
+                ''{}''::ag_catalog.agtype
+         FROM generate_series(1, 64) AS g(i)',
+        graph_name, edge_label_id, vertex_label_id, vertex_label_id);
+END
+$age_adj_multi_property_data$;
+SELECT * FROM cypher('age_adj_multi_property_prefetch', $$
+    CREATE INDEX r_adj_out FOR ()-[r:R]->() ON (ADJACENCY)
+$$) AS (create_index text);
+SELECT create_property_source_index_named(
+    'age_adj_multi_property_prefetch', 'N', 'i',
+    'n_i_bigint_source', 'pg_bigint');
+SELECT create_property_source_index_named(
+    'age_adj_multi_property_prefetch', 'N', 'broad',
+    'n_broad_bigint_source', 'pg_bigint');
+SELECT create_property_source_index_named(
+    'age_adj_multi_property_prefetch', 'N', 'rare',
+    'n_rare_bigint_source', 'pg_bigint');
+DROP INDEX age_adj_multi_property_prefetch."R_end_id_idx";
+ANALYZE age_adj_multi_property_prefetch."N";
+ANALYZE age_adj_multi_property_prefetch."R";
+SELECT i FROM cypher('age_adj_multi_property_prefetch', $$
+    MATCH (:N {i: 0})-[:R]->(n:N {broad: 1, rare: 64})
+    RETURN n.i
+$$) AS (i agtype);
+DO $age_adj_multi_property_prefetch$
+DECLARE
+    plan_text text;
+    has_rare_source boolean := false;
+    has_prefetch boolean := false;
+    has_single_candidate boolean := false;
+BEGIN
+    FOR plan_text IN EXECUTE
+        'SELECT plan::text
+         FROM cypher(''age_adj_multi_property_prefetch'',
+                     $cypher$EXPLAIN (ANALYZE, VERBOSE, COSTS OFF,
+                                     TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+                     MATCH (:N {i: 0})-[:R]->
+                           (n:N {broad: 1, rare: 64})
+                     RETURN n.i$cypher$)
+         AS (plan agtype)'
+    LOOP
+        IF plan_text LIKE '%key=rare%' AND
+           plan_text LIKE '%index=graph-metadata:n_rare_bigint_source%' THEN
+            has_rare_source := true;
+        END IF;
+        IF plan_text LIKE '%mode=property-index-prefetch%' THEN
+            has_prefetch := true;
+        END IF;
+        IF plan_text LIKE '%prefetch-matches=1%' AND
+           plan_text LIKE '%payload-candidates=1%' AND
+           plan_text LIKE '%index-lookups=0%' THEN
+            has_single_candidate := true;
+        END IF;
+    END LOOP;
+
+    IF NOT has_rare_source OR NOT has_prefetch OR
+       NOT has_single_candidate THEN
+        RAISE EXCEPTION
+            'expected selective later terminal conjunct to own prefetch';
+    END IF;
+END
+$age_adj_multi_property_prefetch$;
+SELECT drop_graph('age_adj_multi_property_prefetch', true);
 
 DO $age_custom_path$
 DECLARE
@@ -6767,5 +7028,62 @@ BEGIN
                  coalesce(array_length(srf_ids, 1), 0);
 END
 $age_adj_multiway_tri$;
+
+-- ============================================================================
+-- Bound anonymous expansion followed by count(*): use the existing triangle
+-- graph so the full regression schedule does not consume another graph-version
+-- counter slot.  The directory summary is valid only for an exact post-build
+-- index over a fully all-visible edge heap.  DML must invalidate it and retain
+-- correctness through the visible-posting fallback.
+-- ============================================================================
+VACUUM (INDEX_CLEANUP ON, DISABLE_PAGE_SKIPPING, FREEZE)
+    age_adj_multiway_tri."N";
+VACUUM (INDEX_CLEANUP ON, DISABLE_PAGE_SKIPPING, FREEZE)
+    age_adj_multiway_tri."E";
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT * FROM cypher('age_adj_multiway_tri', $c$
+MATCH (s:N)-[:E]->()
+WHERE id(s) = 844424930131970
+RETURN count(*)
+$c$) AS (count agtype);
+
+SELECT * FROM cypher('age_adj_multiway_tri', $c$
+MATCH (s:N)-[:E]->()
+WHERE id(s) = 844424930131970
+RETURN count(*)
+$c$) AS (count agtype);
+
+INSERT INTO age_adj_multiway_tri."E"(id, start_id, end_id, properties) VALUES
+(_graphid(_label_id('age_adj_multiway_tri', 'E'), 6),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 2),
+ _graphid(_label_id('age_adj_multiway_tri', 'N'), 5), '{}'::agtype);
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT * FROM cypher('age_adj_multiway_tri', $c$
+MATCH (s:N)-[:E]->()
+WHERE id(s) = 844424930131970
+RETURN count(*)
+$c$) AS (count agtype);
+
+SELECT * FROM cypher('age_adj_multiway_tri', $c$
+MATCH (s:N)-[:E]->()
+WHERE id(s) = 844424930131970
+RETURN count(*)
+$c$) AS (count agtype);
+
+DELETE FROM age_adj_multiway_tri."E"
+WHERE id = _graphid(_label_id('age_adj_multiway_tri', 'E'), 6);
+
+REINDEX INDEX age_adj_multiway_tri.age_adj_multiway_tri_e_start_idx;
+VACUUM (INDEX_CLEANUP ON, DISABLE_PAGE_SKIPPING, FREEZE)
+    age_adj_multiway_tri."E";
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT * FROM cypher('age_adj_multiway_tri', $c$
+MATCH (s:N)-[:E]->()
+WHERE id(s) = 844424930131970
+RETURN count(*)
+$c$) AS (count agtype);
 
 SELECT drop_graph('age_adj_multiway_tri', true);

@@ -265,17 +265,17 @@ $$) as (n agtype);
 
 -- Verify that the incices are created on id columns
 SELECT indexname, indexdef FROM pg_indexes WHERE schemaname= 'cypher_index' ORDER BY 1;
-          indexname          |                                            indexdef                                            
------------------------------+------------------------------------------------------------------------------------------------
+          indexname          |                                                indexdef                                                
+-----------------------------+--------------------------------------------------------------------------------------------------------
  City_pkey                   | CREATE UNIQUE INDEX "City_pkey" ON cypher_index."City" USING btree (id)
  Country_pkey                | CREATE UNIQUE INDEX "Country_pkey" ON cypher_index."Country" USING btree (id)
- _ag_label_edge_end_id_idx   | CREATE INDEX _ag_label_edge_end_id_idx ON cypher_index._ag_label_edge USING btree (end_id)
+ _ag_label_edge_end_id_idx   | CREATE INDEX _ag_label_edge_end_id_idx ON cypher_index._ag_label_edge USING btree (end_id, start_id)
  _ag_label_edge_pkey         | CREATE UNIQUE INDEX _ag_label_edge_pkey ON cypher_index._ag_label_edge USING btree (id)
- _ag_label_edge_start_id_idx | CREATE INDEX _ag_label_edge_start_id_idx ON cypher_index._ag_label_edge USING btree (start_id)
+ _ag_label_edge_start_id_idx | CREATE INDEX _ag_label_edge_start_id_idx ON cypher_index._ag_label_edge USING btree (start_id, end_id)
  _ag_label_vertex_pkey       | CREATE UNIQUE INDEX _ag_label_vertex_pkey ON cypher_index._ag_label_vertex USING btree (id)
  cypher_index_idx_props_uq   | CREATE UNIQUE INDEX cypher_index_idx_props_uq ON cypher_index.idx USING btree (properties)
- has_city_end_id_idx         | CREATE INDEX has_city_end_id_idx ON cypher_index.has_city USING btree (end_id)
- has_city_start_id_idx       | CREATE INDEX has_city_start_id_idx ON cypher_index.has_city USING btree (start_id)
+ has_city_end_id_idx         | CREATE INDEX has_city_end_id_idx ON cypher_index.has_city USING btree (end_id, start_id)
+ has_city_start_id_idx       | CREATE INDEX has_city_start_id_idx ON cypher_index.has_city USING btree (start_id, end_id)
  idx_pkey                    | CREATE UNIQUE INDEX idx_pkey ON cypher_index.idx USING btree (id)
 (10 rows)
 
@@ -311,7 +311,7 @@ $$) as (n agtype);
                ->  Merge Join
                      Merge Cond: (a.id = e.end_id)
                      ->  Index Only Scan using "Country_pkey" on "Country" a
-                     ->  Index Scan using has_city_end_id_idx on has_city e
+                     ->  Index Only Scan using has_city_end_id_idx on has_city e
 (15 rows)
 
 SET enable_mergejoin = OFF;
@@ -343,7 +343,7 @@ $$) as (n agtype);
          ->  Hash
                ->  Hash Join
                      Hash Cond: (e.end_id = a.id)
-                     ->  Index Scan using has_city_end_id_idx on has_city e
+                     ->  Index Only Scan using has_city_end_id_idx on has_city e
                      ->  Hash
                            ->  Index Only Scan using "Country_pkey" on "Country" a
 (14 rows)
@@ -360,7 +360,7 @@ $$) as (n agtype);
  Aggregate
    ->  Nested Loop
          ->  Nested Loop
-               ->  Index Scan using has_city_start_id_idx on has_city e
+               ->  Index Only Scan using has_city_start_id_idx on has_city e
                ->  Index Only Scan using "Country_pkey" on "Country" a
                      Index Cond: (id = e.end_id)
          ->  Append
@@ -850,6 +850,52 @@ $$) as (name agtype);
 (1 row)
 
 --
+-- Section 6a: Typed boolean property expression index
+--
+SELECT create_vlabel('cypher_index', 'TypedBoolIndex');
+NOTICE:  VLabel "TypedBoolIndex" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT * FROM cypher('cypher_index', $$
+    CREATE (:TypedBoolIndex {flag: false, name: 'off'}),
+           (:TypedBoolIndex {flag: true, name: 'on'})
+$$) as (a agtype);
+ a 
+---
+(0 rows)
+
+SELECT create_property_index('cypher_index', 'TypedBoolIndex',
+                             'flag', 'pg_bool');
+ create_property_index 
+-----------------------
+ 
+(1 row)
+
+SELECT * FROM cypher('cypher_index', $$
+    EXPLAIN (costs off) MATCH (n:TypedBoolIndex)
+    WHERE n.flag::pg_bool = true
+    RETURN n.name
+$$) as (plan agtype);
+                                    QUERY PLAN                                     
+-----------------------------------------------------------------------------------
+ Index Scan using "TypedBoolIndex_flag_pg_bool_property_idx" on "TypedBoolIndex" n
+   Index Cond: (agtype_object_field_bool(properties, '"flag"'::agtype) = true)
+(2 rows)
+
+SELECT * FROM cypher('cypher_index', $$
+    MATCH (n:TypedBoolIndex)
+    WHERE n.flag::pg_bool = true
+    RETURN n.name
+$$) as (name agtype);
+ name 
+------
+ "on"
+(1 row)
+
+--
 -- Section 7: Nested typed scalar property expression index
 --
 SELECT create_vlabel('cypher_index', 'NestedTypedIndex');
@@ -1152,7 +1198,7 @@ WHERE doc @> '{"a": {"x": 42}}'::agtype;
 -- General Cleanup
 --
 SELECT drop_graph('cypher_index', true);
-NOTICE:  drop cascades to 13 other objects
+NOTICE:  drop cascades to 14 other objects
 DETAIL:  drop cascades to table cypher_index._ag_label_vertex
 drop cascades to table cypher_index._ag_label_edge
 drop cascades to table cypher_index.idx
@@ -1161,6 +1207,7 @@ drop cascades to table cypher_index.has_city
 drop cascades to table cypher_index."City"
 drop cascades to table cypher_index."NestedIndex"
 drop cascades to table cypher_index."TypedIndex"
+drop cascades to table cypher_index."TypedBoolIndex"
 drop cascades to table cypher_index."NestedTypedIndex"
 drop cascades to table cypher_index."NestedNumericIndex"
 drop cascades to table cypher_index."NestedPgNumericIndex"

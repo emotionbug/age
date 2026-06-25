@@ -37,6 +37,12 @@ typedef struct AgeAdjacencyPayload
     bool properties_isnull;
 } AgeAdjacencyPayload;
 
+typedef enum AgeAdjacencyCountMode
+{
+    AGE_ADJACENCY_COUNT_VISIBLE_SCAN = 0,
+    AGE_ADJACENCY_COUNT_DIRECTORY_SUMMARY
+} AgeAdjacencyCountMode;
+
 typedef bool (*AgeAdjacencyPayloadCallback) (const AgeAdjacencyPayload *payload,
                                              void *callback_state);
 typedef bool (*AgeAdjacencyVertexFilterCallback) (graphid vertex_id,
@@ -199,6 +205,9 @@ extern int64 age_adjacency_foreach_visible_payload(Oid index_oid,
                                                    bool fetch_properties,
                                                    AgeAdjacencyPayloadCallback callback,
                                                    void *callback_state);
+extern int64 age_adjacency_count_visible_payloads(
+    Oid index_oid, graphid key, Snapshot snapshot,
+    AgeAdjacencyCountMode *mode);
 extern AgeAdjacencyVisiblePayloadScan *age_adjacency_begin_visible_payload_scan(
     Oid index_oid, Snapshot snapshot, bool fetch_properties);
 extern void age_adjacency_visible_payload_scan_set_terminal_label(
@@ -278,6 +287,10 @@ extern bool age_adjacency_visible_payload_run_scan_group_evidence(
     AgeAdjacencyVisiblePayloadRunGroupEvidence *evidence);
 extern int64 age_adjacency_visible_payload_run_scan_active_keys(
     AgeAdjacencyVisiblePayloadRunScan *scan);
+extern int64 age_adjacency_visible_payload_run_scan_queued_keys(
+    AgeAdjacencyVisiblePayloadRunScan *scan);
+extern bool age_adjacency_visible_payload_run_scan_key_is_queued(
+    AgeAdjacencyVisiblePayloadRunScan *scan, int64 key_index);
 extern void age_adjacency_end_visible_payload_run_scan(
     AgeAdjacencyVisiblePayloadRunScan *scan);
 extern int64 age_adjacency_visible_payload_scan_label_filtered(

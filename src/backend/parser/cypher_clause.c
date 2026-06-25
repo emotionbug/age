@@ -95,6 +95,18 @@
 #define AGE_ADJACENCY_REVERSE_MATCH_MAX_BUDGET 4096.0
 #define AGE_ADJACENCY_REVERSE_MATCH_FRACTION 0.01
 
+typedef struct AgeAdjacencyMatchPropertyAlternative
+{
+    char *key;
+    Oid index_oid;
+    char *index_source;
+    char *index_provider;
+    char *index_type;
+    bool index_metadata_backed;
+    Node *value_expr;
+    Const *value;
+} AgeAdjacencyMatchPropertyAlternative;
+
 /*
  * In the transformation stage, we need to track
  * where a variable came from. When moving between
@@ -233,8 +245,8 @@ static bool get_age_adjacency_match_property_index(Oid graph_oid,
 static char *graph_index_options_property_type(Datum options);
 static bool graph_index_property_names_contains(ArrayType *property_names,
                                                 const char *property_name);
-static char *get_cypher_map_first_property_key(Node *props,
-                                               Node **property_value);
+static List *get_adjacency_match_property_alternatives(
+    cypher_parsestate *cpstate, const char *label_name, Node *props);
 static bool age_adjacency_match_index_matches(Relation index_rel,
                                               bool outgoing);
 static Node *make_vertex_expr(cypher_parsestate *cpstate,
@@ -6190,17 +6202,21 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                 {
                     cypher_node *next_node =
                         (cypher_node *)lfirst(lnext(path->path, lc));
-                    bool terminal_has_owned_property =
+                    bool terminal_has_property_map =
                         next_node->label != NULL &&
                         next_node->props != NULL &&
                         is_ag_node(next_node->props, cypher_map) &&
+                        list_length(((cypher_map *)next_node->props)->keyvals) >=
+                            2;
+                    bool terminal_has_owned_property =
+                        terminal_has_property_map &&
                         list_length(((cypher_map *)next_node->props)->keyvals) ==
                             2;
                     bool source_is_bound =
                         age_adjacency_match_endpoint_is_bound(prev_entity);
                     bool retain_terminal_for_reverse =
                         !source_is_bound &&
-                        terminal_has_owned_property &&
+                        terminal_has_property_map &&
                         age_adjacency_match_terminal_is_selective(cpstate,
                                                                   next_node);
                     bool terminal_elided =
@@ -7049,30 +7065,92 @@ static bool graph_index_property_names_contains(ArrayType *property_names,
     return found;
 }
 
-static char *get_cypher_map_first_property_key(Node *props,
-                                               Node **property_value)
+/*
+ * Build one planner alternative for every indexed equality conjunct in an
+ * inline terminal property map.  The complete map remains in the normal
+ * property quals, so each alternative is only a lossless prefilter: the
+ * planner may choose whichever posting list is cheapest and the remaining
+ * conjuncts are still rechecked by the terminal relation.
+ *
+ * Historically only the first map entry was inspected.  A leading unindexed
+ * or low-selectivity property therefore hid a selective index later in the
+ * map and turned a one-shot posting lookup into one vertex-id probe per
+ * adjacency candidate.  If no map entry is indexed, retain a single fallback
+ * alternative for the first entry so the existing per-vertex correctness path
+ * remains available.
+ */
+static List *get_adjacency_match_property_alternatives(
+    cypher_parsestate *cpstate, const char *label_name, Node *props)
 {
     cypher_map *map;
-    Node *key;
+    AgeAdjacencyMatchPropertyAlternative *first = NULL;
+    List *indexed = NIL;
+    ListCell *key_cell;
 
-    if (property_value != NULL)
-        *property_value = NULL;
-
-    if (props == NULL || !is_ag_node(props, cypher_map))
-        return NULL;
+    if (cpstate == NULL || label_name == NULL || props == NULL ||
+        !is_ag_node(props, cypher_map))
+        return NIL;
 
     map = (cypher_map *)props;
-    if (map->keyvals == NIL || list_length(map->keyvals) < 2)
-        return NULL;
+    for (key_cell = list_head(map->keyvals); key_cell != NULL;)
+    {
+        ListCell *value_cell = lnext(map->keyvals, key_cell);
+        Node *key_node;
+        Node *value_node;
+        AgeAdjacencyMatchPropertyAlternative *alternative;
+        Oid index_oid = InvalidOid;
+        char *index_source = NULL;
+        char *index_provider = NULL;
+        char *index_type = NULL;
+        bool metadata_backed;
 
-    key = (Node *)linitial(map->keyvals);
-    if (!IsA(key, String))
-        return NULL;
+        if (value_cell == NULL)
+            break;
 
-    if (property_value != NULL)
-        *property_value = (Node *)lsecond(map->keyvals);
+        key_node = lfirst(key_cell);
+        value_node = lfirst(value_cell);
+        key_cell = lnext(map->keyvals, value_cell);
+        if (!IsA(key_node, String))
+            continue;
 
-    return ((String *)key)->sval;
+        metadata_backed = get_age_adjacency_match_property_index(
+            cpstate->graph_oid, label_name, strVal(key_node), &index_oid,
+            &index_source, &index_provider, &index_type);
+
+        /* Ignore non-leading, non-indexed entries; they remain residual quals. */
+        if (first != NULL &&
+            (!metadata_backed || !OidIsValid(index_oid)))
+            continue;
+
+        alternative = palloc0(sizeof(*alternative));
+        alternative->key = strVal(key_node);
+        alternative->index_oid = index_oid;
+        alternative->index_source = index_source;
+        alternative->index_provider = index_provider;
+        alternative->index_type = index_type;
+        alternative->index_metadata_backed =
+            metadata_backed && OidIsValid(index_oid);
+        alternative->value_expr = transform_cypher_expr(
+            cpstate, copyObject(value_node), EXPR_KIND_WHERE);
+        if (alternative->value_expr != NULL &&
+            IsA(alternative->value_expr, Const) &&
+            castNode(Const, alternative->value_expr)->consttype == AGTYPEOID &&
+            !castNode(Const, alternative->value_expr)->constisnull)
+        {
+            alternative->value = castNode(Const, alternative->value_expr);
+        }
+
+        if (first == NULL)
+            first = alternative;
+        if (alternative->index_metadata_backed)
+            indexed = lappend(indexed, alternative);
+    }
+
+    if (indexed != NIL)
+        return indexed;
+    if (first != NULL)
+        return list_make1(first);
+    return NIL;
 }
 
 static bool age_adjacency_match_index_matches(Relation index_rel,
@@ -7134,70 +7212,73 @@ static bool age_adjacency_match_endpoint_is_bound(transform_entity *entity)
 static bool age_adjacency_match_terminal_is_selective(
     cypher_parsestate *cpstate, cypher_node *node)
 {
-    Node *property_value_node = NULL;
-    Node *property_value_expr;
-    Const *property_value;
-    char *property_key;
-    Oid property_index_oid = InvalidOid;
-    double reltuples;
-    double estimated_matches;
-    double budget;
-    AgeGraphPropertySelectivitySource source_kind =
-        AGE_GRAPH_PROPERTY_SELECTIVITY_NONE;
+    List *alternatives;
+    ListCell *lc;
+    bool saw_index = false;
 
     if (cpstate == NULL || node == NULL || node->label == NULL ||
         node->props == NULL)
         return false;
 
-    property_key = get_cypher_map_first_property_key(node->props,
-                                                     &property_value_node);
-    if (property_key == NULL || property_value_node == NULL)
-        return false;
+    alternatives = get_adjacency_match_property_alternatives(
+        cpstate, node->label, node->props);
 
     /*
      * This is a rejection gate, not a prerequisite for reverse planning.
-     * Without a property-source index (or a plan-time constant) there is no
-     * reliable evidence that the terminal is broad, so preserve the historical
-     * reverse candidate and let the ordinary relation costs decide.  Only a
-     * known broad posting list should force terminal elision.
+     * Without an indexed constant there is no reliable evidence that the
+     * terminal is broad, so preserve the historical reverse candidate and let
+     * the ordinary relation costs decide.  When several indexed conjuncts are
+     * present, retaining the terminal is justified if any one of them is
+     * selective; the planner will later choose among those alternatives.
      */
-    if (!get_age_adjacency_match_property_index(
-            cpstate->graph_oid, node->label, property_key,
-            &property_index_oid, NULL, NULL, NULL) ||
-        !OidIsValid(property_index_oid))
-        return true;
+    foreach(lc, alternatives)
+    {
+        AgeAdjacencyMatchPropertyAlternative *alternative = lfirst(lc);
+        double reltuples;
+        double estimated_matches;
+        double budget;
+        AgeGraphPropertySelectivitySource source_kind =
+            AGE_GRAPH_PROPERTY_SELECTIVITY_NONE;
 
-    property_value_expr = transform_cypher_expr(
-        cpstate, copyObject(property_value_node), EXPR_KIND_WHERE);
-    if (property_value_expr == NULL || !IsA(property_value_expr, Const))
-        return true;
+        if (alternative == NULL ||
+            !alternative->index_metadata_backed ||
+            !OidIsValid(alternative->index_oid))
+            return true;
 
-    property_value = castNode(Const, property_value_expr);
-    if (property_value->constisnull || property_value->consttype != AGTYPEOID)
-        return true;
+        saw_index = true;
+        if (alternative->value == NULL)
+            return true;
 
-    reltuples = get_vle_relation_estimated_tuples(property_index_oid);
-    estimated_matches = cypher_estimate_graph_property_index_matches(
-        property_index_oid, property_value, 0.15, &source_kind);
-    if (reltuples <= 0 || estimated_matches <= 0)
-        return true;
+        reltuples = get_vle_relation_estimated_tuples(
+            alternative->index_oid);
+        estimated_matches = cypher_estimate_graph_property_index_matches(
+            alternative->index_oid, alternative->value, 0.15, &source_kind);
+        if (reltuples <= 0 || estimated_matches <= 0)
+            return true;
 
-    budget = Min(AGE_ADJACENCY_REVERSE_MATCH_MAX_BUDGET,
-                 Max(AGE_ADJACENCY_REVERSE_MATCH_MIN_BUDGET,
-                     reltuples * AGE_ADJACENCY_REVERSE_MATCH_FRACTION));
+        budget = Min(AGE_ADJACENCY_REVERSE_MATCH_MAX_BUDGET,
+                     Max(AGE_ADJACENCY_REVERSE_MATCH_MIN_BUDGET,
+                         reltuples *
+                         AGE_ADJACENCY_REVERSE_MATCH_FRACTION));
 
-    ereport(DEBUG2,
-            (errmsg_internal("AGE reverse adjacency property gate: "
-                             "label=%s key=%s index=%u matches=%.0f "
-                             "reltuples=%.0f budget=%.0f source=%s result=%s",
-                             node->label, property_key, property_index_oid,
-                             estimated_matches, reltuples, budget,
-                             age_graph_property_selectivity_source_name(
-                                 source_kind),
-                             estimated_matches <= budget ? "retain" :
-                                                           "elide")));
+        ereport(DEBUG2,
+                (errmsg_internal("AGE reverse adjacency property gate: "
+                                 "label=%s key=%s index=%u matches=%.0f "
+                                 "reltuples=%.0f budget=%.0f source=%s "
+                                 "result=%s",
+                                 node->label, alternative->key,
+                                 alternative->index_oid, estimated_matches,
+                                 reltuples, budget,
+                                 age_graph_property_selectivity_source_name(
+                                     source_kind),
+                                 estimated_matches <= budget ? "retain" :
+                                                               "elide")));
 
-    return estimated_matches <= budget;
+        if (estimated_matches <= budget)
+            return true;
+    }
+
+    return !saw_index;
 }
 
 static Node *copy_func_arg(FuncExpr *func_expr, int index)
@@ -7934,17 +8015,12 @@ static Expr *transform_cypher_adjacency_candidate_edge(
         AGE_ADJACENCY_MATCH_INDEX_DIRECTION_NONE;
     int32 index_property_count = 0;
     bool index_metadata_backed = false;
-    char *right_property_key = NULL;
-    char *right_property_index_source = NULL;
-    char *right_property_index_provider = NULL;
-    char *right_property_index_type = NULL;
-    bool right_property_index_metadata_backed = false;
-    Oid right_property_index_oid = InvalidOid;
-    Node *right_property_value_node = NULL;
-    Node *right_property_value_expr = NULL;
-    Const *right_property_value = NULL;
+    List *right_property_alternatives = NIL;
     Node *key_arg;
     Expr *key_expr;
+    transform_entity *bound_terminal_entity = NULL;
+    Node *terminal_key_arg = NULL;
+    Expr *terminal_key_expr = NULL;
     bool has_edge_variable_projection;
     int32 right_label_id = INVALID_LABEL_ID;
     char *graph_pattern_key;
@@ -7990,28 +8066,9 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     if (next_node != NULL && next_node->label != NULL)
     {
         right_label_id = get_label_id(next_node->label, cpstate->graph_oid);
-        right_property_key = get_cypher_map_first_property_key(
-            next_node->props, &right_property_value_node);
-        if (right_property_value_node != NULL)
-        {
-            right_property_value_expr = transform_cypher_expr(
-                cpstate, copyObject(right_property_value_node),
-                EXPR_KIND_WHERE);
-            if (right_property_value_expr != NULL &&
-                IsA(right_property_value_expr, Const) &&
-                castNode(Const, right_property_value_expr)->consttype ==
-                AGTYPEOID &&
-                !castNode(Const, right_property_value_expr)->constisnull)
-                right_property_value = castNode(Const,
-                                                right_property_value_expr);
-        }
-        right_property_index_metadata_backed =
-            get_age_adjacency_match_property_index(
-                cpstate->graph_oid, next_node->label, right_property_key,
-                &right_property_index_oid,
-                &right_property_index_source,
-                &right_property_index_provider,
-                &right_property_index_type);
+        right_property_alternatives =
+            get_adjacency_match_property_alternatives(
+                cpstate, next_node->label, next_node->props);
     }
 
     if (rel->name == NULL)
@@ -8022,6 +8079,27 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     key_arg = make_qual(cpstate, prev_entity, AG_VERTEX_COLNAME_ID);
     key_expr = (Expr *)transformExpr(pstate, copyObject(key_arg),
                                      EXPR_KIND_WHERE);
+    /*
+     * A repeated terminal variable closes a cycle (or otherwise performs an
+     * "expand into" operation): both endpoints already exist in the join
+     * tree.  Capture its raw graphid expression now so the planner can add the
+     * terminal relation to required_outer and the executor can push an exact
+     * one-value destination filter into age_adjacency instead of enumerating
+     * every neighbor of the source.
+     */
+    if (next_node != NULL && next_node->name != NULL)
+    {
+        bound_terminal_entity = find_variable(cpstate, next_node->name);
+        if (bound_terminal_entity != NULL &&
+            bound_terminal_entity->type == ENT_VERTEX &&
+            bound_terminal_entity->in_join_tree)
+        {
+            terminal_key_arg = make_qual(cpstate, bound_terminal_entity,
+                                         AG_VERTEX_COLNAME_ID);
+            terminal_key_expr = (Expr *)transformExpr(
+                pstate, copyObject(terminal_key_arg), EXPR_KIND_WHERE);
+        }
+    }
     graph_pattern_key = make_match_graph_pattern_key(
         cpstate, prev_entity, rel, next_node, outgoing);
     cypher_register_graph_pattern_handoff(graph_pattern_key);
@@ -8034,36 +8112,57 @@ static Expr *transform_cypher_adjacency_candidate_edge(
             AGE_GRAPH_JOIN_SOURCE_ADJACENCY_NODE_PROPERTY,
             AGE_GRAPH_JOIN_COMPONENT_NODE_PROPERTY_SEEK);
 
-    cypher_register_adjacency_match_candidate(
-        edge_label_oid, index_oid, cpstate->graph_oid, rel->name,
-        graph_pattern_key, get_entity_name(prev_entity),
-        (Node *)key_expr,
-        index_source != NULL ? index_source : "unknown",
-        index_kind_id,
-        index_provider != NULL ? index_provider : "unknown",
-        index_direction_id != AGE_ADJACENCY_MATCH_INDEX_DIRECTION_NONE ?
-        index_direction_id :
-        (outgoing ? AGE_ADJACENCY_MATCH_INDEX_DIRECTION_OUT :
-         AGE_ADJACENCY_MATCH_INDEX_DIRECTION_IN),
-        index_property_count,
-        index_metadata_backed,
-        right_property_key,
-        right_property_index_oid,
-        right_property_index_source,
-        right_property_index_provider,
-        right_property_index_type,
-        right_property_index_metadata_backed,
-        right_property_value,
-        right_property_value_expr,
-        outgoing,
-        has_edge_variable_projection,
-        rel->props != NULL,
-        next_node != NULL && next_node->label != NULL,
-        next_node != NULL && next_node->props != NULL,
-        terminal_elided,
-        right_label_id,
-        outgoing ? Anum_ag_label_edge_table_start_id :
-                   Anum_ag_label_edge_table_end_id);
+    /*
+     * Register the indexed conjuncts as competing physical paths.  add_path()
+     * will retain the cheapest property posting list, while the full terminal
+     * map remains a residual correctness check.
+     */
+    if (right_property_alternatives == NIL)
+        right_property_alternatives = list_make1(NULL);
+    {
+        ListCell *lc;
+
+        foreach(lc, right_property_alternatives)
+        {
+            AgeAdjacencyMatchPropertyAlternative *alternative = lfirst(lc);
+
+            cypher_register_adjacency_match_candidate(
+                edge_label_oid, index_oid, cpstate->graph_oid, rel->name,
+                graph_pattern_key, get_entity_name(prev_entity),
+                (Node *)key_expr,
+                bound_terminal_entity != NULL ?
+                    get_entity_name(bound_terminal_entity) : NULL,
+                (Node *)terminal_key_expr,
+                index_source != NULL ? index_source : "unknown",
+                index_kind_id,
+                index_provider != NULL ? index_provider : "unknown",
+                index_direction_id !=
+                    AGE_ADJACENCY_MATCH_INDEX_DIRECTION_NONE ?
+                    index_direction_id :
+                    (outgoing ? AGE_ADJACENCY_MATCH_INDEX_DIRECTION_OUT :
+                     AGE_ADJACENCY_MATCH_INDEX_DIRECTION_IN),
+                index_property_count,
+                index_metadata_backed,
+                alternative != NULL ? alternative->key : NULL,
+                alternative != NULL ? alternative->index_oid : InvalidOid,
+                alternative != NULL ? alternative->index_source : NULL,
+                alternative != NULL ? alternative->index_provider : NULL,
+                alternative != NULL ? alternative->index_type : NULL,
+                alternative != NULL ?
+                    alternative->index_metadata_backed : false,
+                alternative != NULL ? alternative->value : NULL,
+                alternative != NULL ? alternative->value_expr : NULL,
+                outgoing,
+                has_edge_variable_projection,
+                rel->props != NULL,
+                next_node != NULL && next_node->label != NULL,
+                next_node != NULL && next_node->props != NULL,
+                terminal_elided,
+                right_label_id,
+                outgoing ? Anum_ag_label_edge_table_start_id :
+                           Anum_ag_label_edge_table_end_id);
+        }
+    }
     if (candidate_registered != NULL)
         *candidate_registered = true;
     return NULL;
@@ -8123,15 +8222,7 @@ static void register_reverse_adjacency_candidate(
         AGE_ADJACENCY_MATCH_INDEX_DIRECTION_NONE;
     int32 index_property_count = 0;
     bool index_metadata_backed = false;
-    char *right_property_key = NULL;
-    char *right_property_index_source = NULL;
-    char *right_property_index_provider = NULL;
-    char *right_property_index_type = NULL;
-    bool right_property_index_metadata_backed = false;
-    Oid right_property_index_oid = InvalidOid;
-    Node *right_property_value_node = NULL;
-    Node *right_property_value_expr = NULL;
-    Const *right_property_value = NULL;
+    List *right_property_alternatives = NIL;
     Node *key_arg;
     Expr *key_expr;
     int32 right_label_id = INVALID_LABEL_ID;
@@ -8166,28 +8257,9 @@ static void register_reverse_adjacency_candidate(
     {
         right_label_id = get_label_id(terminal_node->label,
                                       cpstate->graph_oid);
-        right_property_key = get_cypher_map_first_property_key(
-            terminal_node->props, &right_property_value_node);
-        if (right_property_value_node != NULL)
-        {
-            right_property_value_expr = transform_cypher_expr(
-                cpstate, copyObject(right_property_value_node),
-                EXPR_KIND_WHERE);
-            if (right_property_value_expr != NULL &&
-                IsA(right_property_value_expr, Const) &&
-                castNode(Const, right_property_value_expr)->consttype ==
-                AGTYPEOID &&
-                !castNode(Const, right_property_value_expr)->constisnull)
-                right_property_value = castNode(Const,
-                                                right_property_value_expr);
-        }
-        right_property_index_metadata_backed =
-            get_age_adjacency_match_property_index(
-                cpstate->graph_oid, terminal_node->label, right_property_key,
-                &right_property_index_oid,
-                &right_property_index_source,
-                &right_property_index_provider,
-                &right_property_index_type);
+        right_property_alternatives =
+            get_adjacency_match_property_alternatives(
+                cpstate, terminal_node->label, terminal_node->props);
     }
 
     key_arg = make_qual(cpstate, source_entity, AG_VERTEX_COLNAME_ID);
@@ -8205,33 +8277,49 @@ static void register_reverse_adjacency_candidate(
             AGE_GRAPH_JOIN_SOURCE_ADJACENCY_NODE_PROPERTY,
             AGE_GRAPH_JOIN_COMPONENT_NODE_PROPERTY_SEEK);
 
-    cypher_register_adjacency_match_candidate(
-        edge_label_oid, index_oid, cpstate->graph_oid, edge_alias,
-        graph_pattern_key, get_entity_name(source_entity),
-        (Node *)key_expr,
-        index_source != NULL ? index_source : "unknown",
-        index_kind_id,
-        index_provider != NULL ? index_provider : "unknown",
-        index_direction_id != AGE_ADJACENCY_MATCH_INDEX_DIRECTION_NONE ?
-        index_direction_id : AGE_ADJACENCY_MATCH_INDEX_DIRECTION_IN,
-        index_property_count,
-        index_metadata_backed,
-        right_property_key,
-        right_property_index_oid,
-        right_property_index_source,
-        right_property_index_provider,
-        right_property_index_type,
-        right_property_index_metadata_backed,
-        right_property_value,
-        right_property_value_expr,
-        false,
-        rel->name != NULL,
-        rel->props != NULL,
-        terminal_node->label != NULL,
-        terminal_node->props != NULL,
-        false,
-        right_label_id,
-        Anum_ag_label_edge_table_end_id);
+    if (right_property_alternatives == NIL)
+        right_property_alternatives = list_make1(NULL);
+    {
+        ListCell *lc;
+
+        foreach(lc, right_property_alternatives)
+        {
+            AgeAdjacencyMatchPropertyAlternative *alternative = lfirst(lc);
+
+            cypher_register_adjacency_match_candidate(
+                edge_label_oid, index_oid, cpstate->graph_oid, edge_alias,
+                graph_pattern_key, get_entity_name(source_entity),
+                (Node *)key_expr,
+                NULL,
+                NULL,
+                index_source != NULL ? index_source : "unknown",
+                index_kind_id,
+                index_provider != NULL ? index_provider : "unknown",
+                index_direction_id !=
+                    AGE_ADJACENCY_MATCH_INDEX_DIRECTION_NONE ?
+                    index_direction_id :
+                    AGE_ADJACENCY_MATCH_INDEX_DIRECTION_IN,
+                index_property_count,
+                index_metadata_backed,
+                alternative != NULL ? alternative->key : NULL,
+                alternative != NULL ? alternative->index_oid : InvalidOid,
+                alternative != NULL ? alternative->index_source : NULL,
+                alternative != NULL ? alternative->index_provider : NULL,
+                alternative != NULL ? alternative->index_type : NULL,
+                alternative != NULL ?
+                    alternative->index_metadata_backed : false,
+                alternative != NULL ? alternative->value : NULL,
+                alternative != NULL ? alternative->value_expr : NULL,
+                false,
+                rel->name != NULL,
+                rel->props != NULL,
+                terminal_node->label != NULL,
+                terminal_node->props != NULL,
+                false,
+                right_label_id,
+                Anum_ag_label_edge_table_end_id);
+        }
+    }
 }
 
 static char *make_node_property_graph_pattern_key(

@@ -29,6 +29,9 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_collation_d.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_am_d.h"
+#include "catalog/pg_aggregate.h"
+#include "catalog/pg_namespace_d.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type_d.h"
 #include "catalog/ag_namespace.h"
@@ -36,6 +39,7 @@
 #include "catalog/ag_graph.h"
 #include "utils/age_global_graph.h"
 #include "commands/label_commands.h"
+#include "executor/cypher_adjacency_count.h"
 #include "executor/cypher_adjacency_match.h"
 #include "executor/cypher_property_projection.h"
 #include "executor/cypher_vle_stream.h"
@@ -155,6 +159,22 @@ static void set_join_pathlist(PlannerInfo *root, RelOptInfo *joinrel,
 static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
                                RelOptInfo *input_rel,
                                RelOptInfo *output_rel, void *extra);
+static void add_adjacency_count_paths(PlannerInfo *root,
+                                      RelOptInfo *output_rel);
+static CustomPath *make_adjacency_count_path(PlannerInfo *root,
+                                              RelOptInfo *output_rel,
+                                              AggPath *agg_path);
+static bool extract_adjacency_count_input(AggPath *agg_path,
+                                          Path **source_path,
+                                          Const **index_oid,
+                                          Const **key);
+static Oid adjacency_count_output_type(PathTarget *target);
+static bool is_plain_count_star_aggref(Aggref *aggref);
+static Plan *plan_age_adjacency_count_path(PlannerInfo *root,
+                                           RelOptInfo *rel,
+                                           CustomPath *best_path,
+                                           List *tlist, List *clauses,
+                                           List *custom_plans);
 static void cypher_path_xact_callback(XactEvent event, void *arg);
 static cypher_clause_kind get_cypher_clause_kind(RangeTblEntry *rte);
 static void register_cypher_clause_function_oid_callbacks(void);
@@ -181,8 +201,10 @@ static Path *add_adjacency_match_partial_gather_path(PlannerInfo *root,
                                                      RelOptInfo *rel,
                                                      CustomPath *partial_path,
                                                      double gathered_rows);
-static Const *find_endpoint_graphid_const(PlannerInfo *root,
-                                          CypherAdjacencyMatchCandidate *candidate);
+static Const *find_adjacency_match_graphid_const(PlannerInfo *root,
+                                                  Index endpoint_rti);
+static IndexOptInfo *find_adjacency_match_endpoint_pair_index(
+    RelOptInfo *rel);
 static bool adjacency_match_bound_expr_uses_age_id(Node *node);
 static bool adjacency_match_bound_expr_uses_age_id_walker(Node *node,
                                                           void *context);
@@ -647,6 +669,11 @@ static Plan *plan_age_property_projection_path(PlannerInfo *root,
                                                CustomPath *best_path,
                                                List *tlist, List *clauses,
                                                List *custom_plans);
+static const CustomPathMethods age_adjacency_count_path_methods = {
+    AGE_ADJACENCY_COUNT_SCAN_NAME,
+    plan_age_adjacency_count_path,
+    NULL};
+
 static const CustomPathMethods age_adjacency_match_path_methods = {
     AGE_ADJACENCY_MATCH_SCAN_NAME,
     plan_age_adjacency_match_path,
@@ -713,6 +740,8 @@ void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
                                                const char *graph_pattern_key,
                                                const char *bound_endpoint_alias,
                                                Node *bound_endpoint_expr,
+                                               const char *bound_terminal_alias,
+                                               Node *bound_terminal_expr,
                                                const char *index_source,
                                                AgeAdjacencyMatchIndexKind index_kind_id,
                                                const char *index_provider,
@@ -765,6 +794,10 @@ void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
     candidate->bound_endpoint_alias = bound_endpoint_alias != NULL ?
         pstrdup(bound_endpoint_alias) : NULL;
     candidate->bound_endpoint_expr = copyObject(bound_endpoint_expr);
+    candidate->bound_terminal_alias = bound_terminal_alias != NULL ?
+        pstrdup(bound_terminal_alias) : NULL;
+    candidate->bound_terminal_expr = bound_terminal_expr != NULL ?
+        copyObject(bound_terminal_expr) : NULL;
     candidate->index_source = index_source != NULL ?
         pstrdup(index_source) : NULL;
     candidate->index_kind_id = index_kind_id;
@@ -821,6 +854,7 @@ void set_rel_pathlist_init(void)
     set_join_pathlist_hook = set_join_pathlist;
     prev_create_upper_paths_hook = create_upper_paths_hook;
     create_upper_paths_hook = create_upper_paths;
+    RegisterCustomScanMethods(&age_adjacency_count_scan_methods);
     RegisterCustomScanMethods(&age_adjacency_match_scan_methods);
     RegisterCustomScanMethods(&age_property_projection_scan_methods);
     RegisterCustomScanMethods(&age_vle_stream_scan_methods);
@@ -1156,6 +1190,7 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
             ereport(DEBUG2,
                     (errmsg_internal("AGE property access aggregate rewritten")));
         }
+        add_adjacency_count_paths(root, output_rel);
         add_narrow_typed_collect_paths(root, output_rel);
         add_narrow_array_agg_property_paths(root, output_rel);
         return;
@@ -1186,6 +1221,372 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
                                             property_slots,
                                             (FinalPathExtraData *)extra);
     }
+}
+
+/*
+ * Replace the linear "emit every adjacency posting, then count(*)" shape with
+ * one count-producing CustomScan.  This deliberately recognizes only the
+ * narrow, semantics-preserving form
+ *
+ *     MATCH (s:Label)-[:Edge]->() WHERE id(s) = <constant> RETURN count(*)
+ *
+ * The source child is retained and executed by the CustomScan, so visibility
+ * and any source-side restriction remain owned by the ordinary PostgreSQL
+ * plan.  Only the anonymous, unfiltered edge expansion is collapsed.
+ */
+static void
+add_adjacency_count_paths(PlannerInfo *root, RelOptInfo *output_rel)
+{
+    List *new_paths = NIL;
+    ListCell *lc;
+
+    if (root == NULL || output_rel == NULL || output_rel->pathlist == NIL)
+        return;
+
+    foreach(lc, output_rel->pathlist)
+    {
+        Path *path = (Path *) lfirst(lc);
+        CustomPath *count_path;
+
+        if (!IsA(path, AggPath))
+            continue;
+
+        count_path = make_adjacency_count_path(root, output_rel,
+                                               (AggPath *)path);
+        if (count_path != NULL)
+            new_paths = lappend(new_paths, count_path);
+    }
+
+    foreach(lc, new_paths)
+        add_path(output_rel, lfirst(lc));
+}
+
+static CustomPath *
+make_adjacency_count_path(PlannerInfo *root, RelOptInfo *output_rel,
+                          AggPath *agg_path)
+{
+    CustomPath *count_path;
+    Path *source_path = NULL;
+    Const *index_oid = NULL;
+    Const *key = NULL;
+    Oid output_type;
+
+    (void)root;
+
+    if (agg_path == NULL || agg_path->aggstrategy != AGG_PLAIN ||
+        agg_path->groupClause != NIL || agg_path->qual != NIL ||
+        agg_path->subpath == NULL)
+    {
+        return NULL;
+    }
+
+    output_type = adjacency_count_output_type(agg_path->path.pathtarget);
+    if (output_type != INT8OID && output_type != AGTYPEOID)
+        return NULL;
+
+    if (!extract_adjacency_count_input(agg_path, &source_path, &index_oid,
+                                       &key))
+    {
+        return NULL;
+    }
+
+    count_path = makeNode(CustomPath);
+    count_path->path.pathtype = T_CustomScan;
+    count_path->path.parent = output_rel;
+    count_path->path.pathtarget = agg_path->path.pathtarget;
+    count_path->path.param_info = NULL;
+    count_path->path.parallel_aware = false;
+    count_path->path.parallel_safe = false;
+    count_path->path.parallel_workers = 0;
+    count_path->path.pathkeys = NIL;
+    count_path->path.rows = 1.0;
+    count_path->path.disabled_nodes = source_path->disabled_nodes;
+    count_path->path.startup_cost = source_path->startup_cost +
+        cpu_operator_cost;
+    count_path->path.total_cost = source_path->total_cost +
+        cpu_operator_cost * 8.0 + cpu_tuple_cost;
+    count_path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+    count_path->custom_paths = list_make1(source_path);
+    count_path->custom_private = list_make3(
+        copyObject(index_oid), copyObject(key),
+        makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
+                  ObjectIdGetDatum(output_type), false, true));
+    count_path->methods = &age_adjacency_count_path_methods;
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE adjacency count path added: index=%u "
+                             "key=" INT64_FORMAT " source_cost=%.2f "
+                             "count_cost=%.2f output_type=%u",
+                             DatumGetObjectId(index_oid->constvalue),
+                             DATUM_GET_GRAPHID(key->constvalue),
+                             source_path->total_cost,
+                             count_path->path.total_cost, output_type)));
+
+    return count_path;
+}
+
+static bool
+extract_adjacency_count_input(AggPath *agg_path, Path **source_path,
+                              Const **index_oid, Const **key)
+{
+    NestPath *nest_path;
+    Path *outer_path;
+    Path *inner_path;
+    CustomPath *adjacency_path = NULL;
+    Path *source = NULL;
+    Node *property_value;
+    Node *terminal_value;
+    List *descriptor;
+    Const *index_const;
+    Const *key_const;
+
+    Assert(source_path != NULL);
+    Assert(index_oid != NULL);
+    Assert(key != NULL);
+    *source_path = NULL;
+    *index_oid = NULL;
+    *key = NULL;
+
+    if (!IsA(agg_path->subpath, NestPath))
+        return false;
+
+    nest_path = (NestPath *)agg_path->subpath;
+    if (nest_path->jpath.jointype != JOIN_INNER ||
+        nest_path->jpath.joinrestrictinfo != NIL)
+    {
+        return false;
+    }
+
+    outer_path = nest_path->jpath.outerjoinpath;
+    inner_path = nest_path->jpath.innerjoinpath;
+    if (IsA(outer_path, CustomPath) &&
+        ((CustomPath *)outer_path)->methods ==
+        &age_adjacency_match_path_methods)
+    {
+        adjacency_path = (CustomPath *)outer_path;
+        source = inner_path;
+    }
+    else if (IsA(inner_path, CustomPath) &&
+             ((CustomPath *)inner_path)->methods ==
+             &age_adjacency_match_path_methods)
+    {
+        adjacency_path = (CustomPath *)inner_path;
+        source = outer_path;
+    }
+    else
+    {
+        return false;
+    }
+
+    if (source == NULL || source->parent == NULL ||
+        bms_num_members(source->parent->relids) != 1 ||
+        source->param_info != NULL ||
+        adjacency_path->path.param_info != NULL ||
+        list_length(adjacency_path->custom_private) != 6)
+    {
+        return false;
+    }
+
+    key_const = list_nth(adjacency_path->custom_private, 0);
+    property_value = list_nth(adjacency_path->custom_private, 1);
+    terminal_value = list_nth(adjacency_path->custom_private, 2);
+    index_const = list_nth(adjacency_path->custom_private, 3);
+    descriptor = list_nth_node(List, adjacency_path->custom_private, 5);
+
+    if (key_const == NULL || !IsA(key_const, Const) ||
+        key_const->constisnull || key_const->consttype != GRAPHIDOID ||
+        index_const == NULL || !IsA(index_const, Const) ||
+        index_const->constisnull || index_const->consttype != OIDOID ||
+        property_value == NULL || !IsA(property_value, Const) ||
+        !castNode(Const, property_value)->constisnull ||
+        terminal_value == NULL || !IsA(terminal_value, Const) ||
+        !castNode(Const, terminal_value)->constisnull ||
+        descriptor == NIL ||
+        list_length(descriptor) != AGE_ADJACENCY_MATCH_DESC_COUNT)
+    {
+        return false;
+    }
+
+    if (DatumGetBool(list_nth_node(
+            Const, descriptor,
+            AGE_ADJACENCY_MATCH_DESC_EDGE_VARIABLE)->constvalue) ||
+        DatumGetBool(list_nth_node(
+            Const, descriptor,
+            AGE_ADJACENCY_MATCH_DESC_EDGE_PROPERTY_PREDICATE)->constvalue) ||
+        DatumGetBool(list_nth_node(
+            Const, descriptor,
+            AGE_ADJACENCY_MATCH_DESC_RIGHT_LABEL_CONSTRAINT)->constvalue) ||
+        DatumGetBool(list_nth_node(
+            Const, descriptor,
+            AGE_ADJACENCY_MATCH_DESC_RIGHT_PROPERTY_PREDICATE)->constvalue) ||
+        DatumGetBool(list_nth_node(
+            Const, descriptor,
+            AGE_ADJACENCY_MATCH_DESC_EDGE_PAYLOAD_REQUIRED)->constvalue))
+    {
+        return false;
+    }
+
+    *source_path = source;
+    *index_oid = index_const;
+    *key = key_const;
+    return true;
+}
+
+static Oid
+adjacency_count_output_type(PathTarget *target)
+{
+    Node *expr;
+
+    if (target == NULL || list_length(target->exprs) != 1)
+        return InvalidOid;
+
+    expr = linitial(target->exprs);
+    while (expr != NULL && IsA(expr, RelabelType))
+        expr = (Node *)castNode(RelabelType, expr)->arg;
+
+    if (expr != NULL && IsA(expr, Aggref) &&
+        is_plain_count_star_aggref((Aggref *)expr))
+    {
+        return exprType(expr);
+    }
+
+    if (expr != NULL && IsA(expr, FuncExpr))
+    {
+        FuncExpr *func = (FuncExpr *)expr;
+        char *func_name = get_func_name(func->funcid);
+        Node *arg;
+
+        if (func_name == NULL || strcmp(func_name, "int8_to_agtype") != 0 ||
+            get_func_namespace(func->funcid) != ag_catalog_namespace_id() ||
+            func->funcresulttype != AGTYPEOID ||
+            list_length(func->args) != 1)
+        {
+            return InvalidOid;
+        }
+
+        arg = linitial(func->args);
+        if (IsA(arg, Aggref) &&
+            is_plain_count_star_aggref((Aggref *)arg))
+        {
+            return AGTYPEOID;
+        }
+    }
+
+    return InvalidOid;
+}
+
+static bool
+is_plain_count_star_aggref(Aggref *aggref)
+{
+    char *func_name;
+
+    if (aggref == NULL || !aggref->aggstar || aggref->aggdirectargs != NIL ||
+        aggref->args != NIL || aggref->aggorder != NIL ||
+        aggref->aggdistinct != NIL || aggref->aggfilter != NULL ||
+        aggref->aggkind != AGGKIND_NORMAL || aggref->agglevelsup != 0 ||
+        aggref->aggtype != INT8OID ||
+        get_func_namespace(aggref->aggfnoid) != PG_CATALOG_NAMESPACE)
+    {
+        return false;
+    }
+
+    func_name = get_func_name(aggref->aggfnoid);
+    return func_name != NULL && strcmp(func_name, "count") == 0;
+}
+
+static Plan *
+plan_age_adjacency_count_path(PlannerInfo *root, RelOptInfo *rel,
+                              CustomPath *best_path, List *tlist,
+                              List *clauses, List *custom_plans)
+{
+    CustomScan *cs;
+    TargetEntry *scan_tle;
+    Const *type_const;
+    Node *output_expr;
+    List *plan_tlist;
+    Oid output_type;
+
+    (void)root;
+    (void)clauses;
+
+    if (rel == NULL || list_length(custom_plans) != 1 ||
+        list_length(best_path->custom_private) !=
+        AGE_ADJACENCY_COUNT_PRIVATE_COUNT ||
+        best_path->path.pathtarget == NULL ||
+        list_length(best_path->path.pathtarget->exprs) != 1 ||
+        (tlist != NIL && list_length(tlist) != 1))
+    {
+        elog(ERROR, "invalid AGE adjacency count custom path");
+    }
+
+    type_const = list_nth_node(
+        Const, best_path->custom_private,
+        AGE_ADJACENCY_COUNT_PRIVATE_OUTPUT_TYPE);
+    if (type_const->constisnull || type_const->consttype != OIDOID)
+        elog(ERROR, "invalid AGE adjacency count output type");
+
+    output_expr = linitial(best_path->path.pathtarget->exprs);
+    output_type = exprType(output_expr);
+    if (output_type != INT8OID && output_type != AGTYPEOID)
+    {
+        elog(ERROR, "unsupported AGE adjacency count output type %u",
+             output_type);
+    }
+
+    /*
+     * custom_scan_tlist describes the logical aggregate expression so setrefs
+     * can replace that expression with INDEX_VAR(1).  The expression is never
+     * evaluated by the CustomScan: the executor writes the already-computed
+     * scalar count directly into raw scan column 1.
+     *
+     * A projection-capable CustomPath is commonly planned with
+     * CP_IGNORE_TLIST, in which case createplan passes NIL here and later
+     * installs a parent ProjectionPath's target list on this same plan node.
+     * Build a local target list now so the node is valid in either case; the
+     * later projection remains matchable against custom_scan_tlist.
+     */
+    scan_tle = makeTargetEntry((Expr *)copyObject(output_expr), 1,
+                               pstrdup("adjacency_count"), false);
+    if (best_path->path.pathtarget->sortgrouprefs != NULL)
+    {
+        scan_tle->ressortgroupref =
+            best_path->path.pathtarget->sortgrouprefs[0];
+    }
+
+    if (tlist == NIL)
+        plan_tlist = list_make1(copyObject(scan_tle));
+    else
+        plan_tlist = copyObject(tlist);
+
+    cs = makeNode(CustomScan);
+    cs->scan.plan.startup_cost = best_path->path.startup_cost;
+    cs->scan.plan.total_cost = best_path->path.total_cost;
+    cs->scan.plan.plan_rows = best_path->path.rows;
+    cs->scan.plan.plan_width = best_path->path.pathtarget->width;
+    cs->scan.plan.parallel_aware = best_path->path.parallel_aware;
+    cs->scan.plan.parallel_safe = best_path->path.parallel_safe;
+    cs->scan.plan.async_capable = false;
+    cs->scan.plan.targetlist = plan_tlist;
+    cs->scan.plan.qual = NIL;
+    cs->scan.plan.lefttree = NULL;
+    cs->scan.plan.righttree = NULL;
+    cs->scan.scanrelid = 0;
+
+    cs->flags = best_path->flags;
+    cs->custom_plans = custom_plans;
+    cs->custom_exprs = NIL;
+    cs->custom_private = list_make3(
+        copyObject(list_nth(best_path->custom_private,
+                            AGE_ADJACENCY_COUNT_PRIVATE_INDEX_OID)),
+        copyObject(list_nth(best_path->custom_private,
+                            AGE_ADJACENCY_COUNT_PRIVATE_KEY)),
+        makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
+                  ObjectIdGetDatum(output_type), false, true));
+    cs->custom_scan_tlist = list_make1(scan_tle);
+    cs->custom_relids = NULL;
+    cs->methods = &age_adjacency_count_scan_methods;
+
+    return (Plan *)cs;
 }
 
 static void log_graph_expansion_join_paths(RelOptInfo *joinrel,
@@ -7438,12 +7839,12 @@ static bool custom_path_adjacency_join_evidence(
 
     if (custom_path == NULL ||
         custom_path->methods != &age_adjacency_match_path_methods ||
-        list_length(custom_path->custom_private) < 5)
+        list_length(custom_path->custom_private) < 6)
     {
         return false;
     }
 
-    descriptor = list_nth_node(List, custom_path->custom_private, 4);
+    descriptor = llast_node(List, custom_path->custom_private);
     if (list_length(descriptor) != AGE_ADJACENCY_MATCH_DESC_COUNT)
         return false;
 
@@ -8116,25 +8517,98 @@ static char *find_graph_pattern_by_index_oid(Oid index_oid)
     return NULL;
 }
 
+static Relids bind_adjacency_match_endpoint_relids(
+    PlannerInfo *root, const char *endpoint_alias, Node **endpoint_expr_ptr,
+    Index alias_rti, Index *bound_rti)
+{
+    RangeTblEntry *rte;
+    Node *endpoint_expr;
+    Relids expr_relids = NULL;
+    Index target_rti = 0;
+    int expr_rti = 0;
+
+    Assert(root != NULL);
+    Assert(endpoint_expr_ptr != NULL);
+    Assert(bound_rti != NULL);
+
+    endpoint_expr = *endpoint_expr_ptr;
+    *bound_rti = 0;
+    if (endpoint_expr != NULL)
+    {
+        expr_relids = pull_varnos(root, endpoint_expr);
+        if (!bms_is_empty(expr_relids) &&
+            bms_membership(expr_relids) == BMS_SINGLETON)
+            expr_rti = bms_singleton_member(expr_relids);
+    }
+
+    /*
+     * Candidate expressions live outside the Query tree while subqueries are
+     * pulled up.  PostgreSQL therefore does not remap either their varno or
+     * their varattno.  The alias is the authoritative identity after pull-up;
+     * use the captured expression only when no alias survived.
+     */
+    if (alias_rti > 0)
+        target_rti = alias_rti;
+    else if (expr_rti > 0 &&
+             expr_rti < root->simple_rel_array_size &&
+             root->simple_rel_array[expr_rti] != NULL)
+        target_rti = expr_rti;
+
+    if (target_rti == 0 || target_rti >= root->simple_rel_array_size)
+    {
+        bms_free(expr_relids);
+        return NULL;
+    }
+
+    rte = root->simple_rte_array[target_rti];
+    if (rte != NULL && rte->rtekind == RTE_RELATION &&
+        get_atttype(rte->relid, Anum_ag_label_vertex_table_id) == GRAPHIDOID)
+    {
+        Var *canonical_var;
+
+        canonical_var = makeVar(target_rti,
+                                Anum_ag_label_vertex_table_id,
+                                GRAPHIDOID, -1, InvalidOid, 0);
+        if (IsA(endpoint_expr, Var))
+        {
+            Var *old_var = castNode(Var, endpoint_expr);
+
+            canonical_var->varnullingrels =
+                bms_copy(old_var->varnullingrels);
+            canonical_var->varreturningtype = old_var->varreturningtype;
+            canonical_var->location = old_var->location;
+        }
+        *endpoint_expr_ptr = (Node *)canonical_var;
+    }
+    else if (expr_rti > 0 && expr_rti != target_rti &&
+             endpoint_expr != NULL)
+    {
+        OffsetVarNodes(endpoint_expr, (int)target_rti - expr_rti, 0);
+    }
+
+    bms_free(expr_relids);
+    *bound_rti = target_rti;
+    (void) endpoint_alias;
+    return bms_make_singleton(target_rti);
+}
+
 static void bind_adjacency_match_candidate_outer_relids(
     PlannerInfo *root, CypherAdjacencyMatchCandidate *candidate)
 {
     ListCell *lc;
     Index rti = 1;
     Index edge_rti = 0;
-    Index alias_rti = 0;
-    Relids expr_relids = NULL;
-    int expr_rti = 0;
+    Index source_alias_rti = 0;
+    Index terminal_alias_rti = 0;
+    Relids source_relids;
+    Relids terminal_relids = NULL;
 
-    if (root == NULL ||
-        root->parse == NULL ||
-        candidate == NULL)
-    {
+    if (root == NULL || root->parse == NULL || candidate == NULL)
         return;
-    }
 
     if (candidate->edge_alias != NULL ||
-        candidate->bound_endpoint_alias != NULL)
+        candidate->bound_endpoint_alias != NULL ||
+        candidate->bound_terminal_alias != NULL)
     {
         foreach(lc, root->parse->rtable)
         {
@@ -8146,86 +8620,77 @@ static void bind_adjacency_match_candidate_outer_relids(
             else if (rte->eref != NULL)
                 aliasname = rte->eref->aliasname;
 
-            if (candidate->edge_alias != NULL &&
-                aliasname != NULL &&
+            if (candidate->edge_alias != NULL && aliasname != NULL &&
                 strcmp(candidate->edge_alias, aliasname) == 0)
                 edge_rti = rti;
 
             if (candidate->bound_endpoint_alias != NULL &&
                 aliasname != NULL &&
                 strcmp(candidate->bound_endpoint_alias, aliasname) == 0)
-                alias_rti = rti;
+                source_alias_rti = rti;
+
+            if (candidate->bound_terminal_alias != NULL &&
+                aliasname != NULL &&
+                strcmp(candidate->bound_terminal_alias, aliasname) == 0)
+                terminal_alias_rti = rti;
 
             if ((candidate->edge_alias == NULL || edge_rti > 0) &&
-                (candidate->bound_endpoint_alias == NULL || alias_rti > 0))
+                (candidate->bound_endpoint_alias == NULL ||
+                 source_alias_rti > 0) &&
+                (candidate->bound_terminal_alias == NULL ||
+                 terminal_alias_rti > 0))
                 break;
 
             rti++;
         }
     }
+
     candidate->edge_rti = edge_rti;
     if (edge_rti > 0)
         candidate->solved_relids = bms_make_singleton(edge_rti);
 
-    if (candidate->bound_endpoint_expr != NULL)
-    {
-        expr_relids = pull_varnos(root, candidate->bound_endpoint_expr);
-        if (!bms_is_empty(expr_relids))
-        {
-            if (bms_membership(expr_relids) == BMS_SINGLETON)
-                expr_rti = bms_singleton_member(expr_relids);
+    source_relids = bind_adjacency_match_endpoint_relids(
+        root, candidate->bound_endpoint_alias,
+        &candidate->bound_endpoint_expr, source_alias_rti,
+        &candidate->bound_endpoint_rti);
+    if (source_relids == NULL)
+        return;
 
-            /*
-             * Only trust the bound-endpoint expression's own varno when it
-             * agrees with the alias-resolved rti (or there is no alias to cross
-             * check).  The expression is captured at parse time and stored on
-             * the candidate outside the query tree, so its varno is NOT
-             * remapped during subquery pull-up/flattening.  For a single-edge
-             * pattern the parse-time and plan-time indexes coincide, but for a
-             * multi-hop pattern they diverge: the stale varno then points at an
-             * unrelated intervening rel (e.g. an earlier edge), which would make
-             * required_outer reference the wrong relation and leave the bound
-             * endpoint unbound at execution.  When they disagree, fall through
-             * to the alias path below, which OffsetVarNodes the expression onto
-             * the correct (alias-resolved) rti.
-             */
-            if (expr_rti > 0 &&
-                expr_rti < root->simple_rel_array_size &&
-                root->simple_rel_array[expr_rti] != NULL &&
-                (alias_rti == 0 || expr_rti == alias_rti))
-            {
-                candidate->required_outer = expr_relids;
-                candidate->bound_endpoint_rti = expr_rti;
-                if (candidate->solved_relids != NULL)
-                    candidate->solved_relids = bms_add_members(
-                        candidate->solved_relids, expr_relids);
-                else
-                    candidate->solved_relids = bms_copy(expr_relids);
-                restrict_adjacency_match_terminal_property_prefetch(root,
-                                                                    candidate);
-                return;
-            }
+    candidate->required_outer = source_relids;
+    if (candidate->solved_relids != NULL)
+        candidate->solved_relids = bms_add_members(candidate->solved_relids,
+                                                   source_relids);
+    else
+        candidate->solved_relids = bms_copy(source_relids);
+
+    /*
+     * Exact terminal pushdown is deliberately limited to a raw graphid outer
+     * expression without a terminal property-prefetch contract.  Property
+     * prefetch installs its own composite vertex-set filter; keeping these
+     * modes disjoint makes the first expand-into slice mechanically safe while
+     * preserving the ordinary source-only expansion as the fallback.
+     */
+    if (candidate->bound_terminal_expr != NULL &&
+        !candidate->has_right_property_predicate &&
+        !adjacency_match_bound_expr_uses_age_id(
+            candidate->bound_terminal_expr))
+    {
+        terminal_relids = bind_adjacency_match_endpoint_relids(
+            root, candidate->bound_terminal_alias,
+            &candidate->bound_terminal_expr, terminal_alias_rti,
+            &candidate->bound_terminal_rti);
+        if (terminal_relids != NULL &&
+            (edge_rti == 0 || !bms_is_member(edge_rti, terminal_relids)))
+        {
+            candidate->required_outer = bms_add_members(
+                candidate->required_outer, terminal_relids);
+            candidate->solved_relids = bms_add_members(
+                candidate->solved_relids, terminal_relids);
+            candidate->exact_terminal_bound = true;
         }
     }
 
-    if (alias_rti == 0)
-        return;
-
-    if (expr_rti > 0 &&
-        alias_rti != expr_rti &&
-        candidate->bound_endpoint_expr != NULL)
-    {
-        OffsetVarNodes(candidate->bound_endpoint_expr,
-                       (int)alias_rti - expr_rti, 0);
-    }
-
-    candidate->bound_endpoint_rti = alias_rti;
-    candidate->required_outer = bms_make_singleton(alias_rti);
-    if (candidate->solved_relids != NULL)
-        candidate->solved_relids = bms_add_member(candidate->solved_relids,
-                                                  alias_rti);
-    else
-        candidate->solved_relids = bms_make_singleton(alias_rti);
+    bms_free(terminal_relids);
     restrict_adjacency_match_terminal_property_prefetch(root, candidate);
 }
 
@@ -8267,13 +8732,53 @@ static void restrict_adjacency_match_terminal_property_prefetch(
     bms_free(value_relids);
 }
 
+static IndexOptInfo *find_adjacency_match_endpoint_pair_index(
+    RelOptInfo *rel)
+{
+    ListCell *lc;
+
+    if (rel == NULL || (!enable_indexscan && !enable_bitmapscan))
+        return NULL;
+
+    foreach(lc, rel->indexlist)
+    {
+        IndexOptInfo *index_info = lfirst_node(IndexOptInfo, lc);
+
+        if (index_info->hypothetical ||
+            index_info->relam != BTREE_AM_OID ||
+            index_info->nkeycolumns < 2 ||
+            (index_info->indpred != NIL && !index_info->predOK) ||
+            (!index_info->amhasgettuple && !index_info->amhasgetbitmap))
+        {
+            continue;
+        }
+
+        if ((index_info->indexkeys[0] ==
+             Anum_ag_label_edge_table_start_id &&
+             index_info->indexkeys[1] ==
+             Anum_ag_label_edge_table_end_id) ||
+            (index_info->indexkeys[0] ==
+             Anum_ag_label_edge_table_end_id &&
+             index_info->indexkeys[1] ==
+             Anum_ag_label_edge_table_start_id))
+        {
+            return index_info;
+        }
+    }
+
+    return NULL;
+}
+
 static void add_adjacency_match_custom_path(
     PlannerInfo *root, RelOptInfo *rel,
     CypherAdjacencyMatchCandidate *candidate)
 {
     CustomPath *cp;
     Expr *key_expr;
+    Expr *terminal_expr;
     Const *endpoint_const;
+    Const *terminal_const;
+    IndexOptInfo *endpoint_pair_index;
     Relids path_required_outer;
     AdjacencyMatchPayloadRequest payload_request;
     AgeGraphJoinCandidateTable *graph_join_table;
@@ -8284,7 +8789,12 @@ static void add_adjacency_match_custom_path(
     if (candidate == NULL || candidate->bound_endpoint_expr == NULL)
         return;
 
-    endpoint_const = find_endpoint_graphid_const(root, candidate);
+    endpoint_const = find_adjacency_match_graphid_const(
+        root, candidate->bound_endpoint_rti);
+    terminal_const = candidate->exact_terminal_bound ?
+        find_adjacency_match_graphid_const(root,
+                                           candidate->bound_terminal_rti) :
+        NULL;
     if (candidate->required_outer == NULL && endpoint_const == NULL)
         return;
 
@@ -8300,8 +8810,38 @@ static void add_adjacency_match_custom_path(
     key_expr = (Expr *)candidate->bound_endpoint_expr;
     if (endpoint_const != NULL)
         key_expr = (Expr *)endpoint_const;
-    path_required_outer = endpoint_const != NULL ? NULL :
-        candidate->required_outer;
+    terminal_expr = candidate->exact_terminal_bound ?
+        (Expr *)candidate->bound_terminal_expr :
+        (Expr *)makeNullConst(GRAPHIDOID, -1, InvalidOid);
+    if (terminal_const != NULL)
+        terminal_expr = (Expr *)terminal_const;
+
+    path_required_outer = bms_copy(candidate->required_outer);
+    if (endpoint_const != NULL && candidate->bound_endpoint_rti > 0)
+        path_required_outer = bms_del_member(
+            path_required_outer, candidate->bound_endpoint_rti);
+    if (terminal_const != NULL && candidate->bound_terminal_rti > 0)
+        path_required_outer = bms_del_member(
+            path_required_outer, candidate->bound_terminal_rti);
+    if (bms_is_empty(path_required_outer))
+    {
+        bms_free(path_required_outer);
+        path_required_outer = NULL;
+    }
+
+    endpoint_pair_index = candidate->exact_terminal_bound ?
+        find_adjacency_match_endpoint_pair_index(rel) : NULL;
+    if (endpoint_pair_index != NULL)
+    {
+        ereport(DEBUG2,
+                (errmsg_internal("AGE adjacency expand-into handed to "
+                                 "endpoint-pair index: edge_rel=%u index=%u",
+                                 candidate->edge_label_oid,
+                                 endpoint_pair_index->indexoid)));
+        bms_free(path_required_outer);
+        return;
+    }
+
     payload_request = build_adjacency_match_payload_request(
         rel->relid, rel->reltarget->exprs, rel->baserestrictinfo);
 
@@ -8337,10 +8877,13 @@ static void add_adjacency_match_custom_path(
         candidate->right_property_value_expr != NULL ?
         copyObject(candidate->right_property_value_expr) :
         (Node *)makeNullConst(AGTYPEOID, -1, InvalidOid),
+        copyObject(terminal_expr),
         makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
                   ObjectIdGetDatum(candidate->index_oid), false, true),
         makeConst(BOOLOID, -1, InvalidOid, sizeof(bool),
-                  BoolGetDatum(candidate->outgoing), false, true),
+                  BoolGetDatum(candidate->outgoing), false, true));
+    cp->custom_private = lappend(
+        cp->custom_private,
         make_adjacency_match_descriptor(candidate, &payload_request,
                                         graph_join_table,
                                         graph_join_candidate));
@@ -8585,17 +9128,16 @@ static Path *add_adjacency_match_partial_gather_path(PlannerInfo *root,
     return NULL;
 }
 
-static Const *find_endpoint_graphid_const(PlannerInfo *root,
-                                          CypherAdjacencyMatchCandidate *candidate)
+static Const *find_adjacency_match_graphid_const(PlannerInfo *root,
+                                                  Index endpoint_rti)
 {
     RelOptInfo *endpoint_rel;
     ListCell *lc;
 
-    if (candidate->bound_endpoint_rti <= 0 ||
-        candidate->bound_endpoint_rti >= root->simple_rel_array_size)
+    if (endpoint_rti <= 0 || endpoint_rti >= root->simple_rel_array_size)
         return NULL;
 
-    endpoint_rel = root->simple_rel_array[candidate->bound_endpoint_rti];
+    endpoint_rel = root->simple_rel_array[endpoint_rti];
     if (endpoint_rel == NULL)
         return NULL;
 
@@ -8627,7 +9169,7 @@ static Const *find_endpoint_graphid_const(PlannerInfo *root,
             Var *var = castNode(Var, left);
             Const *con = castNode(Const, right);
 
-            if (var->varno == candidate->bound_endpoint_rti &&
+            if (var->varno == endpoint_rti &&
                 var->varattno == Anum_ag_label_vertex_table_id &&
                 var->vartype == GRAPHIDOID &&
                 con->consttype == GRAPHIDOID &&
@@ -8639,7 +9181,7 @@ static Const *find_endpoint_graphid_const(PlannerInfo *root,
             Const *con = castNode(Const, left);
             Var *var = castNode(Var, right);
 
-            if (var->varno == candidate->bound_endpoint_rti &&
+            if (var->varno == endpoint_rti &&
                 var->varattno == Anum_ag_label_vertex_table_id &&
                 var->vartype == GRAPHIDOID &&
                 con->consttype == GRAPHIDOID &&
@@ -8878,6 +9420,17 @@ static void cost_adjacency_match_custom_path(PlannerInfo *root,
                                dst_label_selectivity : 0.50));
     }
     candidate->estimated_endpoint_fanout = endpoint_fanout;
+    if (candidate->exact_terminal_bound)
+    {
+        /*
+         * Expand-into probes one destination graphid.  Parallel edges can
+         * still produce more than one row at execution, but one row is the
+         * appropriate default cardinality in the absence of pair-frequency
+         * statistics and prevents the planner from charging the full source
+         * degree for an exact adjacency lookup.
+         */
+        terminal_fanout = 1.0;
+    }
     candidate->estimated_terminal_fanout = terminal_fanout;
     candidate->estimated_composite_selectivity = 0.0;
     candidate->estimated_composite_selectivity_source_kind =
@@ -10073,10 +10626,11 @@ static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
 
     cs->flags = best_path->flags;
     cs->custom_plans = NIL;
-    cs->custom_exprs = list_make2(linitial(best_path->custom_private),
-                                  lsecond(best_path->custom_private));
+    cs->custom_exprs = list_make3(linitial(best_path->custom_private),
+                                  lsecond(best_path->custom_private),
+                                  lthird(best_path->custom_private));
     /*
-     * Edge-only restriction clauses are appended as a third custom_exprs entry
+     * Edge-only restriction clauses are appended as a fourth custom_exprs entry
      * (a List, recursed by setrefs so its Vars are fixed) so the executor can
      * skip non-matching edges in the cursor.  They also stay in scan.plan.qual,
      * so the early skip is a pure optimization and never affects correctness.
@@ -10084,7 +10638,7 @@ static Plan *plan_age_adjacency_match_path(PlannerInfo *root,
     edge_only_quals = collect_adjacency_match_edge_only_quals(rel->relid,
                                                               clauses);
     cs->custom_exprs = lappend(cs->custom_exprs, edge_only_quals);
-    cs->custom_private = list_copy_tail(best_path->custom_private, 2);
+    cs->custom_private = list_copy_tail(best_path->custom_private, 3);
     cs->custom_scan_tlist = custom_scan_tlist;
     cs->custom_relids = bms_make_singleton(rel->relid);
     cs->methods = &age_adjacency_match_scan_methods;

@@ -5275,6 +5275,7 @@ typedef struct WcojSource
     graphid id;
     bool outgoing;
     int64 global_index;
+    int64 run_index;
 } WcojSource;
 
 static int age_wcoj_source_cmp(const void *a, const void *b)
@@ -5333,6 +5334,39 @@ static int age_wcoj_merge_pick(WcojMergeCursor *cursors, int n)
     return best;
 }
 
+/*
+ * Count source lists that can still contribute an unconsumed destination.
+ * The run scan keeps one queued payload per live source key, but refill() pops
+ * the smallest payload into WcojMergeCursor.head.  Account for that detached
+ * lookahead only when the same source has no later payload already queued.
+ */
+static int64 age_wcoj_live_source_count(WcojMergeCursor *cursors, int n)
+{
+    int64 live = 0;
+    int i;
+
+    for (i = 0; i < n; i++)
+    {
+        WcojSource *source;
+
+        if (cursors[i].scan == NULL)
+            continue;
+
+        live += age_adjacency_visible_payload_run_scan_queued_keys(
+            cursors[i].scan);
+        if (!cursors[i].head_valid)
+            continue;
+
+        source = (WcojSource *) cursors[i].head_tag;
+        Assert(source != NULL);
+        if (!age_adjacency_visible_payload_run_scan_key_is_queued(
+                cursors[i].scan, source->run_index))
+            live++;
+    }
+
+    return live;
+}
+
 Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
 {
     char *graph_name;
@@ -5356,7 +5390,7 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
     int sel;
     graphid current_vertex = 0;
     bool have_current = false;
-    uint64 *seen_words;
+    uint64 *seen_words = NULL;
     int64 word_count;
     int64 distinct_seen = 0;
     agtype_iterator *it;
@@ -5529,6 +5563,7 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
         sources[source_count].id = add_id;
         sources[source_count].outgoing = add_outgoing;
         sources[source_count].global_index = 0;
+        sources[source_count].run_index = 0;
         source_count++;
     }
 
@@ -5566,13 +5601,15 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
         if (sources[i].outgoing)
         {
             out_keys[out_count].key = sources[i].id;
-            out_keys[out_count].tag = (void *) (intptr_t) i;
+            sources[i].run_index = out_count;
+            out_keys[out_count].tag = &sources[i];
             out_count++;
         }
         else
         {
             in_keys[in_count].key = sources[i].id;
-            in_keys[in_count].tag = (void *) (intptr_t) i;
+            sources[i].run_index = in_count;
+            in_keys[in_count].tag = &sources[i];
             in_count++;
         }
     }
@@ -5607,6 +5644,19 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
             in_index, GetActiveSnapshot(), false, 0, in_keys, in_count);
     }
 
+    /*
+     * Intersection is impossible when any requested source key has no first
+     * posting.  The old path nevertheless drained every other (possibly very
+     * large) source list before returning an empty set.
+     */
+    if ((out_count > 0 &&
+         age_adjacency_visible_payload_run_scan_active_keys(
+             cursors[0].scan) < out_count) ||
+        (in_count > 0 &&
+         age_adjacency_visible_payload_run_scan_active_keys(
+             cursors[1].scan) < in_count))
+        goto done;
+
     word_count = (source_count + 63) / 64;
     seen_words = (uint64 *) palloc0(sizeof(uint64) * word_count);
 
@@ -5615,8 +5665,12 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
 
     while ((sel = age_wcoj_merge_pick(cursors, 2)) >= 0)
     {
-        int64 kidx = (int64) (intptr_t) cursors[sel].head_tag;
+        WcojSource *source = (WcojSource *) cursors[sel].head_tag;
+        int64 kidx;
         graphid v = cursors[sel].head.next_vertex_id;
+
+        Assert(source != NULL);
+        kidx = source->global_index;
 
         if (!have_current || v != current_vertex)
         {
@@ -5628,6 +5682,21 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
                 values[0] = GRAPHID_GET_DATUM(current_vertex);
                 tuplestore_putvalues(tuple_store, ret_tdesc, values, nulls);
             }
+
+            /*
+             * All lookahead heads belong to the next-or-later groups here.
+             * Once fewer than source_count lists remain live, no later
+             * destination can be covered by every source.  Stop before
+             * draining the surviving high-degree tails.
+             */
+            if (have_current &&
+                age_wcoj_live_source_count(cursors, 2) < source_count)
+            {
+                /* The completed group above has already been emitted. */
+                have_current = false;
+                break;
+            }
+
             MemSet(seen_words, 0, sizeof(uint64) * word_count);
             distinct_seen = 0;
             current_vertex = v;
@@ -5657,12 +5726,14 @@ Datum age_adjacency_multiway_intersect(PG_FUNCTION_ARGS)
         tuplestore_putvalues(tuple_store, ret_tdesc, values, nulls);
     }
 
+done:
     if (cursors[0].scan != NULL)
         age_adjacency_end_visible_payload_run_scan(cursors[0].scan);
     if (cursors[1].scan != NULL)
         age_adjacency_end_visible_payload_run_scan(cursors[1].scan);
 
-    pfree(seen_words);
+    if (seen_words != NULL)
+        pfree(seen_words);
     pfree(out_keys);
     pfree(in_keys);
     pfree(sources);

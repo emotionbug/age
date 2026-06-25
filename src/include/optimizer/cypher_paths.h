@@ -39,6 +39,8 @@ typedef struct CypherAdjacencyMatchCandidate
     char *graph_pattern_key;
     char *bound_endpoint_alias;
     Node *bound_endpoint_expr;
+    char *bound_terminal_alias;
+    Node *bound_terminal_expr;
     char *index_source;
     AgeAdjacencyMatchIndexKind index_kind_id;
     char *index_provider;
@@ -59,8 +61,10 @@ typedef struct CypherAdjacencyMatchCandidate
     Node *right_property_value_expr;
     Index edge_rti;
     Index bound_endpoint_rti;
+    Index bound_terminal_rti;
     Relids solved_relids;
     Relids required_outer;
+    bool exact_terminal_bound;
     bool outgoing;
     bool has_edge_variable_projection;
     bool has_edge_property_predicate;
@@ -110,6 +114,8 @@ void cypher_register_adjacency_match_candidate(Oid edge_label_oid,
                                                const char *graph_pattern_key,
                                                const char *bound_endpoint_alias,
                                                Node *bound_endpoint_expr,
+                                               const char *bound_terminal_alias,
+                                               Node *bound_terminal_expr,
                                                const char *index_source,
                                                AgeAdjacencyMatchIndexKind index_kind_id,
                                                const char *index_provider,

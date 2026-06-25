@@ -88,6 +88,7 @@ static Oid terminal_property_int8_eq_oid = InvalidOid;
 static Oid terminal_property_float8_eq_oid = InvalidOid;
 static Oid terminal_property_numeric_eq_oid = InvalidOid;
 static Oid terminal_property_text_eq_oid = InvalidOid;
+static Oid terminal_property_bool_eq_oid = InvalidOid;
 
 static bool terminal_property_lookup_request_valid(
     const AgeAdjacencyMatchTerminalPropertyRequest *request);
@@ -596,6 +597,15 @@ static bool convert_terminal_property_scan_value(
 {
     char *str;
 
+    if (value_type == BOOLOID)
+    {
+        /* Keep the scan key domain identical to agtype_object_field_bool. */
+        if (scalar_value->type != AGTV_BOOL)
+            return false;
+        *value = BoolGetDatum(scalar_value->val.boolean);
+        return true;
+    }
+
     if (value_type == INT8OID)
     {
         if (scalar_value->type == AGTV_INTEGER)
@@ -745,6 +755,9 @@ static Oid get_terminal_property_eq_oid(Oid value_type)
     if (value_type == TEXTOID)
         return lookup_terminal_property_eq_oid(value_type,
                                                &terminal_property_text_eq_oid);
+    if (value_type == BOOLOID)
+        return lookup_terminal_property_eq_oid(value_type,
+                                               &terminal_property_bool_eq_oid);
 
     return InvalidOid;
 }

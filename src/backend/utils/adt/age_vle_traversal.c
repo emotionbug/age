@@ -27,6 +27,12 @@
 #define VLE_WORKLIST_INITIAL_CAPACITY 64
 #define VLE_ARENA_SEGMENT_INITIAL_CAPACITY 64
 #define VLE_ARENA_COMPACTION_MIN_FRAME_COUNT 1024
+/*
+ * Reference discovery used to run after every closed work item.  Delay it
+ * until enough newly closed arena state can amortize the scan.
+ */
+#define VLE_ARENA_REFERENCE_PROBE_SEGMENT_INTERVAL 64
+#define VLE_ARENA_REFERENCE_PROBE_FRAME_INTERVAL 1024
 
 typedef struct VLELocalEdgeStateEntry
 {
@@ -64,13 +70,8 @@ static void age_vle_arena_segment_record_frame_work(
     VLETraversalState *state, int64 arena_segment_index);
 static void age_vle_arena_segment_record_work_consumed(
     VLETraversalState *state, int64 arena_segment_index);
-static bool age_vle_arena_segment_contains_frame(
-    const VLETraversalArenaSegment *segment, int64 frame_index);
-static bool age_vle_arena_segment_chain_references(
-    const VLETraversalState *state, const VLETraversalArenaSegment *segment,
-    int64 frame_index);
-static bool age_vle_arena_segment_has_active_or_pending_reference(
-    const VLETraversalState *state, const VLETraversalArenaSegment *segment);
+static void age_vle_arena_segments_mark_referenced_chain(
+    const VLETraversalState *state, bool *referenced, int64 frame_index);
 static void age_vle_arena_segments_refresh_compactable_candidates(
     VLETraversalState *state);
 static int64 age_vle_arena_frame_index_after_compaction_windows(
@@ -291,6 +292,7 @@ void age_vle_traversal_state_reset(VLETraversalState *state,
     age_vle_traversal_clear_active_path(state,
                                         "age_vle_traversal_state_reset");
     state->frame_stack->size = 0;
+    state->worklist->head = 0;
     state->worklist->size = 0;
     state->worklist->next_work_ordinal = 0;
     age_vle_arena_segments_reset(&state->arena_segments);
@@ -384,6 +386,8 @@ static void age_vle_arena_segments_init(
     segments->size = 0;
     segments->capacity = VLE_ARENA_SEGMENT_INITIAL_CAPACITY;
     segments->work_closed_count = 0;
+    segments->unprobed_closed_segment_count = 0;
+    segments->unprobed_closed_frame_count = 0;
     segments->compactable_candidate_count = 0;
     segments->compactable_frame_count = 0;
     segments->compacted_segment_count = 0;
@@ -397,6 +401,8 @@ static void age_vle_arena_segments_reset(
 
     segments->size = 0;
     segments->work_closed_count = 0;
+    segments->unprobed_closed_segment_count = 0;
+    segments->unprobed_closed_frame_count = 0;
     segments->compactable_candidate_count = 0;
     segments->compactable_frame_count = 0;
     segments->compacted_segment_count = 0;
@@ -413,6 +419,8 @@ static void age_vle_arena_segments_free(
     segments->size = 0;
     segments->capacity = 0;
     segments->work_closed_count = 0;
+    segments->unprobed_closed_segment_count = 0;
+    segments->unprobed_closed_frame_count = 0;
     segments->compactable_candidate_count = 0;
     segments->compactable_frame_count = 0;
     segments->compacted_segment_count = 0;
@@ -509,83 +517,85 @@ static void age_vle_arena_segment_record_work_consumed(
         Assert(!segment->work_closed);
         segment->work_closed = true;
         state->arena_segments.work_closed_count++;
+        state->arena_segments.unprobed_closed_segment_count++;
+        state->arena_segments.unprobed_closed_frame_count +=
+            segment->frame_count;
     }
 }
 
-static bool age_vle_arena_segment_contains_frame(
-    const VLETraversalArenaSegment *segment, int64 frame_index)
+/*
+ * All frames produced by one arena segment share the segment's parent frame.
+ * Marking by segment therefore visits each referenced ancestry segment at
+ * most once per probe, even when many pending work items reconverge on it.
+ */
+static void age_vle_arena_segments_mark_referenced_chain(
+    const VLETraversalState *state, bool *referenced, int64 frame_index)
 {
-    Assert(segment != NULL);
+    const VLETraversalArenaSegmentList *segments;
 
-    if (frame_index < 0 || segment->frame_count == 0)
-        return false;
-
-    Assert(segment->frame_start >= 0);
-    return frame_index >= segment->frame_start &&
-           frame_index < segment->frame_start + segment->frame_count;
-}
-
-static bool age_vle_arena_segment_chain_references(
-    const VLETraversalState *state, const VLETraversalArenaSegment *segment,
-    int64 frame_index)
-{
     Assert(state != NULL);
     Assert(state->frame_stack != NULL);
-    Assert(segment != NULL);
+    Assert(referenced != NULL);
 
+    segments = &state->arena_segments;
     while (frame_index >= 0)
     {
+        const VLETraversalArenaSegment *segment;
         const VLETraversalFrame *frame;
+        int64 arena_segment_index;
 
         Assert(frame_index < state->frame_stack->size);
-        if (age_vle_arena_segment_contains_frame(segment, frame_index))
-            return true;
-
         frame = &state->frame_stack->array[frame_index];
-        Assert(frame->parent_frame_index < frame_index);
-        frame_index = frame->parent_frame_index;
+        arena_segment_index = frame->arena_segment_index;
+        Assert(arena_segment_index >= 0);
+        Assert(arena_segment_index < segments->size);
+        if (referenced[arena_segment_index])
+            return;
+
+        referenced[arena_segment_index] = true;
+        segment = &segments->array[arena_segment_index];
+        frame_index = segment->parent_frame_index;
     }
-
-    return false;
-}
-
-static bool age_vle_arena_segment_has_active_or_pending_reference(
-    const VLETraversalState *state, const VLETraversalArenaSegment *segment)
-{
-    int64 i;
-
-    Assert(state != NULL);
-    Assert(state->worklist != NULL);
-    Assert(segment != NULL);
-
-    if (age_vle_arena_segment_chain_references(state, segment,
-                                               state->active_frame_index))
-        return true;
-
-    for (i = 0; i < state->worklist->size; i++)
-    {
-        const VLETraversalWorkItem *item;
-
-        item = &state->worklist->items[i];
-        if (age_vle_arena_segment_chain_references(state, segment,
-                                                   item->frame_index))
-            return true;
-    }
-
-    return false;
 }
 
 static void age_vle_arena_segments_refresh_compactable_candidates(
     VLETraversalState *state)
 {
     VLETraversalArenaSegmentList *segments;
+    bool *referenced;
+    bool force_probe;
     int64 i;
 
     Assert(state != NULL);
+    Assert(state->worklist != NULL);
 
     segments = &state->arena_segments;
     if (segments->work_closed_count != segments->compactable_candidate_count)
     {
+        /*
+         * Probing each closed segment made reconvergent traversals quadratic:
+         * every completion rescanned all pending work and each parent chain.
+         * Batch probes while work remains, but force one before traversal
+         * quiescence so every reclaimable segment is eventually discovered.
+         */
+        force_probe = state->worklist->size == 0;
+        if (!force_probe &&
+            segments->unprobed_closed_segment_count <
+                VLE_ARENA_REFERENCE_PROBE_SEGMENT_INTERVAL &&
+            segments->unprobed_closed_frame_count <
+                VLE_ARENA_REFERENCE_PROBE_FRAME_INTERVAL)
+            goto compact_ready_frames;
+
+        referenced = palloc0(sizeof(bool) * segments->size);
+        age_vle_arena_segments_mark_referenced_chain(
+            state, referenced, state->active_frame_index);
+        for (i = state->worklist->head;
+             i < state->worklist->head + state->worklist->size; i++)
+        {
+            age_vle_arena_segments_mark_referenced_chain(
+                state, referenced, state->worklist->items[i].frame_index);
+        }
+
         for (i = 0; i < segments->size; i++)
         {
             VLETraversalArenaSegment *segment;
@@ -594,16 +604,20 @@ static void age_vle_arena_segments_refresh_compactable_candidates(
             if (!segment->work_closed || segment->compactable_candidate)
                 continue;
 
-            if (age_vle_arena_segment_has_active_or_pending_reference(state,
-                                                                      segment))
+            if (referenced[i])
                 continue;
 
             segment->compactable_candidate = true;
             segments->compactable_candidate_count++;
             segments->compactable_frame_count += segment->frame_count;
         }
+
+        pfree(referenced);
+        segments->unprobed_closed_segment_count = 0;
+        segments->unprobed_closed_frame_count = 0;
     }
 
+compact_ready_frames:
     if (segments->compactable_candidate_count !=
         segments->compacted_segment_count &&
         (segments->compactable_frame_count - segments->compacted_frame_count >=
@@ -809,7 +823,8 @@ static void age_vle_arena_segments_rewrite_frame_indexes_for_windows(
     Assert(state->active_frame_index < 0 || rewritten_frame_index >= 0);
     state->active_frame_index = rewritten_frame_index;
 
-    for (i = 0; i < state->worklist->size; i++)
+    for (i = state->worklist->head;
+         i < state->worklist->head + state->worklist->size; i++)
     {
         VLETraversalWorkItem *item;
 
@@ -874,6 +889,7 @@ VLETraversalWorklist *age_vle_worklist_new(void)
 
     worklist->items = palloc(sizeof(VLETraversalWorkItem) *
                              VLE_WORKLIST_INITIAL_CAPACITY);
+    worklist->head = 0;
     worklist->size = 0;
     worklist->capacity = VLE_WORKLIST_INITIAL_CAPACITY;
     worklist->next_work_ordinal = 0;
@@ -894,16 +910,47 @@ void age_vle_worklist_free(VLETraversalWorklist *worklist)
 static void age_vle_worklist_ensure_capacity(
     VLETraversalWorklist *worklist, int64 required)
 {
-    Assert(worklist != NULL);
+    int64 new_capacity;
 
-    if (required <= worklist->capacity)
+    Assert(worklist != NULL);
+    Assert(required >= worklist->size);
+
+    if (worklist->head + required <= worklist->capacity)
         return;
 
-    while (worklist->capacity < required)
-        worklist->capacity *= 2;
-    worklist->items = repalloc(worklist->items,
-                               sizeof(VLETraversalWorkItem) *
-                               worklist->capacity);
+    /*
+     * LEVEL_BATCH removes from the front.  A nearly full queue can dequeue
+     * one item and enqueue one child repeatedly; compacting the live window
+     * for every such append would recreate quadratic copying.  Give dense
+     * queues geometric tail room, and compact in-place only when at least
+     * half of the allocation is already dead prefix.
+     */
+    new_capacity = worklist->capacity;
+    if (worklist->head > 0 && required > worklist->capacity / 2)
+        new_capacity *= 2;
+    while (new_capacity < required)
+        new_capacity *= 2;
+
+    if (new_capacity != worklist->capacity)
+    {
+        worklist->items = repalloc(worklist->items,
+                                   sizeof(VLETraversalWorkItem) *
+                                   new_capacity);
+        worklist->capacity = new_capacity;
+    }
+
+    if (worklist->head > 0)
+    {
+        if (worklist->size > 0)
+        {
+            memmove(worklist->items,
+                    &worklist->items[worklist->head],
+                    sizeof(VLETraversalWorkItem) * worklist->size);
+        }
+        worklist->head = 0;
+    }
+
+    Assert(required <= worklist->capacity);
 }
 
 static void age_vle_worklist_push(VLETraversalWorklist *worklist,
@@ -918,7 +965,7 @@ static void age_vle_worklist_push(VLETraversalWorklist *worklist,
     Assert(path_length > 0);
 
     age_vle_worklist_ensure_capacity(worklist, worklist->size + 1);
-    item = &worklist->items[worklist->size++];
+    item = &worklist->items[worklist->head + worklist->size++];
     item->frame_index = frame_index;
     item->path_length = path_length;
     item->work_ordinal = worklist->next_work_ordinal++;
@@ -956,7 +1003,7 @@ static bool age_vle_worklist_select_lifo(
     if (worklist->size == 0)
         return false;
 
-    selection->work_index = worklist->size - 1;
+    selection->work_index = worklist->head + worklist->size - 1;
     selection->item = worklist->items[selection->work_index];
     return true;
 }
@@ -965,6 +1012,7 @@ static bool age_vle_worklist_select_level_batch(
     VLETraversalState *state, VLETraversalWorkSelection *selection)
 {
     VLETraversalWorklist *worklist;
+    VLETraversalWorkItem *item;
     int64 selected_index = -1;
     int64 selected_path_length = 0;
     int64 i;
@@ -979,10 +1027,30 @@ static bool age_vle_worklist_select_level_batch(
     if (worklist->size == 0)
         return false;
 
-    for (i = 0; i < worklist->size; i++)
+    /*
+     * A level-batch traversal drains all visits at depth N before it appends
+     * depth N+1 work.  Therefore insertion order is already breadth-first
+     * order, and the oldest live visit is the minimum-depth visit.  Pop that
+     * queue head directly instead of rescanning the whole frontier.
+     */
+    item = &worklist->items[worklist->head];
+    if (item->kind == VLE_TRAVERSAL_WORK_VISIT)
     {
-        VLETraversalWorkItem *item;
+        Assert(item->frame_index >= 0);
+        Assert(item->frame_index < state->frame_stack->size);
+        selection->work_index = worklist->head;
+        selection->item = *item;
+        return true;
+    }
 
+    /*
+     * LEVEL_BATCH does not normally enqueue backtracks.  Keep the historical
+     * mixed-item fallback for defensive compatibility rather than changing
+     * its semantics if a future caller does so.
+     */
+    for (i = worklist->head;
+         i < worklist->head + worklist->size; i++)
+    {
         item = &worklist->items[i];
         if (item->kind != VLE_TRAVERSAL_WORK_VISIT)
             continue;
@@ -1009,16 +1077,28 @@ static bool age_vle_worklist_select_level_batch(
 static void age_vle_worklist_remove_at(VLETraversalWorklist *worklist,
                                        int64 work_index)
 {
-    Assert(worklist != NULL);
-    Assert(work_index >= 0);
-    Assert(work_index < worklist->size);
+    int64 work_end;
 
-    if (work_index + 1 < worklist->size)
+    Assert(worklist != NULL);
+    Assert(work_index >= worklist->head);
+    Assert(work_index < worklist->head + worklist->size);
+
+    if (work_index == worklist->head)
+    {
+        worklist->head++;
+        worklist->size--;
+        if (worklist->size == 0)
+            worklist->head = 0;
+        return;
+    }
+
+    work_end = worklist->head + worklist->size;
+    if (work_index + 1 < work_end)
     {
         memmove(&worklist->items[work_index],
                 &worklist->items[work_index + 1],
                 sizeof(VLETraversalWorkItem) *
-                (worklist->size - work_index - 1));
+                (work_end - work_index - 1));
     }
     worklist->size--;
 }

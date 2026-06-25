@@ -76,6 +76,7 @@ typedef struct VLETraversalWorkItem
 typedef struct VLETraversalWorklist
 {
     VLETraversalWorkItem *items;
+    int64 head;
     int64 size;
     int64 capacity;
     int64 next_work_ordinal;
@@ -104,6 +105,8 @@ typedef struct VLETraversalArenaSegmentList
     int64 size;
     int64 capacity;
     int64 work_closed_count;
+    int64 unprobed_closed_segment_count;
+    int64 unprobed_closed_frame_count;
     int64 compactable_candidate_count;
     int64 compactable_frame_count;
     int64 compacted_segment_count;

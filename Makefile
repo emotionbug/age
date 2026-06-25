@@ -60,6 +60,7 @@ OBJS = src/backend/age.o \
        src/backend/commands/graph_commands.o \
        src/backend/commands/label_commands.o \
        src/backend/executor/cypher_create.o \
+       src/backend/executor/cypher_adjacency_count.o \
        src/backend/executor/cypher_adjacency_match.o \
        src/backend/executor/cypher_adjacency_match_terminal.o \
        src/backend/executor/cypher_property_projection.o \
@@ -163,6 +164,7 @@ REGRESS = scan \
           cypher_delete \
           cypher_with \
           cypher_vle \
+          cypher_vle_followup \
           cypher_union \
           cypher_call \
           cypher_merge \
