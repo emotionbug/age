@@ -182,6 +182,10 @@ static Expr *transform_cypher_adjacency_candidate_edge(
     cypher_parsestate *cpstate, cypher_relationship *rel,
     transform_entity *prev_entity, cypher_node *next_node,
     List **target_list, bool valid_label, bool outgoing);
+static void register_reverse_adjacency_candidate(
+    cypher_parsestate *cpstate, cypher_relationship *rel,
+    transform_entity *source_entity, cypher_node *terminal_node,
+    const char *edge_alias);
 static char *make_match_graph_pattern_key(
     cypher_parsestate *cpstate, transform_entity *prev_entity,
     cypher_relationship *rel, cypher_node *next_node, bool outgoing);
@@ -5858,6 +5862,23 @@ static transform_entity *transform_match_node_entity(
 }
 
 /*
+ * A single-edge pattern (a)-[:E]->(b {selective}) whose source (a) is an
+ * unbound scan but whose terminal (b) carries a selective inline property map.
+ * The forward adjacency candidate is not generated (no bound source), but the
+ * reverse direction -- scan the selective terminal, expand backward -- is a
+ * viable, often cheaper candidate.  We capture these during the pattern loop
+ * and register the reverse candidate in a post-loop pass, once the terminal has
+ * been transformed into an entity (item 10).
+ */
+typedef struct ReverseAdjacencyCapture
+{
+    cypher_relationship *rel;      /* the edge */
+    transform_entity *terminal;    /* original source (a) -- reverse terminal */
+    cypher_node *bound_source;     /* original terminal (b) -- reverse source */
+    bool outgoing;                 /* original (forward) direction */
+} ReverseAdjacencyCapture;
+
+/*
  * Iterate through the path and construct all edges and necessary vertices
  */
 static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
@@ -5875,6 +5896,7 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
     transform_entity *pretransformed_node = NULL;
     bool old_skip_raw = cpstate->skip_raw_targets;
     bool path_has_vle = false;
+    List *reverse_captures = NIL;
 
     special_VLE_case = isa_special_VLE_case(path);
 
@@ -6131,18 +6153,38 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
                     }
                 }
 
-                if (list_length(path->path) == 3 &&
+                if (list_length(path->path) >= 3 &&
                     path->var_name == NULL &&
                     (rel->dir == CYPHER_REL_DIR_RIGHT ||
                      rel->dir == CYPHER_REL_DIR_LEFT))
                 {
                     cypher_node *next_node =
                         (cypher_node *)lfirst(lnext(path->path, lc));
-
                     expr = transform_cypher_adjacency_candidate_edge(
                         cpstate, rel, prev_entity, next_node,
                         &query->targetList, valid_label,
                         rel->dir == CYPHER_REL_DIR_RIGHT);
+
+                    /*
+                     * Forward candidate not generated because the source is an
+                     * unbound scan, but the terminal carries a selective inline
+                     * property map: capture the edge so the post-loop pass can
+                     * register the reverse candidate from the (now-pending)
+                     * terminal entity (item 10).
+                     */
+                    if (expr == NULL &&
+                        !age_adjacency_match_endpoint_is_bound(prev_entity) &&
+                        next_node->props != NULL)
+                    {
+                        ReverseAdjacencyCapture *cap =
+                            palloc0(sizeof(ReverseAdjacencyCapture));
+
+                        cap->rel = rel;
+                        cap->terminal = prev_entity;
+                        cap->bound_source = next_node;
+                        cap->outgoing = (rel->dir == CYPHER_REL_DIR_RIGHT);
+                        reverse_captures = lappend(reverse_captures, cap);
+                    }
                 }
 
                 if (expr == NULL)
@@ -6374,6 +6416,74 @@ static List *transform_match_entities(cypher_parsestate *cpstate, Query *query,
     }
 
     cpstate->skip_raw_targets = old_skip_raw;
+
+    /*
+     * Post-loop: for each captured reverse opportunity, resolve the now-built
+     * terminal entity (the selective vertex that becomes the reverse source)
+     * and register the reverse adjacency candidate from it.  Done here so the
+     * candidate is registered with a fully-transformed source entity without
+     * perturbing the main pattern loop.
+     */
+    if (reverse_captures != NIL)
+    {
+        ListCell *clc;
+
+        foreach(clc, reverse_captures)
+        {
+            ReverseAdjacencyCapture *cap = lfirst(clc);
+            transform_entity *source_entity = NULL;
+            transform_entity *edge_entity = NULL;
+            cypher_node *terminal_node = NULL;
+            const char *edge_alias = NULL;
+            ListCell *elc;
+
+            foreach(elc, entities)
+            {
+                transform_entity *ent = lfirst(elc);
+
+                if (ent == NULL)
+                    continue;
+                if (ent->type == ENT_VERTEX &&
+                    ent->entity.node == cap->bound_source)
+                    source_entity = ent;
+                else if (ent->type == ENT_EDGE &&
+                         ent->entity.rel == cap->rel)
+                    edge_entity = ent;
+            }
+
+            if (source_entity == NULL || !source_entity->in_join_tree)
+                continue;
+
+            /*
+             * The candidate's edge alias must be the edge's RTE alias so the
+             * planner pops it for that edge; take it from the transformed edge
+             * entity (falling back to the edge's name).
+             */
+            if (edge_entity != NULL)
+                edge_alias = get_entity_name(edge_entity);
+            if (edge_alias == NULL)
+                edge_alias = cap->rel->name;
+            if (edge_alias == NULL)
+                continue;
+
+            terminal_node = (cap->terminal != NULL &&
+                             cap->terminal->type == ENT_VERTEX) ?
+                            cap->terminal->entity.node : NULL;
+            if (terminal_node == NULL)
+                continue;
+
+            ereport(DEBUG2,
+                    (errmsg_internal("AGE reverse adjacency candidate: "
+                                     "edge=%s source=%s terminal=%s",
+                                     edge_alias,
+                                     get_entity_name(source_entity),
+                                     get_entity_name(cap->terminal))));
+
+            register_reverse_adjacency_candidate(cpstate, cap->rel,
+                                                 source_entity, terminal_node,
+                                                 edge_alias);
+        }
+    }
 
     return entities;
 }
@@ -7846,6 +7956,142 @@ static char *make_match_graph_pattern_key(
                     edge_label,
                     end_name != NULL && end_name[0] != '\0' ?
                     end_name : "_");
+}
+
+/*
+ * Register the reverse (incoming) adjacency candidate for a single-edge pattern
+ * whose forward direction was not viable (unbound source) but whose terminal is
+ * selective.  Mirrors transform_cypher_adjacency_candidate_edge with the roles
+ * swapped: the selective terminal (source_entity) becomes the bound expansion
+ * source via an incoming index, and the original source node (terminal_node)
+ * becomes the "right"/terminal side.  edge_alias must be the edge's RTE alias so
+ * the planner pops this candidate for that edge.  Item 10.
+ */
+static void register_reverse_adjacency_candidate(
+    cypher_parsestate *cpstate, cypher_relationship *rel,
+    transform_entity *source_entity, cypher_node *terminal_node,
+    const char *edge_alias)
+{
+    ParseState *pstate = (ParseState *)cpstate;
+    Relation label_relation;
+    Oid edge_label_oid;
+    Oid index_oid;
+    char *index_source = NULL;
+    AgeAdjacencyMatchIndexKind index_kind_id =
+        AGE_ADJACENCY_MATCH_INDEX_UNKNOWN;
+    char *index_provider = NULL;
+    AgeAdjacencyMatchIndexDirection index_direction_id =
+        AGE_ADJACENCY_MATCH_INDEX_DIRECTION_NONE;
+    int32 index_property_count = 0;
+    bool index_metadata_backed = false;
+    char *right_property_key = NULL;
+    char *right_property_index_source = NULL;
+    char *right_property_index_provider = NULL;
+    char *right_property_index_type = NULL;
+    bool right_property_index_metadata_backed = false;
+    Oid right_property_index_oid = InvalidOid;
+    Node *right_property_value_node = NULL;
+    Node *right_property_value_expr = NULL;
+    Const *right_property_value = NULL;
+    Node *key_arg;
+    Expr *key_expr;
+    int32 right_label_id = INVALID_LABEL_ID;
+    char *graph_pattern_key;
+
+    if (rel->label == NULL || rel->varlen != NULL ||
+        source_entity == NULL || terminal_node == NULL || edge_alias == NULL)
+    {
+        return;
+    }
+
+    label_relation = open_label_relation_with_lock(cpstate, rel->label,
+                                                   rel->location,
+                                                   AccessShareLock);
+    edge_label_oid = RelationGetRelid(label_relation);
+    /* incoming (reverse) index: expand backward from the selective terminal */
+    index_oid = get_age_adjacency_match_index(cpstate->graph_oid,
+                                              edge_label_oid, rel->label,
+                                              false, &index_source,
+                                              &index_kind_id, &index_provider,
+                                              &index_direction_id,
+                                              &index_property_count,
+                                              &index_metadata_backed);
+    table_close(label_relation, AccessShareLock);
+    if (!OidIsValid(index_oid))
+    {
+        return;
+    }
+
+    /* the reverse expansion's terminal side is the original source node */
+    if (terminal_node->label != NULL)
+    {
+        right_label_id = get_label_id(terminal_node->label,
+                                      cpstate->graph_oid);
+        right_property_key = get_cypher_map_first_property_key(
+            terminal_node->props, &right_property_value_node);
+        if (right_property_value_node != NULL)
+        {
+            right_property_value_expr = transform_cypher_expr(
+                cpstate, copyObject(right_property_value_node),
+                EXPR_KIND_WHERE);
+            if (right_property_value_expr != NULL &&
+                IsA(right_property_value_expr, Const) &&
+                castNode(Const, right_property_value_expr)->consttype ==
+                AGTYPEOID &&
+                !castNode(Const, right_property_value_expr)->constisnull)
+                right_property_value = castNode(Const,
+                                                right_property_value_expr);
+        }
+        right_property_index_metadata_backed =
+            get_age_adjacency_match_property_index(
+                cpstate->graph_oid, terminal_node->label, right_property_key,
+                &right_property_index_oid,
+                &right_property_index_source,
+                &right_property_index_provider,
+                &right_property_index_type);
+    }
+
+    key_arg = make_qual(cpstate, source_entity, AG_VERTEX_COLNAME_ID);
+    key_expr = (Expr *)transformExpr(pstate, copyObject(key_arg),
+                                     EXPR_KIND_WHERE);
+    graph_pattern_key = make_match_graph_pattern_key(
+        cpstate, source_entity, rel, terminal_node, false);
+    cypher_register_graph_pattern_handoff(graph_pattern_key);
+    cypher_declare_graph_pattern_source(
+        graph_pattern_key, AGE_GRAPH_JOIN_SOURCE_ADJACENCY_EXPANSION,
+        AGE_GRAPH_JOIN_COMPONENT_ADJACENCY_EXPANSION);
+    if (terminal_node->props != NULL)
+        cypher_declare_graph_pattern_source(
+            graph_pattern_key,
+            AGE_GRAPH_JOIN_SOURCE_ADJACENCY_NODE_PROPERTY,
+            AGE_GRAPH_JOIN_COMPONENT_NODE_PROPERTY_SEEK);
+
+    cypher_register_adjacency_match_candidate(
+        edge_label_oid, index_oid, cpstate->graph_oid, edge_alias,
+        graph_pattern_key, get_entity_name(source_entity),
+        (Node *)key_expr,
+        index_source != NULL ? index_source : "unknown",
+        index_kind_id,
+        index_provider != NULL ? index_provider : "unknown",
+        index_direction_id != AGE_ADJACENCY_MATCH_INDEX_DIRECTION_NONE ?
+        index_direction_id : AGE_ADJACENCY_MATCH_INDEX_DIRECTION_IN,
+        index_property_count,
+        index_metadata_backed,
+        right_property_key,
+        right_property_index_oid,
+        right_property_index_source,
+        right_property_index_provider,
+        right_property_index_type,
+        right_property_index_metadata_backed,
+        right_property_value,
+        right_property_value_expr,
+        false,
+        rel->name != NULL,
+        rel->props != NULL,
+        terminal_node->label != NULL,
+        terminal_node->props != NULL,
+        right_label_id,
+        Anum_ag_label_edge_table_end_id);
 }
 
 static char *make_node_property_graph_pattern_key(

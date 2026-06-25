@@ -1069,6 +1069,85 @@ SELECT * FROM cypher('age_adj_direction', $$
 $$) AS (plan agtype);
 SELECT drop_graph('age_adj_direction', true);
 
+-- Reverse candidate generation (item 10): a forward-written pattern whose
+-- source (:A) is an unbound scan but whose terminal (:B) carries a selective
+-- inline property.  With both a forward and a reverse age_adjacency index, the
+-- planner now generates a reverse candidate (scan the selective terminal,
+-- expand backward) and, because that is cheaper, chooses it -- the plan scans
+-- :B on the property and runs an incoming (direction=incoming endpoint=end_id)
+-- AGE Adjacency Match, returning the same rows as a forward expansion would.
+SELECT create_graph('age_adj_reverse');
+SELECT create_vlabel('age_adj_reverse', 'A');
+SELECT create_vlabel('age_adj_reverse', 'B');
+SELECT create_elabel('age_adj_reverse', 'E');
+SELECT * FROM cypher('age_adj_reverse', $$
+    CREATE (:A {n: 1})-[:E]->(:B {name: 'x'}),
+           (:A {n: 2})-[:E]->(:B {name: 'y'})
+$$) AS (z agtype);
+SELECT * FROM cypher('age_adj_reverse', $$
+    CREATE INDEX e_out FOR ()-[r:E]->() ON (ADJACENCY)
+$$) AS (c text);
+CREATE INDEX e_in ON age_adj_reverse."E"
+    USING age_adjacency (end_id, id, start_id);
+ANALYZE age_adj_reverse."A"; ANALYZE age_adj_reverse."B";
+ANALYZE age_adj_reverse."E";
+-- Correct result: only the :A whose edge reaches :B {name:'x'}.
+SELECT n FROM cypher('age_adj_reverse', $$
+    MATCH (a:A)-[:E]->(b:B {name: 'x'}) RETURN a.n
+$$) AS (n agtype);
+-- The chosen plan runs the adjacency match incoming (reverse) off the selective
+-- :B scan.
+SELECT * FROM cypher('age_adj_reverse', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (a:A)-[:E]->(b:B {name: 'x'}) RETURN a.n
+$$) AS (plan agtype);
+SELECT drop_graph('age_adj_reverse', true);
+
+-- Reverse candidate generation across a 2-hop pattern (item 10).  The terminal
+-- :C of the last edge carries the selective property; the planner must drive the
+-- reverse expansion from :C (scan :C, incoming-expand :E2 back to :B, then join
+-- :E1/:A) rather than scanning all :A forward.  The historical bug: the reverse
+-- candidate's bound-endpoint expression kept a parse-time varno that, after
+-- subquery flattening, pointed at an intervening edge rel, so the endpoint was
+-- left unbound and the multi-hop pattern returned zero rows.  These results lock
+-- in that the 2-hop reverse returns the same rows a forward plan would.
+SELECT create_graph('age_adj_reverse2');
+SELECT create_vlabel('age_adj_reverse2', 'A');
+SELECT create_vlabel('age_adj_reverse2', 'B');
+SELECT create_vlabel('age_adj_reverse2', 'C');
+SELECT create_elabel('age_adj_reverse2', 'E1');
+SELECT create_elabel('age_adj_reverse2', 'E2');
+SELECT * FROM cypher('age_adj_reverse2', $$
+    CREATE (:A {n: 1})-[:E1]->(:B {n: 2})-[:E2]->(:C {name: 'x'}),
+           (:A {n: 3})-[:E1]->(:B {n: 4})-[:E2]->(:C {name: 'y'})
+$$) AS (z agtype);
+SELECT * FROM cypher('age_adj_reverse2', $$
+    CREATE INDEX e2_out FOR ()-[r:E2]->() ON (ADJACENCY)
+$$) AS (c text);
+CREATE INDEX e2_in ON age_adj_reverse2."E2"
+    USING age_adjacency (end_id, id, start_id);
+ANALYZE age_adj_reverse2."A"; ANALYZE age_adj_reverse2."B";
+ANALYZE age_adj_reverse2."C";
+ANALYZE age_adj_reverse2."E1"; ANALYZE age_adj_reverse2."E2";
+-- Selective terminal name='x' reaches only the :A whose n is 1.
+SELECT n FROM cypher('age_adj_reverse2', $$
+    MATCH (a:A)-[:E1]->(b:B)-[:E2]->(c:C {name: 'x'}) RETURN a.n
+$$) AS (n agtype);
+-- name='y' reaches only n=3.
+SELECT n FROM cypher('age_adj_reverse2', $$
+    MATCH (a:A)-[:E1]->(b:B)-[:E2]->(c:C {name: 'y'}) RETURN a.n
+$$) AS (n agtype);
+-- Without a terminal filter both rows match (forward/reverse agree).
+SELECT n FROM cypher('age_adj_reverse2', $$
+    MATCH (a:A)-[:E1]->(b:B)-[:E2]->(c:C) RETURN a.n
+$$) AS (n agtype) ORDER BY n;
+-- The chosen plan drives the incoming (reverse) expansion off the selective :C.
+SELECT * FROM cypher('age_adj_reverse2', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (a:A)-[:E1]->(b:B)-[:E2]->(c:C {name: 'x'}) RETURN a.n
+$$) AS (plan agtype);
+SELECT drop_graph('age_adj_reverse2', true);
+
 SELECT create_graph('age_adj_match_prefetch_gate');
 SELECT create_vlabel('age_adj_match_prefetch_gate', 'N');
 SELECT create_elabel('age_adj_match_prefetch_gate', 'R');

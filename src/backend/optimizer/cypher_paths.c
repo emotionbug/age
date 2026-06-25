@@ -999,8 +999,15 @@ static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
         create_index_paths(root, rel);
     }
 
-    candidate = pop_adjacency_match_candidate(root, rte);
-    if (candidate != NULL)
+    /*
+     * Add a custom path for every candidate registered against this edge, not
+     * just the first.  When more than one direction is viable for the same edge
+     * (a forward expansion from a bound source and a reverse expansion from a
+     * selective terminal), each becomes a competing path and add_path() keeps
+     * the cheaper one -- the basis for cost-based direction selection (item 10).
+     * With a single candidate this loops once, unchanged from before.
+     */
+    while ((candidate = pop_adjacency_match_candidate(root, rte)) != NULL)
     {
         graph_pattern_registry_register_declared_cover(
             root, rel, candidate->graph_pattern_key);
@@ -1347,9 +1354,30 @@ static void register_graph_join_index_path_candidates(PlannerInfo *root,
      * state and crashes the backend.
      */
     rte = root->simple_rte_array[rel->relid];
-    if (rte == NULL ||
-        rte->rtekind != RTE_RELATION ||
-        !OidIsValid(get_graph_oid_for_table(rte->relid)))
+    if (rte == NULL || rte->rtekind != RTE_RELATION)
+    {
+        return;
+    }
+
+    /*
+     * Skip when AGE's own catalogs are absent.  This hook stays installed for
+     * the whole session, so it still fires while planning ordinary queries
+     * after DROP EXTENSION age; get_graph_oid_for_table() then reaches
+     * ag_relation_id("ag_label"), which ereports "table ag_label does not
+     * exist".  A missing-OK lookup avoids that and correctly treats a dropped
+     * extension as "no graph relations to lower".
+     */
+    {
+        Oid ag_catalog_ns = LookupNamespaceNoError("ag_catalog");
+
+        if (!OidIsValid(ag_catalog_ns) ||
+            !OidIsValid(get_relname_relid("ag_label", ag_catalog_ns)))
+        {
+            return;
+        }
+    }
+
+    if (!OidIsValid(get_graph_oid_for_table(rte->relid)))
     {
         return;
     }
@@ -8037,9 +8065,24 @@ static void bind_adjacency_match_candidate_outer_relids(
             if (bms_membership(expr_relids) == BMS_SINGLETON)
                 expr_rti = bms_singleton_member(expr_relids);
 
+            /*
+             * Only trust the bound-endpoint expression's own varno when it
+             * agrees with the alias-resolved rti (or there is no alias to cross
+             * check).  The expression is captured at parse time and stored on
+             * the candidate outside the query tree, so its varno is NOT
+             * remapped during subquery pull-up/flattening.  For a single-edge
+             * pattern the parse-time and plan-time indexes coincide, but for a
+             * multi-hop pattern they diverge: the stale varno then points at an
+             * unrelated intervening rel (e.g. an earlier edge), which would make
+             * required_outer reference the wrong relation and leave the bound
+             * endpoint unbound at execution.  When they disagree, fall through
+             * to the alias path below, which OffsetVarNodes the expression onto
+             * the correct (alias-resolved) rti.
+             */
             if (expr_rti > 0 &&
                 expr_rti < root->simple_rel_array_size &&
-                root->simple_rel_array[expr_rti] != NULL)
+                root->simple_rel_array[expr_rti] != NULL &&
+                (alias_rti == 0 || expr_rti == alias_rti))
             {
                 candidate->required_outer = expr_relids;
                 candidate->bound_endpoint_rti = expr_rti;
