@@ -5518,6 +5518,11 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
                                    &state->flat_enumerator), es);
         ExplainPropertyInteger("Rows Emitted", NULL, state->rows_emitted, es);
         ExplainPropertyInteger("Rescans", NULL, state->rescans, es);
+        if (state->rescans > 0)
+        {
+            ExplainPropertyText("Rescan Strategy", "full provider reset", es);
+            ExplainPropertyBool("Outer Key Block Reduction", false, es);
+        }
         ExplainPropertyInteger("Peak WCOJ Memory", "bytes",
                                (int64)state->peak_memory, es);
         ExplainPropertyInteger("Peak Factor Memory", "bytes",

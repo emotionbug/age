@@ -4923,13 +4923,11 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
         competing_path, max_pair_rows, pair_pressure);
 
     /*
-     * Cycles keep the existing cost-based Generic Join candidate.  Acyclic
-     * components are admitted only when adjacent relation estimates imply a
-     * material binary intermediate; query-wide semijoin reduction can then
-     * remove impossible endpoint domains before tuple enumeration.
+     * Cycles and non-star acyclic components both get a costed Generic Join
+     * candidate.  Only statistically clear pair pressure gets the extra
+     * discount below; ordinary acyclic candidates stay in normal PostgreSQL
+     * path competition.
      */
-    if (!is_cyclic && !risk_adjusted)
-        return;
     match_component = make_generic_match_component(hypergraph, covered_relids);
     if (match_component != NULL)
     {

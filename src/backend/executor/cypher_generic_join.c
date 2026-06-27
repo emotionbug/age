@@ -1575,7 +1575,7 @@ materialize_generic_providers(AgeGenericJoinState *state)
             break;
         }
     }
-    if (!state->exhausted && !state->has_lazy_physical_provider)
+    if (!state->exhausted)
         reduce_generic_providers(state);
     state->materialized = true;
     state->peak_memory = Max(state->peak_memory,
@@ -1918,6 +1918,12 @@ generic_provider_is_lazy_physical(AgeGenericProvider *provider)
 {
     return provider->physical_kind ==
         AGE_GENERIC_PROVIDER_PHYSICAL_ADJACENCY_EDGE;
+}
+
+static bool
+generic_provider_is_reduction_materialized(AgeGenericProvider *provider)
+{
+    return !generic_provider_is_lazy_physical(provider);
 }
 
 static void
@@ -2799,6 +2805,8 @@ build_generic_reduction_domains(AgeGenericJoinState *state,
             graphid *provider_domain;
             int provider_domain_count;
 
+            if (!generic_provider_is_reduction_materialized(provider))
+                continue;
             variable = endpoint == 0 ? provider->var1 : provider->var2;
             provider_domain = generic_provider_unbound_domain(
                 state, provider, variable, context, initialized[variable],
@@ -2883,6 +2891,8 @@ filter_generic_provider(AgeGenericProvider *provider,
     int write_index = 0;
     int old_count = provider->row_count;
 
+    if (!generic_provider_is_reduction_materialized(provider))
+        return 0;
     for (read_index = 0; read_index < old_count; read_index++)
     {
         AgeGenericRow *row = &provider->rows[read_index];
@@ -2930,6 +2940,8 @@ filter_generic_provider_on_variable(AgeGenericProvider *provider,
     else
         return 0;
 
+    if (!generic_provider_is_reduction_materialized(provider))
+        return 0;
     for (read_index = 0; read_index < old_count; read_index++)
     {
         AgeGenericRow *row = &provider->rows[read_index];
@@ -3008,6 +3020,8 @@ filter_generic_provider_for_reduction(AgeGenericJoinState *state,
     int64 rows_removed;
 
     provider = &state->providers[provider_index];
+    if (!generic_provider_is_reduction_materialized(provider))
+        return 0;
     rows_removed = filter_generic_provider(provider, domains);
     if (provider->row_count <= 0)
         state->exhausted = true;
@@ -3034,6 +3048,11 @@ filter_generic_providers_in_reduction_order(AgeGenericJoinState *state,
 
         provider_index =
             state->reduction_order_provider_indexes[ordered_index];
+        if (!generic_provider_is_reduction_materialized(
+                &state->providers[provider_index]))
+        {
+            continue;
+        }
         rows_removed += filter_generic_provider_for_reduction(
             state, provider_index, domains);
         if (state->reduction_semijoin_step_count > 0)
@@ -3057,6 +3076,8 @@ filter_generic_providers_in_reduction_order(AgeGenericJoinState *state,
         AgeGenericProvider *provider = &state->providers[provider_index];
 
         if (provider->kind != AGE_GENERIC_PROVIDER_VERTEX)
+            continue;
+        if (!generic_provider_is_reduction_materialized(provider))
             continue;
 
         rows_removed += filter_generic_provider(provider, domains);
@@ -3082,6 +3103,8 @@ filter_generic_providers_in_default_order(AgeGenericJoinState *state,
     {
         AgeGenericProvider *provider = &state->providers[provider_index];
 
+        if (!generic_provider_is_reduction_materialized(provider))
+            continue;
         rows_removed += filter_generic_provider(provider, domains);
         if (provider->row_count <= 0)
         {
@@ -3218,6 +3241,8 @@ static bool
 generic_provider_is_cyclic_core(AgeGenericProvider *provider,
                                 const bool *core_variables)
 {
+    if (!generic_provider_is_reduction_materialized(provider))
+        return false;
     if (provider->kind == AGE_GENERIC_PROVIDER_VERTEX)
         return core_variables[provider->var1];
     return core_variables[provider->var1] && core_variables[provider->var2];
@@ -3255,6 +3280,11 @@ generic_has_leaf_tail_separator(AgeGenericJoinState *state,
         int tail_variable;
         bool separator_is_key1;
 
+        if (!generic_provider_is_reduction_materialized(
+                &state->providers[provider_index]))
+        {
+            continue;
+        }
         if (generic_leaf_tail_edge_info(&state->providers[provider_index],
                                         core_variables, &separator_variable,
                                         &tail_variable,
@@ -3359,6 +3389,8 @@ reduce_generic_tail_domains(AgeGenericJoinState *state,
         {
             AgeGenericProvider *provider = &state->providers[provider_index];
 
+            if (!generic_provider_is_reduction_materialized(provider))
+                continue;
             if (generic_provider_is_cyclic_core(provider, core_variables))
                 continue;
 
@@ -3435,7 +3467,8 @@ build_generic_semijoin_step_domain(AgeGenericJoinState *state,
     }
 
     provider = &state->providers[step->provider_index];
-    if (provider->row_count <= 0)
+    if (!generic_provider_is_reduction_materialized(provider) ||
+        provider->row_count <= 0)
         return NULL;
 
     oldcontext = MemoryContextSwitchTo(context);
@@ -3506,6 +3539,8 @@ filter_generic_providers_for_semijoin_step(
     {
         AgeGenericProvider *provider = &state->providers[provider_index];
 
+        if (!generic_provider_is_reduction_materialized(provider))
+            continue;
         if (!generic_provider_has_variable(provider, step->to_variable))
             continue;
         rows_removed += filter_generic_provider_on_variable(
@@ -3557,8 +3592,18 @@ reduce_generic_semijoin_steps(AgeGenericJoinState *state,
     {
         AgeGenericSemijoinStepPlan *step =
             &state->reduction_semijoin_steps[step_index];
+        AgeGenericProvider *provider;
         AgeGenericDomain *domains;
         int64 rows_removed;
+
+        if (step->provider_index < 0 ||
+            step->provider_index >= state->provider_count)
+        {
+            elog(ERROR, "invalid AGE Generic Join semijoin step provider");
+        }
+        provider = &state->providers[step->provider_index];
+        if (!generic_provider_is_reduction_materialized(provider))
+            continue;
 
         MemoryContextReset(step_context);
         domains = build_generic_domains_in_context(state, step_context);
@@ -3621,6 +3666,29 @@ generic_ghd_path_bag_internal_variable(AgeGenericGHDBagPlan *bag,
         internal_variable = variable;
     }
     return internal_variable;
+}
+
+static bool
+generic_ghd_bag_reduction_materialized(AgeGenericJoinState *state,
+                                       AgeGenericGHDBagPlan *bag)
+{
+    int index;
+
+    if (bag == NULL)
+        return false;
+    for (index = 0; index < bag->provider_count; index++)
+    {
+        int provider_index = bag->provider_indexes[index];
+
+        if (provider_index < 0 || provider_index >= state->provider_count)
+            return false;
+        if (!generic_provider_is_reduction_materialized(
+                &state->providers[provider_index]))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool
@@ -3742,6 +3810,8 @@ build_generic_ghd_path_pair_domain(AgeGenericJoinState *state,
     provider2 = &state->providers[bag->provider_indexes[1]];
     if (provider1->kind != AGE_GENERIC_PROVIDER_EDGE ||
         provider2->kind != AGE_GENERIC_PROVIDER_EDGE ||
+        !generic_provider_is_reduction_materialized(provider1) ||
+        !generic_provider_is_reduction_materialized(provider2) ||
         provider1->row_count <= 0 || provider2->row_count <= 0)
     {
         return NULL;
@@ -3832,6 +3902,8 @@ filter_generic_ghd_path_bag_on_pair_domain(
     provider2 = &state->providers[bag->provider_indexes[1]];
     if (provider1->kind != AGE_GENERIC_PROVIDER_EDGE ||
         provider2->kind != AGE_GENERIC_PROVIDER_EDGE ||
+        !generic_provider_is_reduction_materialized(provider1) ||
+        !generic_provider_is_reduction_materialized(provider2) ||
         provider1->row_count <= 0 || provider2->row_count <= 0)
     {
         return 0;
@@ -3898,9 +3970,14 @@ reduce_generic_pair_ghd_separators(AgeGenericJoinState *state,
 
         if (plan->kind != AGE_GENERIC_GHD_SEPARATOR_PAIR)
             continue;
-        found_pair_separator = true;
         parent_bag = &state->reduction_ghd_bags[plan->parent_bag_id];
         child_bag = &state->reduction_ghd_bags[plan->child_bag_id];
+        if (!generic_ghd_bag_reduction_materialized(state, parent_bag) ||
+            !generic_ghd_bag_reduction_materialized(state, child_bag))
+        {
+            continue;
+        }
+        found_pair_separator = true;
         pair_domain = build_generic_ghd_path_pair_domain(
             state, child_bag, plan->separator_variables[0],
             plan->separator_variables[1], reduction_context,
@@ -4018,6 +4095,8 @@ reduce_generic_leaf_tail_separators(AgeGenericJoinState *state,
                      "invalid AGE Generic Join GHD separator provider");
             }
 
+            if (!generic_provider_is_reduction_materialized(provider))
+                continue;
             found_leaf_tail = true;
             increment_generic_counter(
                 &state->separator_leaf_tail_providers);
@@ -4079,6 +4158,8 @@ reduce_generic_leaf_tail_separators(AgeGenericJoinState *state,
             {
                 continue;
             }
+            if (!generic_provider_is_reduction_materialized(provider))
+                continue;
 
             found_leaf_tail = true;
             increment_generic_counter(
@@ -4154,6 +4235,8 @@ reduce_generic_leaf_tail_separators(AgeGenericJoinState *state,
 
             if (!generic_provider_has_variable(provider, variable))
                 continue;
+            if (!generic_provider_is_reduction_materialized(provider))
+                continue;
 
             rows_removed = filter_generic_provider_on_variable(
                 provider, variable, &separator_domain);
@@ -4194,11 +4277,8 @@ reduce_generic_leaf_tail_separators(AgeGenericJoinState *state,
 static int
 generic_semijoin_pass_budget(AgeGenericJoinState *state)
 {
-    if (state->reduction_order_kind == AGE_GENERIC_REDUCTION_ORDER_LEAF_PEEL &&
-        state->reduction_order_edge_count > 0)
-    {
+    if (generic_reduction_order_applicable(state))
         return 2;
-    }
     return Max(state->variable_count * 2, 1);
 }
 

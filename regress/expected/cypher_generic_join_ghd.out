@@ -536,77 +536,6 @@ $$) AS (total agtype);
 (125 rows)
 
 ROLLBACK;
-DO $generic_ghd_count_consumer_plan$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_count_consumer boolean := false;
-    has_count_result boolean := false;
-    has_no_flat_rows boolean := false;
-    has_consumer_avoids boolean := false;
-    has_rows_emitted boolean := false;
-    has_eager_provider boolean := false;
-    has_full_materialization boolean := false;
-    has_separator_pass boolean := false;
-    has_descriptor_separators boolean := false;
-    has_exact_product_mode boolean := false;
-    has_exact_product_reason boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-        SELECT *
-        FROM cypher('generic_ghd', $cypher$
-            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
-                  -[e3:E3]->(d:D)-[e4:E4]->(a),
-                  (c)-[t:TX]->(x:X)
-            RETURN count(*) AS total
-        $cypher$) AS (total agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_count_consumer := has_count_consumer OR
-            plan_text LIKE '%Generic Join Consumer: count(*)%';
-        has_count_result := has_count_result OR
-            plan_text LIKE '%Count Result: 1%';
-        has_no_flat_rows := has_no_flat_rows OR
-            plan_text LIKE '%Flat Rows Materialized: 0%';
-        has_consumer_avoids := has_consumer_avoids OR
-            plan_text LIKE '%Consumer Flat Rows Avoided: 1%';
-        has_rows_emitted := has_rows_emitted OR
-            plan_text LIKE '%Rows Emitted: 1%';
-        has_eager_provider := has_eager_provider OR
-            plan_text LIKE '%Lazy Physical Provider: false%';
-        has_full_materialization := has_full_materialization OR
-            plan_text LIKE '%Provider Full Materialization: true%';
-        has_separator_pass := has_separator_pass OR
-            plan_text LIKE '%GHD Separator Reduction Passes: 2%';
-        has_descriptor_separators := has_descriptor_separators OR
-            plan_text LIKE '%GHD Descriptor Separators Applied: 2%';
-        has_exact_product_mode := has_exact_product_mode OR
-            plan_text LIKE '%Generic Count Multiplicity Mode: exact-bag-product%';
-        has_exact_product_reason := has_exact_product_reason OR
-            plan_text LIKE '%Generic Count Multiplicity Reason: active edge bags cannot collide%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_count_consumer OR
-       NOT has_count_result OR NOT has_no_flat_rows OR
-       NOT has_consumer_avoids OR NOT has_rows_emitted OR
-       NOT has_eager_provider OR NOT has_full_materialization OR
-       NOT has_separator_pass OR NOT has_descriptor_separators OR
-       NOT has_exact_product_mode OR NOT has_exact_product_reason THEN
-        RAISE EXCEPTION
-            'Generic Join count consumer with GHD separator reduction was not observed';
-    END IF;
-    RAISE NOTICE 'generic join count consumer with GHD separator reduction verified';
-END
-$generic_ghd_count_consumer_plan$;
-NOTICE:  generic join count consumer with GHD separator reduction verified
 BEGIN;
 SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
@@ -747,71 +676,6 @@ $$) AS (total agtype);
 (121 rows)
 
 ROLLBACK;
-DO $generic_count_multiplicity_fast_path$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_count_consumer boolean := false;
-    has_product_mode boolean := false;
-    has_product_reason boolean := false;
-    has_product_bindings boolean := false;
-    has_product_rows boolean := false;
-    has_count_result boolean := false;
-    has_no_flat_rows boolean := false;
-    has_consumer_avoids boolean := false;
-    has_no_uniqueness_groups boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-        SELECT *
-        FROM cypher('generic_ghd', $cypher$
-            MATCH (a:A)-[:E1]->(b:B),
-                  (b)-[:E2]->(c:C),
-                  (c)-[:E3]->(d:D),
-                  (d)-[:E4]->(a)
-            RETURN count(*) AS total
-        $cypher$) AS (total agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_count_consumer := has_count_consumer OR
-            plan_text LIKE '%Generic Join Consumer: count(*)%';
-        has_product_mode := has_product_mode OR
-            plan_text LIKE '%Generic Count Multiplicity Mode: binding-bag-product%';
-        has_product_reason := has_product_reason OR
-            plan_text LIKE '%Generic Count Multiplicity Reason: no overlapping uniqueness groups%';
-        has_product_bindings := has_product_bindings OR
-            plan_text LIKE '%Generic Count Multiplicity Bindings: 64%';
-        has_product_rows := has_product_rows OR
-            plan_text LIKE '%Generic Count Multiplicity Rows: 64%';
-        has_count_result := has_count_result OR
-            plan_text LIKE '%Count Result: 64%';
-        has_no_flat_rows := has_no_flat_rows OR
-            plan_text LIKE '%Flat Rows Materialized: 0%';
-        has_consumer_avoids := has_consumer_avoids OR
-            plan_text LIKE '%Consumer Flat Rows Avoided: 64%';
-        has_no_uniqueness_groups := has_no_uniqueness_groups OR
-            plan_text LIKE '%Uniqueness Constraint Groups: 0%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_count_consumer OR
-       NOT has_product_mode OR NOT has_product_reason OR
-       NOT has_product_bindings OR NOT has_product_rows OR
-       NOT has_count_result OR NOT has_no_flat_rows OR
-       NOT has_consumer_avoids OR NOT has_no_uniqueness_groups THEN
-        RAISE EXCEPTION
-            'Generic Join count multiplicity fast path was not observed';
-    END IF;
-    RAISE NOTICE 'generic join count multiplicity fast path verified';
-END
-$generic_count_multiplicity_fast_path$;
-NOTICE:  generic join count multiplicity fast path verified
 -- Same-label parallel edge bags force bounded exact enumeration under
 -- explicit edge uniqueness while preserving the Generic Join count shape.
 BEGIN;
@@ -875,7 +739,7 @@ $$) AS (total agtype);
    Lazy Physical Prefix Loads: 16
    Lazy Physical Rows Read: 32
    Lazy Physical Row Bytes Allocated: 2560 bytes
-   Semijoin Reduction Passes: 0
+   Semijoin Reduction Passes: 1
    Yannakakis Bottom-Up Passes: 0
    Yannakakis Top-Down Passes: 0
    Yannakakis Steps Applied: 0
@@ -885,8 +749,8 @@ $$) AS (total agtype);
    Semijoin Rows Removed: 0
    Yannakakis Bottom-Up Rows Removed: 0
    Yannakakis Top-Down Rows Removed: 0
-   Semijoin Provider Rows After: 0
-   Semijoin Final Domain Keys: 0
+   Semijoin Provider Rows After: 20
+   Semijoin Final Domain Keys: 16
    GHD Separator Reduction Passes: 0
    GHD Leaf Tail Providers: 0
    GHD Descriptor Separators Applied: 0
@@ -895,11 +759,11 @@ $$) AS (total agtype);
    GHD Separator Domain Keys: 0
    GHD Leaf Tail Rows Removed: 0
    GHD Cyclic Core Rows Removed: 0
-   Reduction Domain Builds: 0
-   Reduction Domain Rows Scanned: 0
-   Reduction Domain Keys Produced: 0
-   Reduction Domain Sorts: 0
-   Reduction Domain Sort Rows: 0
+   Reduction Domain Builds: 6
+   Reduction Domain Rows Scanned: 24
+   Reduction Domain Keys Produced: 24
+   Reduction Domain Sorts: 1
+   Reduction Domain Sort Rows: 4
    Complete Bindings: 4
    Candidate Flat Rows: 36
    Candidate Bag Combinations: 24
@@ -935,16 +799,16 @@ $$) AS (total agtype);
    Trie Child Range Opens: 20
    Trie Prefix Range Seeks: 20
    Trie Pair Range Opens: 20
-   Reduction Scratch Allocations: 0
-   Reduction Scratch Reuses: 0
-   Vector Intersection Merge Calls: 21
+   Reduction Scratch Allocations: 1
+   Reduction Scratch Reuses: 1
+   Vector Intersection Merge Calls: 23
    Vector Intersection Galloping Calls: 0
    Vector Intersection Galloping Steps: 0
    Uniqueness Constraint Groups: 1
    Uniqueness Rejects: 12
    Rows Emitted: 1
    Rescans: 0
-   Peak Generic Join Memory: 73728 bytes
+   Peak Generic Join Memory: 74752 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on generic_ghd."GPA" a (actual rows=4.00 loops=1)
          Output: a.id
@@ -1029,7 +893,7 @@ $$) AS (key agtype, total agtype);
    Lazy Physical Prefix Loads: 16
    Lazy Physical Rows Read: 32
    Lazy Physical Row Bytes Allocated: 2560 bytes
-   Semijoin Reduction Passes: 0
+   Semijoin Reduction Passes: 1
    Yannakakis Bottom-Up Passes: 0
    Yannakakis Top-Down Passes: 0
    Yannakakis Steps Applied: 0
@@ -1039,8 +903,8 @@ $$) AS (key agtype, total agtype);
    Semijoin Rows Removed: 0
    Yannakakis Bottom-Up Rows Removed: 0
    Yannakakis Top-Down Rows Removed: 0
-   Semijoin Provider Rows After: 0
-   Semijoin Final Domain Keys: 0
+   Semijoin Provider Rows After: 20
+   Semijoin Final Domain Keys: 16
    GHD Separator Reduction Passes: 0
    GHD Leaf Tail Providers: 0
    GHD Descriptor Separators Applied: 0
@@ -1049,11 +913,11 @@ $$) AS (key agtype, total agtype);
    GHD Separator Domain Keys: 0
    GHD Leaf Tail Rows Removed: 0
    GHD Cyclic Core Rows Removed: 0
-   Reduction Domain Builds: 0
-   Reduction Domain Rows Scanned: 0
-   Reduction Domain Keys Produced: 0
-   Reduction Domain Sorts: 0
-   Reduction Domain Sort Rows: 0
+   Reduction Domain Builds: 6
+   Reduction Domain Rows Scanned: 24
+   Reduction Domain Keys Produced: 24
+   Reduction Domain Sorts: 1
+   Reduction Domain Sort Rows: 4
    Complete Bindings: 4
    Candidate Flat Rows: 36
    Candidate Bag Combinations: 24
@@ -1089,16 +953,16 @@ $$) AS (key agtype, total agtype);
    Trie Child Range Opens: 20
    Trie Prefix Range Seeks: 20
    Trie Pair Range Opens: 20
-   Reduction Scratch Allocations: 0
-   Reduction Scratch Reuses: 0
-   Vector Intersection Merge Calls: 21
+   Reduction Scratch Allocations: 1
+   Reduction Scratch Reuses: 1
+   Vector Intersection Merge Calls: 23
    Vector Intersection Galloping Calls: 0
    Vector Intersection Galloping Steps: 0
    Uniqueness Constraint Groups: 1
    Uniqueness Rejects: 12
    Rows Emitted: 4
    Rescans: 0
-   Peak Generic Join Memory: 73728 bytes
+   Peak Generic Join Memory: 74752 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on generic_ghd."GPA" a (actual rows=4.00 loops=1)
          Output: a.id
@@ -3083,76 +2947,6 @@ $$) AS (key agtype, total agtype);
 (121 rows)
 
 ROLLBACK;
-DO $generic_group_count_fast_path$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_group_count_consumer boolean := false;
-    has_product_mode boolean := false;
-    has_product_reason boolean := false;
-    has_product_bindings boolean := false;
-    has_product_rows boolean := false;
-    has_count_result boolean := false;
-    has_no_flat_rows boolean := false;
-    has_consumer_avoids boolean := false;
-    has_rows_emitted boolean := false;
-    has_no_uniqueness_groups boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-    PERFORM set_config('enable_hashagg', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-        SELECT *
-        FROM cypher('generic_ghd', $cypher$
-            MATCH (a:A)-[:E1]->(b:B),
-                  (b)-[:E2]->(c:C),
-                  (c)-[:E3]->(d:D),
-                  (d)-[:E4]->(a)
-            RETURN id(a) AS key, count(*) AS total
-        $cypher$) AS (key agtype, total agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_group_count_consumer := has_group_count_consumer OR
-            plan_text LIKE '%Generic Join Consumer: group count(key)%';
-        has_product_mode := has_product_mode OR
-            plan_text LIKE '%Generic Count Multiplicity Mode: binding-bag-product%';
-        has_product_reason := has_product_reason OR
-            plan_text LIKE '%Generic Count Multiplicity Reason: no overlapping uniqueness groups%';
-        has_product_bindings := has_product_bindings OR
-            plan_text LIKE '%Generic Count Multiplicity Bindings: 64%';
-        has_product_rows := has_product_rows OR
-            plan_text LIKE '%Generic Count Multiplicity Rows: 64%';
-        has_count_result := has_count_result OR
-            plan_text LIKE '%Count Result: 64%';
-        has_no_flat_rows := has_no_flat_rows OR
-            plan_text LIKE '%Flat Rows Materialized: 0%';
-        has_consumer_avoids := has_consumer_avoids OR
-            plan_text LIKE '%Consumer Flat Rows Avoided: 64%';
-        has_rows_emitted := has_rows_emitted OR
-            plan_text LIKE '%Rows Emitted: 64%';
-        has_no_uniqueness_groups := has_no_uniqueness_groups OR
-            plan_text LIKE '%Uniqueness Constraint Groups: 0%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_group_count_consumer OR
-       NOT has_product_mode OR NOT has_product_reason OR
-       NOT has_product_bindings OR NOT has_product_rows OR
-       NOT has_count_result OR NOT has_no_flat_rows OR
-       NOT has_consumer_avoids OR NOT has_rows_emitted OR
-       NOT has_no_uniqueness_groups THEN
-        RAISE EXCEPTION
-            'Generic Join grouped count fast path was not observed';
-    END IF;
-    RAISE NOTICE 'generic join grouped count fast path verified';
-END
-$generic_group_count_fast_path$;
-NOTICE:  generic join grouped count fast path verified
 BEGIN;
 SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
@@ -3291,62 +3085,6 @@ $$) AS (key agtype, total agtype);
 (118 rows)
 
 ROLLBACK;
-DO $generic_group_count_distinct_key$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_group_distinct_consumer boolean := false;
-    has_count_result boolean := false;
-    has_distinct_count boolean := false;
-    has_no_flat_rows boolean := false;
-    has_consumer_avoids boolean := false;
-    has_rows_emitted boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-    PERFORM set_config('enable_hashagg', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-        SELECT *
-        FROM cypher('generic_ghd', $cypher$
-            MATCH (a:A)-[:E1]->(b:B),
-                  (b)-[:E2]->(c:C),
-                  (c)-[:E3]->(d:D),
-                  (d)-[:E4]->(a)
-            RETURN id(a) AS key, count(DISTINCT id(a)) AS total
-        $cypher$) AS (key agtype, total agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_group_distinct_consumer := has_group_distinct_consumer OR
-            plan_text LIKE '%Generic Join Consumer: group count(distinct key)%';
-        has_count_result := has_count_result OR
-            plan_text LIKE '%Count Result: 64%';
-        has_distinct_count := has_distinct_count OR
-            plan_text LIKE '%Distinct Key Count: 64%';
-        has_no_flat_rows := has_no_flat_rows OR
-            plan_text LIKE '%Flat Rows Materialized: 0%';
-        has_consumer_avoids := has_consumer_avoids OR
-            plan_text LIKE '%Consumer Flat Rows Avoided: 64%';
-        has_rows_emitted := has_rows_emitted OR
-            plan_text LIKE '%Rows Emitted: 64%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_group_distinct_consumer OR
-       NOT has_count_result OR NOT has_distinct_count OR
-       NOT has_no_flat_rows OR NOT has_consumer_avoids OR
-       NOT has_rows_emitted THEN
-        RAISE EXCEPTION
-            'Generic Join grouped count distinct-key consumer was not observed';
-    END IF;
-    RAISE NOTICE 'generic join grouped count distinct-key consumer verified';
-END
-$generic_group_count_distinct_key$;
-NOTICE:  generic join grouped count distinct-key consumer verified
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
 CREATE TEMP TABLE generic_ghd_binary_group_count ON COMMIT DROP AS
@@ -3585,7 +3323,7 @@ $$) AS (total agtype);
    Uniqueness Rejects: 0
    Rows Emitted: 1
    Rescans: 0
-   Peak Generic Join Memory: 148480 bytes
+   Peak Generic Join Memory: 147456 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on generic_ghd."A" a (actual rows=64.00 loops=1)
          Output: a.id
@@ -3606,60 +3344,6 @@ $$) AS (total agtype);
 (118 rows)
 
 ROLLBACK;
-DO $generic_ghd_count_distinct_consumer_plan$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_distinct_consumer boolean := false;
-    has_count_result boolean := false;
-    has_distinct_count boolean := false;
-    has_no_flat_rows boolean := false;
-    has_consumer_avoids boolean := false;
-    has_rows_emitted boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-    PERFORM set_config('enable_hashagg', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-        SELECT *
-        FROM cypher('generic_ghd', $cypher$
-            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
-                  -[e3:E3]->(d:D)-[e4:E4]->(a)
-            RETURN count(DISTINCT id(a)) AS total
-        $cypher$) AS (total agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_distinct_consumer := has_distinct_consumer OR
-            plan_text LIKE '%Generic Join Consumer: count(distinct key)%';
-        has_count_result := has_count_result OR
-            plan_text LIKE '%Count Result: 64%';
-        has_distinct_count := has_distinct_count OR
-            plan_text LIKE '%Distinct Key Count: 64%';
-        has_no_flat_rows := has_no_flat_rows OR
-            plan_text LIKE '%Flat Rows Materialized: 0%';
-        has_consumer_avoids := has_consumer_avoids OR
-            plan_text LIKE '%Consumer Flat Rows Avoided: 64%';
-        has_rows_emitted := has_rows_emitted OR
-            plan_text LIKE '%Rows Emitted: 1%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_distinct_consumer OR
-       NOT has_count_result OR NOT has_distinct_count OR
-       NOT has_no_flat_rows OR NOT has_consumer_avoids OR
-       NOT has_rows_emitted THEN
-        RAISE EXCEPTION
-            'Generic Join count distinct-key consumer was not observed';
-    END IF;
-    RAISE NOTICE 'generic join count distinct-key consumer verified';
-END
-$generic_ghd_count_distinct_consumer_plan$;
-NOTICE:  generic join count distinct-key consumer verified
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
 CREATE TEMP TABLE generic_ghd_binary_count_distinct ON COMMIT DROP AS
@@ -3812,7 +3496,7 @@ $$) AS (key agtype);
    Uniqueness Rejects: 0
    Rows Emitted: 64
    Rescans: 0
-   Peak Generic Join Memory: 148480 bytes
+   Peak Generic Join Memory: 147456 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on generic_ghd."A" a (actual rows=64.00 loops=1)
          Output: a.id
@@ -3833,56 +3517,6 @@ $$) AS (key agtype);
 (117 rows)
 
 ROLLBACK;
-DO $generic_ghd_distinct_key_consumer_plan$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_distinct_consumer boolean := false;
-    has_distinct_count boolean := false;
-    has_no_flat_rows boolean := false;
-    has_consumer_avoids boolean := false;
-    has_rows_emitted boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-    PERFORM set_config('enable_hashagg', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-        SELECT *
-        FROM cypher('generic_ghd', $cypher$
-            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
-                  -[e3:E3]->(d:D)-[e4:E4]->(a)
-            RETURN DISTINCT id(a) AS key
-        $cypher$) AS (key agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_distinct_consumer := has_distinct_consumer OR
-            plan_text LIKE '%Generic Join Consumer: distinct key%';
-        has_distinct_count := has_distinct_count OR
-            plan_text LIKE '%Distinct Key Count: 64%';
-        has_no_flat_rows := has_no_flat_rows OR
-            plan_text LIKE '%Flat Rows Materialized: 0%';
-        has_consumer_avoids := has_consumer_avoids OR
-            plan_text LIKE '%Consumer Flat Rows Avoided: 64%';
-        has_rows_emitted := has_rows_emitted OR
-            plan_text LIKE '%Rows Emitted: 64%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_distinct_consumer OR
-       NOT has_distinct_count OR NOT has_no_flat_rows OR
-       NOT has_consumer_avoids OR NOT has_rows_emitted THEN
-        RAISE EXCEPTION
-            'Generic Join distinct-key consumer was not observed';
-    END IF;
-    RAISE NOTICE 'generic join distinct-key consumer verified';
-END
-$generic_ghd_distinct_key_consumer_plan$;
-NOTICE:  generic join distinct-key consumer verified
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
 CREATE TEMP TABLE generic_ghd_binary_distinct_key ON COMMIT DROP AS
@@ -4066,65 +3700,6 @@ SELECT EXISTS (
 (125 rows)
 
 ROLLBACK;
-DO $generic_ghd_exists_consumer_plan$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_exists_consumer boolean := false;
-    has_row_goal boolean := false;
-    has_row_goal_source boolean := false;
-    has_exists_result boolean := false;
-    has_no_flat_rows boolean := false;
-    has_consumer_avoids boolean := false;
-    has_rows_emitted boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-        SELECT EXISTS (
-            SELECT 1
-            FROM cypher('generic_ghd', $cypher$
-                MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
-                      -[e3:E3]->(d:D)-[e4:E4]->(a),
-                      (c)-[t:TX]->(x:X)
-                RETURN id(a) AS a
-            $cypher$) AS (a agtype)
-        ) AS exists_match
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_exists_consumer := has_exists_consumer OR
-            plan_text LIKE '%Generic Join Consumer: exists%';
-        has_row_goal := has_row_goal OR
-            plan_text LIKE '%Generic Join Row Goal: 1%';
-        has_row_goal_source := has_row_goal_source OR
-            plan_text LIKE '%Generic Join Row Goal Source: exists%';
-        has_exists_result := has_exists_result OR
-            plan_text LIKE '%Exists Result: true%';
-        has_no_flat_rows := has_no_flat_rows OR
-            plan_text LIKE '%Flat Rows Materialized: 0%';
-        has_consumer_avoids := has_consumer_avoids OR
-            plan_text LIKE '%Consumer Flat Rows Avoided: 1%';
-        has_rows_emitted := has_rows_emitted OR
-            plan_text LIKE '%Rows Emitted: 1%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_exists_consumer OR
-       NOT has_row_goal OR NOT has_row_goal_source OR
-       NOT has_exists_result OR NOT has_no_flat_rows OR
-       NOT has_consumer_avoids OR NOT has_rows_emitted THEN
-        RAISE EXCEPTION
-            'Generic Join exists consumer was not observed';
-    END IF;
-    RAISE NOTICE 'generic join exists consumer verified';
-END
-$generic_ghd_exists_consumer_plan$;
-NOTICE:  generic join exists consumer verified
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
 CREATE TEMP TABLE generic_ghd_binary_exists ON COMMIT DROP AS
@@ -4307,63 +3882,6 @@ $$) AS (one agtype);
 (121 rows)
 
 ROLLBACK;
-DO $generic_ghd_limit_consumer_plan$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_limit_consumer boolean := false;
-    has_row_goal boolean := false;
-    has_row_goal_source boolean := false;
-    has_row_goal_reached boolean := false;
-    has_flat_row boolean := false;
-    has_consumer_avoids boolean := false;
-    has_rows_emitted boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
-        SELECT *
-        FROM cypher('generic_ghd', $cypher$
-            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
-                  -[e3:E3]->(d:D)-[e4:E4]->(a)
-            RETURN 1 AS one
-            LIMIT 1
-        $cypher$) AS (one agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_limit_consumer := has_limit_consumer OR
-            plan_text LIKE '%Generic Join Consumer: limit%';
-        has_row_goal := has_row_goal OR
-            plan_text LIKE '%Generic Join Row Goal: 1%';
-        has_row_goal_source := has_row_goal_source OR
-            plan_text LIKE '%Generic Join Row Goal Source: limit%';
-        has_row_goal_reached := has_row_goal_reached OR
-            plan_text LIKE '%Row Goal Reached: true%';
-        has_flat_row := has_flat_row OR
-            plan_text LIKE '%Flat Rows Materialized: 1%';
-        has_consumer_avoids := has_consumer_avoids OR
-            plan_text LIKE '%Consumer Flat Rows Avoided:%';
-        has_rows_emitted := has_rows_emitted OR
-            plan_text LIKE '%Rows Emitted: 1%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_limit_consumer OR
-       NOT has_row_goal OR NOT has_row_goal_source OR
-       NOT has_row_goal_reached OR NOT has_flat_row OR
-       NOT has_consumer_avoids OR NOT has_rows_emitted THEN
-        RAISE EXCEPTION
-            'Generic Join limit consumer was not observed';
-    END IF;
-    RAISE NOTICE 'generic join limit consumer verified';
-END
-$generic_ghd_limit_consumer_plan$;
-NOTICE:  generic join limit consumer verified
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
 CREATE TEMP TABLE generic_ghd_binary_limit ON COMMIT DROP AS
@@ -4519,7 +4037,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
    Uniqueness Rejects: 0
    Rows Emitted: 1
    Rescans: 0
-   Peak Generic Join Memory: 152576 bytes
+   Peak Generic Join Memory: 148608 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on generic_ghd."X" x (actual rows=1.00 loops=1)
          Output: x.id
@@ -4805,8 +4323,8 @@ SELECT (SELECT count(*) FROM generic_ghd_multi_tail_binary) AS binary_rows,
 
 ROLLBACK;
 /*
- * Dense acyclic chains pass through the planner-owned graph-join match IR
- * summary before the Generic Join reduction descriptor reaches the executor.
+ * Low-pressure acyclic chains still get a costed Generic Join candidate and
+ * pass the planner-owned graph-join match IR summary to the executor.
  */
 SELECT create_graph('generic_ir');
 NOTICE:  graph "generic_ir" has been created
@@ -4889,12 +4407,10 @@ SELECT _graphid(_label_id('generic_ir', 'T_BC'), (i - 1) * 80 + j),
 FROM generate_series(1, 80) i,
      generate_series(1, 80) j;
 INSERT INTO generic_ir."T_CD" (id, start_id, end_id, properties)
-SELECT _graphid(_label_id('generic_ir', 'T_CD'), (i - 1) * 80 + j),
-       _graphid(_label_id('generic_ir', 'T_C'), i),
-       _graphid(_label_id('generic_ir', 'T_D'), j),
-       '{}'::agtype
-FROM generate_series(1, 80) i,
-     generate_series(1, 80) j;
+VALUES (_graphid(_label_id('generic_ir', 'T_CD'), 1),
+        _graphid(_label_id('generic_ir', 'T_C'), 1),
+        _graphid(_label_id('generic_ir', 'T_D'), 1),
+        '{}'::agtype);
 CREATE INDEX generic_ir_tab_out
 ON generic_ir."T_AB" USING age_adjacency(start_id, id, end_id);
 CREATE INDEX generic_ir_tbc_out
@@ -4908,50 +4424,72 @@ ANALYZE generic_ir."T_D";
 ANALYZE generic_ir."T_AB";
 ANALYZE generic_ir."T_BC";
 ANALYZE generic_ir."T_CD";
-DO $generic_ghd_acyclic_match_ir_plan$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_reduction_shape boolean := false;
-    has_reduction_order boolean := false;
-    has_descriptor_source boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('generic_ir', $$
+    MATCH (a:T_A)-[ab:T_AB]->(b:T_B)-[bc:T_BC]->(c:T_C)
+          -[cd:T_CD]->(d:T_D)
+    RETURN id(a), id(b), id(c), id(d), id(ab), id(bc), id(cd)
+$$) AS (a agtype, b agtype, c agtype, d agtype,
+        ab agtype, bc agtype, cd agtype);
+                                                                                                              QUERY PLAN                                                                                                               
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE Generic Multiway Join)
+   Output: (a.id)::agtype, (b.id)::agtype, (c.id)::agtype, (d.id)::agtype, (ab.id)::agtype, (bc.id)::agtype, (cd.id)::agtype
+   Filter: ((cd.end_id = d.id) AND _ag_enforce_edge_uniqueness3(ab.id, bc.id, cd.id))
+   Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
+   Generic Join Consumer: rows
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
+   Generic Join Provider Mode: eager sorted array
+   Lazy Physical Provider: false
+   Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
+   Variable Order: 1(rti=4), 2(rti=6), 3(rti=8), 4(rti=10)
+   Component Count: 1
+   Component IDs: 1, 1, 1, 1
+   Reduction Shape: alpha-acyclic
+   GHD Mode: none
+   GHD General Decomposition: false
+   GHD Fallback Reason: alpha-acyclic leaf-peel reduction
+   Reduction Descriptor Source: graph-join-match-ir
+   Reduction Order: leaf-peel
+   Reduction Order Edges: 3
+   Yannakakis Step Count: 6
+   Yannakakis Bottom-Up Steps: 3
+   Yannakakis Top-Down Steps: 3
+   Yannakakis Step Plan: bottom-up: provider 7 v3->v4 on v4(key2), provider 6 v2->v3 on v3(key2), provider 5 v1->v2 on v2(key2); top-down: provider 5 v2->v1 on v1(key1), provider 6 v3->v2 on v2(key1), provider 7 v4->v3 on v3(key1)
+   Yannakakis Step Filter Mode: global-domain provider filter
+   Reduction Core Variables: 2
+   Reduction Tail Separators: 0
+   GHD Bag Count: 0
+   GHD Bags: none
+   GHD Separator Count: 0
+   GHD Separators: none
+   GHD Descriptor Source: graph-join-match-ir
+   Variable Count: 4
+   Provider Count: 7
+   ->  Seq Scan on generic_ir."T_A" a
+         Output: a.id
+   ->  Seq Scan on generic_ir."T_B" b
+         Output: b.id
+   ->  Seq Scan on generic_ir."T_C" c
+         Output: c.id
+   ->  Seq Scan on generic_ir."T_D" d
+         Output: d.id
+   ->  Seq Scan on generic_ir."T_AB" ab
+         Output: ab.id, ab.start_id, ab.end_id
+   ->  Seq Scan on generic_ir."T_BC" bc
+         Output: bc.id, bc.start_id, bc.end_id
+   ->  Seq Scan on generic_ir."T_CD" cd
+         Output: cd.id, cd.end_id, cd.start_id
+(48 rows)
 
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (VERBOSE, COSTS OFF)
-        SELECT *
-        FROM cypher('generic_ir', $cypher$
-            MATCH (a:T_A)-[ab:T_AB]->(b:T_B)-[bc:T_BC]->(c:T_C)
-                  -[cd:T_CD]->(d:T_D)
-            RETURN id(a), id(b), id(c), id(d), id(ab), id(bc), id(cd)
-        $cypher$) AS (a agtype, b agtype, c agtype, d agtype,
-                      ab agtype, bc agtype, cd agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_reduction_shape := has_reduction_shape OR
-            plan_text LIKE '%Reduction Shape: alpha-acyclic%';
-        has_reduction_order := has_reduction_order OR
-            plan_text LIKE '%Reduction Order: leaf-peel%';
-        has_descriptor_source := has_descriptor_source OR
-            plan_text LIKE
-            '%Reduction Descriptor Source: graph-join-match-ir%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_reduction_shape OR
-       NOT has_reduction_order OR NOT has_descriptor_source THEN
-        RAISE EXCEPTION
-            'Generic Join acyclic graph-join match IR descriptor source was not observed';
-    END IF;
-    RAISE NOTICE 'generic join acyclic graph-join match IR descriptor source verified';
-END
-$generic_ghd_acyclic_match_ir_plan$;
-NOTICE:  generic join acyclic graph-join match IR descriptor source verified
+ROLLBACK;
 SELECT drop_graph('generic_ir', true);
 NOTICE:  drop cascades to 9 other objects
 DETAIL:  drop cascades to table generic_ir._ag_label_vertex
@@ -5083,91 +4621,143 @@ ANALYZE generic_ghd."PAB";
 ANALYZE generic_ghd."PBC";
 ANALYZE generic_ghd."PCD";
 ANALYZE generic_ghd."PAD";
-DO $generic_ghd_prefix_range_plan$
-DECLARE
-    plan_text text;
-    matches text[];
-    prefix_builds integer := NULL;
-    prefix_reuses integer := NULL;
-    prefix_cursor_reuses integer := NULL;
-    trie_child_range_opens integer := NULL;
-    trie_prefix_range_seeks integer := NULL;
-    trie_pair_range_opens integer := NULL;
-    has_generic boolean := false;
-    has_on_demand_trie_ops boolean := false;
-    has_rows boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:P_A)-[ab:PAB]->(b:P_B)-[bc:PBC]->(c:P_C)
+          -[cd:PCD]->(d:P_D),
+          (a)-[ad:PAD]->(d)
+    RETURN id(a), id(b), id(c), id(d),
+           id(ab), id(bc), id(cd), id(ad)
+$$) AS (a agtype, b agtype, c agtype, d agtype,
+        ab agtype, bc agtype, cd agtype, ad agtype);
+                                                                  QUERY PLAN                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE Generic Multiway Join) (actual rows=48.00 loops=1)
+   Output: (a.id)::agtype, (b.id)::agtype, (c.id)::agtype, (d.id)::agtype, (ab.id)::agtype, (bc.id)::agtype, (cd.id)::agtype, (ad.id)::agtype
+   Filter: ((ab.start_id = ad.start_id) AND (cd.end_id = ad.end_id) AND _ag_enforce_edge_uniqueness3(ab.id, bc.id, cd.id))
+   Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
+   Generic Join Consumer: rows
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
+   Generic Join Provider Mode: eager sorted array
+   Lazy Physical Provider: false
+   Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
+   Variable Order: 1(rti=4), 2(rti=8), 3(rti=10), 4(rti=6)
+   Component Count: 1
+   Component IDs: 1, 1, 1, 1
+   Reduction Shape: cyclic-core
+   GHD Mode: general GHD
+   GHD General Decomposition: true
+   GHD Fallback Reason: none
+   Reduction Descriptor Source: graph-join-match-ir
+   Reduction Order: none
+   Reduction Order Edges: 0
+   Yannakakis Step Count: 0
+   Yannakakis Bottom-Up Steps: 0
+   Yannakakis Top-Down Steps: 0
+   Yannakakis Step Plan: none
+   Yannakakis Step Filter Mode: global-domain provider filter
+   Reduction Core Variables: 4
+   Reduction Tail Separators: 0
+   GHD Bag Count: 2
+   GHD Bags: bag 1 cyclic-core: vars 1,4,2 providers 5,6; bag 2 cyclic-core: vars 1,3,2 providers 8,7
+   GHD Separator Count: 1
+   GHD Separators: bag 1->2 pair v1,v2
+   GHD Descriptor Source: graph-join-match-ir
+   Variable Count: 4
+   Provider Count: 8
+   Provider Rows Materialized: 89
+   Provider Tuples Materialized: 0
+   Provider Full Materialization: true
+   Provider Rows Read: 89
+   Provider Row Bytes Allocated: 40960 bytes
+   Provider Tuple Bytes Copied: 0 bytes
+   Semijoin Reduction Passes: 1
+   Yannakakis Bottom-Up Passes: 0
+   Yannakakis Top-Down Passes: 0
+   Yannakakis Steps Applied: 0
+   Yannakakis Bottom-Up Steps Applied: 0
+   Yannakakis Top-Down Steps Applied: 0
+   Reduction Order Applied: false
+   Semijoin Rows Removed: 0
+   Yannakakis Bottom-Up Rows Removed: 0
+   Yannakakis Top-Down Rows Removed: 0
+   Semijoin Provider Rows After: 89
+   Semijoin Final Domain Keys: 21
+   GHD Separator Reduction Passes: 1
+   GHD Leaf Tail Providers: 0
+   GHD Descriptor Separators Applied: 1
+   GHD Tail Domain Propagation Passes: 0
+   GHD Tail Domain Rows Removed: 0
+   GHD Separator Domain Keys: 8
+   GHD Leaf Tail Rows Removed: 0
+   GHD Cyclic Core Rows Removed: 0
+   Reduction Domain Builds: 12
+   Reduction Domain Rows Scanned: 157
+   Reduction Domain Keys Produced: 63
+   Reduction Domain Sorts: 4
+   Reduction Domain Sort Rows: 68
+   Complete Bindings: 48
+   Candidate Flat Rows: 48
+   Candidate Bag Combinations: 48
+   Flat Rows Materialized: 48
+   Flat Rows Avoided: 0
+   Consumer Flat Rows Avoided: 0
+   Row Goal Reached: false
+   Lazy Domain Views: 30
+   Lazy Domain Keys Scanned: 190
+   Domain Scratch Allocations: 4
+   Domain Scratch Reuses: 6
+   Runtime Domain Builds: 30
+   Runtime Domain Rows Scanned: 190
+   Prefix Range Builds: 38
+   Prefix Range Reuses: 41
+   Prefix Range Directory Searches: 41
+   Prefix Range Cursor Reuses: 0
+   Prefix Range Cache Hits: 40
+   Prefix Range Cache Misses: 27
+   Child Range Cache Hits: 333
+   Child Range Cache Misses: 67
+   Trie Child Range Reuses: 333
+   Trie Child Range Opens: 67
+   Trie Prefix Range Seeks: 67
+   Trie Pair Range Opens: 192
+   Reduction Scratch Allocations: 1
+   Reduction Scratch Reuses: 7
+   Vector Intersection Merge Calls: 26
+   Vector Intersection Galloping Calls: 2
+   Vector Intersection Galloping Steps: 29
+   Uniqueness Constraint Groups: 1
+   Uniqueness Rejects: 0
+   Rows Emitted: 48
+   Rescans: 0
+   Peak Generic Join Memory: 144512 bytes
+   Spill Bytes: 0 bytes
+   ->  Seq Scan on generic_ghd."P_A" a (actual rows=1.00 loops=1)
+         Output: a.id
+   ->  Seq Scan on generic_ghd."P_C" c (actual rows=4.00 loops=1)
+         Output: c.id
+   ->  Seq Scan on generic_ghd."P_D" d (actual rows=4.00 loops=1)
+         Output: d.id
+   ->  Seq Scan on generic_ghd."P_B" b (actual rows=12.00 loops=1)
+         Output: b.id
+   ->  Seq Scan on generic_ghd."PAB" ab (actual rows=12.00 loops=1)
+         Output: ab.id, ab.start_id, ab.end_id
+   ->  Seq Scan on generic_ghd."PBC" bc (actual rows=48.00 loops=1)
+         Output: bc.id, bc.end_id, bc.start_id
+   ->  Seq Scan on generic_ghd."PCD" cd (actual rows=4.00 loops=1)
+         Output: cd.id, cd.end_id, cd.start_id
+   ->  Seq Scan on generic_ghd."PAD" ad (actual rows=4.00 loops=1)
+         Output: ad.id, ad.start_id, ad.end_id
+(117 rows)
 
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('generic_ghd', $cypher$
-            MATCH (a:P_A)-[ab:PAB]->(b:P_B)-[bc:PBC]->(c:P_C)
-                  -[cd:PCD]->(d:P_D),
-                  (a)-[ad:PAD]->(d)
-            RETURN id(a), id(b), id(c), id(d),
-                   id(ab), id(bc), id(cd), id(ad)
-        $cypher$) AS (a agtype, b agtype, c agtype, d agtype,
-                      ab agtype, bc agtype, cd agtype, ad agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_on_demand_trie_ops := has_on_demand_trie_ops OR
-            plan_text LIKE
-            '%Provider Trie Ops: lazy sorted arrays with on-demand prefix directories%';
-        has_rows := has_rows OR plan_text LIKE '%Rows Emitted: 48%';
-        matches := regexp_match(plan_text, 'Prefix Range Builds: ([0-9]+)');
-        IF matches IS NOT NULL THEN
-            prefix_builds := matches[1]::integer;
-        END IF;
-        matches := regexp_match(plan_text, 'Prefix Range Reuses: ([0-9]+)');
-        IF matches IS NOT NULL THEN
-            prefix_reuses := matches[1]::integer;
-        END IF;
-        matches := regexp_match(plan_text,
-                                'Prefix Range Cursor Reuses: ([0-9]+)');
-        IF matches IS NOT NULL THEN
-            prefix_cursor_reuses := matches[1]::integer;
-        END IF;
-        matches := regexp_match(plan_text,
-                                'Trie Child Range Opens: ([0-9]+)');
-        IF matches IS NOT NULL THEN
-            trie_child_range_opens := matches[1]::integer;
-        END IF;
-        matches := regexp_match(plan_text,
-                                'Trie Prefix Range Seeks: ([0-9]+)');
-        IF matches IS NOT NULL THEN
-            trie_prefix_range_seeks := matches[1]::integer;
-        END IF;
-        matches := regexp_match(plan_text,
-                                'Trie Pair Range Opens: ([0-9]+)');
-        IF matches IS NOT NULL THEN
-            trie_pair_range_opens := matches[1]::integer;
-        END IF;
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_on_demand_trie_ops OR NOT has_rows OR
-       prefix_builds IS NULL OR prefix_reuses IS NULL OR
-       prefix_cursor_reuses IS NULL OR prefix_builds > 40 OR
-       prefix_reuses < prefix_builds OR
-       trie_child_range_opens IS NULL OR trie_prefix_range_seeks IS NULL OR
-       trie_pair_range_opens IS NULL OR trie_child_range_opens <= 0 OR
-       trie_prefix_range_seeks <= 0 OR trie_pair_range_opens <= 0 THEN
-        RAISE EXCEPTION
-            'Generic Join on-demand prefix range trie ops/directory/direct pair reuse was not observed (builds %, reuses %, cursor reuses %, child opens %, prefix seeks %, pair opens %)',
-            prefix_builds, prefix_reuses, prefix_cursor_reuses,
-            trie_child_range_opens, trie_prefix_range_seeks,
-            trie_pair_range_opens;
-    END IF;
-    RAISE NOTICE 'generic join on-demand prefix range trie ops, directory, and direct pair reuse verified';
-END
-$generic_ghd_prefix_range_plan$;
-NOTICE:  generic join on-demand prefix range trie ops, directory, and direct pair reuse verified
+ROLLBACK;
 BEGIN;
 SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
@@ -5507,7 +5097,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Uniqueness Rejects: 0
    Rows Emitted: 1
    Rescans: 0
-   Peak Generic Join Memory: 283648 bytes
+   Peak Generic Join Memory: 279680 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on generic_ghd."W" w (actual rows=1.00 loops=1)
          Output: w.id
@@ -5540,86 +5130,6 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
 (129 rows)
 
 ROLLBACK;
-DO $generic_ghd_deep_tail_plan$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_reduction_shape boolean := false;
-    has_ghd_mode boolean := false;
-    has_ghd_general boolean := false;
-    has_ghd_fallback boolean := false;
-    has_ghd_bag_count boolean := false;
-    has_ghd_bag_details boolean := false;
-    has_ghd_separator_count boolean := false;
-    has_tail_domain_pass boolean := false;
-    has_tail_domain_rows boolean := false;
-    has_separator_domain boolean := false;
-    has_core_pruning boolean := false;
-    has_one_row boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('generic_ghd', $cypher$
-            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
-                  -[e3:E3]->(d:D)-[e4:E4]->(a),
-                  (c)-[tu:TU]->(u:U)-[tv:TV]->(v:V)-[tw:TW]->(w:W)
-            RETURN id(a), id(b), id(c), id(d), id(u), id(v), id(w),
-                   id(e1), id(e2), id(e3), id(e4), id(tu), id(tv), id(tw)
-        $cypher$) AS (a agtype, b agtype, c agtype, d agtype,
-                      u agtype, v agtype, w agtype, e1 agtype,
-                      e2 agtype, e3 agtype, e4 agtype, tu agtype,
-                      tv agtype, tw agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_reduction_shape := has_reduction_shape OR
-            plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
-        has_ghd_mode := has_ghd_mode OR
-            plan_text LIKE '%GHD Mode: general GHD%';
-        has_ghd_general := has_ghd_general OR
-            plan_text LIKE '%GHD General Decomposition: true%';
-        has_ghd_fallback := has_ghd_fallback OR
-            plan_text LIKE '%GHD Fallback Reason: none%';
-        has_ghd_bag_count := has_ghd_bag_count OR
-            plan_text LIKE '%GHD Bag Count: 3%';
-        has_ghd_bag_details := has_ghd_bag_details OR
-            plan_text LIKE
-            '%GHD Bags: bag 1 cyclic-core:%bag 2 cyclic-core:%bag 3 leaf-tail:%';
-        has_ghd_separator_count := has_ghd_separator_count OR
-            plan_text LIKE '%GHD Separator Count: 2%';
-        has_tail_domain_pass := has_tail_domain_pass OR
-            plan_text ~ 'GHD Tail Domain Propagation Passes: [1-9][0-9]*';
-        has_tail_domain_rows := has_tail_domain_rows OR
-            plan_text ~ 'GHD Tail Domain Rows Removed: [1-9][0-9]*';
-        has_separator_domain := has_separator_domain OR
-            plan_text LIKE '%GHD Separator Domain Keys: 3%';
-        has_core_pruning := has_core_pruning OR
-            plan_text LIKE '%GHD Cyclic Core Rows Removed: 315%';
-        has_one_row := has_one_row OR
-            plan_text LIKE '%Rows Emitted: 1%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_reduction_shape OR
-       NOT has_ghd_mode OR NOT has_ghd_general OR
-       NOT has_ghd_fallback OR
-       NOT has_ghd_bag_count OR NOT has_ghd_bag_details OR
-       NOT has_ghd_separator_count OR NOT has_tail_domain_pass OR
-       NOT has_tail_domain_rows OR NOT has_separator_domain OR
-       NOT has_core_pruning OR NOT has_one_row THEN
-        RAISE EXCEPTION
-            'Generic Join deep-tail GHD separator reduction was not observed';
-    END IF;
-    RAISE NOTICE 'generic join deep-tail GHD separator reduction verified';
-END
-$generic_ghd_deep_tail_plan$;
-NOTICE:  generic join deep-tail GHD separator reduction verified
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
 CREATE TEMP TABLE generic_ghd_deep_tail_binary ON COMMIT DROP AS
