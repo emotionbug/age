@@ -293,7 +293,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
    Yannakakis Bottom-Up Steps: 1
    Yannakakis Top-Down Steps: 1
    Yannakakis Step Plan: bottom-up: provider 10 v1->v2 on v2(key2); top-down: provider 10 v2->v1 on v1(key1)
-   Yannakakis Step Filter Mode: global-domain provider filter
+   Yannakakis Step Filter Mode: planned step-domain provider filter
    Reduction Core Variables: 4
    Reduction Tail Separators: 1
    GHD Bag Count: 3
@@ -431,7 +431,7 @@ $$) AS (total agtype);
    Yannakakis Bottom-Up Steps: 1
    Yannakakis Top-Down Steps: 1
    Yannakakis Step Plan: bottom-up: provider 10 v1->v2 on v2(key2); top-down: provider 10 v2->v1 on v1(key1)
-   Yannakakis Step Filter Mode: global-domain provider filter
+   Yannakakis Step Filter Mode: planned step-domain provider filter
    Reduction Core Variables: 4
    Reduction Tail Separators: 1
    GHD Bag Count: 3
@@ -3597,7 +3597,7 @@ SELECT EXISTS (
            Yannakakis Bottom-Up Steps: 1
            Yannakakis Top-Down Steps: 1
            Yannakakis Step Plan: bottom-up: provider 10 v1->v2 on v2(key2); top-down: provider 10 v2->v1 on v1(key1)
-           Yannakakis Step Filter Mode: global-domain provider filter
+           Yannakakis Step Filter Mode: planned step-domain provider filter
            Reduction Core Variables: 4
            Reduction Tail Separators: 1
            GHD Bag Count: 3
@@ -3962,7 +3962,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
    Yannakakis Bottom-Up Steps: 1
    Yannakakis Top-Down Steps: 1
    Yannakakis Step Plan: bottom-up: provider 10 v1->v2 on v2(key2); top-down: provider 10 v2->v1 on v1(key1)
-   Yannakakis Step Filter Mode: global-domain provider filter
+   Yannakakis Step Filter Mode: planned step-domain provider filter
    Reduction Core Variables: 4
    Reduction Tail Separators: 1
    GHD Bag Count: 3
@@ -4173,7 +4173,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Yannakakis Bottom-Up Steps: 2
    Yannakakis Top-Down Steps: 2
    Yannakakis Step Plan: bottom-up: provider 11 v1->v4 on v4(key2), provider 12 v2->v3 on v3(key2); top-down: provider 11 v4->v1 on v1(key1), provider 12 v3->v2 on v2(key1)
-   Yannakakis Step Filter Mode: global-domain provider filter
+   Yannakakis Step Filter Mode: planned step-domain provider filter
    Reduction Core Variables: 4
    Reduction Tail Separators: 2
    GHD Bag Count: 4
@@ -4429,7 +4429,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (VERBOSE, COSTS OFF)
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('generic_ir', $$
     MATCH (a:T_A)-[ab:T_AB]->(b:T_B)-[bc:T_BC]->(c:T_C)
@@ -4439,7 +4439,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
         ab agtype, bc agtype, cd agtype);
                                                                                                               QUERY PLAN                                                                                                               
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Custom Scan (AGE Generic Multiway Join)
+ Custom Scan (AGE Generic Multiway Join) (actual rows=80.00 loops=1)
    Output: (a.id)::agtype, (b.id)::agtype, (c.id)::agtype, (d.id)::agtype, (ab.id)::agtype, (bc.id)::agtype, (cd.id)::agtype
    Filter: ((cd.end_id = d.id) AND _ag_enforce_edge_uniqueness3(ab.id, bc.id, cd.id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
@@ -4463,7 +4463,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Yannakakis Bottom-Up Steps: 3
    Yannakakis Top-Down Steps: 3
    Yannakakis Step Plan: bottom-up: provider 7 v3->v4 on v4(key2), provider 6 v2->v3 on v3(key2), provider 5 v1->v2 on v2(key2); top-down: provider 5 v2->v1 on v1(key1), provider 6 v3->v2 on v2(key1), provider 7 v4->v3 on v3(key1)
-   Yannakakis Step Filter Mode: global-domain provider filter
+   Yannakakis Step Filter Mode: planned step-domain provider filter
    Reduction Core Variables: 2
    Reduction Tail Separators: 0
    GHD Bag Count: 0
@@ -4473,21 +4473,88 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    GHD Descriptor Source: graph-join-match-ir
    Variable Count: 4
    Provider Count: 7
-   ->  Seq Scan on generic_ir."T_A" a
+   Provider Rows Materialized: 6722
+   Provider Tuples Materialized: 0
+   Provider Full Materialization: true
+   Provider Rows Read: 6722
+   Provider Row Bytes Allocated: 358400 bytes
+   Provider Tuple Bytes Copied: 0 bytes
+   Semijoin Reduction Passes: 2
+   Yannakakis Bottom-Up Passes: 1
+   Yannakakis Top-Down Passes: 1
+   Yannakakis Steps Applied: 6
+   Yannakakis Bottom-Up Steps Applied: 3
+   Yannakakis Top-Down Steps Applied: 3
+   Reduction Order Applied: true
+   Semijoin Rows Removed: 6478
+   Yannakakis Bottom-Up Rows Removed: 79
+   Yannakakis Top-Down Rows Removed: 6399
+   Semijoin Provider Rows After: 244
+   Semijoin Final Domain Keys: 83
+   GHD Separator Reduction Passes: 0
+   GHD Leaf Tail Providers: 0
+   GHD Descriptor Separators Applied: 0
+   GHD Tail Domain Propagation Passes: 0
+   GHD Tail Domain Rows Removed: 0
+   GHD Separator Domain Keys: 0
+   GHD Leaf Tail Rows Removed: 0
+   GHD Cyclic Core Rows Removed: 0
+   Reduction Domain Builds: 70
+   Reduction Domain Rows Scanned: 79228
+   Reduction Domain Keys Produced: 2756
+   Reduction Domain Sorts: 14
+   Reduction Domain Sort Rows: 39040
+   Complete Bindings: 80
+   Candidate Flat Rows: 80
+   Candidate Bag Combinations: 80
+   Flat Rows Materialized: 80
+   Flat Rows Avoided: 0
+   Consumer Flat Rows Avoided: 0
+   Row Goal Reached: false
+   Lazy Domain Views: 405
+   Lazy Domain Keys Scanned: 641
+   Domain Scratch Allocations: 4
+   Domain Scratch Reuses: 158
+   Runtime Domain Builds: 405
+   Runtime Domain Rows Scanned: 641
+   Prefix Range Builds: 179
+   Prefix Range Reuses: 146
+   Prefix Range Directory Searches: 146
+   Prefix Range Cursor Reuses: 0
+   Prefix Range Cache Hits: 144
+   Prefix Range Cache Misses: 21
+   Child Range Cache Hits: 556
+   Child Range Cache Misses: 165
+   Trie Child Range Reuses: 556
+   Trie Child Range Opens: 165
+   Trie Prefix Range Seeks: 165
+   Trie Pair Range Opens: 240
+   Reduction Scratch Allocations: 2
+   Reduction Scratch Reuses: 40
+   Vector Intersection Merge Calls: 277
+   Vector Intersection Galloping Calls: 8
+   Vector Intersection Galloping Steps: 8
+   Uniqueness Constraint Groups: 1
+   Uniqueness Rejects: 0
+   Rows Emitted: 80
+   Rescans: 0
+   Peak Generic Join Memory: 535680 bytes
+   Spill Bytes: 0 bytes
+   ->  Seq Scan on generic_ir."T_A" a (actual rows=1.00 loops=1)
          Output: a.id
-   ->  Seq Scan on generic_ir."T_B" b
+   ->  Seq Scan on generic_ir."T_B" b (actual rows=80.00 loops=1)
          Output: b.id
-   ->  Seq Scan on generic_ir."T_C" c
+   ->  Seq Scan on generic_ir."T_C" c (actual rows=80.00 loops=1)
          Output: c.id
-   ->  Seq Scan on generic_ir."T_D" d
+   ->  Seq Scan on generic_ir."T_D" d (actual rows=80.00 loops=1)
          Output: d.id
-   ->  Seq Scan on generic_ir."T_AB" ab
+   ->  Seq Scan on generic_ir."T_AB" ab (actual rows=80.00 loops=1)
          Output: ab.id, ab.start_id, ab.end_id
-   ->  Seq Scan on generic_ir."T_BC" bc
+   ->  Seq Scan on generic_ir."T_BC" bc (actual rows=6400.00 loops=1)
          Output: bc.id, bc.start_id, bc.end_id
-   ->  Seq Scan on generic_ir."T_CD" cd
+   ->  Seq Scan on generic_ir."T_CD" cd (actual rows=1.00 loops=1)
          Output: cd.id, cd.end_id, cd.start_id
-(48 rows)
+(115 rows)
 
 ROLLBACK;
 SELECT drop_graph('generic_ir', true);
@@ -5022,7 +5089,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Yannakakis Bottom-Up Steps: 1
    Yannakakis Top-Down Steps: 1
    Yannakakis Step Plan: bottom-up: provider 12 v6->v2 on v2(key1); top-down: provider 12 v2->v6 on v6(key2)
-   Yannakakis Step Filter Mode: global-domain provider filter
+   Yannakakis Step Filter Mode: planned step-domain provider filter
    Reduction Core Variables: 4
    Reduction Tail Separators: 1
    GHD Bag Count: 3

@@ -154,6 +154,8 @@ struct AgeWCOJPostingProvider
     bool outgoing;
     int32 terminal_label_id;
     AttrNumber source_key_attno;
+    Index source_rti;
+    int source_correlation_group;
     int *output_map;
     int output_width;
     int output_offset;
@@ -197,6 +199,7 @@ struct AgeWCOJJoinScanState
     int *source_order;
     Bitmapset **uniqueness_groups;
     int uniqueness_group_count;
+    int source_correlation_group_count;
     AgeWCOJPostingProvider *providers;
     TupleTableSlot **group_slots;
     AgeWCOJTupleGroup *groups;
@@ -254,6 +257,7 @@ struct AgeWCOJJoinScanState
     int64 binding_node_edge_bags;
     int64 binding_node_materialized_flat_rows;
     int64 binding_node_flat_rows_avoided;
+    int64 source_correlation_rejects;
     int64 peak_binding_node_memory;
     int64 cursor_advances;
     int64 seek_calls;
@@ -296,6 +300,7 @@ struct AgeWCOJJoinScanState
     int64 source_bag_memory_reserve;
     int64 peak_source_bag_bytes;
     int64 peak_factor_memory;
+    bool source_correlation_enforced;
     bool progressive_setup_done;
     Size peak_memory;
 };
@@ -949,12 +954,22 @@ initialize_wcoj_provider(AgeWCOJJoinScanState *state,
     TupleDesc child_desc = ExecGetResultType(child_state);
     List *output_map;
     int provider_kind;
+    int source_rti;
+    int source_correlation_group;
     int output_width;
 
     if (list_length(desc) != AGE_WCOJ_PROVIDER_DESC_COUNT)
         elog(ERROR, "invalid AGE WCOJ provider descriptor");
 
     provider_kind = intVal(list_nth(desc, AGE_WCOJ_PROVIDER_DESC_KIND));
+    source_rti = intVal(list_nth(desc, AGE_WCOJ_PROVIDER_DESC_SOURCE_RTI));
+    source_correlation_group = intVal(list_nth(
+        desc, AGE_WCOJ_PROVIDER_DESC_SOURCE_CORRELATION_GROUP));
+    if (source_rti < 0 || source_correlation_group < 0 ||
+        source_correlation_group > state->arity)
+    {
+        elog(ERROR, "invalid AGE WCOJ source correlation descriptor");
+    }
     output_map = list_nth(desc, AGE_WCOJ_PROVIDER_DESC_OUTPUT_MAP);
     output_width = provider_kind == AGE_WCOJ_PROVIDER_PLAN_STREAM ?
         child_desc->natts : list_length(output_map);
@@ -971,6 +986,10 @@ initialize_wcoj_provider(AgeWCOJJoinScanState *state,
         desc, AGE_WCOJ_PROVIDER_DESC_TERMINAL_LABEL_ID));
     provider->source_key_attno = (AttrNumber)intVal(list_nth(
         desc, AGE_WCOJ_PROVIDER_DESC_SOURCE_KEY_ATTNO));
+    provider->source_rti = (Index)source_rti;
+    provider->source_correlation_group = source_correlation_group;
+    state->source_correlation_group_count = Max(
+        state->source_correlation_group_count, source_correlation_group);
     provider->output_width = output_width;
     provider->output_offset = output_offset;
     provider->edge_id_output_attno = (AttrNumber)intVal(list_nth(
@@ -1043,6 +1062,42 @@ initialize_wcoj_provider(AgeWCOJJoinScanState *state,
 }
 
 static void
+initialize_wcoj_source_correlation_enforcement(
+    AgeWCOJJoinScanState *state)
+{
+    int group_id;
+
+    state->source_correlation_enforced = false;
+    for (group_id = 1; group_id <= state->source_correlation_group_count;
+         group_id++)
+    {
+        bool has_member = false;
+        bool all_adjacency = true;
+        int adjacency_count = 0;
+        int source_index;
+
+        for (source_index = 0; source_index < state->arity; source_index++)
+        {
+            AgeWCOJPostingProvider *provider =
+                &state->providers[source_index];
+
+            if (provider->source_correlation_group != group_id)
+                continue;
+            has_member = true;
+            if (provider->kind == AGE_WCOJ_PROVIDER_ADJACENCY)
+                adjacency_count++;
+            else
+                all_adjacency = false;
+        }
+        if (has_member && all_adjacency && adjacency_count >= 2)
+        {
+            state->source_correlation_enforced = true;
+            return;
+        }
+    }
+}
+
+static void
 begin_age_wcoj_join_scan(CustomScanState *node, EState *estate, int eflags)
 {
     AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
@@ -1099,6 +1154,7 @@ begin_age_wcoj_join_scan(CustomScanState *node, EState *estate, int eflags)
         }
         child_index++;
     }
+    initialize_wcoj_source_correlation_enforcement(state);
 
     /*
      * A survivor block is useful whenever at least one direct adjacency
@@ -1907,6 +1963,131 @@ age_wcoj_group_edge_id(void *callback_state, int source_index,
         elog(ERROR, "invalid AGE WCOJ factorized source index");
     return get_age_wcoj_group_edge_id(
         &state->groups[source_index], tuple_index, edge_id);
+}
+
+static bool
+age_wcoj_source_correlation_group_is_enforced(
+    AgeWCOJJoinScanState *state, int group_id)
+{
+    bool has_member = false;
+    bool all_adjacency = true;
+    int adjacency_count = 0;
+    int source_index;
+
+    if (!state->source_correlation_enforced || group_id <= 0)
+        return false;
+
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        AgeWCOJPostingProvider *provider = &state->providers[source_index];
+
+        if (provider->source_correlation_group != group_id)
+            continue;
+        has_member = true;
+        if (provider->kind == AGE_WCOJ_PROVIDER_ADJACENCY)
+            adjacency_count++;
+        else
+            all_adjacency = false;
+    }
+
+    return has_member && all_adjacency && adjacency_count >= 2;
+}
+
+static bool
+age_wcoj_group_source_position(AgeWCOJJoinScanState *state,
+                               int source_index, int tuple_index,
+                               graphid *source_key, int *source_row_offset)
+{
+    AgeWCOJTupleGroup *group;
+    AgeWCOJPostingProvider *provider;
+    AgeWCOJBatchPayload *entry;
+    AgeSourceBag *bag;
+    int source_row_index;
+
+    if (source_index < 0 || source_index >= state->arity)
+        elog(ERROR, "invalid AGE WCOJ source correlation factor");
+
+    group = &state->groups[source_index];
+    if (group->kind != AGE_WCOJ_TUPLE_GROUP_ADJACENCY ||
+        group->adjacency_provider == NULL)
+    {
+        return false;
+    }
+
+    provider = group->adjacency_provider;
+    entry = get_age_wcoj_adjacency_group_payload(
+        group, tuple_index, &source_row_index);
+    bag = age_binding_get_source_bag(provider->source_bags,
+                                     provider->source_bag_count,
+                                     entry->source_bag_index);
+    if (bag == NULL)
+        elog(ERROR, "invalid AGE WCOJ correlated source bag");
+    if (source_row_index < bag->first_row ||
+        source_row_index >= bag->first_row + bag->row_count)
+    {
+        elog(ERROR, "invalid AGE WCOJ correlated source row");
+    }
+
+    *source_key = bag->key;
+    *source_row_offset = source_row_index - bag->first_row;
+    return true;
+}
+
+static bool
+age_wcoj_source_correlation_accept(void *callback_state, int source_index,
+                                   int tuple_index)
+{
+    AgeWCOJJoinScanState *state = callback_state;
+    AgeWCOJPostingProvider *provider;
+    graphid source_key;
+    int source_row_offset;
+    int group_id;
+    int other_index;
+
+    if (state == NULL || source_index < 0 || source_index >= state->arity)
+        elog(ERROR, "invalid AGE WCOJ source correlation callback");
+
+    provider = &state->providers[source_index];
+    group_id = provider->source_correlation_group;
+    if (!age_wcoj_source_correlation_group_is_enforced(state, group_id))
+        return true;
+    if (!age_wcoj_group_source_position(
+            state, source_index, tuple_index, &source_key,
+            &source_row_offset))
+    {
+        increment_wcoj_counter(&state->source_correlation_rejects);
+        return false;
+    }
+
+    for (other_index = 0; other_index < state->arity; other_index++)
+    {
+        AgeWCOJPostingProvider *other_provider;
+        graphid other_source_key;
+        int other_source_row_offset;
+        int other_tuple_index;
+
+        if (other_index == source_index)
+            continue;
+        other_provider = &state->providers[other_index];
+        if (other_provider->source_correlation_group != group_id)
+            continue;
+
+        other_tuple_index = age_binding_flat_enumerator_index(
+            &state->flat_enumerator, other_index);
+        if (other_tuple_index < 0)
+            continue;
+        if (!age_wcoj_group_source_position(
+                state, other_index, other_tuple_index, &other_source_key,
+                &other_source_row_offset) ||
+            other_source_key != source_key ||
+            other_source_row_offset != source_row_offset)
+        {
+            increment_wcoj_counter(&state->source_correlation_rejects);
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static AgeBindingNode *
@@ -3646,6 +3827,8 @@ collect_age_wcoj_group(AgeWCOJJoinScanState *state, graphid matched_key)
         state->flat_rows_materialized;
     flat_rows = age_binding_begin_flat_enumerator(
         &state->flat_enumerator, age_wcoj_group_logical_count,
+        state->source_correlation_enforced ?
+        age_wcoj_source_correlation_accept : NULL,
         age_wcoj_uniqueness_may_reject(state) ? age_wcoj_group_edge_id : NULL,
         state, state->uniqueness_groups);
     if (flat_rows != age_binding_node_candidate_flat_rows(
@@ -4346,7 +4529,8 @@ add_age_wcoj_sum_active_group(AgeWCOJJoinScanState *state)
         elog(ERROR, "AGE WCOJ sum-property provider is not direct adjacency");
     }
 
-    if (!age_wcoj_uniqueness_may_reject(state))
+    if (!age_wcoj_uniqueness_may_reject(state) &&
+        !state->source_correlation_enforced)
     {
         int64 other_product = 1;
         int source_index;
@@ -4466,7 +4650,8 @@ count_age_wcoj_active_group(AgeWCOJJoinScanState *state)
     if (!state->group_active)
         return 0;
 
-    if (!age_wcoj_uniqueness_may_reject(state))
+    if (!age_wcoj_uniqueness_may_reject(state) &&
+        !state->source_correlation_enforced)
     {
         count = count_age_wcoj_group_product(state);
         add_wcoj_counter(&state->candidate_combinations, count);
@@ -4486,7 +4671,8 @@ static int64
 count_age_wcoj_rows(AgeWCOJJoinScanState *state)
 {
     int64 count = 0;
-    bool use_group_product = !age_wcoj_uniqueness_may_reject(state);
+    bool use_group_product = !age_wcoj_uniqueness_may_reject(state) &&
+        !state->source_correlation_enforced;
 
     for (;;)
     {
@@ -4518,7 +4704,8 @@ static int64
 count_age_wcoj_distinct_keys(AgeWCOJJoinScanState *state)
 {
     int64 count = 0;
-    bool use_group_presence = !age_wcoj_uniqueness_may_reject(state);
+    bool use_group_presence = !age_wcoj_uniqueness_may_reject(state) &&
+        !state->source_correlation_enforced;
 
     for (;;)
     {
@@ -4595,7 +4782,8 @@ static TupleTableSlot *
 access_age_wcoj_distinct_key_scan(ScanState *node)
 {
     AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
-    bool use_group_presence = !age_wcoj_uniqueness_may_reject(state);
+    bool use_group_presence = !age_wcoj_uniqueness_may_reject(state) &&
+        !state->source_correlation_enforced;
 
     if (state->row_goal > 0 && state->row_goal_emitted >= state->row_goal)
         return ExecClearTuple(node->ss_ScanTupleSlot);
@@ -4720,7 +4908,8 @@ static TupleTableSlot *
 access_age_wcoj_group_count_distinct_key_scan(ScanState *node)
 {
     AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
-    bool use_group_presence = !age_wcoj_uniqueness_may_reject(state);
+    bool use_group_presence = !age_wcoj_uniqueness_may_reject(state) &&
+        !state->source_correlation_enforced;
 
     state->count_executed = true;
     for (;;)
@@ -5247,6 +5436,72 @@ format_stage_survivors(AgeWCOJJoinScanState *state)
     return buffer.data;
 }
 
+static char *
+format_source_correlation_groups(AgeWCOJJoinScanState *state,
+                                 int *provider_count)
+{
+    StringInfoData buffer;
+    bool first = true;
+    int source_index;
+
+    initStringInfo(&buffer);
+    *provider_count = 0;
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        AgeWCOJPostingProvider *provider = &state->providers[source_index];
+        int group_id = provider->source_correlation_group;
+        int previous_index;
+        int member_index;
+        int member_count = 0;
+        int plan_stream_count = 0;
+        int adjacency_count = 0;
+
+        if (group_id <= 0)
+            continue;
+
+        for (previous_index = 0; previous_index < source_index;
+             previous_index++)
+        {
+            AgeWCOJPostingProvider *previous =
+                &state->providers[previous_index];
+
+            if (previous->source_correlation_group == group_id)
+            {
+                break;
+            }
+        }
+        if (previous_index < source_index)
+            continue;
+
+        for (member_index = source_index; member_index < state->arity;
+             member_index++)
+        {
+            AgeWCOJPostingProvider *member = &state->providers[member_index];
+
+            if (member->source_correlation_group != group_id)
+                continue;
+            member_count++;
+            if (member->kind == AGE_WCOJ_PROVIDER_PLAN_STREAM)
+                plan_stream_count++;
+            else if (member->kind == AGE_WCOJ_PROVIDER_ADJACENCY)
+                adjacency_count++;
+        }
+        if (member_count <= 1)
+            continue;
+
+        appendStringInfo(
+            &buffer,
+            "%s%d=%d providers (plan-stream=%d, adjacency=%d)",
+            first ? "" : ", ", group_id, member_count, plan_stream_count,
+            adjacency_count);
+        *provider_count += member_count;
+        first = false;
+    }
+    if (first)
+        appendStringInfoString(&buffer, "none");
+    return buffer.data;
+}
+
 static const char *
 age_wcoj_consumer_name(AgeWCOJConsumerKind consumer)
 {
@@ -5307,7 +5562,9 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
 {
     AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
     char *estimated_postings;
+    char *source_correlation_groups;
     int adjacency_provider_count = 0;
+    int source_correlation_provider_count;
     int source_index;
 
     (void)ancestors;
@@ -5318,6 +5575,8 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
             adjacency_provider_count++;
     }
     estimated_postings = format_estimated_postings(state);
+    source_correlation_groups = format_source_correlation_groups(
+        state, &source_correlation_provider_count);
     ExplainPropertyText("WCOJ Algorithm",
                         age_wcoj_algorithm_name(state->actual_engine), es);
     ExplainPropertyText("Planned Engine",
@@ -5328,6 +5587,17 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
     ExplainPropertyInteger("Source Count", NULL, state->arity, es);
     ExplainPropertyInteger("Adjacency Providers", NULL,
                            adjacency_provider_count, es);
+    if (source_correlation_provider_count > 0)
+    {
+        ExplainPropertyInteger("Source Correlated Providers", NULL,
+                               source_correlation_provider_count, es);
+        ExplainPropertyText("Source Correlation Groups",
+                            source_correlation_groups, es);
+        ExplainPropertyText(
+            "Source Correlation Enforcement",
+            state->source_correlation_enforced ? "enumerator-prune" :
+            "not required", es);
+    }
     ExplainPropertyText("WCOJ Consumer",
                         age_wcoj_consumer_name(state->consumer_kind), es);
     ExplainPropertyInteger("WCOJ Row Goal", NULL, state->row_goal, es);
@@ -5340,6 +5610,7 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
     ExplainPropertyInteger("Seed Source", NULL, state->seed_index + 1, es);
     ExplainPropertyText("Estimated Postings", estimated_postings, es);
     pfree(estimated_postings);
+    pfree(source_correlation_groups);
     if (es->analyze)
     {
         char *observed_postings = format_observed_postings(state);
@@ -5450,6 +5721,11 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
                                state->binding_node_flat_rows_avoided, es);
         ExplainPropertyInteger("Consumer Flat Rows Avoided", NULL,
                                state->consumer_flat_rows_avoided, es);
+        if (source_correlation_provider_count > 0)
+        {
+            ExplainPropertyInteger("Source Correlation Rejects", NULL,
+                                   state->source_correlation_rejects, es);
+        }
         ExplainPropertyInteger("Row Goal Survivor Blocks Clamped", NULL,
                                state->row_goal_block_clamps, es);
         if (state->row_goal > 0)

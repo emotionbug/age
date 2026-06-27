@@ -6,6 +6,7 @@ current_step="initialization"
 plan_report=${ROADMAP_TELEMETRY_PLAN_REPORT:-}
 print_plan_report=${ROADMAP_TELEMETRY_PRINT_PLAN_REPORT:-1}
 secondary_checks=${ROADMAP_TELEMETRY_SECONDARY_CHECKS:-1}
+print_failure_log=${ROADMAP_TELEMETRY_PRINT_FAILURE_LOG:-1}
 
 if [[ -n "${ROADMAP_TELEMETRY_LOG_DIR:-}" ]]; then
     log_dir=$ROADMAP_TELEMETRY_LOG_DIR
@@ -28,6 +29,18 @@ on_error()
     exit "$status"
 }
 trap on_error ERR
+
+print_check_failure_log()
+{
+    local log_path=$1
+    local fallback_lines=$2
+
+    if [[ "$print_failure_log" == 1 ]]; then
+        cat "$log_path" >&2 || true
+    else
+        tail -n "$fallback_lines" "$log_path" >&2 || true
+    fi
+}
 
 run_plan_check()
 {
@@ -53,7 +66,7 @@ run_plan_check()
         status=$?
         printf '%s: failed (exit %s)\n' "$label" "$status" >&2
         printf 'log: %s\n' "$log_path" >&2
-        tail -n 60 "$log_path" >&2 || true
+        print_check_failure_log "$log_path" 60
         exit "$status"
     fi
 }
@@ -125,7 +138,7 @@ capture_plan_report()
         status=$?
         printf 'primary raw plan capture: failed (exit %s)\n' "$status" >&2
         printf 'log: %s\n' "$capture_log" >&2
-        tail -n 60 "$capture_log" >&2 || true
+        print_check_failure_log "$capture_log" 60
         exit "$status"
     fi
 
@@ -224,7 +237,7 @@ emit_metric "semijoin reduction" "step plan" \
             "$reduction_log" 'Yannakakis Step Plan: bottom-up:'
 emit_metric "semijoin reduction" "step filter mode" \
             "$reduction_log" \
-            'Yannakakis Step Filter Mode: global-domain provider filter'
+            'Yannakakis Step Filter Mode: planned step-domain provider filter'
 emit_metric "semijoin reduction" "passes" \
             "$reduction_log" 'Semijoin Reduction Passes: [1-9][0-9]*'
 emit_metric "semijoin reduction" "steps applied" \

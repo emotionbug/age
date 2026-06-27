@@ -419,6 +419,8 @@ static Path *cheapest_compatible_path(
     RelOptInfo *rel, Relids forbidden_required_outer);
 static CustomPath *find_wcoj_path(RelOptInfo *rel,
                                   Relids forbidden_required_outer);
+static CustomPath *find_wcoj_path_requiring_outer_subset(
+    RelOptInfo *rel, Relids required_outer_subset);
 static Path *find_wcoj_component_path(RelOptInfo *rel, Index edge_rti,
                                       Relids forbidden_required_outer);
 static void append_wcoj_restrictinfos(List **target, List *source);
@@ -445,6 +447,9 @@ static List *make_wcoj_adjacency_path_desc(
 static Path *prepare_wcoj_adjacency_provider_path(
     PlannerInfo *root, Path *component_path, List *provider_desc,
     List *output_exprs);
+static Path *prepare_wcoj_source_dimension_provider_path(
+    PlannerInfo *root, RelOptInfo *source_rel, List *provider_desc,
+    List *output_exprs);
 static List *build_wcoj_edge_local_quals(PlannerInfo *root, Index edge_rti);
 static int wcoj_edge_payload_mask(List *output_exprs, List *local_quals,
                                   Index edge_rti);
@@ -459,6 +464,9 @@ static bool prepare_wcoj_source(
     PlannerInfo *root, RelOptInfo *joinrel, Path *component_path,
     Expr *key_expr, List *path_desc, List *restrictinfos, Oid sortop,
     AgeWCOJPathBuildState *build);
+static bool add_wcoj_source_dimension_join_path(
+    PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
+    RelOptInfo *innerrel, JoinType jointype, JoinPathExtraData *extra);
 static Plan *plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
                                      CustomPath *best_path, List *tlist,
                                      List *clauses, List *custom_plans);
@@ -2395,6 +2403,46 @@ find_wcoj_path(RelOptInfo *rel, Relids forbidden_required_outer)
     return best;
 }
 
+static CustomPath *
+find_wcoj_path_requiring_outer_subset(RelOptInfo *rel,
+                                      Relids required_outer_subset)
+{
+    CustomPath *best = NULL;
+    ListCell *lc;
+
+    if (rel == NULL || bms_is_empty(required_outer_subset))
+        return NULL;
+    foreach(lc, rel->pathlist)
+    {
+        Path *path = (Path *)lfirst(lc);
+        CustomPath *custom_path;
+        Relids required_outer = PATH_REQ_OUTER(path);
+
+        if (bms_is_empty(required_outer) ||
+            !bms_is_subset(required_outer, required_outer_subset))
+        {
+            continue;
+        }
+        if (!IsA(path, CustomPath))
+            continue;
+        custom_path = (CustomPath *)path;
+        if (custom_path->methods != &age_wcoj_join_path_methods)
+            continue;
+        if (list_length(custom_path->custom_private) !=
+            AGE_WCOJ_PATH_PRIVATE_COUNT ||
+            intVal(list_nth(custom_path->custom_private,
+                            AGE_WCOJ_PATH_PRIVATE_CONSUMER)) !=
+                AGE_WCOJ_CONSUMER_ROWS)
+        {
+            continue;
+        }
+        if (best == NULL || path->total_cost < best->path.total_cost)
+            best = custom_path;
+    }
+
+    return best;
+}
+
 static Path *
 find_wcoj_component_path(RelOptInfo *rel, Index edge_rti,
                          Relids forbidden_required_outer)
@@ -2654,6 +2702,138 @@ prepare_wcoj_adjacency_provider_path(PlannerInfo *root,
     bms_free(source_relids);
 
     return source_path;
+}
+
+static bool
+wcoj_source_key_expr_matches_rti(Node *source_key_expr, Index source_rti)
+{
+    Node *stripped;
+    Var *var;
+
+    if (source_rti <= 0 || source_key_expr == NULL)
+        return false;
+    stripped = strip_implicit_coercions(source_key_expr);
+    if (!IsA(stripped, Var))
+        return false;
+    var = castNode(Var, stripped);
+    return var->vartype == GRAPHIDOID &&
+        var->varlevelsup == 0 &&
+        var->varno == source_rti &&
+        var->varattno == Anum_ag_label_vertex_table_id;
+}
+
+static List *
+wcoj_source_dimension_output_exprs(PlannerInfo *root, RelOptInfo *joinrel,
+                                   Path *source_path, List *restrictinfos,
+                                   List *provider_desc)
+{
+    PathTarget *target;
+    List *output_exprs;
+    Node *source_key_expr;
+    ListCell *lc;
+
+    if (joinrel == NULL || source_path == NULL ||
+        list_length(provider_desc) != AGE_WCOJ_PATH_PROVIDER_COUNT)
+    {
+        return NIL;
+    }
+
+    target = create_empty_pathtarget();
+    output_exprs = list_nth(provider_desc,
+                            AGE_WCOJ_PATH_PROVIDER_OUTPUT_EXPRS);
+    foreach(lc, output_exprs)
+    {
+        Node *expr = lfirst(lc);
+
+        if (!pathtarget_contains_expr(target, expr))
+        {
+            add_column_to_pathtarget(target, (Expr *)copyObject(expr), 0);
+        }
+    }
+
+    add_child_rel_vars_to_pathtarget(target, source_path,
+                                     (Node *)joinrel->reltarget->exprs);
+    add_child_join_clause_vars_to_pathtarget(target, source_path,
+                                             restrictinfos);
+    source_key_expr = list_nth(provider_desc,
+                               AGE_WCOJ_PATH_PROVIDER_SOURCE_KEY_EXPR);
+    if (!pathtarget_contains_expr(target, source_key_expr))
+    {
+        add_column_to_pathtarget(target,
+                                 (Expr *)copyObject(source_key_expr), 0);
+    }
+    target = set_pathtarget_cost_width(root, target);
+    return target->exprs;
+}
+
+static Path *
+prepare_wcoj_source_dimension_provider_path(PlannerInfo *root,
+                                            RelOptInfo *source_rel,
+                                            List *provider_desc,
+                                            List *output_exprs)
+{
+    Index edge_rti;
+    Node *source_key_expr;
+    Path *source_path;
+    PathTarget *target;
+    ListCell *lc;
+
+    if (root == NULL || source_rel == NULL ||
+        list_length(provider_desc) != AGE_WCOJ_PATH_PROVIDER_COUNT)
+    {
+        return NULL;
+    }
+
+    edge_rti = intVal(list_nth(provider_desc,
+                               AGE_WCOJ_PATH_PROVIDER_EDGE_RTI));
+    source_key_expr = list_nth(provider_desc,
+                               AGE_WCOJ_PATH_PROVIDER_SOURCE_KEY_EXPR);
+    if (edge_rti <= 0 ||
+        !wcoj_source_key_expr_matches_rti(
+            source_key_expr,
+            intVal(list_nth(provider_desc,
+                            AGE_WCOJ_PATH_PROVIDER_SOURCE_RTI))) ||
+        intVal(list_nth(provider_desc,
+                        AGE_WCOJ_PATH_PROVIDER_EXACT_TERMINAL_BOUND)) != 0)
+    {
+        return NULL;
+    }
+
+    source_path = cheapest_compatible_path(source_rel, NULL);
+    if (source_path == NULL)
+        return NULL;
+
+    target = create_empty_pathtarget();
+    foreach(lc, output_exprs)
+    {
+        Expr *expr = lfirst(lc);
+        Relids expr_relids = pull_varnos(root, (Node *)expr);
+
+        if (bms_is_member(edge_rti, expr_relids))
+        {
+            bms_free(expr_relids);
+            if (!wcoj_direct_edge_expr((Node *)expr, edge_rti))
+                return NULL;
+            continue;
+        }
+        if (!bms_is_subset(expr_relids, source_rel->relids))
+        {
+            bms_free(expr_relids);
+            return NULL;
+        }
+        bms_free(expr_relids);
+        if (!pathtarget_contains_expr(target, (Node *)expr))
+            add_column_to_pathtarget(target, (Expr *)copyObject(expr), 0);
+    }
+    if (!pathtarget_contains_expr(target, source_key_expr))
+    {
+        add_column_to_pathtarget(target, (Expr *)copyObject(source_key_expr),
+                                 0);
+    }
+    target = set_pathtarget_cost_width(root, target);
+
+    return copy_path_with_deferred_projection_target(root, source_path,
+                                                     target, false);
 }
 
 static bool
@@ -5126,6 +5306,217 @@ prepare_wcoj_source(PlannerInfo *root, RelOptInfo *joinrel,
     return true;
 }
 
+static bool
+add_wcoj_source_dimension_join_path(PlannerInfo *root, RelOptInfo *joinrel,
+                                    RelOptInfo *outerrel,
+                                    RelOptInfo *innerrel, JoinType jointype,
+                                    JoinPathExtraData *extra)
+{
+    RelOptInfo *source_rel;
+    RelOptInfo *wcoj_rel;
+    CustomPath *wcoj_path;
+    Path *source_path;
+    List *stored_keys;
+    List *stored_provider_descs;
+    List *restrictinfos = NIL;
+    List *key_exprs = NIL;
+    AgeWCOJPathBuildState build = {0};
+    ListCell *path_cell;
+    ListCell *key_cell;
+    ListCell *desc_cell;
+    Oid sortop = InvalidOid;
+    CustomPath *custom_path;
+    AgeWCOJEngineKind planned_engine;
+    Cost kernel_cost;
+    ParamPathInfo *param_info = NULL;
+    int adjacency_provider_count = 0;
+
+    if (root == NULL || joinrel == NULL || outerrel == NULL ||
+        innerrel == NULL || extra == NULL || jointype != JOIN_INNER)
+    {
+        return false;
+    }
+    if (bms_membership(outerrel->relids) == BMS_SINGLETON)
+    {
+        source_rel = outerrel;
+        wcoj_rel = innerrel;
+    }
+    else if (bms_membership(innerrel->relids) == BMS_SINGLETON)
+    {
+        source_rel = innerrel;
+        wcoj_rel = outerrel;
+    }
+    else
+    {
+        return false;
+    }
+
+    wcoj_path = find_wcoj_path_requiring_outer_subset(wcoj_rel,
+                                                      source_rel->relids);
+    if (wcoj_path == NULL ||
+        list_length(wcoj_path->custom_private) !=
+        AGE_WCOJ_PATH_PRIVATE_COUNT)
+    {
+        return false;
+    }
+    stored_keys = list_nth(wcoj_path->custom_private,
+                           AGE_WCOJ_PATH_PRIVATE_KEY_EXPRS);
+    stored_provider_descs = list_nth(
+        wcoj_path->custom_private,
+        AGE_WCOJ_PATH_PRIVATE_PROVIDER_DESCS);
+    if (list_length(stored_keys) != list_length(wcoj_path->custom_paths) ||
+        list_length(stored_provider_descs) !=
+        list_length(wcoj_path->custom_paths))
+    {
+        return false;
+    }
+
+    source_path = cheapest_compatible_path(source_rel, NULL);
+    if (source_path == NULL)
+        return false;
+
+    append_wcoj_restrictinfos(&restrictinfos,
+                              wcoj_path->custom_restrictinfo);
+    append_wcoj_restrictinfos(&restrictinfos, extra->restrictlist);
+    get_sort_group_operators(GRAPHIDOID, true, false, false,
+                             &sortop, NULL, NULL, NULL);
+    if (!OidIsValid(sortop))
+        return false;
+
+    forthree(path_cell, wcoj_path->custom_paths,
+             key_cell, stored_keys,
+             desc_cell, stored_provider_descs)
+    {
+        Path *component_path = (Path *)lfirst(path_cell);
+        Expr *key_expr = (Expr *)lfirst(key_cell);
+        List *provider_desc = copyObject(lfirst(desc_cell));
+        Node *source_key_expr;
+        List *output_exprs;
+        List *local_quals;
+        Index source_rti;
+        int payload_mask;
+        Path *prepared_path;
+        double posting_estimate;
+
+        if (list_length(provider_desc) != AGE_WCOJ_PATH_PROVIDER_COUNT)
+            return false;
+        source_rti = intVal(list_nth(provider_desc,
+                                     AGE_WCOJ_PATH_PROVIDER_SOURCE_RTI));
+        source_key_expr = list_nth(
+            provider_desc, AGE_WCOJ_PATH_PROVIDER_SOURCE_KEY_EXPR);
+        if (!bms_is_member(source_rti, source_rel->relids) ||
+            !wcoj_source_key_expr_matches_rti(source_key_expr, source_rti))
+        {
+            return false;
+        }
+
+        output_exprs = wcoj_source_dimension_output_exprs(
+            root, joinrel, source_path, restrictinfos, provider_desc);
+        if (output_exprs == NIL)
+            return false;
+        lfirst(list_nth_cell(
+            provider_desc, AGE_WCOJ_PATH_PROVIDER_OUTPUT_EXPRS)) =
+            output_exprs;
+        lfirst(list_nth_cell(
+            provider_desc, AGE_WCOJ_PATH_PROVIDER_KIND)) =
+            makeInteger(AGE_WCOJ_PROVIDER_ADJACENCY);
+        local_quals = list_nth(provider_desc,
+                               AGE_WCOJ_PATH_PROVIDER_LOCAL_QUALS);
+        payload_mask = wcoj_edge_payload_mask(
+            output_exprs, local_quals,
+            intVal(list_nth(provider_desc,
+                            AGE_WCOJ_PATH_PROVIDER_EDGE_RTI)));
+        lfirst(list_nth_cell(
+            provider_desc, AGE_WCOJ_PATH_PROVIDER_PAYLOAD_MASK)) =
+            makeInteger(payload_mask);
+
+        prepared_path = prepare_wcoj_source_dimension_provider_path(
+            root, source_rel, provider_desc, output_exprs);
+        if (prepared_path == NULL)
+            return false;
+
+        posting_estimate = wcoj_provider_posting_estimate(
+            root, component_path, provider_desc);
+        build.paths = lappend(build.paths, prepared_path);
+        key_exprs = lappend(key_exprs, copyObject(key_expr));
+        build.provider_descs = lappend(build.provider_descs, provider_desc);
+        build.estimated_postings = lappend(
+            build.estimated_postings,
+            makeFloat(psprintf("%.17g", posting_estimate)));
+        build.startup_cost += prepared_path->startup_cost;
+        build.total_cost += prepared_path->total_cost;
+        build.disabled_nodes += prepared_path->disabled_nodes;
+        build.required_outer = bms_add_members(
+            build.required_outer, PATH_REQ_OUTER(prepared_path));
+        adjacency_provider_count++;
+    }
+
+    if (adjacency_provider_count < 2 ||
+        adjacency_provider_count != list_length(build.paths))
+    {
+        return false;
+    }
+
+    if (bms_overlap(build.required_outer, joinrel->relids))
+        return false;
+    build.required_outer = bms_add_members(build.required_outer,
+                                           joinrel->lateral_relids);
+    if (!bms_is_empty(build.required_outer))
+    {
+        Path *outer_input = outerrel->cheapest_total_path;
+        Path *inner_input = innerrel->cheapest_total_path;
+        List *param_restrictinfos = restrictinfos;
+
+        if (outer_input == NULL || inner_input == NULL)
+            return false;
+        param_info = get_joinrel_parampathinfo(
+            root, joinrel, outer_input, inner_input, extra->sjinfo,
+            build.required_outer, &param_restrictinfos);
+        restrictinfos = param_restrictinfos;
+    }
+
+    custom_path = makeNode(CustomPath);
+    custom_path->path.pathtype = T_CustomScan;
+    custom_path->path.parent = joinrel;
+    custom_path->path.pathtarget = joinrel->reltarget;
+    custom_path->path.param_info = param_info;
+    custom_path->path.parallel_aware = false;
+    custom_path->path.parallel_safe = false;
+    custom_path->path.parallel_workers = 0;
+    custom_path->path.rows = clamp_row_est(
+        param_info != NULL ? param_info->ppi_rows : joinrel->rows);
+    custom_path->path.disabled_nodes = build.disabled_nodes;
+    custom_path->path.startup_cost = build.startup_cost +
+        cpu_operator_cost * list_length(build.paths);
+    planned_engine = choose_wcoj_engine(build.estimated_postings,
+                                        build.provider_descs);
+    kernel_cost = estimate_wcoj_kernel_cost(
+        planned_engine, build.estimated_postings, build.provider_descs,
+        custom_path->path.rows);
+    custom_path->path.total_cost = build.total_cost + kernel_cost;
+    custom_path->path.pathkeys = wcoj_graphid_pathkeys(
+        root, linitial(key_exprs), joinrel->relids, sortop);
+    custom_path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+    custom_path->custom_paths = build.paths;
+    custom_path->custom_restrictinfo = restrictinfos;
+    custom_path->custom_private = list_make3(
+        copyObject(key_exprs), copyObject(build.estimated_postings),
+        copyObject(build.provider_descs));
+    custom_path->custom_private = lappend(
+        custom_path->custom_private, makeInteger(AGE_WCOJ_CONSUMER_ROWS));
+    custom_path->custom_private = lappend(
+        custom_path->custom_private, make_wcoj_oid_const(InvalidOid));
+    custom_path->custom_private = lappend(
+        custom_path->custom_private, make_int8_const(0));
+    custom_path->custom_private = lappend(
+        custom_path->custom_private, makeInteger(AGE_WCOJ_ROW_GOAL_NONE));
+    custom_path->custom_private = lappend(custom_path->custom_private, NIL);
+    custom_path->methods = &age_wcoj_join_path_methods;
+
+    add_path(joinrel, (Path *)custom_path);
+    return true;
+}
+
 static void
 add_wcoj_join_path(PlannerInfo *root, RelOptInfo *joinrel,
                    RelOptInfo *outerrel, RelOptInfo *innerrel,
@@ -5156,6 +5547,11 @@ add_wcoj_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     }
     if (!age_enable_wcoj)
         return;
+    if (add_wcoj_source_dimension_join_path(root, joinrel, outerrel,
+                                            innerrel, jointype, extra))
+    {
+        return;
+    }
     if (!find_wcoj_terminal_equality(root, outerrel, innerrel,
                                      extra->restrictlist,
                                      &outer_key, &inner_key))
@@ -18310,10 +18706,103 @@ find_wcoj_plan_expr_attno(Plan *plan, Node *expr)
     return 0;
 }
 
+static bool
+wcoj_provider_source_correlation_match(List *left_desc, List *right_desc)
+{
+    Index left_source_rti;
+    Index right_source_rti;
+    Node *left_source_key_expr;
+    Node *right_source_key_expr;
+
+    if (list_length(left_desc) != AGE_WCOJ_PATH_PROVIDER_COUNT ||
+        list_length(right_desc) != AGE_WCOJ_PATH_PROVIDER_COUNT)
+    {
+        return false;
+    }
+
+    left_source_rti = intVal(list_nth(
+        left_desc, AGE_WCOJ_PATH_PROVIDER_SOURCE_RTI));
+    right_source_rti = intVal(list_nth(
+        right_desc, AGE_WCOJ_PATH_PROVIDER_SOURCE_RTI));
+    if (left_source_rti <= 0 || right_source_rti <= 0 ||
+        left_source_rti != right_source_rti)
+    {
+        return false;
+    }
+
+    left_source_key_expr = list_nth(
+        left_desc, AGE_WCOJ_PATH_PROVIDER_SOURCE_KEY_EXPR);
+    right_source_key_expr = list_nth(
+        right_desc, AGE_WCOJ_PATH_PROVIDER_SOURCE_KEY_EXPR);
+    if (left_source_key_expr == NULL || right_source_key_expr == NULL ||
+        (IsA(left_source_key_expr, Const) &&
+         castNode(Const, left_source_key_expr)->constisnull) ||
+        (IsA(right_source_key_expr, Const) &&
+         castNode(Const, right_source_key_expr)->constisnull))
+    {
+        return false;
+    }
+
+    return equal(strip_implicit_coercions(left_source_key_expr),
+                 strip_implicit_coercions(right_source_key_expr));
+}
+
+static int *
+build_wcoj_source_correlation_groups(List *provider_descs)
+{
+    int provider_count = list_length(provider_descs);
+    int *groups;
+    int next_group = 1;
+    ListCell *outer_cell;
+    int outer_index = 0;
+
+    groups = palloc0(sizeof(int) * provider_count);
+    foreach(outer_cell, provider_descs)
+    {
+        List *outer_desc = (List *)lfirst(outer_cell);
+        ListCell *inner_cell;
+        bool matched = false;
+        int inner_index = 0;
+
+        if (groups[outer_index] != 0)
+        {
+            outer_index++;
+            continue;
+        }
+
+        foreach(inner_cell, provider_descs)
+        {
+            List *inner_desc = (List *)lfirst(inner_cell);
+
+            if (inner_index <= outer_index || groups[inner_index] != 0)
+            {
+                inner_index++;
+                continue;
+            }
+            if (wcoj_provider_source_correlation_match(outer_desc,
+                                                       inner_desc))
+            {
+                if (!matched)
+                {
+                    groups[outer_index] = next_group;
+                    matched = true;
+                }
+                groups[inner_index] = next_group;
+            }
+            inner_index++;
+        }
+        if (matched)
+            next_group++;
+        outer_index++;
+    }
+
+    return groups;
+}
 
 static List *
 build_wcoj_exec_provider_desc(List *path_desc, int source_key_attno,
-                              List *output_map, int edge_id_output_attno)
+                              List *output_map, int edge_id_output_attno,
+                              int source_correlation_group)
 {
     List *desc;
     int payload_mask;
@@ -18325,6 +18814,9 @@ build_wcoj_exec_provider_desc(List *path_desc, int source_key_attno,
         copyObject(list_nth(path_desc,
                             AGE_WCOJ_PATH_PROVIDER_TERMINAL_LABEL_ID)),
         makeInteger(source_key_attno));
+    desc = lappend(desc, copyObject(list_nth(
+        path_desc, AGE_WCOJ_PATH_PROVIDER_SOURCE_RTI)));
+    desc = lappend(desc, makeInteger(source_correlation_group));
     desc = lappend(desc, copyObject(output_map));
     payload_mask = intVal(list_nth(
         path_desc, AGE_WCOJ_PATH_PROVIDER_PAYLOAD_MASK));
@@ -18434,6 +18926,8 @@ build_wcoj_custom_scan_tlist(List *custom_plans, List *key_exprs,
     ListCell *plan_cell;
     ListCell *key_cell;
     ListCell *desc_cell;
+    int *source_correlation_groups;
+    int provider_index = 0;
     int scan_resno = first_scan_resno;
 
     *key_attnos = NIL;
@@ -18444,6 +18938,8 @@ build_wcoj_custom_scan_tlist(List *custom_plans, List *key_exprs,
     {
         elog(ERROR, "AGE WCOJ child/provider arity mismatch");
     }
+    source_correlation_groups =
+        build_wcoj_source_correlation_groups(provider_descs);
 
     forthree(plan_cell, custom_plans, key_cell, key_exprs,
              desc_cell, provider_descs)
@@ -18495,11 +18991,14 @@ build_wcoj_custom_scan_tlist(List *custom_plans, List *key_exprs,
             *exec_provider_descs,
             build_wcoj_exec_provider_desc(path_desc, source_key_attno,
                                           output_map,
-                                          edge_id_output_attno));
+                                          edge_id_output_attno,
+                                          source_correlation_groups[
+                                              provider_index]));
         *provider_local_quals = lappend(
             *provider_local_quals,
             copyObject(list_nth(path_desc,
                                 AGE_WCOJ_PATH_PROVIDER_LOCAL_QUALS)));
+        provider_index++;
     }
 
     return scan_tlist;

@@ -989,6 +989,7 @@ age_binding_reset_flat_enumerator(AgeBindingFlatEnumerator *enumerator)
         enumerator->selected_edge_id_valid[factor_index] = false;
     }
     enumerator->uniqueness_groups = NULL;
+    enumerator->accept_callback = NULL;
     enumerator->edge_id_callback = NULL;
     enumerator->callback_state = NULL;
     enumerator->active = false;
@@ -999,6 +1000,7 @@ int64
 age_binding_begin_flat_enumerator(
     AgeBindingFlatEnumerator *enumerator,
     AgeBindingFlatEnumeratorCountCallback count_callback,
+    AgeBindingFlatEnumeratorAcceptCallback accept_callback,
     AgeBindingFlatEnumeratorEdgeIdCallback edge_id_callback,
     void *callback_state, Bitmapset **uniqueness_groups)
 {
@@ -1009,6 +1011,7 @@ age_binding_begin_flat_enumerator(
         elog(ERROR, "invalid AGE factorized binding enumerator state");
 
     age_binding_reset_flat_enumerator(enumerator);
+    enumerator->accept_callback = accept_callback;
     enumerator->edge_id_callback = edge_id_callback;
     enumerator->callback_state = callback_state;
     enumerator->uniqueness_groups = edge_id_callback != NULL ?
@@ -1088,6 +1091,14 @@ age_binding_flat_enumerator_next(AgeBindingFlatEnumerator *enumerator)
 
             enumerator->indexes[factor_index] = tuple_index;
             age_binding_add_counter(&enumerator->steps, 1);
+
+            if (enumerator->accept_callback != NULL &&
+                !enumerator->accept_callback(
+                    enumerator->callback_state, factor_index, tuple_index))
+            {
+                tuple_index++;
+                continue;
+            }
 
             if (enumerator->edge_id_callback != NULL)
             {

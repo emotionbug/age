@@ -138,6 +138,8 @@ typedef struct AgeBindingNodeFlatEnumerator
 
 typedef int (*AgeBindingFlatEnumeratorCountCallback)(
     void *callback_state, int factor_index);
+typedef bool (*AgeBindingFlatEnumeratorAcceptCallback)(
+    void *callback_state, int factor_index, int tuple_index);
 typedef bool (*AgeBindingFlatEnumeratorEdgeIdCallback)(
     void *callback_state, int factor_index, int tuple_index,
     graphid *edge_id);
@@ -151,6 +153,7 @@ typedef struct AgeBindingFlatEnumerator
     graphid *selected_edge_ids;
     bool *selected_edge_id_valid;
     Bitmapset **uniqueness_groups;
+    AgeBindingFlatEnumeratorAcceptCallback accept_callback;
     AgeBindingFlatEnumeratorEdgeIdCallback edge_id_callback;
     void *callback_state;
     bool active;
@@ -249,6 +252,7 @@ extern void age_binding_reset_flat_enumerator(
 extern int64 age_binding_begin_flat_enumerator(
     AgeBindingFlatEnumerator *enumerator,
     AgeBindingFlatEnumeratorCountCallback count_callback,
+    AgeBindingFlatEnumeratorAcceptCallback accept_callback,
     AgeBindingFlatEnumeratorEdgeIdCallback edge_id_callback,
     void *callback_state, Bitmapset **uniqueness_groups);
 extern bool age_binding_flat_enumerator_next(

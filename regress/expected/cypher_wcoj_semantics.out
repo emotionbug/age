@@ -260,111 +260,268 @@ ANALYZE wcoj_lowering."S";
 ANALYZE wcoj_lowering."T";
 ANALYZE wcoj_lowering."H";
 ANALYZE wcoj_lowering."E";
-DO $wcoj_lowering_plan$
-DECLARE
-    plan_text text;
-    has_wcoj boolean := false;
-    has_arity_four boolean := false;
-    has_three_adjacency_providers boolean := false;
-BEGIN
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('wcoj_lowering', $$
-            EXPLAIN (VERBOSE, COSTS OFF)
-            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
-                  (s2:S {id: 2})-[e2:E]->(t),
-                  (s3:S {id: 3})-[e3:E]->(t)
-            RETURN t
-        $$) AS (plan agtype)
-    LOOP
-        IF plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%' THEN
-            has_wcoj := true;
-        END IF;
-        IF plan_text LIKE '%WCOJ Arity: 4%' THEN
-            has_arity_four := true;
-        END IF;
-        IF plan_text LIKE '%Adjacency Providers: 3%' THEN
-            has_three_adjacency_providers := true;
-        END IF;
-    END LOOP;
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN t
+$$) AS (plan agtype);
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE WCOJ Multiway Join)
+   Output: _agtype_build_vertex_label('17338'::oid, t.id, t.properties)
+   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND (e2.end_id = e3.end_id))
+   WCOJ Algorithm: streaming merge intersection with delayed bag product
+   Planned Engine: merge
+   Actual Engine: merge
+   Fallback Reason: none
+   Source Count: 4
+   Adjacency Providers: 3
+   WCOJ Consumer: rows
+   WCOJ Row Goal: 0
+   WCOJ Row Goal Source: none
+   Batched Payload Materialization: true
+   WCOJ Arity: 4
+   Seed Source: 4
+   Estimated Postings: 1=1, 2=3, 3=3, 4=1
+   ->  Seq Scan on wcoj_lowering."S" s1
+         Output: s1.id
+         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on wcoj_lowering."S" s2
+         Output: s2.id
+         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on wcoj_lowering."S" s3
+         Output: s3.id
+         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Sort
+         Output: t.id, t.properties
+         Sort Key: t.id
+         ->  Seq Scan on wcoj_lowering."T" t
+               Output: t.id, t.properties
+(30 rows)
 
-    IF NOT has_wcoj OR NOT has_arity_four OR
-       NOT has_three_adjacency_providers THEN
-        RAISE EXCEPTION 'expected arity-4 WCOJ with three adjacency providers';
-    END IF;
-END
-$wcoj_lowering_plan$;
-DO $wcoj_controls$
-DECLARE
-    plan_text text;
-    engine_name text;
-    has_wcoj boolean;
-    has_planned boolean;
-    has_actual boolean;
-    has_no_fallback boolean;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'off', true);
-    has_wcoj := false;
-    FOR plan_text IN
-        SELECT plan::text
-        FROM cypher('wcoj_lowering', $$
-            EXPLAIN (VERBOSE, COSTS OFF)
-            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
-                  (s2:S {id: 2})-[e2:E]->(t),
-                  (s3:S {id: 3})-[e3:E]->(t)
-            RETURN t
-        $$) AS (plan agtype)
-    LOOP
-        has_wcoj := has_wcoj OR
-            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
-    END LOOP;
-    IF has_wcoj THEN
-        RAISE EXCEPTION 'age.enable_wcoj=off still selected WCOJ';
-    END IF;
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN t
+$$) AS (plan agtype);
+                                                                                                                                                                                          QUERY PLAN                                                                                                                                                                                          
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop
+   Output: _agtype_build_vertex_label('17338'::oid, t.id, t.properties)
+   Join Filter: (e1.end_id = t.id)
+   ->  Nested Loop
+         Output: t.id, t.properties, e2.end_id, e3.end_id
+         Join Filter: (t.id = e2.end_id)
+         ->  Nested Loop
+               Output: e2.end_id
+               ->  Seq Scan on wcoj_lowering."S" s2
+                     Output: s2.id, s2.properties
+                     Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+               ->  Custom Scan (AGE Adjacency Match) on wcoj_lowering."E" e2
+                     Output: e2.start_id, e2.end_id
+                     Filter: (s2.id = e2.start_id)
+                     Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=3 composite-fanout=3 label-groups=0 main-blocks=0 fanout-source=statistics source=relcache-scan payload=id-only
+                     Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=out properties=0 metadata=no
+                     Adjacency Pruning: required=start_id,end_id terminal-source=none right-prune=label:no/props:none index-solved=0 residual-count=0 residual=edge:no/right-label:no/right-props:no edge-var:yes
+                     Adjacency Edge Skip: cursor-pushdown=no
+                     Adjacency Cost Input: fanout=3 terminal-fanout=3 composite-fanout=3 source-handoff=posting-run source-fanout=3 source-blocks=0 property-source-matches=0 residual=0 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=0 residual-weight=100% index-credit=100% prefetch-threshold=0 reason=not-indexable payload=id-only
+                     Adjacency Join Order: component=e2 solved=(b 7 8) connector=adjacency-expand bound=start-bound property=query-order rows=3 fanout=3 terminal-fanout=3 composite-fanout=3 source=unknown candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
+                     Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+                     Adjacency Terminal Property: none
+                     Adjacency Payload Columns: mode=id-only columns=start_id,end_id
+         ->  Materialize
+               Output: t.id, t.properties, e3.end_id
+               ->  Nested Loop
+                     Output: t.id, t.properties, e3.end_id
+                     Join Filter: (t.id = e3.end_id)
+                     ->  Seq Scan on wcoj_lowering."T" t
+                           Output: t.id, t.properties
+                     ->  Nested Loop
+                           Output: e3.end_id
+                           ->  Seq Scan on wcoj_lowering."S" s3
+                                 Output: s3.id, s3.properties
+                                 Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+                           ->  Custom Scan (AGE Adjacency Match) on wcoj_lowering."E" e3
+                                 Output: e3.start_id, e3.end_id
+                                 Filter: (s3.id = e3.start_id)
+                                 Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=3 composite-fanout=3 label-groups=0 main-blocks=0 fanout-source=statistics source=relcache-scan payload=id-only
+                                 Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=out properties=0 metadata=no
+                                 Adjacency Pruning: required=start_id,end_id terminal-source=none right-prune=label:no/props:none index-solved=0 residual-count=0 residual=edge:no/right-label:no/right-props:no edge-var:yes
+                                 Adjacency Edge Skip: cursor-pushdown=no
+                                 Adjacency Cost Input: fanout=3 terminal-fanout=3 composite-fanout=3 source-handoff=posting-run source-fanout=3 source-blocks=0 property-source-matches=0 residual=0 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=0 residual-weight=100% index-credit=100% prefetch-threshold=0 reason=not-indexable payload=id-only
+                                 Adjacency Join Order: component=e3 solved=(b 9 10) connector=adjacency-expand bound=start-bound property=query-order rows=3 fanout=3 terminal-fanout=3 composite-fanout=3 source=unknown candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
+                                 Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+                                 Adjacency Terminal Property: none
+                                 Adjacency Payload Columns: mode=id-only columns=start_id,end_id
+   ->  Materialize
+         Output: e1.end_id
+         ->  Nested Loop
+               Output: e1.end_id
+               ->  Seq Scan on wcoj_lowering."S" s1
+                     Output: s1.id, s1.properties
+                     Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+               ->  Custom Scan (AGE Adjacency Match) on wcoj_lowering."E" e1
+                     Output: e1.start_id, e1.end_id
+                     Filter: (s1.id = e1.start_id)
+                     Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=relcache-scan payload=id-only
+                     Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=out properties=0 metadata=no
+                     Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:yes
+                     Adjacency Edge Skip: cursor-pushdown=no
+                     Adjacency Cost Input: fanout=3 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=1 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
+                     Adjacency Join Order: component=e1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=query-order rows=1 fanout=3 terminal-fanout=1 composite-fanout=1 source=unknown candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
+                     Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
+                     Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=none value=none candidate-fanout=1 composite-fanout=1 value-posting=none planned=none threshold=0 reason=not-indexable
+                     Adjacency Terminal Property: none
+                     Adjacency Payload Columns: mode=id-only columns=start_id,end_id
+(67 rows)
 
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    FOREACH engine_name IN ARRAY ARRAY['leapfrog', 'merge', 'progressive']
-    LOOP
-        PERFORM set_config('age.wcoj_engine', engine_name, true);
-        has_wcoj := false;
-        has_planned := false;
-        has_actual := false;
-        has_no_fallback := false;
+ROLLBACK;
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'leapfrog';
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN t
+$$) AS (plan agtype);
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE WCOJ Multiway Join)
+   Output: _agtype_build_vertex_label('17338'::oid, t.id, t.properties)
+   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND (e2.end_id = e3.end_id))
+   WCOJ Algorithm: provider leapfrog intersection with delayed bag product
+   Planned Engine: leapfrog
+   Actual Engine: leapfrog
+   Fallback Reason: none
+   Source Count: 4
+   Adjacency Providers: 3
+   WCOJ Consumer: rows
+   WCOJ Row Goal: 0
+   WCOJ Row Goal Source: none
+   Batched Payload Materialization: true
+   WCOJ Arity: 4
+   Seed Source: 4
+   Estimated Postings: 1=1, 2=3, 3=3, 4=1
+   ->  Seq Scan on wcoj_lowering."S" s1
+         Output: s1.id
+         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on wcoj_lowering."S" s2
+         Output: s2.id
+         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on wcoj_lowering."S" s3
+         Output: s3.id
+         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Sort
+         Output: t.id, t.properties
+         Sort Key: t.id
+         ->  Seq Scan on wcoj_lowering."T" t
+               Output: t.id, t.properties
+(30 rows)
 
-        /* Dynamic SQL forces replanning after each engine GUC change. */
-        FOR plan_text IN EXECUTE $engine_plan$
-            SELECT plan::text
-            FROM cypher('wcoj_lowering', $cypher$
-                EXPLAIN (VERBOSE, COSTS OFF)
-                MATCH (s1:S {id: 1})-[e1:E]->(t:T),
-                      (s2:S {id: 2})-[e2:E]->(t),
-                      (s3:S {id: 3})-[e3:E]->(t)
-                RETURN t
-            $cypher$) AS (plan agtype)
-        $engine_plan$
-        LOOP
-            has_wcoj := has_wcoj OR
-                plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
-            has_planned := has_planned OR
-                plan_text LIKE format('%%Planned Engine: %s%%', engine_name);
-            has_actual := has_actual OR
-                plan_text LIKE format('%%Actual Engine: %s%%', engine_name);
-            has_no_fallback := has_no_fallback OR
-                plan_text LIKE '%Fallback Reason: none%';
-        END LOOP;
+ROLLBACK;
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN t
+$$) AS (plan agtype);
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE WCOJ Multiway Join)
+   Output: _agtype_build_vertex_label('17338'::oid, t.id, t.properties)
+   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND (e2.end_id = e3.end_id))
+   WCOJ Algorithm: streaming merge intersection with delayed bag product
+   Planned Engine: merge
+   Actual Engine: merge
+   Fallback Reason: none
+   Source Count: 4
+   Adjacency Providers: 3
+   WCOJ Consumer: rows
+   WCOJ Row Goal: 0
+   WCOJ Row Goal Source: none
+   Batched Payload Materialization: true
+   WCOJ Arity: 4
+   Seed Source: 4
+   Estimated Postings: 1=1, 2=3, 3=3, 4=1
+   ->  Seq Scan on wcoj_lowering."S" s1
+         Output: s1.id
+         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on wcoj_lowering."S" s2
+         Output: s2.id
+         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on wcoj_lowering."S" s3
+         Output: s3.id
+         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Sort
+         Output: t.id, t.properties
+         Sort Key: t.id
+         ->  Seq Scan on wcoj_lowering."T" t
+               Output: t.id, t.properties
+(30 rows)
 
-        IF NOT has_wcoj OR NOT has_planned OR NOT has_actual OR
-           NOT has_no_fallback
-        THEN
-            RAISE EXCEPTION 'invalid forced WCOJ engine plan for %',
-                            engine_name;
-        END IF;
-    END LOOP;
+ROLLBACK;
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'progressive';
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    EXPLAIN (VERBOSE, COSTS OFF)
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN t
+$$) AS (plan agtype);
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE WCOJ Multiway Join)
+   Output: _agtype_build_vertex_label('17338'::oid, t.id, t.properties)
+   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND (e2.end_id = e3.end_id))
+   WCOJ Algorithm: progressive seed filtering with delayed bag product
+   Planned Engine: progressive
+   Actual Engine: progressive
+   Fallback Reason: none
+   Source Count: 4
+   Adjacency Providers: 3
+   WCOJ Consumer: rows
+   WCOJ Row Goal: 0
+   WCOJ Row Goal Source: none
+   Batched Payload Materialization: true
+   WCOJ Arity: 4
+   Seed Source: 4
+   Estimated Postings: 1=1, 2=3, 3=3, 4=1
+   ->  Seq Scan on wcoj_lowering."S" s1
+         Output: s1.id
+         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on wcoj_lowering."S" s2
+         Output: s2.id
+         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on wcoj_lowering."S" s3
+         Output: s3.id
+         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Sort
+         Output: t.id, t.properties
+         Sort Key: t.id
+         ->  Seq Scan on wcoj_lowering."T" t
+               Output: t.id, t.properties
+(30 rows)
 
-    RAISE NOTICE 'wcoj controls and forced engines verified';
-END
-$wcoj_controls$;
-NOTICE:  wcoj controls and forced engines verified
+ROLLBACK;
 -- Re-enter the same analyzed Cypher EXPLAIN through separate SPI portals.  The
 -- graph-join lowering artifact must own its candidate strings and tables past
 -- each PortalDrop; planner-local pointers here previously caused a UAF.
@@ -2419,58 +2576,125 @@ SELECT (SELECT count(*) FROM wcoj_group_max_property_binary) AS binary_rows,
 (1 row)
 
 ROLLBACK;
-DO $wcoj_group_sum_property_local_qual$
-DECLARE
-    plan_text text;
-    has_wcoj boolean := false;
-    has_group_sum_consumer boolean := false;
-    has_local_reject boolean := false;
-    has_sum_input_rows boolean := false;
-    has_flat_rows_avoided boolean := false;
-    has_one_row_emitted boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('age.wcoj_engine', 'merge', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    WHERE e1.keep = true
+    RETURN id(t) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
+   Output: ((t.id)::agtype), (age_sum(agtype_access_operator(VARIADIC ARRAY[properties, '"score"'::agtype])))
+   WCOJ Algorithm: streaming merge intersection with delayed bag product
+   Planned Engine: merge
+   Actual Engine: merge
+   Fallback Reason: none
+   Source Count: 4
+   Adjacency Providers: 3
+   WCOJ Consumer: group sum(property)
+   WCOJ Row Goal: 0
+   WCOJ Row Goal Source: none
+   Batched Payload Materialization: true
+   WCOJ Arity: 4
+   Seed Source: 4
+   Estimated Postings: 1=1, 2=3, 3=3, 4=1
+   Observed Postings: 1=2, 2=3, 3=4, 4=1
+   Stage Survivors: 1=0, 2=0, 3=0, 4=0
+   Cursor Advances: 4
+   Seek Calls: 0
+   Posting Rows Scanned: 10
+   Survivor Blocks: 1
+   Payload Scan Batches: 3
+   Payload Scan Restarts: 0
+   Payload Source Keys Scanned: 3
+   Distinct Source Keys Scanned: 3
+   Payload Scan Restarts Avoided: 0
+   Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
+   Payload Rows Matched: 9
+   Payload Rows Fetched: 10
+   Payload Block Budget Overruns: 0
+   Payload Block Capacity Clamps: 0
+   Peak Payload Block Rows: 8
+   Progressive Probes: 0
+   Progressive Matches: 0
+   Exact Set Filters: 0
+   Exact Set Candidates Tested: 0
+   Source Rows Scanned: 3
+   Distinct Source Keys: 3
+   Source Bag Rows: 3
+   Source Bag Keys: 3
+   Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
+   Source Bag Bytes: 888 bytes
+   Source Bag Memory Reserve: 888 bytes
+   Intersection Builds: 3
+   Intersection Merge Calls: 0
+   Intersection Galloping Calls: 0
+   Intersection Galloping Steps: 0
+   Payload Rows Rejected by Local Qual: 1
+   Local Predicate Rejects: 1
+   Matched Terminal Groups: 1
+   Candidate Flat Rows: 12
+   Candidate Bag Combinations: 12
+   Flat Rows Materialized: 0
+   Factorized Binding Enumerators: 1
+   Shared Factor Enumerator Steps: 0
+   Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 12
+   Consumer Flat Rows Avoided: 12
+   Row Goal Survivor Blocks Clamped: 0
+   Row Goal Reached: false
+   Sum Property Provider: 1
+   Sum Property Input Rows: 12
+   Sum Property Null Rows: 0
+   Uniqueness Constraint Groups: 0
+   Uniqueness Rejects: 0
+   Rows Emitted: 1
+   Rescans: 0
+   Peak WCOJ Memory: 330376 bytes
+   Peak Factor Memory: 136420 bytes
+   Payload Rows Spilled: 0
+   Payload Bucket Blocks Spilled: 0
+   Payload Bucket Rows Spilled: 0
+   Payload Bucket Bytes Spilled: 0 bytes
+   Spill Bytes: 0 bytes
+   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
+         Output: s1.id
+         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+         Rows Removed by Filter: 2
+   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
+         Output: s2.id
+         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+         Rows Removed by Filter: 2
+   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
+         Output: s3.id
+         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+         Rows Removed by Filter: 2
+   ->  Sort (actual rows=1.00 loops=1)
+         Output: t.id
+         Sort Key: t.id
+         Sort Method: quicksort  Memory: 25kB
+         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
+               Output: t.id
+(99 rows)
 
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('wcoj_lowering', $cypher$
-            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
-                  (s2:S {id: 2})-[e2:E]->(t),
-                  (s3:S {id: 3})-[e3:E]->(t)
-            WHERE e1.keep = true
-            RETURN id(t) AS key, sum(e1.score) AS total
-        $cypher$) AS (key agtype, total agtype)
-    $plan$
-    LOOP
-        has_wcoj := has_wcoj OR
-            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
-        has_group_sum_consumer := has_group_sum_consumer OR
-            plan_text LIKE '%WCOJ Consumer: group sum(property)%';
-        has_local_reject := has_local_reject OR
-            plan_text LIKE '%Local Predicate Rejects: 1%';
-        has_sum_input_rows := has_sum_input_rows OR
-            plan_text LIKE '%Sum Property Input Rows: 12%';
-        has_flat_rows_avoided := has_flat_rows_avoided OR
-            plan_text LIKE '%Consumer Flat Rows Avoided: 12%';
-        has_one_row_emitted := has_one_row_emitted OR
-            plan_text LIKE '%Rows Emitted: 1%';
-    END LOOP;
-
-    IF NOT has_wcoj OR NOT has_group_sum_consumer OR
-       NOT has_local_reject OR NOT has_sum_input_rows OR
-       NOT has_flat_rows_avoided OR NOT has_one_row_emitted THEN
-        RAISE EXCEPTION
-            'WCOJ group sum-property local-qual consumer telemetry was not observed';
-    END IF;
-    RAISE NOTICE 'wcoj group sum-property local-qual consumer verified';
-END
-$wcoj_group_sum_property_local_qual$;
-NOTICE:  wcoj group sum-property local-qual consumer verified
+ROLLBACK;
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
 CREATE TEMP TABLE wcoj_group_sum_property_local_qual_binary
@@ -2539,54 +2763,122 @@ ORDER BY key;
  1125899906842625 | 24
 (1 row)
 
-DO $wcoj_group_count_consumer_telemetry$
-DECLARE
-    plan_text text;
-    has_wcoj boolean := false;
-    has_group_consumer boolean := false;
-    has_count_result boolean := false;
-    has_flat_rows_avoided boolean := false;
-    has_one_row_emitted boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('age.wcoj_engine', 'merge', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, count(*) AS total
+$$) AS (key agtype, total agtype);
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
+   Output: ((t.id)::agtype), ((count(*)))::agtype
+   WCOJ Algorithm: streaming merge intersection with delayed bag product
+   Planned Engine: merge
+   Actual Engine: merge
+   Fallback Reason: none
+   Source Count: 4
+   Adjacency Providers: 3
+   WCOJ Consumer: group count(key)
+   WCOJ Row Goal: 0
+   WCOJ Row Goal Source: none
+   Batched Payload Materialization: true
+   WCOJ Arity: 4
+   Seed Source: 4
+   Estimated Postings: 1=1, 2=3, 3=3, 4=1
+   Observed Postings: 1=2, 2=3, 3=4, 4=1
+   Stage Survivors: 1=0, 2=0, 3=0, 4=0
+   Cursor Advances: 4
+   Seek Calls: 0
+   Posting Rows Scanned: 10
+   Survivor Blocks: 1
+   Payload Scan Batches: 3
+   Payload Scan Restarts: 0
+   Payload Source Keys Scanned: 3
+   Distinct Source Keys Scanned: 3
+   Payload Scan Restarts Avoided: 0
+   Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
+   Payload Rows Matched: 9
+   Payload Rows Fetched: 10
+   Payload Block Budget Overruns: 0
+   Payload Block Capacity Clamps: 0
+   Peak Payload Block Rows: 9
+   Progressive Probes: 0
+   Progressive Matches: 0
+   Exact Set Filters: 0
+   Exact Set Candidates Tested: 0
+   Source Rows Scanned: 3
+   Distinct Source Keys: 3
+   Source Bag Rows: 3
+   Source Bag Keys: 3
+   Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
+   Source Bag Bytes: 888 bytes
+   Source Bag Memory Reserve: 888 bytes
+   Intersection Builds: 3
+   Intersection Merge Calls: 0
+   Intersection Galloping Calls: 0
+   Intersection Galloping Steps: 0
+   Payload Rows Rejected by Local Qual: 0
+   Local Predicate Rejects: 0
+   Matched Terminal Groups: 1
+   Candidate Flat Rows: 24
+   Candidate Bag Combinations: 24
+   Flat Rows Materialized: 0
+   Factorized Binding Enumerators: 1
+   Shared Factor Enumerator Steps: 0
+   Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 24
+   Consumer Flat Rows Avoided: 24
+   Row Goal Survivor Blocks Clamped: 0
+   Row Goal Reached: false
+   Count Result: 24
+   Uniqueness Constraint Groups: 0
+   Uniqueness Rejects: 0
+   Rows Emitted: 1
+   Rescans: 0
+   Peak WCOJ Memory: 330376 bytes
+   Peak Factor Memory: 136420 bytes
+   Payload Rows Spilled: 0
+   Payload Bucket Blocks Spilled: 0
+   Payload Bucket Rows Spilled: 0
+   Payload Bucket Bytes Spilled: 0 bytes
+   Spill Bytes: 0 bytes
+   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
+         Output: s1.id
+         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+         Rows Removed by Filter: 2
+   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
+         Output: s2.id
+         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+         Rows Removed by Filter: 2
+   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
+         Output: s3.id
+         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+         Rows Removed by Filter: 2
+   ->  Sort (actual rows=1.00 loops=1)
+         Output: t.id
+         Sort Key: t.id
+         Sort Method: quicksort  Memory: 25kB
+         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
+               Output: t.id
+(97 rows)
 
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('wcoj_lowering', $cypher$
-            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
-                  (s2:S {id: 2})-[e2:E]->(t),
-                  (s3:S {id: 3})-[e3:E]->(t)
-            RETURN id(t) AS key, count(*) AS total
-        $cypher$) AS (key agtype, total agtype)
-    $plan$
-    LOOP
-        has_wcoj := has_wcoj OR
-            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
-        has_group_consumer := has_group_consumer OR
-            plan_text LIKE '%WCOJ Consumer: group count(key)%';
-        has_count_result := has_count_result OR
-            plan_text LIKE '%Count Result: 24%';
-        has_flat_rows_avoided := has_flat_rows_avoided OR
-            plan_text LIKE '%Consumer Flat Rows Avoided: 24%';
-        has_one_row_emitted := has_one_row_emitted OR
-            plan_text LIKE '%Rows Emitted: 1%';
-    END LOOP;
-
-    IF NOT has_wcoj OR NOT has_group_consumer OR
-       NOT has_count_result OR NOT has_flat_rows_avoided OR
-       NOT has_one_row_emitted THEN
-        RAISE EXCEPTION
-            'WCOJ group-count consumer telemetry was not observed';
-    END IF;
-    RAISE NOTICE 'wcoj group-count consumer telemetry verified';
-END
-$wcoj_group_count_consumer_telemetry$;
-NOTICE:  wcoj group-count consumer telemetry verified
+ROLLBACK;
 SELECT key, total FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
@@ -3797,75 +4089,127 @@ NOTICE:  graph "wcoj_payload_budget" has been dropped
  
 (1 row)
 
-DO $wcoj_limit_row_goal_telemetry$
-DECLARE
-    plan_text text;
-    has_limit boolean := false;
-    has_wcoj boolean := false;
-    has_row_goal boolean := false;
-    has_row_goal_source boolean := false;
-    has_rows_emitted boolean := false;
-    has_flat_rows_materialized boolean := false;
-    has_row_goal_rows_emitted boolean := false;
-    has_row_goal_flat_rows_avoided boolean := false;
-    has_block_clamp boolean := false;
-    has_goal_reached boolean := false;
-    has_spill_bytes boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('age.wcoj_engine', 'merge', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s7:S {id: 7})-[e7:E]->(t:T),
+          (s8:S {id: 8})-[e8:E]->(t),
+          (s9:S {id: 9})-[e9:E]->(t)
+    RETURN id(e7), id(e8), id(e9), id(t)
+    LIMIT 1
+$$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype);
+                                                                QUERY PLAN                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------
+ Limit (actual rows=1.00 loops=1)
+   Output: ((e7.id)::agtype), ((e8.id)::agtype), ((e9.id)::agtype), ((t.id)::agtype)
+   ->  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
+         Output: (e7.id)::agtype, (e8.id)::agtype, (e9.id)::agtype, (t.id)::agtype
+         Filter: ((e7.end_id = t.id) AND (e7.end_id = e8.end_id) AND (e8.end_id = e9.end_id))
+         WCOJ Algorithm: streaming merge intersection with delayed bag product
+         Planned Engine: merge
+         Actual Engine: merge
+         Fallback Reason: none
+         Source Count: 4
+         Adjacency Providers: 3
+         WCOJ Consumer: rows
+         WCOJ Row Goal: 1
+         WCOJ Row Goal Source: limit
+         Batched Payload Materialization: true
+         WCOJ Arity: 4
+         Seed Source: 1
+         Estimated Postings: 1=4, 2=7, 3=7, 4=20
+         Observed Postings: 1=17, 2=17, 3=17, 4=5
+         Stage Survivors: 1=0, 2=0, 3=0, 4=0
+         Cursor Advances: 7
+         Seek Calls: 0
+         Posting Rows Scanned: 56
+         Survivor Blocks: 1
+         Payload Scan Batches: 3
+         Payload Scan Restarts: 0
+         Payload Source Keys Scanned: 3
+         Distinct Source Keys Scanned: 3
+         Payload Scan Restarts Avoided: 0
+         Payload Rows Scanned: 3
+         Payload Main Rows Scanned: 0
+         Payload Delta Rows Scanned: 3
+         Payload Rows After Survivor Filter: 3
+         Payload Rows Matched: 3
+         Payload Rows Fetched: 8
+         Payload Block Budget Overruns: 0
+         Payload Block Capacity Clamps: 0
+         Peak Payload Block Rows: 3
+         Progressive Probes: 0
+         Progressive Matches: 0
+         Exact Set Filters: 0
+         Exact Set Candidates Tested: 0
+         Source Rows Scanned: 3
+         Distinct Source Keys: 3
+         Source Bag Rows: 3
+         Source Bag Keys: 3
+         Factorized Binding Source Bags: 3
+         Binding Nodes Created: 1
+         Binding Node Source Bags: 1
+         Binding Node Edge Bags: 3
+         Binding Node Memory: 376 bytes
+         Source Bag Bytes: 888 bytes
+         Source Bag Memory Reserve: 888 bytes
+         Intersection Builds: 3
+         Intersection Merge Calls: 0
+         Intersection Galloping Calls: 0
+         Intersection Galloping Steps: 0
+         Payload Rows Rejected by Local Qual: 0
+         Local Predicate Rejects: 0
+         Matched Terminal Groups: 1
+         Candidate Flat Rows: 1
+         Candidate Bag Combinations: 1
+         Flat Rows Materialized: 1
+         Factorized Binding Enumerators: 1
+         Shared Factor Enumerator Steps: 4
+         Flat Rows Avoided: 0
+         Binding Node Flat Rows Avoided: 0
+         Consumer Flat Rows Avoided: 0
+         Row Goal Survivor Blocks Clamped: 1
+         Row Goal Rows Emitted: 1
+         Row Goal Flat Rows Avoided: 0
+         Row Goal Reached: true
+         Uniqueness Constraint Groups: 0
+         Uniqueness Rejects: 0
+         Rows Emitted: 1
+         Rescans: 0
+         Peak WCOJ Memory: 106496 bytes
+         Peak Factor Memory: 18268 bytes
+         Payload Rows Spilled: 0
+         Payload Bucket Blocks Spilled: 0
+         Payload Bucket Rows Spilled: 0
+         Payload Bucket Bytes Spilled: 0 bytes
+         Spill Bytes: 0 bytes
+         ->  Seq Scan on wcoj_lowering."S" s7 (actual rows=1.00 loops=1)
+               Output: s7.id
+               Filter: ((s7.properties @> '{"id": 7}'::agtype) AND agtype_object_field_equals(s7.properties, '"id"'::agtype, '7'::agtype))
+               Rows Removed by Filter: 8
+         ->  Seq Scan on wcoj_lowering."S" s8 (actual rows=1.00 loops=1)
+               Output: s8.id
+               Filter: ((s8.properties @> '{"id": 8}'::agtype) AND agtype_object_field_equals(s8.properties, '"id"'::agtype, '8'::agtype))
+               Rows Removed by Filter: 8
+         ->  Seq Scan on wcoj_lowering."S" s9 (actual rows=1.00 loops=1)
+               Output: s9.id
+               Filter: ((s9.properties @> '{"id": 9}'::agtype) AND agtype_object_field_equals(s9.properties, '"id"'::agtype, '9'::agtype))
+               Rows Removed by Filter: 8
+         ->  Sort (actual rows=5.00 loops=1)
+               Output: t.id
+               Sort Key: t.id
+               Sort Method: quicksort  Memory: 25kB
+               ->  Seq Scan on wcoj_lowering."T" t (actual rows=20.00 loops=1)
+                     Output: t.id
+(101 rows)
 
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('wcoj_lowering', $cypher$
-            MATCH (s7:S {id: 7})-[e7:E]->(t:T),
-                  (s8:S {id: 8})-[e8:E]->(t),
-                  (s9:S {id: 9})-[e9:E]->(t)
-            RETURN id(e7), id(e8), id(e9), id(t)
-            LIMIT 1
-        $cypher$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype)
-    $plan$
-    LOOP
-        has_limit := has_limit OR plan_text LIKE '%Limit%';
-        has_wcoj := has_wcoj OR
-            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
-        has_row_goal := has_row_goal OR
-            plan_text LIKE '%WCOJ Row Goal: 1%';
-        has_row_goal_source := has_row_goal_source OR
-            plan_text LIKE '%WCOJ Row Goal Source: limit%';
-        has_rows_emitted := has_rows_emitted OR
-            plan_text LIKE '%Rows Emitted: 1%';
-        has_flat_rows_materialized := has_flat_rows_materialized OR
-            plan_text LIKE '%Flat Rows Materialized: 1%';
-        has_row_goal_rows_emitted := has_row_goal_rows_emitted OR
-            plan_text LIKE '%Row Goal Rows Emitted: 1%';
-        has_row_goal_flat_rows_avoided :=
-            has_row_goal_flat_rows_avoided OR
-            plan_text LIKE '%Row Goal Flat Rows Avoided: 0%';
-        has_block_clamp := has_block_clamp OR
-            plan_text LIKE '%Row Goal Survivor Blocks Clamped: 1%';
-        has_goal_reached := has_goal_reached OR
-            plan_text LIKE '%Row Goal Reached: true%';
-        has_spill_bytes := has_spill_bytes OR
-            plan_text LIKE '%Spill Bytes: 0 bytes%';
-    END LOOP;
-
-    IF NOT has_limit OR NOT has_wcoj OR NOT has_row_goal OR
-       NOT has_row_goal_source OR
-       NOT has_rows_emitted OR NOT has_flat_rows_materialized OR
-       NOT has_row_goal_rows_emitted OR
-       NOT has_row_goal_flat_rows_avoided OR NOT has_block_clamp OR
-       NOT has_goal_reached OR NOT has_spill_bytes THEN
-        RAISE EXCEPTION 'WCOJ limit row-goal telemetry was not observed';
-    END IF;
-    RAISE NOTICE 'wcoj limit row-goal telemetry verified';
-END
-$wcoj_limit_row_goal_telemetry$;
-NOTICE:  wcoj limit row-goal telemetry verified
+ROLLBACK;
 SELECT ok FROM cypher('wcoj_lowering', $$
     RETURN EXISTS {
         MATCH (s7:S {id: 7})-[e7:E]->(t:T),
@@ -3879,79 +4223,128 @@ $$) AS (ok agtype);
  true
 (1 row)
 
-DO $wcoj_exists_row_goal_telemetry$
-DECLARE
-    plan_text text;
-    has_result boolean := false;
-    has_initplan boolean := false;
-    has_wcoj boolean := false;
-    has_exists_consumer boolean := false;
-    has_row_goal boolean := false;
-    has_row_goal_source boolean := false;
-    has_rows_emitted boolean := false;
-    has_row_goal_rows_emitted boolean := false;
-    has_row_goal_flat_rows_avoided boolean := false;
-    has_block_clamp boolean := false;
-    has_exists_result boolean := false;
-    has_goal_reached boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('age.wcoj_engine', 'merge', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    RETURN EXISTS {
+        MATCH (s7:S {id: 7})-[e7:E]->(t:T),
+              (s8:S {id: 8})-[e8:E]->(t),
+              (s9:S {id: 9})-[e9:E]->(t)
+        RETURN t
+    } AS ok
+$$) AS (ok agtype);
+                                                                 QUERY PLAN                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------
+ Result (actual rows=1.00 loops=1)
+   Output: ((InitPlan 1).col1)::agtype
+   InitPlan 1
+     ->  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
+           WCOJ Algorithm: streaming merge intersection with delayed bag product
+           Planned Engine: merge
+           Actual Engine: merge
+           Fallback Reason: none
+           Source Count: 4
+           Adjacency Providers: 3
+           WCOJ Consumer: exists
+           WCOJ Row Goal: 1
+           WCOJ Row Goal Source: exists
+           Batched Payload Materialization: true
+           WCOJ Arity: 4
+           Seed Source: 1
+           Estimated Postings: 1=4, 2=7, 3=7, 4=20
+           Observed Postings: 1=17, 2=17, 3=17, 4=5
+           Stage Survivors: 1=0, 2=0, 3=0, 4=0
+           Cursor Advances: 7
+           Seek Calls: 0
+           Posting Rows Scanned: 56
+           Survivor Blocks: 1
+           Payload Scan Batches: 3
+           Payload Scan Restarts: 0
+           Payload Source Keys Scanned: 3
+           Distinct Source Keys Scanned: 3
+           Payload Scan Restarts Avoided: 0
+           Payload Rows Scanned: 3
+           Payload Main Rows Scanned: 0
+           Payload Delta Rows Scanned: 3
+           Payload Rows After Survivor Filter: 3
+           Payload Rows Matched: 3
+           Payload Rows Fetched: 8
+           Payload Block Budget Overruns: 0
+           Payload Block Capacity Clamps: 0
+           Peak Payload Block Rows: 3
+           Progressive Probes: 0
+           Progressive Matches: 0
+           Exact Set Filters: 0
+           Exact Set Candidates Tested: 0
+           Source Rows Scanned: 3
+           Distinct Source Keys: 3
+           Source Bag Rows: 3
+           Source Bag Keys: 3
+           Factorized Binding Source Bags: 3
+           Binding Nodes Created: 1
+           Binding Node Source Bags: 1
+           Binding Node Edge Bags: 3
+           Binding Node Memory: 376 bytes
+           Source Bag Bytes: 888 bytes
+           Source Bag Memory Reserve: 888 bytes
+           Intersection Builds: 3
+           Intersection Merge Calls: 0
+           Intersection Galloping Calls: 0
+           Intersection Galloping Steps: 0
+           Payload Rows Rejected by Local Qual: 0
+           Local Predicate Rejects: 0
+           Matched Terminal Groups: 1
+           Candidate Flat Rows: 1
+           Candidate Bag Combinations: 1
+           Flat Rows Materialized: 0
+           Factorized Binding Enumerators: 1
+           Shared Factor Enumerator Steps: 4
+           Flat Rows Avoided: 0
+           Binding Node Flat Rows Avoided: 0
+           Consumer Flat Rows Avoided: 0
+           Row Goal Survivor Blocks Clamped: 1
+           Row Goal Rows Emitted: 1
+           Row Goal Flat Rows Avoided: 0
+           Row Goal Reached: true
+           Exists Result: true
+           Uniqueness Constraint Groups: 0
+           Uniqueness Rejects: 0
+           Rows Emitted: 1
+           Rescans: 0
+           Peak WCOJ Memory: 106496 bytes
+           Peak Factor Memory: 18268 bytes
+           Payload Rows Spilled: 0
+           Payload Bucket Blocks Spilled: 0
+           Payload Bucket Rows Spilled: 0
+           Payload Bucket Bytes Spilled: 0 bytes
+           Spill Bytes: 0 bytes
+           ->  Seq Scan on wcoj_lowering."S" s7 (actual rows=1.00 loops=1)
+                 Output: s7.id
+                 Filter: ((s7.properties @> '{"id": 7}'::agtype) AND agtype_object_field_equals(s7.properties, '"id"'::agtype, '7'::agtype))
+                 Rows Removed by Filter: 8
+           ->  Seq Scan on wcoj_lowering."S" s8 (actual rows=1.00 loops=1)
+                 Output: s8.id
+                 Filter: ((s8.properties @> '{"id": 8}'::agtype) AND agtype_object_field_equals(s8.properties, '"id"'::agtype, '8'::agtype))
+                 Rows Removed by Filter: 8
+           ->  Seq Scan on wcoj_lowering."S" s9 (actual rows=1.00 loops=1)
+                 Output: s9.id
+                 Filter: ((s9.properties @> '{"id": 9}'::agtype) AND agtype_object_field_equals(s9.properties, '"id"'::agtype, '9'::agtype))
+                 Rows Removed by Filter: 8
+           ->  Sort (actual rows=5.00 loops=1)
+                 Output: t.id
+                 Sort Key: t.id
+                 Sort Method: quicksort  Memory: 25kB
+                 ->  Seq Scan on wcoj_lowering."T" t (actual rows=20.00 loops=1)
+                       Output: t.id
+(101 rows)
 
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('wcoj_lowering', $cypher$
-            RETURN EXISTS {
-                MATCH (s7:S {id: 7})-[e7:E]->(t:T),
-                      (s8:S {id: 8})-[e8:E]->(t),
-                      (s9:S {id: 9})-[e9:E]->(t)
-                RETURN t
-            } AS ok
-        $cypher$) AS (ok agtype)
-    $plan$
-    LOOP
-        has_result := has_result OR plan_text LIKE '%Result%';
-        has_initplan := has_initplan OR plan_text LIKE '%InitPlan%';
-        has_wcoj := has_wcoj OR
-            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
-        has_exists_consumer := has_exists_consumer OR
-            plan_text LIKE '%WCOJ Consumer: exists%';
-        has_row_goal := has_row_goal OR
-            plan_text LIKE '%WCOJ Row Goal: 1%';
-        has_row_goal_source := has_row_goal_source OR
-            plan_text LIKE '%WCOJ Row Goal Source: exists%';
-        has_rows_emitted := has_rows_emitted OR
-            plan_text LIKE '%Rows Emitted: 1%';
-        has_row_goal_rows_emitted := has_row_goal_rows_emitted OR
-            plan_text LIKE '%Row Goal Rows Emitted: 1%';
-        has_row_goal_flat_rows_avoided :=
-            has_row_goal_flat_rows_avoided OR
-            plan_text LIKE '%Row Goal Flat Rows Avoided: 0%';
-        has_block_clamp := has_block_clamp OR
-            plan_text LIKE '%Row Goal Survivor Blocks Clamped: 1%';
-        has_exists_result := has_exists_result OR
-            plan_text LIKE '%Exists Result: true%';
-        has_goal_reached := has_goal_reached OR
-            plan_text LIKE '%Row Goal Reached: true%';
-    END LOOP;
-
-    IF NOT has_result OR NOT has_initplan OR NOT has_wcoj OR
-       NOT has_exists_consumer OR NOT has_row_goal OR
-       NOT has_row_goal_source OR NOT has_rows_emitted OR
-       NOT has_row_goal_rows_emitted OR
-       NOT has_row_goal_flat_rows_avoided OR NOT has_block_clamp OR
-       NOT has_exists_result OR
-       NOT has_goal_reached THEN
-        RAISE EXCEPTION 'WCOJ exists row-goal telemetry was not observed';
-    END IF;
-    RAISE NOTICE 'wcoj exists row-goal telemetry verified';
-END
-$wcoj_exists_row_goal_telemetry$;
-NOTICE:  wcoj exists row-goal telemetry verified
+ROLLBACK;
 -- Sparse overlap in progressive exact-set filtering should skip long runs in
 -- the larger candidate array instead of merge-walking every key.  The first
 -- branch has eighty terminals; the middle branch has three terminals; the
@@ -3985,54 +4378,122 @@ SELECT _graphid(_label_id('wcoj_lowering', 'E'),
        _graphid(_label_id('wcoj_lowering', 'T'), target_no),
        '{}'::agtype
 FROM generate_series(300, 379) target_no;
-DO $wcoj_galloping_intersection_telemetry$
-DECLARE
-    plan_text text;
-    has_wcoj boolean := false;
-    has_progressive_plan boolean := false;
-    has_galloping_calls boolean := false;
-    has_galloping_steps boolean := false;
-    has_three_rows boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('age.wcoj_engine', 'progressive', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'progressive';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s20:S {id: 20})-[e20:E]->(t:T),
+          (s21:S {id: 21})-[e21:E]->(t),
+          (s22:S {id: 22})-[e22:E]->(t)
+    RETURN id(e20), id(e21), id(e22), id(t)
+$$) AS (eid20 agtype, eid21 agtype, eid22 agtype, tid agtype);
+                                                               QUERY PLAN                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE WCOJ Multiway Join) (actual rows=3.00 loops=1)
+   Output: (e20.id)::agtype, (e21.id)::agtype, (e22.id)::agtype, (t.id)::agtype
+   Filter: ((e20.end_id = t.id) AND (e20.end_id = e21.end_id) AND (e21.end_id = e22.end_id))
+   WCOJ Algorithm: progressive seed filtering with delayed bag product
+   Planned Engine: progressive
+   Actual Engine: progressive
+   Fallback Reason: none
+   Source Count: 4
+   Adjacency Providers: 3
+   WCOJ Consumer: rows
+   WCOJ Row Goal: 0
+   WCOJ Row Goal Source: none
+   Batched Payload Materialization: true
+   WCOJ Arity: 4
+   Seed Source: 1
+   Estimated Postings: 1=4, 2=7, 3=7, 4=20
+   Observed Postings: 1=80, 2=3, 3=3, 4=100
+   Stage Survivors: 1=3, 2=3, 3=3, 4=3
+   Cursor Advances: 109
+   Seek Calls: 9
+   Posting Rows Scanned: 186
+   Survivor Blocks: 1
+   Payload Scan Batches: 3
+   Payload Scan Restarts: 0
+   Payload Source Keys Scanned: 3
+   Distinct Source Keys Scanned: 3
+   Payload Scan Restarts Avoided: 6
+   Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 0
+   Payload Delta Rows Scanned: 9
+   Payload Rows After Survivor Filter: 9
+   Payload Rows Matched: 9
+   Payload Rows Fetched: 109
+   Payload Block Budget Overruns: 0
+   Payload Block Capacity Clamps: 0
+   Peak Payload Block Rows: 9
+   Progressive Probes: 3
+   Progressive Matches: 3
+   Exact Set Filters: 2
+   Exact Set Candidates Tested: 83
+   Source Rows Scanned: 3
+   Distinct Source Keys: 3
+   Source Bag Rows: 3
+   Source Bag Keys: 3
+   Factorized Binding Source Bags: 3
+   Binding Nodes Created: 3
+   Binding Node Source Bags: 3
+   Binding Node Edge Bags: 9
+   Binding Node Memory: 376 bytes
+   Source Bag Bytes: 888 bytes
+   Source Bag Memory Reserve: 888 bytes
+   Intersection Builds: 3
+   Intersection Merge Calls: 1
+   Intersection Galloping Calls: 1
+   Intersection Galloping Steps: 25
+   Payload Rows Rejected by Local Qual: 0
+   Local Predicate Rejects: 0
+   Matched Terminal Groups: 3
+   Candidate Flat Rows: 3
+   Candidate Bag Combinations: 3
+   Flat Rows Materialized: 3
+   Factorized Binding Enumerators: 3
+   Shared Factor Enumerator Steps: 12
+   Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 0
+   Consumer Flat Rows Avoided: 0
+   Row Goal Survivor Blocks Clamped: 0
+   Row Goal Reached: false
+   Uniqueness Constraint Groups: 0
+   Uniqueness Rejects: 0
+   Rows Emitted: 3
+   Rescans: 0
+   Peak WCOJ Memory: 238528 bytes
+   Peak Factor Memory: 63384 bytes
+   Payload Rows Spilled: 0
+   Payload Bucket Blocks Spilled: 0
+   Payload Bucket Rows Spilled: 0
+   Payload Bucket Bytes Spilled: 0 bytes
+   Spill Bytes: 0 bytes
+   ->  Seq Scan on wcoj_lowering."S" s20 (actual rows=1.00 loops=1)
+         Output: s20.id
+         Filter: ((s20.properties @> '{"id": 20}'::agtype) AND agtype_object_field_equals(s20.properties, '"id"'::agtype, '20'::agtype))
+         Rows Removed by Filter: 11
+   ->  Seq Scan on wcoj_lowering."S" s21 (actual rows=1.00 loops=1)
+         Output: s21.id
+         Filter: ((s21.properties @> '{"id": 21}'::agtype) AND agtype_object_field_equals(s21.properties, '"id"'::agtype, '21'::agtype))
+         Rows Removed by Filter: 11
+   ->  Seq Scan on wcoj_lowering."S" s22 (actual rows=1.00 loops=1)
+         Output: s22.id
+         Filter: ((s22.properties @> '{"id": 22}'::agtype) AND agtype_object_field_equals(s22.properties, '"id"'::agtype, '22'::agtype))
+         Rows Removed by Filter: 11
+   ->  Sort (actual rows=100.00 loops=1)
+         Output: t.id
+         Sort Key: t.id
+         Sort Method: quicksort  Memory: 25kB
+         ->  Seq Scan on wcoj_lowering."T" t (actual rows=100.00 loops=1)
+               Output: t.id
+(97 rows)
 
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('wcoj_lowering', $cypher$
-            MATCH (s20:S {id: 20})-[e20:E]->(t:T),
-                  (s21:S {id: 21})-[e21:E]->(t),
-                  (s22:S {id: 22})-[e22:E]->(t)
-            RETURN id(e20), id(e21), id(e22), id(t)
-        $cypher$) AS (eid20 agtype, eid21 agtype,
-                      eid22 agtype, tid agtype)
-    $plan$
-    LOOP
-        has_wcoj := has_wcoj OR
-            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
-        has_progressive_plan := has_progressive_plan OR
-            plan_text LIKE '%Planned Engine: progressive%';
-        has_galloping_calls := has_galloping_calls OR
-            plan_text ~ 'Intersection Galloping Calls: [1-9][0-9]*';
-        has_galloping_steps := has_galloping_steps OR
-            plan_text ~ 'Intersection Galloping Steps: [1-9][0-9]*';
-        has_three_rows := has_three_rows OR
-            plan_text LIKE '%Rows Emitted: 3%';
-    END LOOP;
-
-    IF NOT has_wcoj OR NOT has_progressive_plan OR
-       NOT has_galloping_calls OR NOT has_galloping_steps OR
-       NOT has_three_rows THEN
-        RAISE EXCEPTION 'WCOJ galloping intersection telemetry was not observed';
-    END IF;
-    RAISE NOTICE 'wcoj galloping intersection telemetry verified';
-END
-$wcoj_galloping_intersection_telemetry$;
-NOTICE:  wcoj galloping intersection telemetry verified
+ROLLBACK;
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
 CREATE TEMP TABLE wcoj_survivor_batch_binary ON COMMIT DROP AS
@@ -4992,104 +5453,247 @@ ON wcoj_payload_spill."E" USING age_adjacency(start_id, id, end_id);
 ANALYZE wcoj_payload_spill."S";
 ANALYZE wcoj_payload_spill."T";
 ANALYZE wcoj_payload_spill."E";
-DO $wcoj_payload_spill_telemetry$
-DECLARE
-    plan_text text;
-    has_wcoj boolean := false;
-    has_count_consumer boolean := false;
-    has_batched boolean := false;
-    has_payload_spill_rows boolean := false;
-    has_spill_bytes boolean := false;
-    has_count_result boolean := false;
-BEGIN
-    PERFORM set_config('work_mem', '64kB', true);
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('age.wcoj_engine', 'merge', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
+BEGIN;
+SET LOCAL work_mem = '64kB';
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_payload_spill', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    WHERE e1.keep = true AND e2.keep = true AND e3.keep = true
+    RETURN count(*) AS total
+$$) AS (total agtype);
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
+   Output: ((count(*)))::agtype
+   WCOJ Algorithm: streaming merge intersection with delayed bag product
+   Planned Engine: merge
+   Actual Engine: merge
+   Fallback Reason: none
+   Source Count: 4
+   Adjacency Providers: 3
+   WCOJ Consumer: count(*)
+   WCOJ Row Goal: 0
+   WCOJ Row Goal Source: none
+   Batched Payload Materialization: true
+   WCOJ Arity: 4
+   Seed Source: 1
+   Estimated Postings: 1=4, 2=8, 3=8, 4=8
+   Observed Postings: 1=8, 2=8, 3=8, 4=8
+   Stage Survivors: 1=0, 2=0, 3=0, 4=0
+   Cursor Advances: 32
+   Seek Calls: 0
+   Posting Rows Scanned: 32
+   Survivor Blocks: 8
+   Payload Scan Batches: 24
+   Payload Scan Restarts: 0
+   Payload Source Keys Scanned: 24
+   Distinct Source Keys Scanned: 24
+   Payload Scan Restarts Avoided: 0
+   Payload Rows Scanned: 192
+   Payload Main Rows Scanned: 192
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 24
+   Payload Rows Matched: 24
+   Payload Rows Fetched: 32
+   Payload Block Budget Overruns: 8
+   Payload Block Capacity Clamps: 0
+   Peak Payload Block Rows: 3
+   Progressive Probes: 0
+   Progressive Matches: 0
+   Exact Set Filters: 0
+   Exact Set Candidates Tested: 0
+   Source Rows Scanned: 3
+   Distinct Source Keys: 3
+   Source Bag Rows: 3
+   Source Bag Keys: 3
+   Factorized Binding Source Bags: 3
+   Binding Nodes Created: 8
+   Binding Node Source Bags: 8
+   Binding Node Edge Bags: 24
+   Binding Node Memory: 376 bytes
+   Source Bag Bytes: 888 bytes
+   Source Bag Memory Reserve: 888 bytes
+   Intersection Builds: 3
+   Intersection Merge Calls: 0
+   Intersection Galloping Calls: 0
+   Intersection Galloping Steps: 0
+   Payload Rows Rejected by Local Qual: 0
+   Local Predicate Rejects: 0
+   Matched Terminal Groups: 8
+   Candidate Flat Rows: 8
+   Candidate Bag Combinations: 8
+   Flat Rows Materialized: 0
+   Factorized Binding Enumerators: 8
+   Shared Factor Enumerator Steps: 0
+   Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 8
+   Consumer Flat Rows Avoided: 8
+   Row Goal Survivor Blocks Clamped: 0
+   Row Goal Reached: false
+   Count Result: 8
+   Uniqueness Constraint Groups: 0
+   Uniqueness Rejects: 0
+   Rows Emitted: 1
+   Rescans: 0
+   Peak WCOJ Memory: 140184 bytes
+   Peak Factor Memory: 17380 bytes
+   Payload Rows Spilled: 24
+   Payload Bucket Blocks Spilled: 24
+   Payload Bucket Rows Spilled: 24
+   Payload Bucket Bytes Spilled: 2016 bytes
+   Spill Bytes: 483360 bytes
+   ->  Seq Scan on wcoj_payload_spill."S" s1 (actual rows=1.00 loops=1)
+         Output: s1.id
+         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+         Rows Removed by Filter: 2
+   ->  Seq Scan on wcoj_payload_spill."S" s2 (actual rows=1.00 loops=1)
+         Output: s2.id
+         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+         Rows Removed by Filter: 2
+   ->  Seq Scan on wcoj_payload_spill."S" s3 (actual rows=1.00 loops=1)
+         Output: s3.id
+         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+         Rows Removed by Filter: 2
+   ->  Sort (actual rows=8.00 loops=1)
+         Output: t.id
+         Sort Key: t.id
+         Sort Method: quicksort  Memory: 25kB
+         ->  Seq Scan on wcoj_payload_spill."T" t (actual rows=8.00 loops=1)
+               Output: t.id
+(97 rows)
 
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('wcoj_payload_spill', $cypher$
-            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
-                  (s2:S {id: 2})-[e2:E]->(t),
-                  (s3:S {id: 3})-[e3:E]->(t)
-            WHERE e1.keep = true AND e2.keep = true AND e3.keep = true
-            RETURN count(*) AS total
-        $cypher$) AS (total agtype)
-    $plan$
-    LOOP
-        has_wcoj := has_wcoj OR
-            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
-        has_count_consumer := has_count_consumer OR
-            plan_text LIKE '%WCOJ Consumer: count(*)%';
-        has_batched := has_batched OR
-            plan_text LIKE '%Batched Payload Materialization: true%';
-        has_payload_spill_rows := has_payload_spill_rows OR
-            plan_text ~ 'Payload Rows Spilled: [1-9][0-9]*';
-        has_spill_bytes := has_spill_bytes OR
-            plan_text ~ 'Spill Bytes: [1-9][0-9]* bytes';
-        has_count_result := has_count_result OR
-            plan_text LIKE '%Count Result: 8%';
-    END LOOP;
+ROLLBACK;
+BEGIN;
+SET LOCAL work_mem = '64kB';
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_payload_spill', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    WHERE e1.keep = true AND e2.keep = true AND e3.keep = true
+    RETURN e1, id(t)
+    LIMIT 1
+$$) AS (e1 agtype, tid agtype);
+                                                                                                                                                                  QUERY PLAN                                                                                                                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit (actual rows=1.00 loops=1)
+   Output: (CASE WHEN (e1.id IS NOT NULL) THEN _agtype_build_edge_label('17852'::oid, e1.id, e1.start_id, e1.end_id, e1.properties) ELSE NULL::agtype END), ((t.id)::agtype)
+   ->  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
+         Output: CASE WHEN (e1.id IS NOT NULL) THEN _agtype_build_edge_label('17852'::oid, e1.id, e1.start_id, e1.end_id, e1.properties) ELSE NULL::agtype END, (t.id)::agtype
+         Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND agtype_object_field_equals(e1.properties, '"keep"'::agtype, 'true'::agtype) AND (e2.end_id = e3.end_id) AND agtype_object_field_equals(e2.properties, '"keep"'::agtype, 'true'::agtype) AND agtype_object_field_equals(e3.properties, '"keep"'::agtype, 'true'::agtype))
+         WCOJ Algorithm: streaming merge intersection with delayed bag product
+         Planned Engine: merge
+         Actual Engine: merge
+         Fallback Reason: none
+         Source Count: 4
+         Adjacency Providers: 3
+         WCOJ Consumer: rows
+         WCOJ Row Goal: 1
+         WCOJ Row Goal Source: limit
+         Batched Payload Materialization: true
+         WCOJ Arity: 4
+         Seed Source: 1
+         Estimated Postings: 1=4, 2=8, 3=8, 4=8
+         Observed Postings: 1=8, 2=8, 3=8, 4=2
+         Stage Survivors: 1=0, 2=0, 3=0, 4=0
+         Cursor Advances: 4
+         Seek Calls: 0
+         Posting Rows Scanned: 26
+         Survivor Blocks: 1
+         Payload Scan Batches: 3
+         Payload Scan Restarts: 0
+         Payload Source Keys Scanned: 3
+         Distinct Source Keys Scanned: 3
+         Payload Scan Restarts Avoided: 0
+         Payload Rows Scanned: 24
+         Payload Main Rows Scanned: 24
+         Payload Delta Rows Scanned: 0
+         Payload Rows After Survivor Filter: 3
+         Payload Rows Matched: 3
+         Payload Rows Fetched: 5
+         Payload Block Budget Overruns: 1
+         Payload Block Capacity Clamps: 0
+         Peak Payload Block Rows: 3
+         Progressive Probes: 0
+         Progressive Matches: 0
+         Exact Set Filters: 0
+         Exact Set Candidates Tested: 0
+         Source Rows Scanned: 3
+         Distinct Source Keys: 3
+         Source Bag Rows: 3
+         Source Bag Keys: 3
+         Factorized Binding Source Bags: 3
+         Binding Nodes Created: 1
+         Binding Node Source Bags: 1
+         Binding Node Edge Bags: 3
+         Binding Node Memory: 376 bytes
+         Source Bag Bytes: 888 bytes
+         Source Bag Memory Reserve: 888 bytes
+         Intersection Builds: 3
+         Intersection Merge Calls: 0
+         Intersection Galloping Calls: 0
+         Intersection Galloping Steps: 0
+         Payload Rows Rejected by Local Qual: 0
+         Local Predicate Rejects: 0
+         Matched Terminal Groups: 1
+         Candidate Flat Rows: 1
+         Candidate Bag Combinations: 1
+         Flat Rows Materialized: 1
+         Factorized Binding Enumerators: 1
+         Shared Factor Enumerator Steps: 4
+         Flat Rows Avoided: 0
+         Binding Node Flat Rows Avoided: 0
+         Consumer Flat Rows Avoided: 0
+         Row Goal Survivor Blocks Clamped: 1
+         Row Goal Rows Emitted: 1
+         Row Goal Flat Rows Avoided: 0
+         Row Goal Reached: true
+         Uniqueness Constraint Groups: 0
+         Uniqueness Rejects: 0
+         Rows Emitted: 1
+         Rescans: 0
+         Peak WCOJ Memory: 131480 bytes
+         Peak Factor Memory: 13148 bytes
+         Payload Rows Spilled: 3
+         Payload Bucket Blocks Spilled: 1
+         Payload Bucket Rows Spilled: 1
+         Payload Bucket Bytes Spilled: 84 bytes
+         Spill Bytes: 60252 bytes
+         ->  Seq Scan on wcoj_payload_spill."S" s1 (actual rows=1.00 loops=1)
+               Output: s1.id
+               Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+               Rows Removed by Filter: 2
+         ->  Seq Scan on wcoj_payload_spill."S" s2 (actual rows=1.00 loops=1)
+               Output: s2.id
+               Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+               Rows Removed by Filter: 2
+         ->  Seq Scan on wcoj_payload_spill."S" s3 (actual rows=1.00 loops=1)
+               Output: s3.id
+               Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+               Rows Removed by Filter: 2
+         ->  Sort (actual rows=2.00 loops=1)
+               Output: t.id
+               Sort Key: t.id
+               Sort Method: quicksort  Memory: 25kB
+               ->  Seq Scan on wcoj_payload_spill."T" t (actual rows=8.00 loops=1)
+                     Output: t.id
+(101 rows)
 
-    IF NOT has_wcoj OR NOT has_count_consumer OR NOT has_batched OR
-       NOT has_payload_spill_rows OR NOT has_spill_bytes OR
-       NOT has_count_result THEN
-        RAISE EXCEPTION 'WCOJ payload spill telemetry was not observed';
-    END IF;
-    RAISE NOTICE 'wcoj payload spill telemetry verified';
-END
-$wcoj_payload_spill_telemetry$;
-NOTICE:  wcoj payload spill telemetry verified
-DO $wcoj_payload_spill_restore$
-DECLARE
-    plan_text text;
-    has_wcoj boolean := false;
-    has_payload_spill_rows boolean := false;
-    has_spill_bytes boolean := false;
-    has_rows_emitted boolean := false;
-BEGIN
-    PERFORM set_config('work_mem', '64kB', true);
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('age.wcoj_engine', 'merge', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('wcoj_payload_spill', $cypher$
-            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
-                  (s2:S {id: 2})-[e2:E]->(t),
-                  (s3:S {id: 3})-[e3:E]->(t)
-            WHERE e1.keep = true AND e2.keep = true AND e3.keep = true
-            RETURN e1, id(t)
-            LIMIT 1
-        $cypher$) AS (e1 agtype, tid agtype)
-    $plan$
-    LOOP
-        has_wcoj := has_wcoj OR
-            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
-        has_payload_spill_rows := has_payload_spill_rows OR
-            plan_text ~ 'Payload Rows Spilled: [1-9][0-9]*';
-        has_spill_bytes := has_spill_bytes OR
-            plan_text ~ 'Spill Bytes: [1-9][0-9]* bytes';
-        has_rows_emitted := has_rows_emitted OR
-            plan_text LIKE '%Rows Emitted: 1%';
-    END LOOP;
-
-    IF NOT has_wcoj OR NOT has_payload_spill_rows OR
-       NOT has_spill_bytes OR NOT has_rows_emitted THEN
-        RAISE EXCEPTION 'WCOJ payload spill restore path was not observed';
-    END IF;
-    RAISE NOTICE 'wcoj payload spill restore verified';
-END
-$wcoj_payload_spill_restore$;
-NOTICE:  wcoj payload spill restore verified
+ROLLBACK;
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
 CREATE TEMP TABLE wcoj_payload_spill_binary ON COMMIT DROP AS
@@ -5212,42 +5816,55 @@ ANALYZE wcoj_mixed."T";
 ANALYZE wcoj_mixed."E1";
 ANALYZE wcoj_mixed."E2";
 ANALYZE wcoj_mixed."E3";
-DO $wcoj_mixed_plan$
-DECLARE
-    plan_text text;
-    has_wcoj boolean := false;
-    has_three_adjacency_providers boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('age.wcoj_engine', 'leapfrog', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'leapfrog';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('wcoj_mixed', $$
+    MATCH (s1:S {id: 1})-[e1:E1]->(t:T),
+          (s2:S {id: 2})<-[e2:E2]-(t),
+          (s3:S {id: 3})-[e3:E3]->(t)
+    RETURN id(e1), id(e2), id(e3), id(t)
+$$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE WCOJ Multiway Join)
+   Output: (e1.id)::agtype, (e2.id)::agtype, (e3.id)::agtype, (t.id)::agtype
+   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.start_id) AND (e2.start_id = e3.end_id))
+   WCOJ Algorithm: provider leapfrog intersection with delayed bag product
+   Planned Engine: leapfrog
+   Actual Engine: leapfrog
+   Fallback Reason: none
+   Source Count: 4
+   Adjacency Providers: 3
+   WCOJ Consumer: rows
+   WCOJ Row Goal: 0
+   WCOJ Row Goal Source: none
+   Batched Payload Materialization: true
+   WCOJ Arity: 4
+   Seed Source: 1
+   Estimated Postings: 1=1, 2=3, 3=4, 4=1
+   ->  Seq Scan on wcoj_mixed."S" s1
+         Output: s1.id
+         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on wcoj_mixed."S" s2
+         Output: s2.id
+         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on wcoj_mixed."S" s3
+         Output: s3.id
+         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Sort
+         Output: t.id
+         Sort Key: t.id
+         ->  Seq Scan on wcoj_mixed."T" t
+               Output: t.id
+(30 rows)
 
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (VERBOSE, COSTS OFF)
-        SELECT *
-        FROM cypher('wcoj_mixed', $cypher$
-            MATCH (s1:S {id: 1})-[e1:E1]->(t:T),
-                  (s2:S {id: 2})<-[e2:E2]-(t),
-                  (s3:S {id: 3})-[e3:E3]->(t)
-            RETURN id(e1), id(e2), id(e3), id(t)
-        $cypher$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype)
-    $plan$
-    LOOP
-        has_wcoj := has_wcoj OR
-            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
-        has_three_adjacency_providers := has_three_adjacency_providers OR
-            plan_text LIKE '%Adjacency Providers: 3%';
-    END LOOP;
-
-    IF NOT has_wcoj OR NOT has_three_adjacency_providers THEN
-        RAISE EXCEPTION 'mixed label/direction star did not use direct WCOJ';
-    END IF;
-    RAISE NOTICE 'wcoj mixed label and direction providers verified';
-END
-$wcoj_mixed_plan$;
-NOTICE:  wcoj mixed label and direction providers verified
+ROLLBACK;
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
 CREATE TEMP TABLE wcoj_mixed_binary ON COMMIT DROP AS
@@ -5442,87 +6059,214 @@ ANALYZE wcoj_generic."E";
 ANALYZE wcoj_generic."E1";
 ANALYZE wcoj_generic."E2";
 ANALYZE wcoj_generic."E3";
-DO $wcoj_generic_plan$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_variable_count boolean := false;
-    has_provider_count boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM cypher('wcoj_generic', $$
+    MATCH (a:N {case:'tri'})-[e1:E {case:'tri'}]->(b:N)
+          -[e2:E {case:'tri'}]->(c:N)
+          -[e3:E {case:'tri'}]->(a)
+    RETURN id(a), id(b), id(c), id(e1), id(e2), id(e3)
+$$) AS (a agtype, b agtype, c agtype,
+        e1 agtype, e2 agtype, e3 agtype);
+                                                                  QUERY PLAN                                                                   
+-----------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE Generic Multiway Join)
+   Output: (a.id)::agtype, (b.id)::agtype, (c.id)::agtype, (e1.id)::agtype, (e2.id)::agtype, (e3.id)::agtype
+   Filter: (_ag_enforce_edge_uniqueness3(e1.id, e2.id, e3.id) AND (e1.start_id = e3.end_id) AND (e2.end_id = e3.start_id))
+   Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
+   Generic Join Consumer: rows
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
+   Generic Join Provider Mode: eager sorted array
+   Lazy Physical Provider: false
+   Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
+   Variable Order: 1(rti=4), 2(rti=6), 3(rti=8)
+   Component Count: 1
+   Component IDs: 1, 1, 1
+   Reduction Shape: cyclic-core
+   GHD Mode: general GHD
+   GHD General Decomposition: true
+   GHD Fallback Reason: none
+   Reduction Descriptor Source: graph-join-match-ir
+   Reduction Order: none
+   Reduction Order Edges: 0
+   Yannakakis Step Count: 0
+   Yannakakis Bottom-Up Steps: 0
+   Yannakakis Top-Down Steps: 0
+   Yannakakis Step Plan: none
+   Yannakakis Step Filter Mode: global-domain provider filter
+   Reduction Core Variables: 3
+   Reduction Tail Separators: 0
+   GHD Bag Count: 1
+   GHD Bags: bag 1 cyclic-core: vars 1,2,3 providers 4,5,6
+   GHD Separator Count: 0
+   GHD Separators: none
+   GHD Descriptor Source: graph-join-match-ir
+   Variable Count: 3
+   Provider Count: 6
+   ->  Seq Scan on wcoj_generic."N" a
+         Output: a.id
+         Filter: ((a.properties @> '{"case": "tri"}'::agtype) AND agtype_object_field_equals(a.properties, '"case"'::agtype, '"tri"'::agtype))
+   ->  Seq Scan on wcoj_generic."N" b
+         Output: b.id
+   ->  Seq Scan on wcoj_generic."N" c
+         Output: c.id
+   ->  Seq Scan on wcoj_generic."E" e1
+         Output: e1.id, e1.start_id, e1.end_id
+         Filter: agtype_object_field_equals(e1.properties, '"case"'::agtype, '"tri"'::agtype)
+   ->  Seq Scan on wcoj_generic."E" e2
+         Output: e2.id, e2.end_id, e2.start_id
+         Filter: agtype_object_field_equals(e2.properties, '"case"'::agtype, '"tri"'::agtype)
+   ->  Seq Scan on wcoj_generic."E" e3
+         Output: e3.id, e3.end_id, e3.start_id
+         Filter: agtype_object_field_equals(e3.properties, '"case"'::agtype, '"tri"'::agtype)
+(50 rows)
 
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (VERBOSE, COSTS OFF)
-        SELECT *
-        FROM cypher('wcoj_generic', $cypher$
-            MATCH (a:N {case:'tri'})-[e1:E {case:'tri'}]->(b:N)
-                  -[e2:E {case:'tri'}]->(c:N)
-                  -[e3:E {case:'tri'}]->(a)
-            RETURN id(a), id(b), id(c), id(e1), id(e2), id(e3)
-        $cypher$) AS (a agtype, b agtype, c agtype,
-                      e1 agtype, e2 agtype, e3 agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_variable_count := has_variable_count OR
-            plan_text LIKE '%Variable Count: 3%';
-        has_provider_count := has_provider_count OR
-            plan_text LIKE '%Provider Count: 6%';
-    END LOOP;
+ROLLBACK;
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_generic', $$
+    MATCH (a:N {case:'self'})-[:E {case:'self'}]->(b:N)
+          -[:E {case:'self'}]->(c:N)
+          -[:E {case:'self'}]->(a)
+    RETURN id(a), id(b), id(c)
+$$) AS (a agtype, b agtype, c agtype);
+                                                                                                                       QUERY PLAN                                                                                                                        
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE Generic Multiway Join) (actual rows=0.00 loops=1)
+   Output: (a.id)::agtype, (b.id)::agtype, (c.id)::agtype
+   Filter: (_ag_enforce_edge_uniqueness3(_age_default_alias_0.id, _age_default_alias_1.id, _age_default_alias_2.id) AND (_age_default_alias_0.start_id = _age_default_alias_2.end_id) AND (_age_default_alias_1.end_id = _age_default_alias_2.start_id))
+   Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
+   Generic Join Consumer: rows
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
+   Generic Join Provider Mode: eager sorted array
+   Lazy Physical Provider: false
+   Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
+   Variable Order: 1(rti=4), 2(rti=6), 3(rti=8)
+   Component Count: 1
+   Component IDs: 1, 1, 1
+   Reduction Shape: cyclic-core
+   GHD Mode: general GHD
+   GHD General Decomposition: true
+   GHD Fallback Reason: none
+   Reduction Descriptor Source: graph-join-match-ir
+   Reduction Order: none
+   Reduction Order Edges: 0
+   Yannakakis Step Count: 0
+   Yannakakis Bottom-Up Steps: 0
+   Yannakakis Top-Down Steps: 0
+   Yannakakis Step Plan: none
+   Yannakakis Step Filter Mode: global-domain provider filter
+   Reduction Core Variables: 3
+   Reduction Tail Separators: 0
+   GHD Bag Count: 1
+   GHD Bags: bag 1 cyclic-core: vars 1,2,3 providers 4,5,6
+   GHD Separator Count: 0
+   GHD Separators: none
+   GHD Descriptor Source: graph-join-match-ir
+   Variable Count: 3
+   Provider Count: 6
+   Provider Rows Materialized: 46
+   Provider Tuples Materialized: 0
+   Provider Full Materialization: true
+   Provider Rows Read: 46
+   Provider Row Bytes Allocated: 30720 bytes
+   Provider Tuple Bytes Copied: 0 bytes
+   Semijoin Reduction Passes: 2
+   Yannakakis Bottom-Up Passes: 0
+   Yannakakis Top-Down Passes: 0
+   Yannakakis Steps Applied: 0
+   Yannakakis Bottom-Up Steps Applied: 0
+   Yannakakis Top-Down Steps Applied: 0
+   Reduction Order Applied: false
+   Semijoin Rows Removed: 40
+   Yannakakis Bottom-Up Rows Removed: 0
+   Yannakakis Top-Down Rows Removed: 0
+   Semijoin Provider Rows After: 6
+   Semijoin Final Domain Keys: 3
+   GHD Separator Reduction Passes: 0
+   GHD Leaf Tail Providers: 0
+   GHD Descriptor Separators Applied: 0
+   GHD Tail Domain Propagation Passes: 0
+   GHD Tail Domain Rows Removed: 0
+   GHD Separator Domain Keys: 0
+   GHD Leaf Tail Rows Removed: 0
+   GHD Cyclic Core Rows Removed: 0
+   Reduction Domain Builds: 18
+   Reduction Domain Rows Scanned: 58
+   Reduction Domain Keys Produced: 58
+   Reduction Domain Sorts: 0
+   Reduction Domain Sort Rows: 0
+   Complete Bindings: 1
+   Candidate Flat Rows: 1
+   Candidate Bag Combinations: 0
+   Flat Rows Materialized: 0
+   Flat Rows Avoided: 1
+   Consumer Flat Rows Avoided: 0
+   Row Goal Reached: false
+   Lazy Domain Views: 9
+   Lazy Domain Keys Scanned: 9
+   Domain Scratch Allocations: 3
+   Domain Scratch Reuses: 0
+   Runtime Domain Builds: 9
+   Runtime Domain Rows Scanned: 9
+   Prefix Range Builds: 6
+   Prefix Range Reuses: 0
+   Prefix Range Directory Searches: 0
+   Prefix Range Cursor Reuses: 0
+   Prefix Range Cache Hits: 0
+   Prefix Range Cache Misses: 6
+   Child Range Cache Hits: 3
+   Child Range Cache Misses: 6
+   Trie Child Range Reuses: 3
+   Trie Child Range Opens: 6
+   Trie Prefix Range Seeks: 6
+   Trie Pair Range Opens: 3
+   Reduction Scratch Allocations: 1
+   Reduction Scratch Reuses: 11
+   Vector Intersection Merge Calls: 16
+   Vector Intersection Galloping Calls: 2
+   Vector Intersection Galloping Steps: 18
+   Uniqueness Constraint Groups: 1
+   Uniqueness Rejects: 1
+   Rows Emitted: 0
+   Rescans: 0
+   Peak Generic Join Memory: 140288 bytes
+   Spill Bytes: 0 bytes
+   ->  Seq Scan on wcoj_generic."N" a (actual rows=1.00 loops=1)
+         Output: a.id
+         Filter: ((a.properties @> '{"case": "self"}'::agtype) AND agtype_object_field_equals(a.properties, '"case"'::agtype, '"self"'::agtype))
+         Rows Removed by Filter: 20
+   ->  Seq Scan on wcoj_generic."N" b (actual rows=21.00 loops=1)
+         Output: b.id
+   ->  Seq Scan on wcoj_generic."N" c (actual rows=21.00 loops=1)
+         Output: c.id
+   ->  Seq Scan on wcoj_generic."E" _age_default_alias_0 (actual rows=1.00 loops=1)
+         Output: _age_default_alias_0.id, _age_default_alias_0.start_id, _age_default_alias_0.end_id
+         Filter: agtype_object_field_equals(_age_default_alias_0.properties, '"case"'::agtype, '"self"'::agtype)
+         Rows Removed by Filter: 24
+   ->  Seq Scan on wcoj_generic."E" _age_default_alias_1 (actual rows=1.00 loops=1)
+         Output: _age_default_alias_1.id, _age_default_alias_1.end_id, _age_default_alias_1.start_id
+         Filter: agtype_object_field_equals(_age_default_alias_1.properties, '"case"'::agtype, '"self"'::agtype)
+         Rows Removed by Filter: 24
+   ->  Seq Scan on wcoj_generic."E" _age_default_alias_2 (actual rows=1.00 loops=1)
+         Output: _age_default_alias_2.id, _age_default_alias_2.end_id, _age_default_alias_2.start_id
+         Filter: agtype_object_field_equals(_age_default_alias_2.properties, '"case"'::agtype, '"self"'::agtype)
+         Rows Removed by Filter: 24
+(121 rows)
 
-    IF NOT has_generic OR NOT has_variable_count OR NOT has_provider_count THEN
-        RAISE EXCEPTION 'cyclic component did not use AGE Generic Join';
-    END IF;
-    RAISE NOTICE 'wcoj generic join logical IR verified';
-END
-$wcoj_generic_plan$;
-NOTICE:  wcoj generic join logical IR verified
-DO $wcoj_generic_factor_telemetry$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_candidate_flat_rows boolean := false;
-    has_candidate_combinations boolean := false;
-    has_flat_rows_avoided boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('wcoj_generic', $cypher$
-            MATCH (a:N {case:'self'})-[:E {case:'self'}]->(b:N)
-                  -[:E {case:'self'}]->(c:N)
-                  -[:E {case:'self'}]->(a)
-            RETURN id(a), id(b), id(c)
-        $cypher$) AS (a agtype, b agtype, c agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_candidate_flat_rows := has_candidate_flat_rows OR
-            plan_text LIKE '%Candidate Flat Rows: 1%';
-        has_candidate_combinations := has_candidate_combinations OR
-            plan_text LIKE '%Candidate Bag Combinations: 0%';
-        has_flat_rows_avoided := has_flat_rows_avoided OR
-            plan_text LIKE '%Flat Rows Avoided: 1%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_candidate_flat_rows OR
-       NOT has_candidate_combinations OR NOT has_flat_rows_avoided THEN
-        RAISE EXCEPTION 'Generic Join factorized telemetry was not observed';
-    END IF;
-    RAISE NOTICE 'wcoj generic join factorized telemetry verified';
-END
-$wcoj_generic_factor_telemetry$;
-NOTICE:  wcoj generic join factorized telemetry verified
+ROLLBACK;
 BEGIN;
 CREATE TEMP TABLE wcoj_generic_summary (
     case_name text,
@@ -5874,7 +6618,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Yannakakis Bottom-Up Steps: 3
    Yannakakis Top-Down Steps: 3
    Yannakakis Step Plan: bottom-up: provider 7 v2->v4 on v4(key2), provider 6 v1->v4 on v4(key2), provider 5 v3->v1 on v1(key1); top-down: provider 5 v1->v3 on v3(key2), provider 6 v4->v1 on v1(key1), provider 7 v4->v2 on v2(key1)
-   Yannakakis Step Filter Mode: global-domain provider filter
+   Yannakakis Step Filter Mode: planned step-domain provider filter
    Reduction Core Variables: 2
    Reduction Tail Separators: 0
    GHD Bag Count: 0
@@ -5910,11 +6654,11 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    GHD Separator Domain Keys: 0
    GHD Leaf Tail Rows Removed: 0
    GHD Cyclic Core Rows Removed: 0
-   Reduction Domain Builds: 20
-   Reduction Domain Rows Scanned: 1544
-   Reduction Domain Keys Produced: 1036
-   Reduction Domain Sorts: 4
-   Reduction Domain Sort Rows: 512
+   Reduction Domain Builds: 70
+   Reduction Domain Rows Scanned: 3880
+   Reduction Domain Keys Produced: 2610
+   Reduction Domain Sorts: 10
+   Reduction Domain Sort Rows: 1280
    Complete Bindings: 128
    Candidate Flat Rows: 128
    Candidate Bag Combinations: 128
@@ -5941,15 +6685,15 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Trie Prefix Range Seeks: 134
    Trie Pair Range Opens: 384
    Reduction Scratch Allocations: 1
-   Reduction Scratch Reuses: 11
-   Vector Intersection Merge Calls: 271
-   Vector Intersection Galloping Calls: 1
-   Vector Intersection Galloping Steps: 1
+   Reduction Scratch Reuses: 41
+   Vector Intersection Merge Calls: 299
+   Vector Intersection Galloping Calls: 3
+   Vector Intersection Galloping Steps: 3
    Uniqueness Constraint Groups: 1
    Uniqueness Rejects: 0
    Rows Emitted: 128
    Rescans: 0
-   Peak Generic Join Memory: 156736 bytes
+   Peak Generic Join Memory: 152640 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on wcoj_generic."B" b (actual rows=1.00 loops=1)
          Output: b.id
@@ -6079,7 +6823,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, u agtype, v agtype,
    Yannakakis Bottom-Up Steps: 4
    Yannakakis Top-Down Steps: 4
    Yannakakis Step Plan: bottom-up: provider 10 v3->v4 on v4(key2), provider 9 v2->v6 on v6(key2), provider 8 v1->v6 on v6(key2), provider 7 v5->v1 on v1(key1); top-down: provider 7 v1->v5 on v5(key2), provider 8 v6->v1 on v1(key1), provider 9 v6->v2 on v2(key1), provider 10 v4->v3 on v3(key1)
-   Yannakakis Step Filter Mode: global-domain provider filter
+   Yannakakis Step Filter Mode: planned step-domain provider filter
    Reduction Core Variables: 2
    Reduction Tail Separators: 0
    GHD Bag Count: 0
@@ -6115,11 +6859,11 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, u agtype, v agtype,
    GHD Separator Domain Keys: 0
    GHD Leaf Tail Rows Removed: 0
    GHD Cyclic Core Rows Removed: 0
-   Reduction Domain Builds: 28
-   Reduction Domain Rows Scanned: 1552
-   Reduction Domain Keys Produced: 1044
-   Reduction Domain Sorts: 4
-   Reduction Domain Sort Rows: 512
+   Reduction Domain Builds: 126
+   Reduction Domain Rows Scanned: 5460
+   Reduction Domain Keys Produced: 3682
+   Reduction Domain Sorts: 14
+   Reduction Domain Sort Rows: 1792
    Complete Bindings: 128
    Candidate Flat Rows: 128
    Candidate Bag Combinations: 128
@@ -6146,15 +6890,15 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, u agtype, v agtype,
    Trie Prefix Range Seeks: 137
    Trie Pair Range Opens: 512
    Reduction Scratch Allocations: 1
-   Reduction Scratch Reuses: 15
-   Vector Intersection Merge Calls: 277
-   Vector Intersection Galloping Calls: 1
-   Vector Intersection Galloping Steps: 1
+   Reduction Scratch Reuses: 71
+   Vector Intersection Merge Calls: 331
+   Vector Intersection Galloping Calls: 3
+   Vector Intersection Galloping Steps: 3
    Uniqueness Constraint Groups: 1
    Uniqueness Rejects: 0
    Rows Emitted: 128
    Rescans: 0
-   Peak Generic Join Memory: 156736 bytes
+   Peak Generic Join Memory: 152640 bytes
    Spill Bytes: 0 bytes
    Buffers: shared hit=11
    ->  Seq Scan on wcoj_generic."B" b (actual rows=1.00 loops=1)
@@ -6345,7 +7089,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    Yannakakis Bottom-Up Steps: 4
    Yannakakis Top-Down Steps: 4
    Yannakakis Step Plan: bottom-up: provider 9 v3->v5 on v5(key2), provider 8 v2->v5 on v5(key2), provider 7 v1->v5 on v5(key2), provider 6 v4->v1 on v1(key1); top-down: provider 6 v1->v4 on v4(key2), provider 7 v5->v1 on v1(key1), provider 8 v5->v2 on v2(key1), provider 9 v5->v3 on v3(key1)
-   Yannakakis Step Filter Mode: global-domain provider filter
+   Yannakakis Step Filter Mode: planned step-domain provider filter
    Reduction Core Variables: 2
    Reduction Tail Separators: 0
    GHD Bag Count: 0
@@ -6381,11 +7125,11 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    GHD Separator Domain Keys: 0
    GHD Leaf Tail Rows Removed: 0
    GHD Cyclic Core Rows Removed: 0
-   Reduction Domain Builds: 26
-   Reduction Domain Rows Scanned: 1550
-   Reduction Domain Keys Produced: 1042
-   Reduction Domain Sorts: 4
-   Reduction Domain Sort Rows: 512
+   Reduction Domain Builds: 117
+   Reduction Domain Rows Scanned: 4308
+   Reduction Domain Keys Produced: 2911
+   Reduction Domain Sorts: 11
+   Reduction Domain Sort Rows: 1408
    Complete Bindings: 128
    Candidate Flat Rows: 128
    Candidate Bag Combinations: 128
@@ -6412,15 +7156,15 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    Trie Prefix Range Seeks: 136
    Trie Pair Range Opens: 512
    Reduction Scratch Allocations: 1
-   Reduction Scratch Reuses: 15
-   Vector Intersection Merge Calls: 404
+   Reduction Scratch Reuses: 71
+   Vector Intersection Merge Calls: 460
    Vector Intersection Galloping Calls: 1
    Vector Intersection Galloping Steps: 1
    Uniqueness Constraint Groups: 1
    Uniqueness Rejects: 0
    Rows Emitted: 128
    Rescans: 0
-   Peak Generic Join Memory: 156736 bytes
+   Peak Generic Join Memory: 152640 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on wcoj_generic."B" b (actual rows=1.00 loops=1)
          Output: b.id
@@ -6639,7 +7383,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    Yannakakis Bottom-Up Steps: 6
    Yannakakis Top-Down Steps: 6
    Yannakakis Step Plan: bottom-up: provider 13 v5->v7 on v7(key2), provider 12 v4->v7 on v7(key2), provider 11 v3->v7 on v7(key2), provider 10 v2->v7 on v7(key2), provider 9 v1->v7 on v7(key2), provider 8 v6->v1 on v1(key1); top-down: provider 8 v1->v6 on v6(key2), provider 9 v7->v1 on v1(key1), provider 10 v7->v2 on v2(key1), provider 11 v7->v3 on v3(key1), provider 12 v7->v4 on v4(key1), provider 13 v7->v5 on v5(key1)
-   Yannakakis Step Filter Mode: global-domain provider filter
+   Yannakakis Step Filter Mode: planned step-domain provider filter
    Reduction Core Variables: 2
    Reduction Tail Separators: 0
    GHD Bag Count: 0
@@ -6675,11 +7419,11 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    GHD Separator Domain Keys: 0
    GHD Leaf Tail Rows Removed: 0
    GHD Cyclic Core Rows Removed: 0
-   Reduction Domain Builds: 38
-   Reduction Domain Rows Scanned: 1562
-   Reduction Domain Keys Produced: 1054
-   Reduction Domain Sorts: 4
-   Reduction Domain Sort Rows: 512
+   Reduction Domain Builds: 247
+   Reduction Domain Rows Scanned: 5962
+   Reduction Domain Keys Produced: 4057
+   Reduction Domain Sorts: 15
+   Reduction Domain Sort Rows: 1920
    Complete Bindings: 128
    Candidate Flat Rows: 128
    Candidate Bag Combinations: 128
@@ -6706,15 +7450,15 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    Trie Prefix Range Seeks: 140
    Trie Pair Range Opens: 768
    Reduction Scratch Allocations: 1
-   Reduction Scratch Reuses: 23
-   Vector Intersection Merge Calls: 670
+   Reduction Scratch Reuses: 155
+   Vector Intersection Merge Calls: 802
    Vector Intersection Galloping Calls: 1
    Vector Intersection Galloping Steps: 1
    Uniqueness Constraint Groups: 1
    Uniqueness Rejects: 0
    Rows Emitted: 128
    Rescans: 0
-   Peak Generic Join Memory: 156736 bytes
+   Peak Generic Join Memory: 152640 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on wcoj_generic."B" b (actual rows=1.00 loops=1)
          Output: b.id
@@ -6884,144 +7628,102 @@ FROM cypher('wcoj_parameterized', $$
     MATCH (s:S)-[e1:E]->(t:T), (s)-[e2:E]->(t)
     RETURN id(s), id(t), id(e1), id(e2)
 $$) AS (sid agtype, tid agtype, e1 agtype, e2 agtype);
-                                                                                                                                                                                       QUERY PLAN                                                                                                                                                                                       
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Nested Loop (actual rows=5.00 loops=1)
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE WCOJ Multiway Join) (actual rows=5.00 loops=1)
    Output: (s.id)::agtype, (t.id)::agtype, (e1.id)::agtype, (e2.id)::agtype
-   Inner Unique: true
-   Join Filter: (e1.end_id = t.id)
-   Rows Removed by Join Filter: 2
-   ->  Nested Loop (actual rows=5.00 loops=1)
-         Output: s.id, e1.id, e1.end_id, e2.id, e2.end_id
-         Join Filter: (s.id = e1.start_id)
-         ->  Seq Scan on wcoj_parameterized."S" s (actual rows=3.00 loops=1)
-               Output: s.id, s.properties
-         ->  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.67 loops=3)
-               Output: e1.id, e1.start_id, e1.end_id, e2.id, e2.start_id, e2.end_id
-               Filter: ((s.id = e1.start_id) AND (e1.start_id = e2.start_id) AND (e1.end_id = e2.end_id))
-               WCOJ Algorithm: provider leapfrog intersection with delayed bag product
-               Planned Engine: leapfrog
-               Actual Engine: leapfrog
-               Fallback Reason: none
-               Source Count: 2
-               Adjacency Providers: 0
-               WCOJ Consumer: rows
-               WCOJ Row Goal: 0
-               WCOJ Row Goal Source: none
-               Batched Payload Materialization: false
-               WCOJ Arity: 2
-               Seed Source: 1
-               Estimated Postings: 1=1, 2=2
-               Observed Postings: 1=5, 2=5
-               Stage Survivors: 1=0, 2=0
-               Cursor Advances: 10
-               Seek Calls: 0
-               Posting Rows Scanned: 10
-               Survivor Blocks: 0
-               Payload Scan Batches: 0
-               Payload Scan Restarts: 0
-               Payload Source Keys Scanned: 0
-               Distinct Source Keys Scanned: 0
-               Payload Scan Restarts Avoided: 0
-               Payload Rows Scanned: 0
-               Payload Main Rows Scanned: 0
-               Payload Delta Rows Scanned: 0
-               Payload Rows After Survivor Filter: 0
-               Payload Rows Matched: 0
-               Payload Rows Fetched: 10
-               Payload Block Budget Overruns: 0
-               Payload Block Capacity Clamps: 0
-               Peak Payload Block Rows: 0
-               Progressive Probes: 0
-               Progressive Matches: 0
-               Exact Set Filters: 0
-               Exact Set Candidates Tested: 0
-               Source Rows Scanned: 0
-               Distinct Source Keys: 0
-               Source Bag Rows: 0
-               Source Bag Keys: 0
-               Factorized Binding Source Bags: 0
-               Binding Nodes Created: 5
-               Binding Node Source Bags: 10
-               Binding Node Edge Bags: 0
-               Binding Node Memory: 248 bytes
-               Source Bag Bytes: 0 bytes
-               Source Bag Memory Reserve: 0 bytes
-               Intersection Builds: 0
-               Intersection Merge Calls: 0
-               Intersection Galloping Calls: 0
-               Intersection Galloping Steps: 0
-               Payload Rows Rejected by Local Qual: 0
-               Local Predicate Rejects: 0
-               Matched Terminal Groups: 5
-               Candidate Flat Rows: 5
-               Candidate Bag Combinations: 5
-               Flat Rows Materialized: 5
-               Factorized Binding Enumerators: 5
-               Shared Factor Enumerator Steps: 10
-               Flat Rows Avoided: 0
-               Binding Node Flat Rows Avoided: 0
-               Consumer Flat Rows Avoided: 0
-               Row Goal Survivor Blocks Clamped: 0
-               Row Goal Reached: false
-               Uniqueness Constraint Groups: 0
-               Uniqueness Rejects: 0
-               Rows Emitted: 5
-               Rescans: 3
-               Rescan Strategy: full provider reset
-               Outer Key Block Reduction: false
-               Peak WCOJ Memory: 16384 bytes
-               Peak Factor Memory: 248 bytes
-               Payload Rows Spilled: 0
-               Payload Bucket Blocks Spilled: 0
-               Payload Bucket Rows Spilled: 0
-               Payload Bucket Bytes Spilled: 0 bytes
-               Spill Bytes: 0 bytes
-               ->  Sort (actual rows=1.67 loops=3)
-                     Output: e1.id, e1.start_id, e1.end_id
-                     Sort Key: e1.end_id
-                     Sort Method: quicksort  Memory: 25kB
-                     ->  Custom Scan (AGE Adjacency Match) on wcoj_parameterized."E" e1 (actual rows=1.67 loops=3)
-                           Output: e1.id, e1.start_id, e1.end_id
-                           Filter: (s.id = e1.start_id)
-                           Adjacency Index: direction=outgoing endpoint=start_id fanout=2 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=relcache-scan payload=id-only
-                           Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=out properties=0 metadata=no
-                           Adjacency Pruning: required=id,start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:yes
-                           Adjacency Edge Skip: cursor-pushdown=no filtered=0
-                           Adjacency Cost Input: fanout=2 terminal-fanout=1 composite-fanout=1 source-handoff=label-slice source-fanout=1 source-blocks=0 property-source-matches=0 residual=1 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=1 residual-weight=135% index-credit=90% prefetch-threshold=0 reason=not-indexable payload=id-only
-                           Adjacency Join Order: component=e1 solved=(b 4 5) connector=adjacency-composite-expand bound=start-bound property=query-order rows=1 fanout=2 terminal-fanout=1 composite-fanout=1 source=unknown candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
-                           Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
-                           Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=none value=none candidate-fanout=1 composite-fanout=1 value-posting=none planned=none threshold=0 reason=not-indexable
-                           Adjacency Terminal Property: none
-                           Adjacency Terminal Runtime: none
-                           Adjacency Terminal Prefetch: none
-                           Adjacency Payload Columns: mode=id-only columns=id,start_id,end_id
-                           Adjacency Payload Runtime: visible=1 label-filtered=0 directory-label=0 property-filtered=0 cache-filtered=0 cache-label=0 cache-property=0 emitted=1
-               ->  Sort (actual rows=1.67 loops=3)
-                     Output: e2.id, e2.start_id, e2.end_id
-                     Sort Key: e2.end_id
-                     Sort Method: quicksort  Memory: 25kB
-                     ->  Custom Scan (AGE Adjacency Match) on wcoj_parameterized."E" e2 (actual rows=1.67 loops=3)
-                           Output: e2.id, e2.start_id, e2.end_id
-                           Filter: (s.id = e2.start_id)
-                           Adjacency Index: direction=outgoing endpoint=start_id fanout=2 terminal-fanout=2 composite-fanout=2 label-groups=0 main-blocks=0 fanout-source=statistics source=relcache-scan payload=id-only
-                           Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=out properties=0 metadata=no
-                           Adjacency Pruning: required=id,start_id,end_id terminal-source=none right-prune=label:no/props:none index-solved=0 residual-count=0 residual=edge:no/right-label:no/right-props:no edge-var:yes
-                           Adjacency Edge Skip: cursor-pushdown=no filtered=0
-                           Adjacency Cost Input: fanout=2 terminal-fanout=2 composite-fanout=2 source-handoff=posting-run source-fanout=2 source-blocks=0 property-source-matches=0 residual=0 label-groups=0 main-blocks=0 fanout-source=statistics value-posting=none index-solved=0 residual-weight=100% index-credit=100% prefetch-threshold=0 reason=not-indexable payload=id-only
-                           Adjacency Join Order: component=e2 solved=(b 4 7) connector=adjacency-expand bound=start-bound property=query-order rows=2 fanout=2 terminal-fanout=2 composite-fanout=2 source=unknown candidates=1 declared-cover=1 cover=matched next=none/none/none alt-credit=none
-                           Adjacency Parallel: safe=false aware=false workers=0 gather-cost=0.00 order-preserving=false shared-state=false shared-source=none:0/0 slice=serial-only active=serial
-                           Adjacency Terminal Property: none
-                           Adjacency Terminal Runtime: none
-                           Adjacency Terminal Prefetch: none
-                           Adjacency Payload Columns: mode=id-only columns=id,start_id,end_id
-                           Adjacency Payload Runtime: visible=1 label-filtered=0 directory-label=0 property-filtered=0 cache-filtered=0 cache-label=0 cache-property=0 emitted=1
-   ->  Materialize (actual rows=1.40 loops=5)
+   Filter: ((e1.end_id = t.id) AND (s.id = e1.start_id) AND (e1.start_id = e2.start_id) AND (e1.end_id = e2.end_id))
+   WCOJ Algorithm: streaming merge intersection with delayed bag product
+   Planned Engine: merge
+   Actual Engine: merge
+   Fallback Reason: none
+   Source Count: 3
+   Adjacency Providers: 2
+   Source Correlated Providers: 2
+   Source Correlation Groups: 1=2 providers (plan-stream=0, adjacency=2)
+   Source Correlation Enforcement: enumerator-prune
+   WCOJ Consumer: rows
+   WCOJ Row Goal: 0
+   WCOJ Row Goal Source: none
+   Batched Payload Materialization: true
+   WCOJ Arity: 3
+   Seed Source: 1
+   Estimated Postings: 1=1, 2=2, 3=2
+   Observed Postings: 1=5, 2=5, 3=2
+   Stage Survivors: 1=0, 2=0, 3=0
+   Cursor Advances: 6
+   Seek Calls: 0
+   Posting Rows Scanned: 12
+   Survivor Blocks: 1
+   Payload Scan Batches: 2
+   Payload Scan Restarts: 0
+   Payload Source Keys Scanned: 6
+   Distinct Source Keys Scanned: 6
+   Payload Scan Restarts Avoided: 6
+   Payload Rows Scanned: 10
+   Payload Main Rows Scanned: 10
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 10
+   Payload Rows Matched: 10
+   Payload Rows Fetched: 12
+   Payload Block Budget Overruns: 0
+   Payload Block Capacity Clamps: 0
+   Peak Payload Block Rows: 10
+   Progressive Probes: 0
+   Progressive Matches: 0
+   Exact Set Filters: 0
+   Exact Set Candidates Tested: 0
+   Source Rows Scanned: 6
+   Distinct Source Keys: 6
+   Source Bag Rows: 6
+   Source Bag Keys: 6
+   Factorized Binding Source Bags: 6
+   Binding Nodes Created: 2
+   Binding Node Source Bags: 2
+   Binding Node Edge Bags: 4
+   Binding Node Memory: 376 bytes
+   Source Bag Bytes: 752 bytes
+   Source Bag Memory Reserve: 752 bytes
+   Intersection Builds: 6
+   Intersection Merge Calls: 0
+   Intersection Galloping Calls: 0
+   Intersection Galloping Steps: 0
+   Payload Rows Rejected by Local Qual: 0
+   Local Predicate Rejects: 0
+   Matched Terminal Groups: 2
+   Candidate Flat Rows: 13
+   Candidate Bag Combinations: 5
+   Flat Rows Materialized: 5
+   Factorized Binding Enumerators: 2
+   Shared Factor Enumerator Steps: 20
+   Flat Rows Avoided: 8
+   Binding Node Flat Rows Avoided: 8
+   Consumer Flat Rows Avoided: 0
+   Source Correlation Rejects: 8
+   Row Goal Survivor Blocks Clamped: 0
+   Row Goal Reached: false
+   Uniqueness Constraint Groups: 0
+   Uniqueness Rejects: 0
+   Rows Emitted: 5
+   Rescans: 0
+   Peak WCOJ Memory: 334552 bytes
+   Peak Factor Memory: 173576 bytes
+   Payload Rows Spilled: 0
+   Payload Bucket Blocks Spilled: 0
+   Payload Bucket Rows Spilled: 0
+   Payload Bucket Bytes Spilled: 0 bytes
+   Spill Bytes: 0 bytes
+   ->  Seq Scan on wcoj_parameterized."S" s (actual rows=3.00 loops=1)
+         Output: s.id
+   ->  Seq Scan on wcoj_parameterized."S" s (actual rows=3.00 loops=1)
+         Output: s.id
+   ->  Sort (actual rows=2.00 loops=1)
          Output: t.id
-         Storage: Memory  Maximum Storage: 17kB
+         Sort Key: t.id
+         Sort Method: quicksort  Memory: 25kB
          ->  Seq Scan on wcoj_parameterized."T" t (actual rows=2.00 loops=1)
                Output: t.id
-(135 rows)
+(93 rows)
 
 ROLLBACK;
 BEGIN;

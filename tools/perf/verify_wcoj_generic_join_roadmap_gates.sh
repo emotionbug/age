@@ -6,6 +6,7 @@ current_gate="initialization"
 remove_log_dir=0
 capture_plans=${ROADMAP_GATES_CAPTURE_PLANS:-1}
 print_plans=${ROADMAP_GATES_PRINT_PLANS:-1}
+print_failure_log=${ROADMAP_GATES_PRINT_FAILURE_LOG:-1}
 
 if [[ -n "${ROADMAP_GATES_LOG_DIR:-}" ]]; then
     log_dir=$ROADMAP_GATES_LOG_DIR
@@ -43,6 +44,18 @@ cleanup()
 }
 trap cleanup EXIT
 
+print_gate_failure_log()
+{
+    local log_path=$1
+    local fallback_lines=$2
+
+    if [[ "$print_failure_log" == 1 ]]; then
+        cat "$log_path" >&2 || true
+    else
+        tail -n "$fallback_lines" "$log_path" >&2 || true
+    fi
+}
+
 gates=(
     "WCOJ roadmap gates|verify_wcoj_roadmap_gates.sh"
     "WCOJ semiring consumer gates|verify_wcoj_semiring_gates.sh"
@@ -70,6 +83,7 @@ for index in "${!gates[@]}"; do
     IFS='|' read -r label script_name <<< "${gates[$index]}"
     script_path="$script_dir/$script_name"
     log_path="$log_dir/${script_name%.sh}.log"
+    gate_env=()
     current_gate="$label"
 
     if [[ ! -x "$script_path" ]]; then
@@ -77,9 +91,33 @@ for index in "${!gates[@]}"; do
         exit 1
     fi
 
+    case "$script_name" in
+        verify_wcoj_roadmap_gates.sh)
+            gate_env=(
+                "WCOJ_ROADMAP_COMPLETION_RAW_PLAN_LOG=$log_dir/raw-wcoj-completion-plans.log"
+                "WCOJ_ROADMAP_SEMIJOIN_RAW_PLAN_LOG=$log_dir/raw-wcoj-semijoin-plans.log"
+            )
+            ;;
+        verify_wcoj_semiring_gates.sh)
+            gate_env=(
+                "WCOJ_SEMIRING_RAW_PLAN_LOG=$log_dir/raw-wcoj-semiring-plans.log"
+            )
+            ;;
+        verify_generic_join_preservation.sh)
+            gate_env=(
+                "GENERIC_JOIN_PRESERVE_RAW_PLAN_LOG=$log_dir/raw-generic-join-preservation-plans.log"
+            )
+            ;;
+        verify_generic_reduction_matrix.sh)
+            gate_env=(
+                "GENERIC_REDUCTION_RAW_PLAN_LOG=$log_dir/raw-generic-reduction-plans.log"
+            )
+            ;;
+    esac
+
     started_at=$(date +%s)
     printf '[%d/%d] %s: start\n' "$((index + 1))" "$total" "$label"
-    if "$script_path" >"$log_path" 2>&1; then
+    if env "${gate_env[@]}" "$script_path" >"$log_path" 2>&1; then
         elapsed=$(( $(date +%s) - started_at ))
         summary=$(awk 'NF { line = $0 } END { print line }' "$log_path")
         if [[ -n "$summary" ]]; then
@@ -94,7 +132,7 @@ for index in "${!gates[@]}"; do
         printf '[%d/%d] %s: failed (exit %s)\n' \
                "$((index + 1))" "$total" "$label" "$status" >&2
         printf 'log: %s\n' "$log_path" >&2
-        tail -n 40 "$log_path" >&2 || true
+        print_gate_failure_log "$log_path" 40
         exit "$status"
     fi
 done
@@ -132,7 +170,7 @@ if [[ "$capture_plans" == 1 ]]; then
         status=$?
         printf 'full plan capture: failed (exit %s)\n' "$status" >&2
         printf 'log: %s\n' "$capture_log" >&2
-        tail -n 40 "$capture_log" >&2 || true
+        print_gate_failure_log "$capture_log" 40
         exit "$status"
     fi
 fi

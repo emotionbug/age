@@ -287,6 +287,7 @@ struct AgeGenericJoinState
     int reduction_semijoin_bottom_up_step_count;
     int reduction_semijoin_top_down_step_count;
     AgeGenericSemijoinStepPlan *reduction_semijoin_steps;
+    bool planned_semijoin_step_filter_applied;
     int component_count;
     int *variable_component_ids;
     bool reduction_order_applied;
@@ -507,6 +508,8 @@ static void reduce_generic_leaf_tail_separators(
 static void initialize_generic_provider_output(
     AgeGenericProvider *provider, TupleDesc tuple_desc, EState *estate);
 static const char *generic_consumer_name(AgeGenericConsumerKind consumer);
+static const char *generic_semijoin_step_filter_mode(
+    AgeGenericJoinState *state);
 static bool age_generic_property_aggregate_consumer(
     AgeGenericConsumerKind consumer);
 static bool age_generic_property_minmax_consumer(
@@ -3555,18 +3558,60 @@ filter_generic_providers_for_semijoin_step(
 }
 
 static bool
-generic_cyclic_semijoin_steps_applicable(AgeGenericJoinState *state)
+generic_planned_semijoin_steps_applicable(AgeGenericJoinState *state)
 {
-    return state->reduction_shape == AGE_GENERIC_REDUCTION_CYCLIC_WITH_TAIL &&
+    int expected_steps;
+    int step_index;
+
+    if (state->reduction_semijoin_steps == NULL ||
+        state->reduction_semijoin_step_count <= 0)
+    {
+        return false;
+    }
+
+    if (state->reduction_shape == AGE_GENERIC_REDUCTION_CYCLIC_WITH_TAIL &&
         state->reduction_order_kind == AGE_GENERIC_REDUCTION_ORDER_NONE &&
-        state->reduction_order_edge_count == 0 &&
-        state->reduction_semijoin_steps != NULL &&
-        state->reduction_semijoin_step_count ==
-        state->reduction_tail_separators * 2 &&
-        state->reduction_semijoin_bottom_up_step_count ==
-        state->reduction_tail_separators &&
-        state->reduction_semijoin_top_down_step_count ==
-        state->reduction_tail_separators;
+        state->reduction_order_edge_count == 0)
+    {
+        expected_steps = state->reduction_tail_separators;
+    }
+    else if (state->reduction_shape ==
+             AGE_GENERIC_REDUCTION_ALPHA_ACYCLIC &&
+             state->reduction_order_kind ==
+             AGE_GENERIC_REDUCTION_ORDER_LEAF_PEEL &&
+             state->reduction_order_edge_count > 0)
+    {
+        expected_steps = state->reduction_order_edge_count;
+    }
+    else
+    {
+        return false;
+    }
+
+    if (state->reduction_semijoin_step_count != expected_steps * 2 ||
+        state->reduction_semijoin_bottom_up_step_count != expected_steps ||
+        state->reduction_semijoin_top_down_step_count != expected_steps)
+    {
+        return false;
+    }
+
+    for (step_index = 0;
+         step_index < state->reduction_semijoin_step_count;
+         step_index++)
+    {
+        AgeGenericSemijoinStepPlan *step =
+            &state->reduction_semijoin_steps[step_index];
+
+        if (step->provider_index < 0 ||
+            step->provider_index >= state->provider_count ||
+            !generic_provider_is_reduction_materialized(
+                &state->providers[step->provider_index]))
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static int64
@@ -3579,8 +3624,11 @@ reduce_generic_semijoin_steps(AgeGenericJoinState *state,
     bool bottom_up_pass = false;
     bool top_down_pass = false;
 
-    if (!generic_cyclic_semijoin_steps_applicable(state))
+    if (!generic_planned_semijoin_steps_applicable(state))
         return 0;
+    state->planned_semijoin_step_filter_applied = true;
+    if (state->reduction_shape == AGE_GENERIC_REDUCTION_ALPHA_ACYCLIC)
+        state->reduction_order_applied = true;
 
     step_context = AllocSetContextCreate(
         reduction_context,
@@ -3641,6 +3689,13 @@ reduce_generic_semijoin_steps(AgeGenericJoinState *state,
         increment_generic_counter(&state->semijoin_bottom_up_passes);
     if (top_down_pass)
         increment_generic_counter(&state->semijoin_top_down_passes);
+    if (state->reduction_shape == AGE_GENERIC_REDUCTION_ALPHA_ACYCLIC)
+    {
+        if (bottom_up_pass)
+            increment_generic_counter(&state->semijoin_passes);
+        if (top_down_pass)
+            increment_generic_counter(&state->semijoin_passes);
+    }
     MemoryContextDelete(step_context);
     return total_rows_removed;
 }
@@ -4325,6 +4380,37 @@ reduce_generic_providers(AgeGenericJoinState *state)
         MemoryContextDelete(reduction_context);
         return;
     }
+    if (state->planned_semijoin_step_filter_applied &&
+        state->reduction_shape == AGE_GENERIC_REDUCTION_ALPHA_ACYCLIC)
+    {
+        AgeGenericDomain *domains;
+
+        MemoryContextReset(reduction_context);
+        domains = MemoryContextAllocZero(
+            reduction_context,
+            sizeof(AgeGenericDomain) * state->variable_count);
+        if (!build_generic_reduction_domains(state, reduction_context,
+                                             domains))
+        {
+            state->exhausted = true;
+            state->semijoin_provider_rows_after =
+                generic_provider_row_total(state);
+            state->semijoin_final_domain_keys = 0;
+        }
+        else
+        {
+            state->semijoin_provider_rows_after =
+                generic_provider_row_total(state);
+            state->semijoin_final_domain_keys =
+                generic_domain_key_total(state, domains);
+        }
+        state->peak_memory = Max(
+            state->peak_memory,
+            MemoryContextMemAllocated(state->data_context, true) +
+            MemoryContextMemAllocated(reduction_context, true));
+        MemoryContextDelete(reduction_context);
+        return;
+    }
     for (pass = 0; pass < max_passes; pass++)
     {
         AgeGenericDomain *domains;
@@ -4903,7 +4989,8 @@ begin_age_generic_small_bag_enumerator(AgeGenericJoinState *state,
 
     *candidate_rows = age_binding_begin_flat_enumerator(
         &state->small_bag_enumerator, age_generic_provider_bag_count,
-        age_generic_provider_bag_edge_id, state, state->uniqueness_groups);
+        NULL, age_generic_provider_bag_edge_id, state,
+        state->uniqueness_groups);
     if (*candidate_rows != product)
         elog(ERROR, "AGE Generic Join small-bag cardinality mismatch");
     *uniqueness_rejects_before =
@@ -7078,6 +7165,17 @@ generic_consumer_name(AgeGenericConsumerKind consumer)
 }
 
 static const char *
+generic_semijoin_step_filter_mode(AgeGenericJoinState *state)
+{
+    if (state->planned_semijoin_step_filter_applied ||
+        generic_planned_semijoin_steps_applicable(state))
+    {
+        return "planned step-domain provider filter";
+    }
+    return "global-domain provider filter";
+}
+
+static const char *
 generic_row_goal_source_name(AgeGenericRowGoalSource source)
 {
     switch (source)
@@ -7245,7 +7343,7 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                            state->reduction_semijoin_top_down_step_count, es);
     ExplainPropertyText("Yannakakis Step Plan", semijoin_steps, es);
     ExplainPropertyText("Yannakakis Step Filter Mode",
-                        "global-domain provider filter", es);
+                        generic_semijoin_step_filter_mode(state), es);
     ExplainPropertyInteger("Reduction Core Variables", NULL,
                            state->reduction_core_variables, es);
     ExplainPropertyInteger("Reduction Tail Separators", NULL,
