@@ -93,6 +93,7 @@ DECLARE
     has_descriptor_source boolean := false;
     has_ghd_bag_count boolean := false;
     has_ghd_separator_count boolean := false;
+    has_ghd_separator_details boolean := false;
     has_ghd_descriptor_source boolean := false;
     has_reduction_core boolean := false;
     has_reduction_tail boolean := false;
@@ -141,6 +142,8 @@ BEGIN
             plan_text LIKE '%GHD Bag Count: 2%';
         has_ghd_separator_count := has_ghd_separator_count OR
             plan_text LIKE '%GHD Separator Count: 1%';
+        has_ghd_separator_details := has_ghd_separator_details OR
+            plan_text LIKE '%GHD Separators: provider %';
         has_ghd_descriptor_source := has_ghd_descriptor_source OR
             plan_text LIKE '%GHD Descriptor Source: graph-join-match-ir%';
         has_reduction_core := has_reduction_core OR
@@ -174,7 +177,7 @@ BEGIN
        NOT has_component_ids OR NOT has_reduction_shape OR
        NOT has_descriptor_source OR NOT has_reduction_core OR
        NOT has_ghd_bag_count OR NOT has_ghd_separator_count OR
-       NOT has_ghd_descriptor_source OR
+       NOT has_ghd_separator_details OR NOT has_ghd_descriptor_source OR
        NOT has_reduction_tail OR
        NOT has_separator_pass OR
        NOT has_leaf_tail_provider OR
@@ -258,6 +261,7 @@ DECLARE
     has_descriptor_source boolean := false;
     has_ghd_bag_count boolean := false;
     has_ghd_separator_count boolean := false;
+    has_ghd_separator_details boolean := false;
     has_ghd_descriptor_source boolean := false;
     has_reduction_core boolean := false;
     has_reduction_tail boolean := false;
@@ -303,6 +307,8 @@ BEGIN
             plan_text LIKE '%GHD Bag Count: 3%';
         has_ghd_separator_count := has_ghd_separator_count OR
             plan_text LIKE '%GHD Separator Count: 2%';
+        has_ghd_separator_details := has_ghd_separator_details OR
+            plan_text LIKE '%GHD Separators: provider %';
         has_ghd_descriptor_source := has_ghd_descriptor_source OR
             plan_text LIKE '%GHD Descriptor Source: graph-join-match-ir%';
         has_reduction_core := has_reduction_core OR
@@ -326,7 +332,8 @@ BEGIN
     IF NOT has_generic OR NOT has_component_count OR
        NOT has_component_ids OR NOT has_reduction_shape OR
        NOT has_descriptor_source OR NOT has_ghd_bag_count OR
-       NOT has_ghd_separator_count OR NOT has_ghd_descriptor_source OR
+       NOT has_ghd_separator_count OR NOT has_ghd_separator_details OR
+       NOT has_ghd_descriptor_source OR
        NOT has_reduction_core OR NOT has_reduction_tail OR
        NOT has_separator_pass OR NOT has_leaf_tail_providers OR
        NOT has_descriptor_separators OR NOT has_separator_domain OR
@@ -571,6 +578,7 @@ DECLARE
     trie_prefix_range_seeks integer := NULL;
     trie_pair_range_opens integer := NULL;
     has_generic boolean := false;
+    has_on_demand_trie_ops boolean := false;
     has_rows boolean := false;
 BEGIN
     PERFORM set_config('age.enable_wcoj', 'on', true);
@@ -593,6 +601,9 @@ BEGIN
     LOOP
         has_generic := has_generic OR
             plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_on_demand_trie_ops := has_on_demand_trie_ops OR
+            plan_text LIKE
+            '%Provider Trie Ops: lazy sorted arrays with on-demand prefix directories%';
         has_rows := has_rows OR plan_text LIKE '%Rows Emitted: 48%';
         matches := regexp_match(plan_text, 'Prefix Range Builds: ([0-9]+)');
         IF matches IS NOT NULL THEN
@@ -624,22 +635,193 @@ BEGIN
         END IF;
     END LOOP;
 
-    IF NOT has_generic OR NOT has_rows OR
+    IF NOT has_generic OR NOT has_on_demand_trie_ops OR NOT has_rows OR
        prefix_builds IS NULL OR prefix_reuses IS NULL OR
        prefix_cursor_reuses IS NULL OR prefix_builds > 40 OR
-       prefix_reuses < 300 OR prefix_cursor_reuses <= 0 OR
+       prefix_reuses < prefix_builds OR
        trie_child_range_opens IS NULL OR trie_prefix_range_seeks IS NULL OR
        trie_pair_range_opens IS NULL OR trie_child_range_opens <= 0 OR
        trie_prefix_range_seeks <= 0 OR trie_pair_range_opens <= 0 THEN
         RAISE EXCEPTION
-            'Generic Join prefix range trie ops/directory/cursor/direct pair reuse was not observed (builds %, reuses %, cursor reuses %, child opens %, prefix seeks %, pair opens %)',
+            'Generic Join on-demand prefix range trie ops/directory/direct pair reuse was not observed (builds %, reuses %, cursor reuses %, child opens %, prefix seeks %, pair opens %)',
             prefix_builds, prefix_reuses, prefix_cursor_reuses,
             trie_child_range_opens, trie_prefix_range_seeks,
             trie_pair_range_opens;
     END IF;
-    RAISE NOTICE 'generic join prefix range trie ops, directory, cursor, and direct pair reuse verified';
+    RAISE NOTICE 'generic join on-demand prefix range trie ops, directory, and direct pair reuse verified';
 END
 $generic_ghd_prefix_range_plan$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A {missing: true})-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN id(a), id(b), id(c), id(d), id(e1), id(e2), id(e3), id(e4)
+$$) AS (a agtype, b agtype, c agtype, d agtype,
+        e1 agtype, e2 agtype, e3 agtype, e4 agtype);
+ROLLBACK;
+
+/*
+ * Deep acyclic tails should propagate leaf-domain pruning back to the cycle
+ * separator before the cyclic core is searched.
+ */
+SELECT create_vlabel('generic_ghd', 'U');
+SELECT create_vlabel('generic_ghd', 'V');
+SELECT create_vlabel('generic_ghd', 'W');
+SELECT create_elabel('generic_ghd', 'TU');
+SELECT create_elabel('generic_ghd', 'TV');
+SELECT create_elabel('generic_ghd', 'TW');
+
+INSERT INTO generic_ghd."U" (id, properties)
+SELECT _graphid(_label_id('generic_ghd', 'U'), i), '{}'::agtype
+FROM generate_series(1, 64) i;
+INSERT INTO generic_ghd."V" (id, properties)
+SELECT _graphid(_label_id('generic_ghd', 'V'), i), '{}'::agtype
+FROM generate_series(1, 64) i;
+INSERT INTO generic_ghd."W" (id, properties)
+VALUES (_graphid(_label_id('generic_ghd', 'W'), 1), '{}'::agtype);
+
+INSERT INTO generic_ghd."TU" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('generic_ghd', 'TU'), i),
+       _graphid(_label_id('generic_ghd', 'C'), i),
+       _graphid(_label_id('generic_ghd', 'U'), i),
+       '{}'::agtype
+FROM generate_series(1, 64) i;
+INSERT INTO generic_ghd."TV" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('generic_ghd', 'TV'), i),
+       _graphid(_label_id('generic_ghd', 'U'), i),
+       _graphid(_label_id('generic_ghd', 'V'), i),
+       '{}'::agtype
+FROM generate_series(1, 64) i;
+INSERT INTO generic_ghd."TW" (id, start_id, end_id, properties)
+VALUES (_graphid(_label_id('generic_ghd', 'TW'), 1),
+        _graphid(_label_id('generic_ghd', 'V'), 1),
+        _graphid(_label_id('generic_ghd', 'W'), 1),
+        '{}'::agtype);
+
+CREATE INDEX generic_ghd_tu_out
+ON generic_ghd."TU" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX generic_ghd_tv_out
+ON generic_ghd."TV" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX generic_ghd_tw_out
+ON generic_ghd."TW" USING age_adjacency(start_id, id, end_id);
+
+ANALYZE generic_ghd."U";
+ANALYZE generic_ghd."V";
+ANALYZE generic_ghd."W";
+ANALYZE generic_ghd."TU";
+ANALYZE generic_ghd."TV";
+ANALYZE generic_ghd."TW";
+
+DO $generic_ghd_deep_tail_plan$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_reduction_shape boolean := false;
+    has_ghd_separator_count boolean := false;
+    has_tail_domain_pass boolean := false;
+    has_tail_domain_rows boolean := false;
+    has_separator_domain boolean := false;
+    has_core_pruning boolean := false;
+    has_one_row boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('generic_ghd', $cypher$
+            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+                  -[e3:E3]->(d:D)-[e4:E4]->(a),
+                  (c)-[tu:TU]->(u:U)-[tv:TV]->(v:V)-[tw:TW]->(w:W)
+            RETURN id(a), id(b), id(c), id(d), id(u), id(v), id(w),
+                   id(e1), id(e2), id(e3), id(e4), id(tu), id(tv), id(tw)
+        $cypher$) AS (a agtype, b agtype, c agtype, d agtype,
+                      u agtype, v agtype, w agtype, e1 agtype,
+                      e2 agtype, e3 agtype, e4 agtype, tu agtype,
+                      tv agtype, tw agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_reduction_shape := has_reduction_shape OR
+            plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
+        has_ghd_separator_count := has_ghd_separator_count OR
+            plan_text LIKE '%GHD Separator Count: 1%';
+        has_tail_domain_pass := has_tail_domain_pass OR
+            plan_text ~ 'GHD Tail Domain Propagation Passes: [1-9][0-9]*';
+        has_tail_domain_rows := has_tail_domain_rows OR
+            plan_text ~ 'GHD Tail Domain Rows Removed: [1-9][0-9]*';
+        has_separator_domain := has_separator_domain OR
+            plan_text LIKE '%GHD Separator Domain Keys: 1%';
+        has_core_pruning := has_core_pruning OR
+            plan_text LIKE '%GHD Cyclic Core Rows Removed: 189%';
+        has_one_row := has_one_row OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_reduction_shape OR
+       NOT has_ghd_separator_count OR NOT has_tail_domain_pass OR
+       NOT has_tail_domain_rows OR NOT has_separator_domain OR
+       NOT has_core_pruning OR NOT has_one_row THEN
+        RAISE EXCEPTION
+            'Generic Join deep-tail GHD separator reduction was not observed';
+    END IF;
+    RAISE NOTICE 'generic join deep-tail GHD separator reduction verified';
+END
+$generic_ghd_deep_tail_plan$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_deep_tail_binary ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a),
+          (c)-[tu:TU]->(u:U)-[tv:TV]->(v:V)-[tw:TW]->(w:W)
+    RETURN id(a), id(b), id(c), id(d), id(u), id(v), id(w),
+           id(e1), id(e2), id(e3), id(e4), id(tu), id(tv), id(tw)
+$$) AS (a agtype, b agtype, c agtype, d agtype,
+        u agtype, v agtype, w agtype, e1 agtype,
+        e2 agtype, e3 agtype, e4 agtype, tu agtype,
+        tv agtype, tw agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE generic_ghd_deep_tail_join ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a),
+          (c)-[tu:TU]->(u:U)-[tv:TV]->(v:V)-[tw:TW]->(w:W)
+    RETURN id(a), id(b), id(c), id(d), id(u), id(v), id(w),
+           id(e1), id(e2), id(e3), id(e4), id(tu), id(tv), id(tw)
+$$) AS (a agtype, b agtype, c agtype, d agtype,
+        u agtype, v agtype, w agtype, e1 agtype,
+        e2 agtype, e3 agtype, e4 agtype, tu agtype,
+        tv agtype, tw agtype);
+
+SELECT (SELECT count(*) FROM generic_ghd_deep_tail_binary) AS binary_rows,
+       (SELECT count(*) FROM generic_ghd_deep_tail_join) AS generic_rows,
+       (SELECT count(*) FROM (
+           (TABLE generic_ghd_deep_tail_binary EXCEPT ALL
+            TABLE generic_ghd_deep_tail_join)
+           UNION ALL
+           (TABLE generic_ghd_deep_tail_join EXCEPT ALL
+            TABLE generic_ghd_deep_tail_binary)
+       ) diff) AS diff_rows;
+ROLLBACK;
 
 SELECT drop_graph('generic_ghd', true);
 -- End cypher_generic_join_ghd.

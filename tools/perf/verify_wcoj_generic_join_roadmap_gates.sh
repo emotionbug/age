@@ -4,6 +4,8 @@ set -Eeuo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 current_gate="initialization"
 remove_log_dir=0
+capture_plans=${ROADMAP_GATES_CAPTURE_PLANS:-1}
+print_plans=${ROADMAP_GATES_PRINT_PLANS:-1}
 
 if [[ -n "${ROADMAP_GATES_LOG_DIR:-}" ]]; then
     log_dir=$ROADMAP_GATES_LOG_DIR
@@ -29,7 +31,11 @@ cleanup()
 
     if (( remove_log_dir )); then
         if (( status == 0 )); then
-            rm -rf "$log_dir"
+            if [[ "$capture_plans" == 1 ]]; then
+                printf 'roadmap gate logs retained in %s\n' "$log_dir"
+            else
+                rm -rf "$log_dir"
+            fi
         else
             printf 'roadmap gate logs retained in %s\n' "$log_dir" >&2
         fi
@@ -50,7 +56,11 @@ printf 'roadmap gates: PG_CONFIG=%s PGDATABASE=%s PGHOST=%s PGPORT=%s\n' \
        "${PGHOST:-<libpq default>}" \
        "${PGPORT:-<libpq default>}"
 if (( remove_log_dir )); then
-    printf 'roadmap gate logs: temporary, retained on failure\n'
+    if [[ "$capture_plans" == 1 ]]; then
+        printf 'roadmap gate logs: temporary, retained for full plan capture\n'
+    else
+        printf 'roadmap gate logs: temporary, retained on failure\n'
+    fi
 else
     printf 'roadmap gate logs: %s\n' "$log_dir"
 fi
@@ -88,6 +98,44 @@ for index in "${!gates[@]}"; do
         exit "$status"
     fi
 done
+
+if [[ "$capture_plans" == 1 ]]; then
+    capture_script="$script_dir/capture_roadmap_plans.sh"
+    capture_log="$log_dir/capture_roadmap_plans.log"
+    plan_log_dir="$log_dir/full-plans"
+    plan_report="$log_dir/roadmap-full-plans.md"
+
+    current_gate="full plan capture"
+    if [[ ! -x "$capture_script" ]]; then
+        printf 'roadmap plan capture script is not executable: %s\n' \
+               "$capture_script" >&2
+        exit 1
+    fi
+
+    printf 'full plan capture: start\n'
+    if ROADMAP_PLAN_PRINT_REPORT=0 "$capture_script" \
+        --log-dir "$plan_log_dir" \
+        --report "$plan_report" \
+        --skip-setup >"$capture_log" 2>&1; then
+        summary=$(awk 'NF { line = $0 } END { print line }' "$capture_log")
+        if [[ -n "$summary" ]]; then
+            printf 'full plan capture: ok %s\n' "$summary"
+        else
+            printf 'full plan capture: ok\n'
+        fi
+        printf 'roadmap full plan report: %s\n' "$plan_report"
+        if [[ "$print_plans" == 1 ]]; then
+            printf '\n'
+            cat "$plan_report"
+        fi
+    else
+        status=$?
+        printf 'full plan capture: failed (exit %s)\n' "$status" >&2
+        printf 'log: %s\n' "$capture_log" >&2
+        tail -n 40 "$capture_log" >&2 || true
+        exit "$status"
+    fi
+fi
 
 current_gate="complete"
 printf 'all roadmap gates passed\n'

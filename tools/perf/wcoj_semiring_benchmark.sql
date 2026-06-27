@@ -14,6 +14,7 @@ SET age.wcoj_engine = 'merge';
 SET enable_nestloop = off;
 SET enable_hashjoin = off;
 SET enable_mergejoin = off;
+SET enable_hashagg = off;
 
 \echo 'semiring count: fanout^3 flat rows'
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
@@ -34,6 +35,37 @@ FROM cypher('wcoj_bench_semiring', $$
           (s3:S {id:3})-[e3:E3]->(t)
     RETURN count(DISTINCT id(t)) AS total
 $$) AS (total agtype);
+
+\echo 'semiring distinct key: one terminal row'
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_bench_semiring', $$
+    MATCH (s1:S {id:1})-[e1:E1]->(t:T),
+          (s2:S {id:2})-[e2:E2]->(t),
+          (s3:S {id:3})-[e3:E3]->(t)
+    RETURN DISTINCT id(t) AS key
+$$) AS (key agtype);
+
+\echo 'semiring distinct key limit: one demanded key'
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_bench_semiring', $$
+    MATCH (s1:S {id:1})-[e1:E1]->(t:T),
+          (s2:S {id:2})-[e2:E2]->(t),
+          (s3:S {id:3})-[e3:E3]->(t)
+    RETURN DISTINCT id(t) AS key
+    LIMIT 1
+$$) AS (key agtype);
+
+\echo 'semiring group count distinct key: terminal key'
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_bench_semiring', $$
+    MATCH (s1:S {id:1})-[e1:E1]->(t:T),
+          (s2:S {id:2})-[e2:E2]->(t),
+          (s3:S {id:3})-[e3:E3]->(t)
+    RETURN id(t) AS key, count(DISTINCT id(t)) AS total
+$$) AS (key agtype, total agtype);
 
 \echo 'semiring sum property: first edge score'
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)

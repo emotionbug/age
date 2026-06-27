@@ -443,6 +443,8 @@ static List *build_wcoj_custom_scan_tlist(List *custom_plans,
                                           List **provider_local_quals);
 static List *build_wcoj_count_custom_scan_tlist(PathTarget *target,
                                                 List *provider_tlist);
+static List *build_wcoj_distinct_key_custom_scan_tlist(
+    PathTarget *target, List *provider_tlist);
 static List *build_wcoj_group_count_custom_scan_tlist(PathTarget *target,
                                                       List *provider_tlist);
 static List *build_wcoj_sum_property_custom_scan_tlist(
@@ -465,6 +467,8 @@ static void add_adjacency_count_paths(PlannerInfo *root,
                                       RelOptInfo *output_rel);
 static void add_wcoj_count_paths(PlannerInfo *root,
                                  RelOptInfo *output_rel);
+static void add_wcoj_distinct_key_paths(PlannerInfo *root,
+                                        RelOptInfo *output_rel);
 static void add_wcoj_limit_row_goal_paths(PlannerInfo *root,
                                           RelOptInfo *input_rel,
                                           RelOptInfo *output_rel,
@@ -479,6 +483,9 @@ static CustomPath *make_adjacency_count_path(PlannerInfo *root,
 static CustomPath *make_wcoj_count_path(PlannerInfo *root,
                                         RelOptInfo *output_rel,
                                         AggPath *agg_path);
+static CustomPath *make_wcoj_distinct_key_path(PlannerInfo *root,
+                                               RelOptInfo *output_rel,
+                                               Path *distinct_path);
 static Path *make_wcoj_limit_row_goal_path(PlannerInfo *root,
                                            RelOptInfo *output_rel,
                                            LimitPath *limit_path);
@@ -509,8 +516,15 @@ static bool is_group_count_key_target(PathTarget *target,
                                       AggPath *agg_path,
                                       CustomPath *wcoj_path,
                                       Oid *output_type);
+static bool is_group_count_distinct_key_target(PathTarget *target,
+                                               AggPath *agg_path,
+                                               CustomPath *wcoj_path,
+                                               Oid *output_type);
 static bool wcoj_distinct_arg_matches_key(CustomPath *wcoj_path,
                                           Node *arg);
+static bool is_wcoj_distinct_key_target(PathTarget *target,
+                                        CustomPath *wcoj_path,
+                                        Oid *output_type);
 static Node *wcoj_unwrap_distinct_key_arg(Node *node);
 static bool extract_adjacency_count_input(AggPath *agg_path,
                                           Path **source_path,
@@ -543,7 +557,8 @@ static bool wcoj_sum_property_arg(Aggref *aggref, Index *edge_rti,
 static bool wcoj_sum_property_prepare_direct(
     PlannerInfo *root, CustomPath *wcoj_path, Index edge_rti,
     List **paths, List **provider_descs, int *provider_index);
-static bool wcoj_sum_property_provider_quals_are_empty(List *provider_descs);
+static bool add_wcoj_sum_property_local_qual_edge_exprs(
+    List **output_exprs, List *local_quals, Index edge_rti);
 static Var *make_wcoj_edge_properties_var(Index edge_rti);
 static Oid adjacency_count_output_type(PathTarget *target);
 static bool is_plain_count_star_aggref(Aggref *aggref);
@@ -3513,15 +3528,18 @@ make_generic_leaf_peel_order(const AgeGenericHypergraph *hypergraph)
     int *degree;
     List *order = NIL;
     int remaining_edges;
+    int expected_edges;
     int index;
 
     if (hypergraph == NULL || hypergraph->variables == NULL ||
         hypergraph->edges == NULL || hypergraph->cyclic ||
-        !hypergraph->connected || hypergraph->variable_count < 2 ||
-        hypergraph->edge_count != hypergraph->variable_count - 1)
+        hypergraph->component_count <= 0 || hypergraph->variable_count < 2)
     {
         return NIL;
     }
+    expected_edges = hypergraph->variable_count - hypergraph->component_count;
+    if (expected_edges <= 0 || hypergraph->edge_count != expected_edges)
+        return NIL;
 
     edge_alive = palloc(sizeof(bool) * hypergraph->edge_count);
     degree = palloc0(sizeof(int) * hypergraph->variable_count);
@@ -4083,7 +4101,9 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
         return;
 
     hypergraph = build_generic_hypergraph(root, entries);
-    if (hypergraph == NULL || hypergraph->component_count != 1)
+    if (hypergraph == NULL || hypergraph->component_count <= 0)
+        return;
+    if (hypergraph->component_count != 1 && hypergraph->cyclic)
         return;
     variable_rtis = hypergraph->variable_rtis;
     is_cyclic = hypergraph->cyclic;
@@ -4543,6 +4563,12 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
         return;
     }
 
+    if (stage == UPPERREL_DISTINCT)
+    {
+        add_wcoj_distinct_key_paths(root, output_rel);
+        return;
+    }
+
     if (stage != UPPERREL_FINAL)
         return;
 
@@ -4636,6 +4662,32 @@ add_wcoj_count_paths(PlannerInfo *root, RelOptInfo *output_rel)
                                                         (AggPath *)path);
         if (consumer_path != NULL)
             new_paths = lappend(new_paths, consumer_path);
+    }
+
+    foreach(lc, new_paths)
+        add_path(output_rel, lfirst(lc));
+}
+
+static void
+add_wcoj_distinct_key_paths(PlannerInfo *root, RelOptInfo *output_rel)
+{
+    List *new_paths = NIL;
+    ListCell *lc;
+
+    if (root == NULL || output_rel == NULL || output_rel->pathlist == NIL)
+        return;
+
+    foreach(lc, output_rel->pathlist)
+    {
+        Path *path = (Path *)lfirst(lc);
+        CustomPath *distinct_path;
+
+        if (!IsA(path, UpperUniquePath) && !IsA(path, AggPath))
+            continue;
+
+        distinct_path = make_wcoj_distinct_key_path(root, output_rel, path);
+        if (distinct_path != NULL)
+            new_paths = lappend(new_paths, distinct_path);
     }
 
     foreach(lc, new_paths)
@@ -4766,7 +4818,9 @@ make_wcoj_final_limit_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
         return NULL;
 
     row_goal_subpath = copy_wcoj_path_with_row_goal(
-        wcoj_path, extra->count_est, AGE_WCOJ_CONSUMER_ROWS,
+        wcoj_path, extra->count_est,
+        intVal(list_nth(wcoj_path->custom_private,
+                        AGE_WCOJ_PATH_PRIVATE_CONSUMER)),
         AGE_WCOJ_ROW_GOAL_LIMIT);
     if (row_goal_subpath == NULL)
         return NULL;
@@ -4880,7 +4934,9 @@ make_wcoj_limit_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
         return NULL;
 
     row_goal_subpath = copy_wcoj_path_with_row_goal(
-        wcoj_path, row_goal, AGE_WCOJ_CONSUMER_ROWS,
+        wcoj_path, row_goal,
+        intVal(list_nth(wcoj_path->custom_private,
+                        AGE_WCOJ_PATH_PRIVATE_CONSUMER)),
         AGE_WCOJ_ROW_GOAL_LIMIT);
     if (row_goal_subpath == NULL)
         return NULL;
@@ -4943,23 +4999,36 @@ copy_wcoj_path_with_row_goal(CustomPath *wcoj_path, int64 row_goal,
     List *estimated_postings;
     List *provider_descs;
     Const *output_type;
+    int existing_consumer_kind;
     int64 existing_goal;
     double row_fraction;
 
     if (wcoj_path == NULL || row_goal <= 0 ||
         wcoj_path->methods != &age_wcoj_join_path_methods ||
         list_length(wcoj_path->custom_private) !=
-            AGE_WCOJ_PATH_PRIVATE_COUNT ||
-        intVal(list_nth(wcoj_path->custom_private,
-                        AGE_WCOJ_PATH_PRIVATE_CONSUMER)) !=
-            AGE_WCOJ_CONSUMER_ROWS)
+            AGE_WCOJ_PATH_PRIVATE_COUNT)
     {
         return NULL;
     }
-    if ((consumer_kind != AGE_WCOJ_CONSUMER_ROWS &&
-         consumer_kind != AGE_WCOJ_CONSUMER_EXISTS) ||
+    existing_consumer_kind = intVal(list_nth(
+        wcoj_path->custom_private, AGE_WCOJ_PATH_PRIVATE_CONSUMER));
+    if (existing_consumer_kind != AGE_WCOJ_CONSUMER_ROWS &&
+        existing_consumer_kind != AGE_WCOJ_CONSUMER_DISTINCT_KEY)
+    {
+        return NULL;
+    }
+    if (((existing_consumer_kind == AGE_WCOJ_CONSUMER_ROWS &&
+          consumer_kind != AGE_WCOJ_CONSUMER_ROWS &&
+          consumer_kind != AGE_WCOJ_CONSUMER_EXISTS) ||
+         (existing_consumer_kind == AGE_WCOJ_CONSUMER_DISTINCT_KEY &&
+          consumer_kind != AGE_WCOJ_CONSUMER_DISTINCT_KEY)) ||
         (row_goal_source != AGE_WCOJ_ROW_GOAL_LIMIT &&
          row_goal_source != AGE_WCOJ_ROW_GOAL_EXISTS))
+    {
+        return NULL;
+    }
+    if (consumer_kind == AGE_WCOJ_CONSUMER_DISTINCT_KEY &&
+        row_goal_source != AGE_WCOJ_ROW_GOAL_LIMIT)
     {
         return NULL;
     }
@@ -4989,8 +5058,7 @@ copy_wcoj_path_with_row_goal(CustomPath *wcoj_path, int64 row_goal,
 
     row_goal_path = makeNode(CustomPath);
     memcpy(row_goal_path, wcoj_path, sizeof(*row_goal_path));
-    row_goal_path->path.rows =
-        consumer_kind == AGE_WCOJ_CONSUMER_EXISTS ?
+    row_goal_path->path.rows = consumer_kind == AGE_WCOJ_CONSUMER_EXISTS ?
         1.0 : clamp_row_est(Min(wcoj_path->path.rows, (double)row_goal));
     row_fraction = (double)row_goal / Max(wcoj_path->path.rows, 1.0);
     if (row_fraction < 1.0)
@@ -5131,6 +5199,50 @@ is_group_count_key_target(PathTarget *target, AggPath *agg_path,
     return true;
 }
 
+static bool
+is_group_count_distinct_key_target(PathTarget *target, AggPath *agg_path,
+                                   CustomPath *wcoj_path, Oid *output_type)
+{
+    SortGroupClause *group_clause;
+    Node *group_expr;
+    Node *count_expr;
+    Aggref *aggref;
+    Oid count_type = InvalidOid;
+
+    if (output_type != NULL)
+        *output_type = InvalidOid;
+    if (target == NULL || agg_path == NULL || wcoj_path == NULL ||
+        target->sortgrouprefs == NULL ||
+        list_length(target->exprs) != 2 ||
+        list_length(agg_path->groupClause) != 1)
+    {
+        return false;
+    }
+
+    group_clause = linitial_node(SortGroupClause, agg_path->groupClause);
+    if (target->sortgrouprefs[0] != group_clause->tleSortGroupRef ||
+        target->sortgrouprefs[1] != 0)
+    {
+        return false;
+    }
+
+    group_expr = linitial(target->exprs);
+    count_expr = lsecond(target->exprs);
+    if (!wcoj_distinct_arg_matches_key(wcoj_path, group_expr))
+        return false;
+
+    aggref = wcoj_count_expr_aggref(count_expr, &count_type);
+    if (!is_count_distinct_key_aggref(aggref, wcoj_path) ||
+        (count_type != INT8OID && count_type != AGTYPEOID))
+    {
+        return false;
+    }
+
+    if (output_type != NULL)
+        *output_type = count_type;
+    return true;
+}
+
 static Aggref *
 wcoj_count_target_aggref(PathTarget *target, Oid *output_type)
 {
@@ -5245,6 +5357,36 @@ is_count_aggref(Aggref *aggref)
 }
 
 static bool
+is_wcoj_distinct_key_target(PathTarget *target, CustomPath *wcoj_path,
+                            Oid *output_type)
+{
+    Node *expr;
+    Oid expr_type;
+
+    if (output_type != NULL)
+        *output_type = InvalidOid;
+    if (target == NULL || wcoj_path == NULL ||
+        list_length(target->exprs) != 1)
+    {
+        return false;
+    }
+
+    expr = linitial(target->exprs);
+    if (!wcoj_distinct_arg_matches_key(wcoj_path, expr))
+        return false;
+
+    expr_type = exprType(expr);
+    if (expr_type != GRAPHIDOID && expr_type != INT8OID &&
+        expr_type != AGTYPEOID)
+    {
+        return false;
+    }
+    if (output_type != NULL)
+        *output_type = expr_type;
+    return true;
+}
+
+static bool
 is_count_distinct_key_aggref(Aggref *aggref, CustomPath *wcoj_path)
 {
     TargetEntry *arg_tle;
@@ -5344,6 +5486,139 @@ wcoj_unwrap_distinct_key_arg(Node *node)
 }
 
 static CustomPath *
+make_wcoj_distinct_key_path(PlannerInfo *root, RelOptInfo *output_rel,
+                            Path *distinct_path)
+{
+    Path *wcoj_input_path;
+    CustomPath *wcoj_path;
+    CustomPath *key_path;
+    PathTarget *target;
+    Oid output_type;
+    List *key_exprs;
+    List *estimated_postings;
+    List *provider_descs;
+
+    if (root == NULL || output_rel == NULL || distinct_path == NULL)
+        return NULL;
+
+    if (IsA(distinct_path, UpperUniquePath))
+    {
+        UpperUniquePath *unique_path = (UpperUniquePath *)distinct_path;
+
+        if (unique_path->numkeys != 1 || unique_path->subpath == NULL)
+            return NULL;
+        target = unique_path->path.pathtarget;
+        wcoj_input_path = unique_path->subpath;
+    }
+    else if (IsA(distinct_path, AggPath))
+    {
+        AggPath *agg_path = (AggPath *)distinct_path;
+
+        if (agg_path->aggsplit != AGGSPLIT_SIMPLE ||
+            agg_path->qual != NIL ||
+            agg_path->subpath == NULL ||
+            list_length(agg_path->groupClause) != 1)
+        {
+            return NULL;
+        }
+        target = agg_path->path.pathtarget;
+        wcoj_input_path = agg_path->subpath;
+    }
+    else
+    {
+        return NULL;
+    }
+
+    for (;;)
+    {
+        if (IsA(wcoj_input_path, SortPath))
+        {
+            SortPath *sort_path = (SortPath *)wcoj_input_path;
+
+            wcoj_input_path = sort_path->subpath;
+            continue;
+        }
+        if (IsA(wcoj_input_path, ProjectionPath))
+        {
+            ProjectionPath *projection_path =
+                (ProjectionPath *)wcoj_input_path;
+
+            wcoj_input_path = projection_path->subpath;
+            continue;
+        }
+        break;
+    }
+    if (wcoj_input_path == NULL || !IsA(wcoj_input_path, CustomPath))
+        return NULL;
+
+    wcoj_path = (CustomPath *)wcoj_input_path;
+    if (wcoj_path->methods != &age_wcoj_join_path_methods ||
+        !wcoj_count_path_is_direct(wcoj_path) ||
+        !wcoj_count_restrictinfos_supported(wcoj_path) ||
+        !is_wcoj_distinct_key_target(target, wcoj_path, &output_type))
+    {
+        return NULL;
+    }
+
+    key_exprs = list_nth(wcoj_path->custom_private,
+                         AGE_WCOJ_PATH_PRIVATE_KEY_EXPRS);
+    estimated_postings = list_nth(
+        wcoj_path->custom_private,
+        AGE_WCOJ_PATH_PRIVATE_ESTIMATED_POSTINGS);
+    provider_descs = list_nth(
+        wcoj_path->custom_private,
+        AGE_WCOJ_PATH_PRIVATE_PROVIDER_DESCS);
+
+    key_path = makeNode(CustomPath);
+    key_path->path.pathtype = T_CustomScan;
+    key_path->path.parent = output_rel;
+    key_path->path.pathtarget = target;
+    key_path->path.param_info = NULL;
+    key_path->path.parallel_aware = false;
+    key_path->path.parallel_safe = false;
+    key_path->path.parallel_workers = 0;
+    key_path->path.pathkeys = NIL;
+    key_path->path.rows = Max(1.0, distinct_path->rows);
+    key_path->path.disabled_nodes = wcoj_path->path.disabled_nodes;
+    key_path->path.startup_cost = wcoj_path->path.startup_cost;
+    key_path->path.total_cost = wcoj_path->path.total_cost +
+        cpu_operator_cost + cpu_tuple_cost * key_path->path.rows;
+    if (key_path->path.total_cost >= distinct_path->total_cost)
+    {
+        key_path->path.total_cost = Max(
+            key_path->path.startup_cost,
+            distinct_path->total_cost - cpu_operator_cost);
+    }
+    key_path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+    key_path->custom_paths = list_copy(wcoj_path->custom_paths);
+    key_path->custom_restrictinfo = wcoj_path->custom_restrictinfo;
+    key_path->custom_private = list_make3(
+        copyObject(key_exprs), copyObject(estimated_postings),
+        copyObject(provider_descs));
+    key_path->custom_private = lappend(
+        key_path->custom_private,
+        makeInteger(AGE_WCOJ_CONSUMER_DISTINCT_KEY));
+    key_path->custom_private = lappend(
+        key_path->custom_private, make_wcoj_oid_const(output_type));
+    key_path->custom_private = lappend(
+        key_path->custom_private, make_int8_const(0));
+    key_path->custom_private = lappend(
+        key_path->custom_private, makeInteger(AGE_WCOJ_ROW_GOAL_NONE));
+    key_path->custom_private = lappend(key_path->custom_private, NIL);
+    key_path->methods = &age_wcoj_join_path_methods;
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE WCOJ distinct-key path added: sources=%d "
+                             "source_cost=%.2f distinct_cost=%.2f "
+                             "output_type=%u",
+                             list_length(wcoj_path->custom_paths),
+                             wcoj_path->path.total_cost,
+                             key_path->path.total_cost, output_type)));
+
+    return key_path;
+}
+
+static CustomPath *
 make_wcoj_count_path(PlannerInfo *root, RelOptInfo *output_rel,
                      AggPath *agg_path)
 {
@@ -5406,12 +5681,21 @@ make_wcoj_count_path(PlannerInfo *root, RelOptInfo *output_rel,
 
     if (agg_path->groupClause != NIL)
     {
-        if (!is_group_count_key_target(agg_path->path.pathtarget,
-                                       agg_path, wcoj_path, &output_type))
+        if (is_group_count_key_target(agg_path->path.pathtarget,
+                                      agg_path, wcoj_path, &output_type))
+        {
+            consumer_kind = AGE_WCOJ_CONSUMER_GROUP_COUNT;
+        }
+        else if (is_group_count_distinct_key_target(
+                     agg_path->path.pathtarget, agg_path, wcoj_path,
+                     &output_type))
+        {
+            consumer_kind = AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY;
+        }
+        else
         {
             return NULL;
         }
-        consumer_kind = AGE_WCOJ_CONSUMER_GROUP_COUNT;
     }
     else
     {
@@ -5422,7 +5706,8 @@ make_wcoj_count_path(PlannerInfo *root, RelOptInfo *output_rel,
     }
     if (skipped_input_sort &&
         consumer_kind != AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY &&
-        consumer_kind != AGE_WCOJ_CONSUMER_GROUP_COUNT)
+        consumer_kind != AGE_WCOJ_CONSUMER_GROUP_COUNT &&
+        consumer_kind != AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY)
     {
         return NULL;
     }
@@ -5446,7 +5731,8 @@ make_wcoj_count_path(PlannerInfo *root, RelOptInfo *output_rel,
     count_path->path.parallel_workers = 0;
     count_path->path.pathkeys = NIL;
     count_path->path.rows =
-        consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT ?
+        (consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY) ?
         Max(1.0, agg_path->path.rows) : 1.0;
     count_path->path.disabled_nodes = wcoj_path->path.disabled_nodes;
     count_path->path.startup_cost = wcoj_path->path.startup_cost;
@@ -5589,7 +5875,6 @@ make_wcoj_sum_property_path(PlannerInfo *root, RelOptInfo *output_rel,
     if (!wcoj_sum_property_prepare_direct(root, wcoj_path, edge_rti,
                                           &paths, &provider_descs,
                                           &provider_index) ||
-        !wcoj_sum_property_provider_quals_are_empty(provider_descs) ||
         !wcoj_count_restrictinfos_supported(wcoj_path))
     {
         return NULL;
@@ -5809,6 +6094,40 @@ wcoj_sum_property_arg(Aggref *aggref, Index *edge_rti, Const **property_key)
 }
 
 static bool
+add_wcoj_sum_property_local_qual_edge_exprs(List **output_exprs,
+                                            List *local_quals,
+                                            Index edge_rti)
+{
+    List *vars;
+    ListCell *lc;
+
+    if (output_exprs == NULL || edge_rti == 0)
+        return false;
+
+    vars = pull_var_clause((Node *)local_quals,
+                           PVC_RECURSE_AGGREGATES |
+                           PVC_RECURSE_WINDOWFUNCS |
+                           PVC_RECURSE_PLACEHOLDERS);
+    foreach(lc, vars)
+    {
+        Var *var = lfirst_node(Var, lc);
+
+        if (var->varno != edge_rti || var->varlevelsup != 0)
+            continue;
+        if (!wcoj_direct_edge_expr((Node *)var, edge_rti))
+        {
+            list_free(vars);
+            return false;
+        }
+        if (!list_member(*output_exprs, var))
+            *output_exprs = lappend(*output_exprs, copyObject(var));
+    }
+
+    list_free(vars);
+    return true;
+}
+
+static bool
 wcoj_sum_property_prepare_direct(PlannerInfo *root, CustomPath *wcoj_path,
                                  Index edge_rti, List **paths,
                                  List **provider_descs,
@@ -5853,9 +6172,9 @@ wcoj_sum_property_prepare_direct(PlannerInfo *root, CustomPath *wcoj_path,
         if (provider_edge_rti == edge_rti)
         {
             Path *source_path = NULL;
+            List *local_quals;
             List *output_exprs;
-            int payload_mask =
-                1 << (Anum_ag_label_edge_table_properties - 1);
+            int payload_mask;
 
             if (provider_index == NULL || *provider_index >= 0 ||
                 (provider_kind != AGE_WCOJ_PROVIDER_ADJACENCY &&
@@ -5865,6 +6184,15 @@ wcoj_sum_property_prepare_direct(PlannerInfo *root, CustomPath *wcoj_path,
             }
 
             output_exprs = list_make1(make_wcoj_edge_properties_var(edge_rti));
+            local_quals = list_nth(provider_desc,
+                                   AGE_WCOJ_PATH_PROVIDER_LOCAL_QUALS);
+            if (!add_wcoj_sum_property_local_qual_edge_exprs(
+                    &output_exprs, local_quals, edge_rti))
+            {
+                return false;
+            }
+            payload_mask = wcoj_edge_payload_mask(output_exprs, local_quals,
+                                                  edge_rti);
             lfirst(list_nth_cell(
                 provider_desc, AGE_WCOJ_PATH_PROVIDER_KIND)) =
                 makeInteger(AGE_WCOJ_PROVIDER_ADJACENCY);
@@ -5901,26 +6229,6 @@ wcoj_sum_property_prepare_direct(PlannerInfo *root, CustomPath *wcoj_path,
     }
 
     return provider_index != NULL && *provider_index >= 0;
-}
-
-static bool
-wcoj_sum_property_provider_quals_are_empty(List *provider_descs)
-{
-    ListCell *lc;
-
-    foreach(lc, provider_descs)
-    {
-        List *provider_desc = lfirst_node(List, lc);
-        List *local_quals;
-
-        if (list_length(provider_desc) != AGE_WCOJ_PATH_PROVIDER_COUNT)
-            return false;
-        local_quals = list_nth(provider_desc,
-                               AGE_WCOJ_PATH_PROVIDER_LOCAL_QUALS);
-        if (local_quals != NIL)
-            return false;
-    }
-    return true;
 }
 
 static Var *
@@ -15943,6 +16251,25 @@ build_wcoj_count_custom_scan_tlist(PathTarget *target, List *provider_tlist)
 }
 
 static List *
+build_wcoj_distinct_key_custom_scan_tlist(PathTarget *target,
+                                          List *provider_tlist)
+{
+    List *key_tlist;
+    TargetEntry *key_tle;
+
+    if (target == NULL || list_length(target->exprs) != 1)
+        elog(ERROR, "invalid AGE WCOJ distinct-key target");
+
+    key_tle = makeTargetEntry((Expr *)copyObject(linitial(target->exprs)),
+                              1, pstrdup("wcoj_distinct_key"), false);
+    if (target->sortgrouprefs != NULL)
+        key_tle->ressortgroupref = target->sortgrouprefs[0];
+    key_tlist = list_make1(key_tle);
+
+    return list_concat(key_tlist, provider_tlist);
+}
+
+static List *
 build_wcoj_group_count_custom_scan_tlist(PathTarget *target,
                                          List *provider_tlist)
 {
@@ -16082,8 +16409,10 @@ wcoj_consumer_first_scan_resno(int consumer_kind)
         return 1;
     case AGE_WCOJ_CONSUMER_COUNT:
     case AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY:
+    case AGE_WCOJ_CONSUMER_DISTINCT_KEY:
         return 2;
     case AGE_WCOJ_CONSUMER_GROUP_COUNT:
+    case AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY:
         return 3;
     case AGE_WCOJ_CONSUMER_SUM_PROPERTY:
         return 2;
@@ -16313,7 +16642,9 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
     if ((consumer_kind != AGE_WCOJ_CONSUMER_ROWS &&
          consumer_kind != AGE_WCOJ_CONSUMER_COUNT &&
          consumer_kind != AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY &&
+         consumer_kind != AGE_WCOJ_CONSUMER_DISTINCT_KEY &&
          consumer_kind != AGE_WCOJ_CONSUMER_GROUP_COUNT &&
+         consumer_kind != AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY &&
          consumer_kind != AGE_WCOJ_CONSUMER_SUM_PROPERTY &&
          consumer_kind != AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY &&
          consumer_kind != AGE_WCOJ_CONSUMER_EXISTS) ||
@@ -16325,10 +16656,18 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
     output_type = DatumGetObjectId(output_type_const->constvalue);
     if ((consumer_kind == AGE_WCOJ_CONSUMER_COUNT ||
          consumer_kind == AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY ||
-         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT) &&
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY) &&
         output_type != INT8OID && output_type != AGTYPEOID)
     {
         elog(ERROR, "invalid AGE WCOJ count output type %u", output_type);
+    }
+    if (consumer_kind == AGE_WCOJ_CONSUMER_DISTINCT_KEY &&
+        output_type != GRAPHIDOID && output_type != INT8OID &&
+        output_type != AGTYPEOID)
+    {
+        elog(ERROR, "invalid AGE WCOJ distinct-key output type %u",
+             output_type);
     }
     if ((consumer_kind == AGE_WCOJ_CONSUMER_SUM_PROPERTY ||
          consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY) &&
@@ -16347,7 +16686,10 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
     row_goal = DatumGetInt64(row_goal_const->constvalue);
     if (row_goal < 0 ||
         (consumer_kind != AGE_WCOJ_CONSUMER_ROWS &&
+         consumer_kind != AGE_WCOJ_CONSUMER_DISTINCT_KEY &&
          consumer_kind != AGE_WCOJ_CONSUMER_EXISTS && row_goal != 0) ||
+        (consumer_kind == AGE_WCOJ_CONSUMER_DISTINCT_KEY &&
+         row_goal > 0 && row_goal_source != AGE_WCOJ_ROW_GOAL_LIMIT) ||
         (consumer_kind == AGE_WCOJ_CONSUMER_EXISTS &&
          (row_goal <= 0 || row_goal_source != AGE_WCOJ_ROW_GOAL_EXISTS)) ||
         (row_goal == 0 && row_goal_source != AGE_WCOJ_ROW_GOAL_NONE) ||
@@ -16371,7 +16713,13 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
         custom_scan_tlist = build_wcoj_count_custom_scan_tlist(
             best_path->path.pathtarget, custom_scan_tlist);
     }
-    else if (consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT)
+    else if (consumer_kind == AGE_WCOJ_CONSUMER_DISTINCT_KEY)
+    {
+        custom_scan_tlist = build_wcoj_distinct_key_custom_scan_tlist(
+            best_path->path.pathtarget, custom_scan_tlist);
+    }
+    else if (consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT ||
+             consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY)
     {
         custom_scan_tlist = build_wcoj_group_count_custom_scan_tlist(
             best_path->path.pathtarget, custom_scan_tlist);

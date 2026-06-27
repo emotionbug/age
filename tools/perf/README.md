@@ -153,6 +153,13 @@ builds.  Discard the first sample and compare the median of the next five.
 `wcoj_survivor_batch_results.md` records the reference environment, raw
 samples, telemetry, and correctness checks.
 
+The raw plans include soft budget telemetry for batched payload blocks:
+`Payload Block Budget Overruns`, `Payload Block Capacity Clamps`, and
+`Peak Payload Block Rows`.  These counters show when a completed block exceeded
+the in-memory payload budget and whether later survivor blocks were reduced
+from observed payload fanout.  They are not a substitute for true payload-bucket
+spill.
+
 ## Query-wide semijoin reduction for acyclic multiway joins
 
 `wcoj_semijoin_setup.sql` creates a high-pressure three-edge chain whose two C
@@ -223,34 +230,56 @@ flags, and debug-PG allow flags such as `WCOJ_ROADMAP_ALLOW_DEBUG_PG=1`,
 `ROADMAP_GATES_LOG_DIR` when set; otherwise the temporary log directory is
 cleaned up after success and retained on failure.
 
-## Roadmap telemetry report gate
+After all gates pass, the umbrella runs `capture_roadmap_plans.sh --skip-setup`
+by default, retains a Markdown artifact whose primary sections are the full raw
+`EXPLAIN ANALYZE` plans, and prints that complete report to stdout.  Set
+`ROADMAP_GATES_PRINT_PLANS=0` when stdout should stay compact but the artifact
+should still be retained.  Set `ROADMAP_GATES_CAPTURE_PLANS=0` only when the
+compact gate output is enough and the plan artifact is not needed:
+
+```sh
+ROADMAP_GATES_LOG_DIR=/tmp/hidden-age-roadmap-gates \
+PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
+PGHOST=/tmp PGPORT=55432 PGDATABASE=agebench \
+  tools/perf/verify_wcoj_generic_join_roadmap_gates.sh
+```
+
+## Roadmap raw plan report with secondary telemetry checks
 
 `verify_roadmap_telemetry_report.sh` runs the same bounded WCOJ/Generic Join
-gate set, retains each gate's `EXPLAIN ANALYZE` output, and extracts a compact
-roadmap telemetry report.  The report fails if the logs do not show survivor
-batching, alpha-acyclic semijoin reduction, factorized source bags and shared
-enumerators, Generic Join trie ops, WCOJ row goals, semiring consumers, and GHD
-separator pruning counters.
+workloads, retains the full `EXPLAIN ANALYZE` output, writes the raw-plan
+Markdown artifact, and prints that full artifact before extracting compact
+telemetry checks.  The raw plan text is the default review target.  The
+PASS/FAIL telemetry summary is secondary and only checks that the logs include
+survivor batching, alpha-acyclic semijoin reduction, factorized source bags and
+shared enumerators, Generic Join trie ops, WCOJ row goals, semiring consumers,
+and GHD separator pruning counters.
 
 ```sh
 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
 PGHOST=/tmp PGPORT=55432 PGDATABASE=agebench \
 ROADMAP_TELEMETRY_LOG_DIR=/tmp/hidden-age-roadmap-telemetry \
+ROADMAP_TELEMETRY_PLAN_REPORT=/tmp/hidden-age-roadmap-telemetry/full-plans.md \
   tools/perf/verify_roadmap_telemetry_report.sh
 ```
 
 The script delegates data setup, timing thresholds, and debug-build rejection
-to the individual gate scripts.  Use the existing per-gate environment
+to the individual verifier scripts.  Use the existing per-script environment
 overrides for dimensions, skip-setup flags, baseline medians, and debug-PG
 allow flags.  If `ROADMAP_TELEMETRY_LOG_DIR` is omitted, the script creates and
-retains a temporary log directory and prints its path.
+retains a temporary log directory and prints its path.  If
+`ROADMAP_TELEMETRY_PLAN_REPORT` is omitted, the full-plan Markdown report is
+written to `ROADMAP_TELEMETRY_LOG_DIR/roadmap-full-plans.md`.  Set
+`ROADMAP_TELEMETRY_PRINT_PLAN_REPORT=0` only when the report should be written
+without also being printed.
 
 ## Roadmap full plan capture
 
 `capture_roadmap_plans.sh` runs the roadmap benchmark SQL files and writes the
 full raw `EXPLAIN ANALYZE` output for each workload to individual logs plus a
-single Markdown report.  It is intended for plan inspection and artifact
-retention rather than grep-based evidence gating.
+single Markdown report.  The report opens with complete raw plan sections and
+is printed to stdout by default for direct inspection rather than grep-based
+evidence gating.  Set `ROADMAP_PLAN_PRINT_REPORT=0` to retain only the file.
 
 ```sh
 ROADMAP_PLAN_LOG_DIR=/tmp/hidden-age-roadmap-plans \
@@ -267,9 +296,11 @@ plan-shape inspection, not for performance evidence.
 `verify_wcoj_semiring_gates.sh` builds a compact direct-WCOJ graph whose three
 edge bags imply `fanout^3` flat rows.  The default `fanout=500` creates
 125,000,000 candidate combinations from only 1,500 edge rows, then verifies
-that count, count-distinct, sum, grouped sum, LIMIT, and EXISTS use consumer
-arithmetic or row goals instead of materializing the flat product.  The gate
-also checks source-bag and factor-memory telemetry.
+that count, count-distinct, standalone distinct-key, grouped count-distinct,
+sum, grouped sum, LIMIT, and EXISTS use consumer arithmetic or row goals
+instead of materializing the flat product.  The gate checks both the avoided
+flat product and the actual `Flat Rows Materialized` count, plus source-bag and
+factor-memory telemetry.
 
 ```sh
 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \

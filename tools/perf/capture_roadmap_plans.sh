@@ -9,6 +9,7 @@ database=${PGDATABASE:-agebench}
 report_path=${ROADMAP_PLAN_REPORT:-}
 log_dir=${ROADMAP_PLAN_LOG_DIR:-}
 skip_setup=${ROADMAP_PLAN_SKIP_SETUP:-0}
+print_report=${ROADMAP_PLAN_PRINT_REPORT:-1}
 
 runs=${ROADMAP_PLAN_RUNS:-${WCOJ_ROADMAP_RUNS:-5}}
 star_sources=${ROADMAP_PLAN_STAR_SOURCES:-${WCOJ_ROADMAP_STAR_SOURCES:-4}}
@@ -25,9 +26,10 @@ usage()
     cat <<'EOF'
 usage: tools/perf/capture_roadmap_plans.sh [options]
 
-Run the roadmap benchmark SQL files and save the full raw EXPLAIN ANALYZE
-output for each workload. This script does not grep for evidence counters or
-apply speedup thresholds; it preserves the actual plans for inspection.
+Run the roadmap benchmark SQL files and save a Markdown artifact whose primary
+sections are the complete raw EXPLAIN ANALYZE output for each workload. This
+script does not grep for evidence counters or apply speedup thresholds; it
+preserves the actual plans for inspection.
 
 Options:
   --log-dir DIR       Directory for raw workload logs.
@@ -38,6 +40,7 @@ Options:
 Environment:
   PG_CONFIG, PGDATABASE, PGHOST, PGPORT, PSQL
   ROADMAP_PLAN_LOG_DIR, ROADMAP_PLAN_REPORT, ROADMAP_PLAN_SKIP_SETUP=1
+  ROADMAP_PLAN_PRINT_REPORT=0 to keep the full Markdown report out of stdout
   ROADMAP_PLAN_RUNS
   ROADMAP_PLAN_STAR_SOURCES, ROADMAP_PLAN_STAR_FANOUT
   ROADMAP_PLAN_CYCLE_VERTICES, ROADMAP_PLAN_CYCLE_FANOUT
@@ -214,11 +217,13 @@ capture_workload \
     printf -- '- semiring_fanout: `%s`\n' "$semiring_fanout"
     printf -- '- reduction_fanout: `%s`\n' "$reduction_fanout"
     printf -- '- preserve_cycle_size: `%s`\n\n' "$preserve_cycle_size"
-    printf '## Raw Plan Logs\n\n'
+    printf '## Complete Raw EXPLAIN Plan Sections\n\n'
+    printf 'The sections below are copied verbatim from the workload logs. No '
+    printf 'grep-style evidence filters or threshold summaries are applied.\n\n'
 
     for index in "${!plan_logs[@]}"; do
-        printf '### %s\n\n' "${plan_labels[$index]}"
-        printf -- '- log: `%s`\n\n' "${plan_logs[$index]}"
+        printf '### Full Raw Plan: %s\n\n' "${plan_labels[$index]}"
+        printf -- '- source_log: `%s`\n\n' "${plan_logs[$index]}"
         printf '```text\n'
         cat "${plan_logs[$index]}"
         printf '```\n\n'
@@ -226,3 +231,7 @@ capture_workload \
 } > "$report_path"
 
 printf 'roadmap full plan report: %s\n' "$report_path"
+if [[ "$print_report" == 1 ]]; then
+    printf '\n'
+    cat "$report_path"
+fi

@@ -2,7 +2,10 @@
 set -Eeuo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-current_gate="initialization"
+repo_root=$(cd -- "$script_dir/../.." && pwd)
+current_step="initialization"
+plan_report=${ROADMAP_TELEMETRY_PLAN_REPORT:-}
+print_plan_report=${ROADMAP_TELEMETRY_PRINT_PLAN_REPORT:-1}
 
 if [[ -n "${ROADMAP_TELEMETRY_LOG_DIR:-}" ]]; then
     log_dir=$ROADMAP_TELEMETRY_LOG_DIR
@@ -11,19 +14,22 @@ else
     timestamp=$(date +%Y%m%d-%H%M%S)
     log_dir=$(mktemp -d "${TMPDIR:-/tmp}/roadmap-telemetry-$timestamp.XXXXXX")
 fi
+if [[ -z "$plan_report" ]]; then
+    plan_report="$log_dir/roadmap-full-plans.md"
+fi
 
 on_error()
 {
     local status=$?
 
-    printf 'roadmap telemetry gate failed unexpectedly: %s (exit %s)\n' \
-           "$current_gate" "$status" >&2
+    printf 'roadmap raw-plan workflow failed unexpectedly: %s (exit %s)\n' \
+           "$current_step" "$status" >&2
     printf 'roadmap telemetry logs retained in %s\n' "$log_dir" >&2
     exit "$status"
 }
 trap on_error ERR
 
-run_gate()
+run_plan_check()
 {
     local label=$1
     local script_name=$2
@@ -32,9 +38,9 @@ run_gate()
     local log_path="$log_dir/$log_name"
     local status
 
-    current_gate="$label"
+    current_step="$label"
     if [[ ! -x "$script_path" ]]; then
-        printf 'roadmap telemetry gate script is not executable: %s\n' \
+        printf 'roadmap telemetry check script is not executable: %s\n' \
                "$script_path" >&2
         exit 1
     fi
@@ -78,7 +84,7 @@ emit_metric()
     local line
 
     if ! line=$(first_match "$file" "$pattern"); then
-        printf 'missing roadmap telemetry metric: %s: %s\n' \
+        printf 'missing secondary roadmap telemetry metric: %s: %s\n' \
                "$category" "$description" >&2
         printf 'searched log: %s\n' "$file" >&2
         exit 1
@@ -92,35 +98,89 @@ emit_category()
     printf '\n%s\n' "$1"
 }
 
+emit_plan_section()
+{
+    local label=$1
+    local file=$2
+
+    printf '### Full Raw Plans: %s\n\n' "$label"
+    printf -- '- source_log: `%s`\n\n' "$file"
+    printf '```text\n'
+    cat "$file"
+    printf '```\n\n'
+}
+
+write_plan_report()
+{
+    current_step="raw plan report"
+    mkdir -p "$(dirname "$plan_report")"
+
+    {
+        printf '# Roadmap Raw EXPLAIN Plan Artifact\n\n'
+        printf 'This artifact is intentionally plan-first: the complete captured '
+        printf 'EXPLAIN ANALYZE output is preserved below before any secondary '
+        printf 'telemetry checks are considered.\n\n'
+        printf -- '- generated_at: `%s`\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        printf -- '- repository: `%s`\n' "$repo_root"
+        printf -- '- git_commit: `%s`\n' \
+               "$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || printf unknown)"
+        printf -- '- PG_CONFIG: `%s`\n' "${PG_CONFIG:-<script default>}"
+        printf -- '- PGDATABASE: `%s`\n' "${PGDATABASE:-agebench}"
+        printf -- '- PGHOST: `%s`\n' "${PGHOST:-<libpq default>}"
+        printf -- '- PGPORT: `%s`\n' "${PGPORT:-<libpq default>}"
+        printf -- '- log_dir: `%s`\n\n' "$log_dir"
+        printf '## Complete Raw EXPLAIN Plan Sections\n\n'
+        printf 'Each section is copied verbatim from its source log, including '
+        printf 'the full plan text and surrounding benchmark output.\n\n'
+        emit_plan_section "WCOJ completion, cycle, and semijoin" "$wcoj_log"
+        emit_plan_section "WCOJ semiring consumers and row goals" "$semiring_log"
+        emit_plan_section "Generic Join GHD preservation" "$preserve_log"
+        emit_plan_section "Generic Join reduction matrix" "$reduction_log"
+        printf '## Secondary Telemetry Checks\n\n'
+        printf 'The shell workflow prints compact PASS/FAIL telemetry checks after '
+        printf 'writing this artifact. Those checks are secondary to the raw plan '
+        printf 'sections above.\n'
+    } > "$plan_report"
+
+    printf '\nprimary raw plan artifact=%s\n' "$plan_report"
+    if [[ "$print_plan_report" == 1 ]]; then
+        printf '\n'
+        cat "$plan_report"
+    fi
+}
+
 wcoj_log="$log_dir/wcoj-roadmap-gates.log"
 semiring_log="$log_dir/wcoj-semiring-gates.log"
 preserve_log="$log_dir/generic-join-preservation.log"
 reduction_log="$log_dir/generic-reduction-matrix.log"
 
-printf 'roadmap telemetry gate: PG_CONFIG=%s PGDATABASE=%s PGHOST=%s PGPORT=%s\n' \
-       "${PG_CONFIG:-<gate default>}" \
+printf 'roadmap raw-plan workflow: PG_CONFIG=%s PGDATABASE=%s PGHOST=%s PGPORT=%s\n' \
+       "${PG_CONFIG:-<script default>}" \
        "${PGDATABASE:-agebench}" \
        "${PGHOST:-<libpq default>}" \
        "${PGPORT:-<libpq default>}"
 printf 'roadmap telemetry logs: %s\n' "$log_dir"
 
-run_gate "WCOJ roadmap gates" \
-         "verify_wcoj_roadmap_gates.sh" \
-         "$(basename "$wcoj_log")"
-run_gate "WCOJ semiring consumer gates" \
-         "verify_wcoj_semiring_gates.sh" \
-         "$(basename "$semiring_log")"
-run_gate "Generic Join preservation gates" \
-         "verify_generic_join_preservation.sh" \
-         "$(basename "$preserve_log")"
-run_gate "Generic reduction matrix gate" \
-         "verify_generic_reduction_matrix.sh" \
-         "$(basename "$reduction_log")"
+run_plan_check "WCOJ completion/cycle/semijoin plan run" \
+               "verify_wcoj_roadmap_gates.sh" \
+               "$(basename "$wcoj_log")"
+run_plan_check "WCOJ semiring consumer plan run" \
+               "verify_wcoj_semiring_gates.sh" \
+               "$(basename "$semiring_log")"
+run_plan_check "Generic Join preservation plan run" \
+               "verify_generic_join_preservation.sh" \
+               "$(basename "$preserve_log")"
+run_plan_check "Generic reduction matrix plan run" \
+               "verify_generic_reduction_matrix.sh" \
+               "$(basename "$reduction_log")"
 
-current_gate="telemetry extraction"
+write_plan_report
 
-printf '\nroadmap telemetry report\n'
+current_step="secondary telemetry extraction"
+
+printf '\nsecondary roadmap telemetry checks\n'
 printf 'logs=%s\n' "$log_dir"
+printf 'primary_raw_plan_artifact=%s\n' "$plan_report"
 
 emit_category "survivor batching"
 emit_metric "survivor batching" "batch enabled" \
@@ -133,6 +193,10 @@ emit_metric "survivor batching" "restart avoids" \
             "$wcoj_log" 'Payload Scan Restarts Avoided: [1-9][0-9]*'
 emit_metric "survivor batching" "payload rows matched" \
             "$wcoj_log" 'Payload Rows Matched: [1-9][0-9]*'
+emit_metric "survivor batching" "payload block rows" \
+            "$wcoj_log" 'Peak Payload Block Rows: [1-9][0-9]*'
+emit_metric "survivor batching" "payload budget overruns" \
+            "$wcoj_log" 'Payload Block Budget Overruns: [0-9]+'
 
 emit_category "semijoin reduction"
 emit_metric "semijoin reduction" "shape" \
@@ -159,12 +223,15 @@ emit_metric "factorized binding" "enumerators" \
             "$semiring_log" 'Factorized Binding Enumerators: [1-9][0-9]*'
 emit_metric "factorized binding" "enumerator steps" \
             "$semiring_log" 'Shared Factor Enumerator Steps: [1-9][0-9]*'
+emit_metric "factorized binding" "flat rows materialized" \
+            "$semiring_log" 'Flat Rows Materialized: [0-9]+'
 emit_metric "factorized binding" "peak factor memory" \
             "$semiring_log" 'Peak Factor Memory: [1-9][0-9]* bytes'
 
 emit_category "trie ops"
 emit_metric "trie ops" "provider ops" \
-            "$preserve_log" 'Provider Trie Ops: sorted-array'
+            "$preserve_log" \
+            'Provider Trie Ops: lazy sorted arrays with on-demand prefix directories'
 emit_metric "trie ops" "prefix builds" \
             "$preserve_log" 'Prefix Range Builds: [1-9][0-9]*'
 emit_metric "trie ops" "prefix reuses" \
@@ -193,6 +260,8 @@ emit_metric "semiring consumers" "count" \
             "$semiring_log" 'WCOJ Consumer: count\(\*\)'
 emit_metric "semiring consumers" "count distinct" \
             "$semiring_log" 'WCOJ Consumer: count\(distinct key\)'
+emit_metric "semiring consumers" "group count distinct" \
+            "$semiring_log" 'WCOJ Consumer: group count\(distinct key\)'
 emit_metric "semiring consumers" "sum property" \
             "$semiring_log" 'WCOJ Consumer: sum\(property\)'
 emit_metric "semiring consumers" "group sum" \
@@ -220,5 +289,6 @@ emit_metric "ghd separator" "domain keys" \
 emit_metric "ghd separator" "core rows removed" \
             "$preserve_log" 'GHD Cyclic Core Rows Removed: [1-9][0-9]*'
 
-current_gate="complete"
-printf '\nroadmap telemetry report passed\n'
+current_step="complete"
+printf '\nsecondary roadmap telemetry checks passed\n'
+printf 'primary raw plan artifact: %s\n' "$plan_report"

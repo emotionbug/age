@@ -170,6 +170,8 @@ struct AgeWCOJPostingProvider
     AgeEdgeBag *batch_payload_ranges;
     int batch_payload_count;
     int batch_payload_capacity;
+    double observed_payloads_per_survivor;
+    int64 peak_batch_payload_count;
     bool fetch_properties;
     bool built;
     int64 rows_scanned;
@@ -229,6 +231,7 @@ struct AgeWCOJJoinScanState
     int64 sum_null_rows;
     int64 candidate_flat_rows;
     int64 candidate_combinations;
+    int64 flat_rows_materialized;
     int64 consumer_flat_rows_avoided;
     int64 cursor_advances;
     int64 seek_calls;
@@ -257,6 +260,9 @@ struct AgeWCOJJoinScanState
     int64 exact_set_filters;
     int64 exact_set_candidates_tested;
     int64 row_goal_block_clamps;
+    int64 payload_block_budget_overruns;
+    int64 payload_block_capacity_clamps;
+    int64 peak_payload_block_rows;
     int64 spill_bytes;
     int64 payload_rows_spilled;
     int64 source_bag_memory_reserve;
@@ -342,6 +348,8 @@ static void rescan_age_wcoj_providers(AgeWCOJJoinScanState *state);
 static bool prepare_age_wcoj_progressive_exact_set(
     AgeWCOJJoinScanState *state);
 static void update_age_wcoj_peak_memory(AgeWCOJJoinScanState *state);
+static void update_age_wcoj_payload_block_budget(
+    AgeWCOJJoinScanState *state);
 static int64 current_age_wcoj_source_bag_bytes(
     AgeWCOJJoinScanState *state);
 static int64 current_age_wcoj_factor_memory(AgeWCOJJoinScanState *state);
@@ -417,6 +425,9 @@ static int64 count_age_wcoj_group_product(AgeWCOJJoinScanState *state);
 static int64 count_age_wcoj_active_group(AgeWCOJJoinScanState *state);
 static int64 count_age_wcoj_rows(AgeWCOJJoinScanState *state);
 static int64 count_age_wcoj_distinct_keys(AgeWCOJJoinScanState *state);
+static TupleTableSlot *access_age_wcoj_distinct_key_scan(ScanState *node);
+static TupleTableSlot *store_age_wcoj_distinct_key_result(ScanState *node,
+                                                          graphid key);
 static TupleTableSlot *access_age_wcoj_count_scan(ScanState *node);
 static TupleTableSlot *store_age_wcoj_count_result(ScanState *node,
                                                    int64 count);
@@ -424,6 +435,8 @@ static TupleTableSlot *access_age_wcoj_group_count_scan(ScanState *node);
 static TupleTableSlot *store_age_wcoj_group_count_result(ScanState *node,
                                                          graphid key,
                                                          int64 count);
+static TupleTableSlot *access_age_wcoj_group_count_distinct_key_scan(
+    ScanState *node);
 static TupleTableSlot *access_age_wcoj_sum_property_scan(ScanState *node);
 static TupleTableSlot *store_age_wcoj_sum_property_result(ScanState *node);
 static TupleTableSlot *access_age_wcoj_group_sum_property_scan(ScanState *node);
@@ -508,7 +521,7 @@ static bool
 valid_wcoj_consumer(int consumer)
 {
     return consumer >= AGE_WCOJ_CONSUMER_ROWS &&
-        consumer <= AGE_WCOJ_CONSUMER_EXISTS;
+        consumer <= AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY;
 }
 
 static int
@@ -520,8 +533,10 @@ wcoj_consumer_output_offset(AgeWCOJConsumerKind consumer)
         return 1;
     case AGE_WCOJ_CONSUMER_COUNT:
     case AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY:
+    case AGE_WCOJ_CONSUMER_DISTINCT_KEY:
         return 2;
     case AGE_WCOJ_CONSUMER_GROUP_COUNT:
+    case AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY:
         return 3;
     case AGE_WCOJ_CONSUMER_SUM_PROPERTY:
         return 2;
@@ -607,10 +622,18 @@ create_age_wcoj_join_scan_state(CustomScan *cscan)
     output_type = DatumGetObjectId(output_type_const->constvalue);
     if ((consumer_kind == AGE_WCOJ_CONSUMER_COUNT ||
          consumer_kind == AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY ||
-         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT) &&
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY) &&
         output_type != INT8OID && output_type != AGTYPEOID)
     {
         elog(ERROR, "invalid AGE WCOJ count output type %u", output_type);
+    }
+    if (consumer_kind == AGE_WCOJ_CONSUMER_DISTINCT_KEY &&
+        output_type != GRAPHIDOID && output_type != INT8OID &&
+        output_type != AGTYPEOID)
+    {
+        elog(ERROR, "invalid AGE WCOJ distinct-key output type %u",
+             output_type);
     }
     if (consumer_kind == AGE_WCOJ_CONSUMER_SUM_PROPERTY ||
         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY)
@@ -643,7 +666,10 @@ create_age_wcoj_join_scan_state(CustomScan *cscan)
     row_goal = DatumGetInt64(row_goal_const->constvalue);
     if (row_goal < 0 ||
         (consumer_kind != AGE_WCOJ_CONSUMER_ROWS &&
+         consumer_kind != AGE_WCOJ_CONSUMER_DISTINCT_KEY &&
          consumer_kind != AGE_WCOJ_CONSUMER_EXISTS && row_goal != 0) ||
+        (consumer_kind == AGE_WCOJ_CONSUMER_DISTINCT_KEY &&
+         row_goal > 0 && row_goal_source != AGE_WCOJ_ROW_GOAL_LIMIT) ||
         (consumer_kind == AGE_WCOJ_CONSUMER_EXISTS &&
          (row_goal <= 0 || row_goal_source != AGE_WCOJ_ROW_GOAL_EXISTS)) ||
         (row_goal == 0 && row_goal_source != AGE_WCOJ_ROW_GOAL_NONE) ||
@@ -1027,6 +1053,7 @@ exec_age_wcoj_join_scan(CustomScanState *node)
         increment_wcoj_counter(&state->rows_emitted);
         if (state->row_goal > 0 &&
             (state->consumer_kind == AGE_WCOJ_CONSUMER_ROWS ||
+             state->consumer_kind == AGE_WCOJ_CONSUMER_DISTINCT_KEY ||
              state->consumer_kind == AGE_WCOJ_CONSUMER_EXISTS))
         {
             increment_wcoj_counter(&state->row_goal_emitted);
@@ -1238,6 +1265,49 @@ update_age_wcoj_peak_memory(AgeWCOJJoinScanState *state)
 }
 
 static void
+update_age_wcoj_payload_block_budget(AgeWCOJJoinScanState *state)
+{
+    Size batch_memory;
+    int64 payload_rows = 0;
+    int source_index;
+
+    if (state->batch_context == NULL || state->survivor_block_count <= 0)
+        return;
+
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        AgeWCOJPostingProvider *provider = &state->providers[source_index];
+
+        if (provider->kind != AGE_WCOJ_PROVIDER_ADJACENCY)
+            continue;
+
+        add_wcoj_counter(&payload_rows, provider->batch_payload_count);
+        if (provider->batch_payload_count >
+            provider->peak_batch_payload_count)
+        {
+            provider->peak_batch_payload_count =
+                provider->batch_payload_count;
+        }
+        if (provider->batch_payload_count > 0)
+        {
+            double observed =
+                (double)provider->batch_payload_count /
+                (double)state->survivor_block_count;
+
+            if (observed > provider->observed_payloads_per_survivor)
+                provider->observed_payloads_per_survivor = observed;
+        }
+    }
+
+    if (payload_rows > state->peak_payload_block_rows)
+        state->peak_payload_block_rows = payload_rows;
+
+    batch_memory = MemoryContextMemAllocated(state->batch_context, true);
+    if (batch_memory > state->batch_memory_budget)
+        increment_wcoj_counter(&state->payload_block_budget_overruns);
+}
+
+static void
 reset_age_wcoj_survivor_block(AgeWCOJJoinScanState *state)
 {
     int source_index;
@@ -1306,6 +1376,8 @@ age_wcoj_survivor_block_capacity(AgeWCOJJoinScanState *state)
                     (double)provider->rows_scanned /
                         (double)provider->terminal_count);
             }
+            if (provider->observed_payloads_per_survivor > multiplicity)
+                multiplicity = provider->observed_payloads_per_survivor;
             bytes_per_survivor += sizeof(AgeEdgeBag) +
                 multiplicity * sizeof(AgeWCOJBatchPayload);
         }
@@ -1314,7 +1386,16 @@ age_wcoj_survivor_block_capacity(AgeWCOJJoinScanState *state)
     capacity = (double)effective_budget /
         Max(bytes_per_survivor, 1.0);
     if (capacity < AGE_WCOJ_SURVIVOR_BLOCK_MIN)
-        capacity = AGE_WCOJ_SURVIVOR_BLOCK_MIN;
+    {
+        if (state->payload_block_budget_overruns > 0)
+        {
+            increment_wcoj_counter(&state->payload_block_capacity_clamps);
+            if (capacity < 1.0)
+                capacity = 1.0;
+        }
+        else
+            capacity = AGE_WCOJ_SURVIVOR_BLOCK_MIN;
+    }
     if (capacity > AGE_WCOJ_SURVIVOR_BLOCK_MAX)
         capacity = AGE_WCOJ_SURVIVOR_BLOCK_MAX;
     if (state->row_goal > 0)
@@ -3295,6 +3376,7 @@ prepare_age_wcoj_survivor_block(AgeWCOJJoinScanState *state)
         if (provider->kind == AGE_WCOJ_PROVIDER_ADJACENCY)
             prefetch_age_wcoj_adjacency_payloads(provider);
     }
+    update_age_wcoj_payload_block_budget(state);
     increment_wcoj_counter(&state->survivor_blocks);
     state->survivor_block_index = 0;
     update_age_wcoj_peak_memory(state);
@@ -3391,6 +3473,7 @@ materialize_age_wcoj_combination(AgeWCOJJoinScanState *state)
              raw_index, raw_slot->tts_tupleDescriptor->natts);
     }
     ExecStoreVirtualTuple(raw_slot);
+    increment_wcoj_counter(&state->flat_rows_materialized);
 
     return raw_slot;
 }
@@ -3978,6 +4061,87 @@ count_age_wcoj_distinct_keys(AgeWCOJJoinScanState *state)
 }
 
 static TupleTableSlot *
+store_age_wcoj_distinct_key_result(ScanState *node, graphid key)
+{
+    AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
+    TupleTableSlot *slot = node->ss_ScanTupleSlot;
+
+    ExecClearTuple(slot);
+    if (slot->tts_tupleDescriptor->natts < 1)
+        elog(ERROR, "AGE WCOJ distinct-key scan expected an output column");
+    memset(slot->tts_values, 0,
+           sizeof(Datum) * slot->tts_tupleDescriptor->natts);
+    memset(slot->tts_isnull, true,
+           sizeof(bool) * slot->tts_tupleDescriptor->natts);
+
+    if (state->consumer_output_type == GRAPHIDOID)
+        slot->tts_values[0] = GRAPHID_GET_DATUM(key);
+    else if (state->consumer_output_type == INT8OID)
+        slot->tts_values[0] = Int64GetDatum((int64)key);
+    else if (state->consumer_output_type == AGTYPEOID)
+        slot->tts_values[0] = PointerGetDatum(agtype_integer_to_agtype(key));
+    else
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("AGE WCOJ distinct-key scan cannot produce type %s",
+                        format_type_be(state->consumer_output_type))));
+    }
+    slot->tts_isnull[0] = false;
+
+    ExecStoreVirtualTuple(slot);
+    return slot;
+}
+
+static TupleTableSlot *
+access_age_wcoj_distinct_key_scan(ScanState *node)
+{
+    AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
+    bool use_group_presence = !age_wcoj_uniqueness_may_reject(state);
+
+    if (state->row_goal > 0 && state->row_goal_emitted >= state->row_goal)
+        return ExecClearTuple(node->ss_ScanTupleSlot);
+
+    for (;;)
+    {
+        graphid key;
+        int64 group_count;
+
+        if (!state->group_active && !prepare_age_wcoj_group(state))
+            return ExecClearTuple(node->ss_ScanTupleSlot);
+        if (!state->active_group_key_valid)
+            elog(ERROR, "AGE WCOJ distinct-key scan missing active group key");
+
+        key = state->active_group_key;
+        group_count = count_age_wcoj_group_product(state);
+        if (group_count <= 0)
+        {
+            clear_age_wcoj_group(state);
+            continue;
+        }
+
+        if (use_group_presence)
+        {
+            add_wcoj_counter(&state->consumer_flat_rows_avoided,
+                             group_count);
+            clear_age_wcoj_group(state);
+            return store_age_wcoj_distinct_key_result(node, key);
+        }
+
+        if (next_age_wcoj_combination(state))
+        {
+            if (group_count > 1)
+            {
+                add_wcoj_counter(&state->consumer_flat_rows_avoided,
+                                 group_count - 1);
+            }
+            clear_age_wcoj_group(state);
+            return store_age_wcoj_distinct_key_result(node, key);
+        }
+    }
+}
+
+static TupleTableSlot *
 store_age_wcoj_group_count_result(ScanState *node, graphid key, int64 count)
 {
     TupleTableSlot *slot = node->ss_ScanTupleSlot;
@@ -4051,6 +4215,60 @@ access_age_wcoj_group_count_scan(ScanState *node)
         state->count_result =
             add_age_wcoj_count(state->count_result, group_count);
         return store_age_wcoj_group_count_result(node, key, group_count);
+    }
+}
+
+static TupleTableSlot *
+access_age_wcoj_group_count_distinct_key_scan(ScanState *node)
+{
+    AgeWCOJJoinScanState *state = (AgeWCOJJoinScanState *)node;
+    bool use_group_presence = !age_wcoj_uniqueness_may_reject(state);
+
+    state->count_executed = true;
+    for (;;)
+    {
+        graphid key;
+        int64 group_count;
+        bool has_binding = false;
+
+        if (!state->group_active && !prepare_age_wcoj_group(state))
+            return ExecClearTuple(node->ss_ScanTupleSlot);
+        if (!state->active_group_key_valid)
+        {
+            elog(ERROR,
+                 "AGE WCOJ group count-distinct missing active group key");
+        }
+
+        key = state->active_group_key;
+        group_count = count_age_wcoj_group_product(state);
+        if (group_count <= 0)
+        {
+            clear_age_wcoj_group(state);
+            continue;
+        }
+
+        if (use_group_presence)
+        {
+            has_binding = true;
+            add_wcoj_counter(&state->consumer_flat_rows_avoided,
+                             group_count);
+        }
+        else if (next_age_wcoj_combination(state))
+        {
+            has_binding = true;
+            if (group_count > 1)
+            {
+                add_wcoj_counter(&state->consumer_flat_rows_avoided,
+                                 group_count - 1);
+            }
+        }
+
+        clear_age_wcoj_group(state);
+        if (!has_binding)
+            continue;
+
+        state->count_result = add_age_wcoj_count(state->count_result, 1);
+        return store_age_wcoj_group_count_result(node, key, 1);
     }
 }
 
@@ -4291,8 +4509,12 @@ access_age_wcoj_join_scan(ScanState *node)
     if (state->consumer_kind == AGE_WCOJ_CONSUMER_COUNT ||
         state->consumer_kind == AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY)
         return access_age_wcoj_count_scan(node);
+    if (state->consumer_kind == AGE_WCOJ_CONSUMER_DISTINCT_KEY)
+        return access_age_wcoj_distinct_key_scan(node);
     if (state->consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT)
         return access_age_wcoj_group_count_scan(node);
+    if (state->consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY)
+        return access_age_wcoj_group_count_distinct_key_scan(node);
     if (state->consumer_kind == AGE_WCOJ_CONSUMER_SUM_PROPERTY)
         return access_age_wcoj_sum_property_scan(node);
     if (state->consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY)
@@ -4448,8 +4670,12 @@ age_wcoj_consumer_name(AgeWCOJConsumerKind consumer)
         return "count(*)";
     case AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY:
         return "count(distinct key)";
+    case AGE_WCOJ_CONSUMER_DISTINCT_KEY:
+        return "distinct key";
     case AGE_WCOJ_CONSUMER_GROUP_COUNT:
         return "group count(key)";
+    case AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY:
+        return "group count(distinct key)";
     case AGE_WCOJ_CONSUMER_SUM_PROPERTY:
         return "sum(property)";
     case AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY:
@@ -4549,6 +4775,12 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
                                state->payload_rows_matched, es);
         ExplainPropertyInteger("Payload Rows Fetched", NULL,
                                state->payload_rows_fetched, es);
+        ExplainPropertyInteger("Payload Block Budget Overruns", NULL,
+                               state->payload_block_budget_overruns, es);
+        ExplainPropertyInteger("Payload Block Capacity Clamps", NULL,
+                               state->payload_block_capacity_clamps, es);
+        ExplainPropertyInteger("Peak Payload Block Rows", NULL,
+                               state->peak_payload_block_rows, es);
         ExplainPropertyInteger("Progressive Probes", NULL,
                                state->progressive_probes, es);
         ExplainPropertyInteger("Progressive Matches", NULL,
@@ -4589,6 +4821,8 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
                                state->candidate_flat_rows, es);
         ExplainPropertyInteger("Candidate Bag Combinations", NULL,
                                state->candidate_combinations, es);
+        ExplainPropertyInteger("Flat Rows Materialized", NULL,
+                               state->flat_rows_materialized, es);
         ExplainPropertyInteger(
             "Factorized Binding Enumerators", NULL,
             age_binding_flat_enumerator_starts(&state->flat_enumerator), es);
@@ -4613,7 +4847,9 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
                             state->row_goal_emitted >= state->row_goal, es);
         if ((state->consumer_kind == AGE_WCOJ_CONSUMER_COUNT ||
              state->consumer_kind == AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY ||
-             state->consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT) &&
+             state->consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT ||
+             state->consumer_kind ==
+             AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY) &&
             state->count_executed)
         {
             ExplainPropertyInteger("Count Result", NULL,
