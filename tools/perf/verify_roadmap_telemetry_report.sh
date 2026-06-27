@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/roadmap_log_helpers.sh"
+
 current_step="initialization"
 plan_report=${ROADMAP_TELEMETRY_PLAN_REPORT:-}
 print_plan_report=${ROADMAP_TELEMETRY_PRINT_PLAN_REPORT:-1}
@@ -30,35 +32,6 @@ on_error()
 }
 trap on_error ERR
 
-print_check_failure_log()
-{
-    local log_path=$1
-    local fallback_lines=$2
-
-    if [[ "$print_failure_log" == 1 ]]; then
-        cat "$log_path" >&2 || true
-    else
-        tail -n "$fallback_lines" "$log_path" >&2 || true
-    fi
-}
-
-print_workload_failure_logs()
-{
-    local log_dir=$1
-    local fallback_lines=$2
-    local log_path
-
-    if ! compgen -G "$log_dir/*.log" >/dev/null; then
-        printf 'no raw workload logs found in %s\n' "$log_dir" >&2
-        return
-    fi
-
-    for log_path in "$log_dir"/*.log; do
-        printf '\nraw workload log: %s\n' "$log_path" >&2
-        print_check_failure_log "$log_path" "$fallback_lines"
-    done
-}
-
 run_plan_check()
 {
     local label=$1
@@ -83,7 +56,7 @@ run_plan_check()
         status=$?
         printf '%s: failed (exit %s)\n' "$label" "$status" >&2
         printf 'log: %s\n' "$log_path" >&2
-        print_check_failure_log "$log_path" 60
+        roadmap_print_log "$log_path" 60 "$print_failure_log"
         exit "$status"
     fi
 }
@@ -155,9 +128,9 @@ capture_plan_report()
         status=$?
         printf 'primary raw plan capture: failed (exit %s)\n' "$status" >&2
         printf 'log: %s\n' "$capture_log" >&2
-        print_check_failure_log "$capture_log" 60
+        roadmap_print_log "$capture_log" 60 "$print_failure_log"
         printf 'raw workload log dir: %s\n' "$raw_plan_log_dir" >&2
-        print_workload_failure_logs "$raw_plan_log_dir" 60
+        roadmap_print_workload_logs "$raw_plan_log_dir" 60 "$print_failure_log"
         exit "$status"
     fi
 

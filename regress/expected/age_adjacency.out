@@ -8291,7 +8291,7 @@ FROM ag_catalog.age_adjacency_multiway_intersect(
 JOIN cypher('age_adj_multiway',
             $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
   ON (vn.id::text)::bigint = (m.dst::text)::bigint
-ORDER BY vn.name::text;
+ORDER BY vn.name::text COLLATE "C";
  common_target 
 ---------------
  t3
@@ -8308,7 +8308,7 @@ FROM ag_catalog.age_adjacency_multiway_intersect(
 JOIN cypher('age_adj_multiway',
             $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
   ON (vn.id::text)::bigint = (m.dst::text)::bigint
-ORDER BY vn.name::text;
+ORDER BY vn.name::text COLLATE "C";
  common_target 
 ---------------
  t2
@@ -8327,7 +8327,7 @@ FROM ag_catalog.age_adjacency_multiway_intersect(
 JOIN cypher('age_adj_multiway',
             $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
   ON (vn.id::text)::bigint = (m.dst::text)::bigint
-ORDER BY vn.name::text;
+ORDER BY vn.name::text COLLATE "C";
  common_source 
 ---------------
  s2
@@ -8539,7 +8539,7 @@ FROM ag_catalog.age_adjacency_multiway_intersect(
 JOIN cypher('age_adj_multiway_tri',
             $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
   ON (vn.id::text)::bigint = (m.dst::text)::bigint
-ORDER BY vn.name::text;
+ORDER BY vn.name::text COLLATE "C";
  closing_vertex 
 ----------------
  v3

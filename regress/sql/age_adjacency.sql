@@ -6786,7 +6786,7 @@ FROM ag_catalog.age_adjacency_multiway_intersect(
 JOIN cypher('age_adj_multiway',
             $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
   ON (vn.id::text)::bigint = (m.dst::text)::bigint
-ORDER BY vn.name::text;
+ORDER BY vn.name::text COLLATE "C";
 
 -- The 2-source intersection {s1,s2}: expect t2 and t3.
 SELECT vn.name::text AS common_target
@@ -6799,7 +6799,7 @@ FROM ag_catalog.age_adjacency_multiway_intersect(
 JOIN cypher('age_adj_multiway',
             $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
   ON (vn.id::text)::bigint = (m.dst::text)::bigint
-ORDER BY vn.name::text;
+ORDER BY vn.name::text COLLATE "C";
 
 -- direction => 'in': vertices that point into BOTH t3 and t4.  Expect s2, s3.
 SELECT vn.name::text AS common_source
@@ -6813,7 +6813,7 @@ FROM ag_catalog.age_adjacency_multiway_intersect(
 JOIN cypher('age_adj_multiway',
             $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
   ON (vn.id::text)::bigint = (m.dst::text)::bigint
-ORDER BY vn.name::text;
+ORDER BY vn.name::text COLLATE "C";
 
 -- Correctness contract: the multiway intersection result must equal the
 -- multi-pattern binary join for the same pattern.  Asserted as id sets so the
@@ -6992,7 +6992,7 @@ FROM ag_catalog.age_adjacency_multiway_intersect(
 JOIN cypher('age_adj_multiway_tri',
             $c$ MATCH (n:N) RETURN id(n), n.name $c$) AS vn(id agtype, name agtype)
   ON (vn.id::text)::bigint = (m.dst::text)::bigint
-ORDER BY vn.name::text;
+ORDER BY vn.name::text COLLATE "C";
 
 -- Contract: mixed-direction intersection == the binary triangle-closure join
 -- (c reachable from v2 AND reaching v1).
