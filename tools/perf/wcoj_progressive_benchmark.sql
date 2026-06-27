@@ -16,7 +16,7 @@ CROSS JOIN LATERAL age_adjacency_multiway_intersect(
     'age_wcoj_progressive_sparse', 'E', args.source_ids) result;
 
 SELECT format($sql$
-EXPLAIN (ANALYZE, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+EXPLAIN (ANALYZE, TIMING OFF, SUMMARY ON, BUFFERS ON)
 SELECT count(*)
 FROM age_wcoj_progressive_sparse_args args
 CROSS JOIN LATERAL age_adjacency_multiway_intersect(
@@ -32,7 +32,7 @@ CROSS JOIN LATERAL age_adjacency_multiway_intersect(
     'age_wcoj_progressive_dense', 'E', args.source_ids) result;
 
 SELECT format($sql$
-EXPLAIN (ANALYZE, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+EXPLAIN (ANALYZE, TIMING OFF, SUMMARY ON, BUFFERS ON)
 SELECT count(*)
 FROM age_wcoj_progressive_dense_args args
 CROSS JOIN LATERAL age_adjacency_multiway_intersect(

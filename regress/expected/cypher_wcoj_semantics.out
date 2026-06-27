@@ -459,6 +459,10 @@ $$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -474,6 +478,7 @@ $$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 10
    Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 0
    Consumer Flat Rows Avoided: 0
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -482,7 +487,7 @@ $$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
    Rows Emitted: 6
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136044 bytes
+   Peak Factor Memory: 136420 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -506,7 +511,7 @@ $$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
          Sort Method: quicksort  Memory: 25kB
          ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
                Output: t.id
-(89 rows)
+(94 rows)
 
 ROLLBACK;
 BEGIN;
@@ -569,6 +574,10 @@ $$) AS (tag agtype, eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
    Source Bag Rows: 5
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 1160 bytes
    Source Bag Memory Reserve: 1160 bytes
    Intersection Builds: 3
@@ -584,6 +593,7 @@ $$) AS (tag agtype, eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 88
    Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 0
    Consumer Flat Rows Avoided: 0
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -592,7 +602,7 @@ $$) AS (tag agtype, eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
    Rows Emitted: 72
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136316 bytes
+   Peak Factor Memory: 136692 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -624,7 +634,7 @@ $$) AS (tag agtype, eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
          Sort Method: quicksort  Memory: 25kB
          ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
                Output: t.id
-(97 rows)
+(102 rows)
 
 ROLLBACK;
 DO $wcoj_direct_provider_telemetry$
@@ -984,6 +994,10 @@ $$) AS (total agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -999,6 +1013,7 @@ $$) AS (total agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 0
    Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 24
    Consumer Flat Rows Avoided: 24
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -1008,7 +1023,7 @@ $$) AS (total agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136044 bytes
+   Peak Factor Memory: 136420 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -1032,7 +1047,7 @@ $$) AS (total agtype);
          Sort Method: quicksort  Memory: 25kB
          ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
                Output: t.id
-(89 rows)
+(94 rows)
 
 ROLLBACK;
 DO $wcoj_count_consumer_telemetry$
@@ -1161,6 +1176,10 @@ $$) AS (total agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -1176,6 +1195,7 @@ $$) AS (total agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 0
    Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 24
    Consumer Flat Rows Avoided: 24
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -1185,7 +1205,7 @@ $$) AS (total agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136044 bytes
+   Peak Factor Memory: 136420 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -1217,7 +1237,7 @@ $$) AS (total agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(97 rows)
+(102 rows)
 
 ROLLBACK;
 BEGIN;
@@ -1327,6 +1347,10 @@ $$) AS (total agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -1342,6 +1366,7 @@ $$) AS (total agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 0
    Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 24
    Consumer Flat Rows Avoided: 24
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -1353,7 +1378,7 @@ $$) AS (total agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136044 bytes
+   Peak Factor Memory: 136420 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -1377,7 +1402,7 @@ $$) AS (total agtype);
          Sort Method: quicksort  Memory: 25kB
          ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
                Output: t.id
-(91 rows)
+(96 rows)
 
 ROLLBACK;
 DO $wcoj_sum_property_consumer_telemetry$
@@ -1529,6 +1554,10 @@ $$) AS (value agtype);
          Source Bag Rows: 3
          Source Bag Keys: 3
          Factorized Binding Source Bags: 3
+         Binding Nodes Created: 1
+         Binding Node Source Bags: 1
+         Binding Node Edge Bags: 3
+         Binding Node Memory: 376 bytes
          Source Bag Bytes: 888 bytes
          Source Bag Memory Reserve: 888 bytes
          Intersection Builds: 3
@@ -1544,6 +1573,7 @@ $$) AS (value agtype);
          Factorized Binding Enumerators: 1
          Shared Factor Enumerator Steps: 0
          Flat Rows Avoided: 0
+         Binding Node Flat Rows Avoided: 24
          Consumer Flat Rows Avoided: 24
          Row Goal Survivor Blocks Clamped: 0
          Row Goal Reached: false
@@ -1555,7 +1585,7 @@ $$) AS (value agtype);
          Rows Emitted: 1
          Rescans: 0
          Peak WCOJ Memory: 330376 bytes
-         Peak Factor Memory: 136044 bytes
+         Peak Factor Memory: 136420 bytes
          Payload Rows Spilled: 0
          Payload Bucket Blocks Spilled: 0
          Payload Bucket Rows Spilled: 0
@@ -1587,7 +1617,7 @@ $$) AS (value agtype);
                      Buffers: shared hit=1
  Planning:
    Buffers: shared hit=15
-(102 rows)
+(107 rows)
 
 ROLLBACK;
 DO $wcoj_avg_property_consumer_telemetry$
@@ -1739,6 +1769,10 @@ $$) AS (value agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -1754,6 +1788,7 @@ $$) AS (value agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 0
    Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 24
    Consumer Flat Rows Avoided: 24
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -1765,7 +1800,7 @@ $$) AS (value agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136044 bytes
+   Peak Factor Memory: 136420 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -1797,7 +1832,7 @@ $$) AS (value agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=6
-(99 rows)
+(104 rows)
 
 ROLLBACK;
 BEGIN;
@@ -1896,6 +1931,10 @@ $$) AS (value agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -1911,6 +1950,7 @@ $$) AS (value agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 0
    Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 24
    Consumer Flat Rows Avoided: 24
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -1922,7 +1962,7 @@ $$) AS (value agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136044 bytes
+   Peak Factor Memory: 136420 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -1954,7 +1994,7 @@ $$) AS (value agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=6
-(99 rows)
+(104 rows)
 
 ROLLBACK;
 BEGIN;
@@ -2065,6 +2105,10 @@ $$) AS (key agtype, total agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -2080,6 +2124,7 @@ $$) AS (key agtype, total agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 0
    Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 24
    Consumer Flat Rows Avoided: 24
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -2091,7 +2136,7 @@ $$) AS (key agtype, total agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136044 bytes
+   Peak Factor Memory: 136420 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -2115,7 +2160,7 @@ $$) AS (key agtype, total agtype);
          Sort Method: quicksort  Memory: 25kB
          ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
                Output: t.id
-(91 rows)
+(96 rows)
 
 ROLLBACK;
 DO $wcoj_group_sum_property_consumer_telemetry$
@@ -2272,6 +2317,10 @@ $$) AS (key agtype, value agtype);
          Source Bag Rows: 3
          Source Bag Keys: 3
          Factorized Binding Source Bags: 3
+         Binding Nodes Created: 1
+         Binding Node Source Bags: 1
+         Binding Node Edge Bags: 3
+         Binding Node Memory: 376 bytes
          Source Bag Bytes: 888 bytes
          Source Bag Memory Reserve: 888 bytes
          Intersection Builds: 3
@@ -2287,6 +2336,7 @@ $$) AS (key agtype, value agtype);
          Factorized Binding Enumerators: 1
          Shared Factor Enumerator Steps: 0
          Flat Rows Avoided: 0
+         Binding Node Flat Rows Avoided: 24
          Consumer Flat Rows Avoided: 24
          Row Goal Survivor Blocks Clamped: 0
          Row Goal Reached: false
@@ -2298,7 +2348,7 @@ $$) AS (key agtype, value agtype);
          Rows Emitted: 1
          Rescans: 0
          Peak WCOJ Memory: 330376 bytes
-         Peak Factor Memory: 136044 bytes
+         Peak Factor Memory: 136420 bytes
          Payload Rows Spilled: 0
          Payload Bucket Blocks Spilled: 0
          Payload Bucket Rows Spilled: 0
@@ -2330,7 +2380,7 @@ $$) AS (key agtype, value agtype);
                      Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(102 rows)
+(107 rows)
 
 ROLLBACK;
 DO $wcoj_group_avg_property_consumer_telemetry$
@@ -2484,6 +2534,10 @@ $$) AS (key agtype, value agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -2499,6 +2553,7 @@ $$) AS (key agtype, value agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 0
    Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 24
    Consumer Flat Rows Avoided: 24
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -2510,7 +2565,7 @@ $$) AS (key agtype, value agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136044 bytes
+   Peak Factor Memory: 136420 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -2542,7 +2597,7 @@ $$) AS (key agtype, value agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(99 rows)
+(104 rows)
 
 ROLLBACK;
 BEGIN;
@@ -2641,6 +2696,10 @@ $$) AS (key agtype, value agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -2656,6 +2715,7 @@ $$) AS (key agtype, value agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 0
    Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 24
    Consumer Flat Rows Avoided: 24
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -2667,7 +2727,7 @@ $$) AS (key agtype, value agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136044 bytes
+   Peak Factor Memory: 136420 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -2699,7 +2759,7 @@ $$) AS (key agtype, value agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(99 rows)
+(104 rows)
 
 ROLLBACK;
 BEGIN;
@@ -2979,6 +3039,10 @@ $$) AS (key agtype, total agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -2994,6 +3058,7 @@ $$) AS (key agtype, total agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 0
    Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 24
    Consumer Flat Rows Avoided: 24
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -3003,7 +3068,7 @@ $$) AS (key agtype, total agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136044 bytes
+   Peak Factor Memory: 136420 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -3035,7 +3100,7 @@ $$) AS (key agtype, total agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(97 rows)
+(102 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3148,6 +3213,10 @@ $$) AS (key agtype, total agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -3163,6 +3232,7 @@ $$) AS (key agtype, total agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 0
    Flat Rows Avoided: 24
+   Binding Node Flat Rows Avoided: 24
    Consumer Flat Rows Avoided: 24
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -3172,7 +3242,7 @@ $$) AS (key agtype, total agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136044 bytes
+   Peak Factor Memory: 136420 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -3204,7 +3274,7 @@ $$) AS (key agtype, total agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(97 rows)
+(102 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3354,6 +3424,10 @@ $$) AS (key agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -3369,6 +3443,7 @@ $$) AS (key agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 0
    Flat Rows Avoided: 24
+   Binding Node Flat Rows Avoided: 24
    Consumer Flat Rows Avoided: 24
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -3377,7 +3452,7 @@ $$) AS (key agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 330376 bytes
-   Peak Factor Memory: 136044 bytes
+   Peak Factor Memory: 136420 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -3409,7 +3484,7 @@ $$) AS (key agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(96 rows)
+(101 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3474,6 +3549,10 @@ $$) AS (key agtype);
          Source Bag Rows: 3
          Source Bag Keys: 3
          Factorized Binding Source Bags: 3
+         Binding Nodes Created: 1
+         Binding Node Source Bags: 1
+         Binding Node Edge Bags: 3
+         Binding Node Memory: 376 bytes
          Source Bag Bytes: 888 bytes
          Source Bag Memory Reserve: 888 bytes
          Intersection Builds: 3
@@ -3489,6 +3568,7 @@ $$) AS (key agtype);
          Factorized Binding Enumerators: 1
          Shared Factor Enumerator Steps: 0
          Flat Rows Avoided: 24
+         Binding Node Flat Rows Avoided: 24
          Consumer Flat Rows Avoided: 24
          Row Goal Survivor Blocks Clamped: 1
          Row Goal Rows Emitted: 1
@@ -3499,7 +3579,7 @@ $$) AS (key agtype);
          Rows Emitted: 1
          Rescans: 0
          Peak WCOJ Memory: 106496 bytes
-         Peak Factor Memory: 17892 bytes
+         Peak Factor Memory: 18268 bytes
          Payload Rows Spilled: 0
          Payload Bucket Blocks Spilled: 0
          Payload Bucket Rows Spilled: 0
@@ -3531,7 +3611,7 @@ $$) AS (key agtype);
                      Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(101 rows)
+(106 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3634,6 +3714,10 @@ $$) AS (ok agtype);
            Source Bag Rows: 3
            Source Bag Keys: 3
            Factorized Binding Source Bags: 3
+           Binding Nodes Created: 1
+           Binding Node Source Bags: 1
+           Binding Node Edge Bags: 3
+           Binding Node Memory: 376 bytes
            Source Bag Bytes: 888 bytes
            Source Bag Memory Reserve: 888 bytes
            Intersection Builds: 3
@@ -3649,6 +3733,7 @@ $$) AS (ok agtype);
            Factorized Binding Enumerators: 1
            Shared Factor Enumerator Steps: 4
            Flat Rows Avoided: 23
+           Binding Node Flat Rows Avoided: 0
            Consumer Flat Rows Avoided: 0
            Row Goal Survivor Blocks Clamped: 1
            Row Goal Rows Emitted: 1
@@ -3660,7 +3745,7 @@ $$) AS (ok agtype);
            Rows Emitted: 1
            Rescans: 0
            Peak WCOJ Memory: 106496 bytes
-           Peak Factor Memory: 17892 bytes
+           Peak Factor Memory: 18268 bytes
            Payload Rows Spilled: 0
            Payload Bucket Blocks Spilled: 0
            Payload Bucket Rows Spilled: 0
@@ -3684,7 +3769,7 @@ $$) AS (ok agtype);
                  Sort Method: quicksort  Memory: 25kB
                  ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
                        Output: t.id
-(93 rows)
+(98 rows)
 
 ROLLBACK;
 DO $wcoj_exists_factorized_row_goal_telemetry$
@@ -4085,6 +4170,10 @@ $$) AS (total agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 20
+   Binding Node Source Bags: 20
+   Binding Node Edge Bags: 60
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -4100,6 +4189,7 @@ $$) AS (total agtype);
    Factorized Binding Enumerators: 20
    Shared Factor Enumerator Steps: 0
    Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 81920
    Consumer Flat Rows Avoided: 81920
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -4109,7 +4199,7 @@ $$) AS (total agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 147864 bytes
-   Peak Factor Memory: 30156 bytes
+   Peak Factor Memory: 30532 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 48
    Payload Bucket Rows Spilled: 768
@@ -4141,7 +4231,7 @@ $$) AS (total agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(97 rows)
+(102 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4558,6 +4648,10 @@ $$) AS (total agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -4573,6 +4667,7 @@ $$) AS (total agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 8
    Flat Rows Avoided: 2
+   Binding Node Flat Rows Avoided: 4
    Consumer Flat Rows Avoided: 2
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -4582,7 +4677,7 @@ $$) AS (total agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 442984 bytes
-   Peak Factor Memory: 195660 bytes
+   Peak Factor Memory: 196036 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -4608,7 +4703,7 @@ $$) AS (total agtype);
                Output: t.id
                Filter: ((t.properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(t.properties, '"id"'::agtype, '1900'::agtype))
                Rows Removed by Filter: 100
-(91 rows)
+(96 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4669,6 +4764,10 @@ $$) AS (total agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -4684,6 +4783,7 @@ $$) AS (total agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 8
    Flat Rows Avoided: 2
+   Binding Node Flat Rows Avoided: 4
    Consumer Flat Rows Avoided: 2
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -4695,7 +4795,7 @@ $$) AS (total agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 442984 bytes
-   Peak Factor Memory: 195660 bytes
+   Peak Factor Memory: 196036 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -4721,7 +4821,7 @@ $$) AS (total agtype);
                Output: t.id
                Filter: ((t.properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(t.properties, '"id"'::agtype, '1900'::agtype))
                Rows Removed by Filter: 100
-(93 rows)
+(98 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4782,6 +4882,10 @@ $$) AS (key agtype, total agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -4797,6 +4901,7 @@ $$) AS (key agtype, total agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 8
    Flat Rows Avoided: 2
+   Binding Node Flat Rows Avoided: 4
    Consumer Flat Rows Avoided: 2
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -4806,7 +4911,7 @@ $$) AS (key agtype, total agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 442984 bytes
-   Peak Factor Memory: 195660 bytes
+   Peak Factor Memory: 196036 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -4832,7 +4937,7 @@ $$) AS (key agtype, total agtype);
                Output: t.id
                Filter: ((t.properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(t.properties, '"id"'::agtype, '1900'::agtype))
                Rows Removed by Filter: 100
-(91 rows)
+(96 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4893,6 +4998,10 @@ $$) AS (key agtype, total agtype);
    Source Bag Rows: 3
    Source Bag Keys: 3
    Factorized Binding Source Bags: 3
+   Binding Nodes Created: 1
+   Binding Node Source Bags: 1
+   Binding Node Edge Bags: 3
+   Binding Node Memory: 376 bytes
    Source Bag Bytes: 888 bytes
    Source Bag Memory Reserve: 888 bytes
    Intersection Builds: 3
@@ -4908,6 +5017,7 @@ $$) AS (key agtype, total agtype);
    Factorized Binding Enumerators: 1
    Shared Factor Enumerator Steps: 8
    Flat Rows Avoided: 2
+   Binding Node Flat Rows Avoided: 4
    Consumer Flat Rows Avoided: 2
    Row Goal Survivor Blocks Clamped: 0
    Row Goal Reached: false
@@ -4919,7 +5029,7 @@ $$) AS (key agtype, total agtype);
    Rows Emitted: 1
    Rescans: 0
    Peak WCOJ Memory: 442984 bytes
-   Peak Factor Memory: 195660 bytes
+   Peak Factor Memory: 196036 bytes
    Payload Rows Spilled: 0
    Payload Bucket Blocks Spilled: 0
    Payload Bucket Rows Spilled: 0
@@ -4945,7 +5055,7 @@ $$) AS (key agtype, total agtype);
                Output: t.id
                Filter: ((t.properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(t.properties, '"id"'::agtype, '1900'::agtype))
                Rows Removed by Filter: 100
-(93 rows)
+(98 rows)
 
 ROLLBACK;
 DO $wcoj_same_edge_semiring_telemetry$
@@ -6292,6 +6402,8 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Filter: ((f3.end_id = d.id) AND _ag_enforce_edge_uniqueness3(f1.id, f2.id, f3.id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
    Generic Join Provider Mode: eager sorted array
    Lazy Physical Provider: false
    Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
@@ -6313,6 +6425,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Reduction Core Variables: 2
    Reduction Tail Separators: 0
    GHD Bag Count: 0
+   GHD Bags: none
    GHD Separator Count: 0
    GHD Separators: none
    GHD Descriptor Source: graph-join-match-ir
@@ -6355,6 +6468,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Flat Rows Materialized: 128
    Flat Rows Avoided: 0
    Consumer Flat Rows Avoided: 0
+   Row Goal Reached: false
    Lazy Domain Views: 391
    Lazy Domain Keys Scanned: 644
    Domain Scratch Allocations: 4
@@ -6398,7 +6512,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
          Output: f2.id, f2.start_id, f2.end_id
    ->  Seq Scan on wcoj_generic."F3" f3 (actual rows=128.00 loops=1)
          Output: f3.id, f3.end_id, f3.start_id
-(111 rows)
+(115 rows)
 
 ROLLBACK;
 DO $wcoj_acyclic_semijoin_plan$
@@ -6587,6 +6701,8 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, u agtype, v agtype,
    Filter: ((f4.end_id = v.id) AND _ag_enforce_edge_uniqueness3(f1.id, f2.id, f3.id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
    Generic Join Provider Mode: eager sorted array
    Lazy Physical Provider: false
    Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
@@ -6608,6 +6724,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, u agtype, v agtype,
    Reduction Core Variables: 2
    Reduction Tail Separators: 0
    GHD Bag Count: 0
+   GHD Bags: none
    GHD Separator Count: 0
    GHD Separators: none
    GHD Descriptor Source: graph-join-match-ir
@@ -6650,6 +6767,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, u agtype, v agtype,
    Flat Rows Materialized: 128
    Flat Rows Avoided: 0
    Consumer Flat Rows Avoided: 0
+   Row Goal Reached: false
    Lazy Domain Views: 395
    Lazy Domain Keys Scanned: 648
    Domain Scratch Allocations: 6
@@ -6712,7 +6830,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, u agtype, v agtype,
          Buffers: shared hit=1
  Planning:
    Buffers: shared hit=40
-(130 rows)
+(134 rows)
 
 ROLLBACK;
 BEGIN;
@@ -6849,6 +6967,8 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    Filter: ((g4.end_id = q.id) AND _ag_enforce_edge_uniqueness3(g1.id, g2.id, g3.id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
    Generic Join Provider Mode: eager sorted array
    Lazy Physical Provider: false
    Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
@@ -6870,6 +6990,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    Reduction Core Variables: 2
    Reduction Tail Separators: 0
    GHD Bag Count: 0
+   GHD Bags: none
    GHD Separator Count: 0
    GHD Separators: none
    GHD Descriptor Source: graph-join-match-ir
@@ -6912,6 +7033,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    Flat Rows Materialized: 128
    Flat Rows Avoided: 0
    Consumer Flat Rows Avoided: 0
+   Row Goal Reached: false
    Lazy Domain Views: 521
    Lazy Domain Keys Scanned: 774
    Domain Scratch Allocations: 5
@@ -6959,7 +7081,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
          Output: g3.id, g3.end_id, g3.start_id
    ->  Seq Scan on wcoj_generic."G4" g4 (actual rows=1.00 loops=1)
          Output: g4.id, g4.end_id, g4.start_id
-(115 rows)
+(119 rows)
 
 ROLLBACK;
 DO $wcoj_tree_semijoin_plan$
@@ -7231,6 +7353,8 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    Filter: ((h4.end_id = q.id) AND _ag_enforce_edge_uniqueness3(h1.id, h2.id, h3.id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
    Generic Join Provider Mode: eager sorted array
    Lazy Physical Provider: false
    Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
@@ -7252,6 +7376,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    Reduction Core Variables: 2
    Reduction Tail Separators: 0
    GHD Bag Count: 0
+   GHD Bags: none
    GHD Separator Count: 0
    GHD Separators: none
    GHD Descriptor Source: graph-join-match-ir
@@ -7294,6 +7419,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    Flat Rows Materialized: 128
    Flat Rows Avoided: 0
    Consumer Flat Rows Avoided: 0
+   Row Goal Reached: false
    Lazy Domain Views: 781
    Lazy Domain Keys Scanned: 1034
    Domain Scratch Allocations: 7
@@ -7349,7 +7475,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
          Output: h5.id, h5.start_id, h5.end_id
    ->  Seq Scan on wcoj_generic."H6" h6 (actual rows=1.00 loops=1)
          Output: h6.id, h6.end_id, h6.start_id
-(123 rows)
+(127 rows)
 
 ROLLBACK;
 DO $wcoj_snowflake_semijoin_plan$

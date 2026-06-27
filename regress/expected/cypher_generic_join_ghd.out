@@ -165,6 +165,8 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
    Filter: ((t.end_id = x.id) AND _ag_enforce_edge_uniqueness4(e1.id, e2.id, e3.id, e4.id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
    Generic Join Provider Mode: eager sorted array
    Lazy Physical Provider: false
    Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
@@ -172,9 +174,9 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
    Component Count: 1
    Component IDs: 1, 1, 1, 1, 1
    Reduction Shape: cyclic-with-tail
-   GHD Mode: 2-core leaf-tail
-   GHD General Decomposition: false
-   GHD Fallback Reason: general GHD decomposition is not implemented
+   GHD Mode: general GHD
+   GHD General Decomposition: true
+   GHD Fallback Reason: none
    Reduction Descriptor Source: graph-join-match-ir
    Reduction Order: none
    Reduction Order Edges: 0
@@ -185,9 +187,10 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
    Yannakakis Step Filter Mode: global-domain provider filter
    Reduction Core Variables: 4
    Reduction Tail Separators: 1
-   GHD Bag Count: 2
-   GHD Separator Count: 1
-   GHD Separators: provider 10: v2->v1 via key2
+   GHD Bag Count: 3
+   GHD Bags: bag 1 cyclic-core: vars 3,4,2 providers 6,7; bag 2 cyclic-core: vars 3,5,2 providers 9,8; bag 3 leaf-tail: vars 2,1 providers 10
+   GHD Separator Count: 2
+   GHD Separators: bag 1->2 pair v3,v2, bag 1->3 provider 10: v2->v1 via key2
    GHD Descriptor Source: graph-join-match-ir
    Variable Count: 5
    Provider Count: 10
@@ -197,7 +200,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
    Provider Rows Read: 514
    Provider Row Bytes Allocated: 51200 bytes
    Provider Tuple Bytes Copied: 0 bytes
-   Semijoin Reduction Passes: 3
+   Semijoin Reduction Passes: 2
    Yannakakis Bottom-Up Passes: 0
    Yannakakis Top-Down Passes: 0
    Yannakakis Steps Applied: 0
@@ -209,25 +212,26 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
    Yannakakis Top-Down Rows Removed: 0
    Semijoin Provider Rows After: 10
    Semijoin Final Domain Keys: 5
-   GHD Separator Reduction Passes: 1
+   GHD Separator Reduction Passes: 2
    GHD Leaf Tail Providers: 1
-   GHD Descriptor Separators Applied: 1
+   GHD Descriptor Separators Applied: 2
    GHD Tail Domain Propagation Passes: 0
    GHD Tail Domain Rows Removed: 0
-   GHD Separator Domain Keys: 1
+   GHD Separator Domain Keys: 3
    GHD Leaf Tail Rows Removed: 0
-   GHD Cyclic Core Rows Removed: 189
-   Reduction Domain Builds: 60
-   Reduction Domain Rows Scanned: 1320
-   Reduction Domain Keys Produced: 1320
-   Reduction Domain Sorts: 6
-   Reduction Domain Sort Rows: 384
+   GHD Cyclic Core Rows Removed: 315
+   Reduction Domain Builds: 45
+   Reduction Domain Rows Scanned: 990
+   Reduction Domain Keys Produced: 990
+   Reduction Domain Sorts: 4
+   Reduction Domain Sort Rows: 256
    Complete Bindings: 1
    Candidate Flat Rows: 1
    Candidate Bag Combinations: 1
    Flat Rows Materialized: 1
    Flat Rows Avoided: 0
    Consumer Flat Rows Avoided: 0
+   Row Goal Reached: false
    Lazy Domain Views: 15
    Lazy Domain Keys Scanned: 15
    Domain Scratch Allocations: 5
@@ -247,15 +251,15 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
    Trie Prefix Range Seeks: 10
    Trie Pair Range Opens: 5
    Reduction Scratch Allocations: 1
-   Reduction Scratch Reuses: 39
-   Vector Intersection Merge Calls: 45
-   Vector Intersection Galloping Calls: 5
-   Vector Intersection Galloping Steps: 5
+   Reduction Scratch Reuses: 29
+   Vector Intersection Merge Calls: 36
+   Vector Intersection Galloping Calls: 4
+   Vector Intersection Galloping Steps: 4
    Uniqueness Constraint Groups: 1
    Uniqueness Rejects: 0
    Rows Emitted: 1
    Rescans: 0
-   Peak Generic Join Memory: 144384 bytes
+   Peak Generic Join Memory: 148608 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on generic_ghd."X" x (actual rows=1.00 loops=1)
          Output: x.id
@@ -277,7 +281,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
          Output: e4.id, e4.end_id, e4.start_id
    ->  Seq Scan on generic_ghd."TX" t (actual rows=1.00 loops=1)
          Output: t.id, t.end_id, t.start_id
-(117 rows)
+(121 rows)
 
 ROLLBACK;
 BEGIN;
@@ -293,12 +297,14 @@ FROM cypher('generic_ghd', $$
           (c)-[t:TX]->(x:X)
     RETURN count(*) AS total
 $$) AS (total agtype);
-                                           QUERY PLAN                                            
--------------------------------------------------------------------------------------------------
+                                                                  QUERY PLAN                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE Generic Multiway Join) (actual rows=1.00 loops=1)
    Output: ((count(*)))::agtype
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: count(*)
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
    Generic Join Provider Mode: eager sorted array
    Lazy Physical Provider: false
    Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
@@ -306,9 +312,9 @@ $$) AS (total agtype);
    Component Count: 1
    Component IDs: 1, 1, 1, 1, 1
    Reduction Shape: cyclic-with-tail
-   GHD Mode: 2-core leaf-tail
-   GHD General Decomposition: false
-   GHD Fallback Reason: general GHD decomposition is not implemented
+   GHD Mode: general GHD
+   GHD General Decomposition: true
+   GHD Fallback Reason: none
    Reduction Descriptor Source: graph-join-match-ir
    Reduction Order: none
    Reduction Order Edges: 0
@@ -319,9 +325,10 @@ $$) AS (total agtype);
    Yannakakis Step Filter Mode: global-domain provider filter
    Reduction Core Variables: 4
    Reduction Tail Separators: 1
-   GHD Bag Count: 2
-   GHD Separator Count: 1
-   GHD Separators: provider 10: v2->v1 via key2
+   GHD Bag Count: 3
+   GHD Bags: bag 1 cyclic-core: vars 3,4,2 providers 6,7; bag 2 cyclic-core: vars 3,5,2 providers 9,8; bag 3 leaf-tail: vars 2,1 providers 10
+   GHD Separator Count: 2
+   GHD Separators: bag 1->2 pair v3,v2, bag 1->3 provider 10: v2->v1 via key2
    GHD Descriptor Source: graph-join-match-ir
    Variable Count: 5
    Provider Count: 10
@@ -331,7 +338,7 @@ $$) AS (total agtype);
    Provider Rows Read: 514
    Provider Row Bytes Allocated: 51200 bytes
    Provider Tuple Bytes Copied: 0 bytes
-   Semijoin Reduction Passes: 3
+   Semijoin Reduction Passes: 2
    Yannakakis Bottom-Up Passes: 0
    Yannakakis Top-Down Passes: 0
    Yannakakis Steps Applied: 0
@@ -343,25 +350,26 @@ $$) AS (total agtype);
    Yannakakis Top-Down Rows Removed: 0
    Semijoin Provider Rows After: 10
    Semijoin Final Domain Keys: 5
-   GHD Separator Reduction Passes: 1
+   GHD Separator Reduction Passes: 2
    GHD Leaf Tail Providers: 1
-   GHD Descriptor Separators Applied: 1
+   GHD Descriptor Separators Applied: 2
    GHD Tail Domain Propagation Passes: 0
    GHD Tail Domain Rows Removed: 0
-   GHD Separator Domain Keys: 1
+   GHD Separator Domain Keys: 3
    GHD Leaf Tail Rows Removed: 0
-   GHD Cyclic Core Rows Removed: 189
-   Reduction Domain Builds: 60
-   Reduction Domain Rows Scanned: 1320
-   Reduction Domain Keys Produced: 1320
-   Reduction Domain Sorts: 6
-   Reduction Domain Sort Rows: 384
+   GHD Cyclic Core Rows Removed: 315
+   Reduction Domain Builds: 45
+   Reduction Domain Rows Scanned: 990
+   Reduction Domain Keys Produced: 990
+   Reduction Domain Sorts: 4
+   Reduction Domain Sort Rows: 256
    Complete Bindings: 1
    Candidate Flat Rows: 1
    Candidate Bag Combinations: 1
    Flat Rows Materialized: 0
    Flat Rows Avoided: 0
    Consumer Flat Rows Avoided: 1
+   Row Goal Reached: false
    Count Result: 1
    Lazy Domain Views: 15
    Lazy Domain Keys Scanned: 15
@@ -382,15 +390,15 @@ $$) AS (total agtype);
    Trie Prefix Range Seeks: 10
    Trie Pair Range Opens: 5
    Reduction Scratch Allocations: 1
-   Reduction Scratch Reuses: 39
-   Vector Intersection Merge Calls: 45
-   Vector Intersection Galloping Calls: 5
-   Vector Intersection Galloping Steps: 5
+   Reduction Scratch Reuses: 29
+   Vector Intersection Merge Calls: 36
+   Vector Intersection Galloping Calls: 4
+   Vector Intersection Galloping Steps: 4
    Uniqueness Constraint Groups: 1
    Uniqueness Rejects: 0
    Rows Emitted: 1
    Rescans: 0
-   Peak Generic Join Memory: 144384 bytes
+   Peak Generic Join Memory: 148608 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on generic_ghd."X" x (actual rows=1.00 loops=1)
          Output: x.id
@@ -412,7 +420,7 @@ $$) AS (total agtype);
          Output: e4.id, e4.end_id, e4.start_id
    ->  Seq Scan on generic_ghd."TX" t (actual rows=1.00 loops=1)
          Output: t.end_id, t.start_id, t.id
-(117 rows)
+(121 rows)
 
 ROLLBACK;
 DO $generic_ghd_count_consumer_plan$
@@ -424,6 +432,10 @@ DECLARE
     has_no_flat_rows boolean := false;
     has_consumer_avoids boolean := false;
     has_rows_emitted boolean := false;
+    has_eager_provider boolean := false;
+    has_full_materialization boolean := false;
+    has_separator_pass boolean := false;
+    has_descriptor_separators boolean := false;
 BEGIN
     PERFORM set_config('age.enable_wcoj', 'on', true);
     PERFORM set_config('enable_nestloop', 'off', true);
@@ -453,18 +465,28 @@ BEGIN
             plan_text LIKE '%Consumer Flat Rows Avoided: 1%';
         has_rows_emitted := has_rows_emitted OR
             plan_text LIKE '%Rows Emitted: 1%';
+        has_eager_provider := has_eager_provider OR
+            plan_text LIKE '%Lazy Physical Provider: false%';
+        has_full_materialization := has_full_materialization OR
+            plan_text LIKE '%Provider Full Materialization: true%';
+        has_separator_pass := has_separator_pass OR
+            plan_text LIKE '%GHD Separator Reduction Passes: 2%';
+        has_descriptor_separators := has_descriptor_separators OR
+            plan_text LIKE '%GHD Descriptor Separators Applied: 2%';
     END LOOP;
 
     IF NOT has_generic OR NOT has_count_consumer OR
        NOT has_count_result OR NOT has_no_flat_rows OR
-       NOT has_consumer_avoids OR NOT has_rows_emitted THEN
+       NOT has_consumer_avoids OR NOT has_rows_emitted OR
+       NOT has_eager_provider OR NOT has_full_materialization OR
+       NOT has_separator_pass OR NOT has_descriptor_separators THEN
         RAISE EXCEPTION
-            'Generic Join count consumer was not observed';
+            'Generic Join count consumer with GHD separator reduction was not observed';
     END IF;
-    RAISE NOTICE 'generic join count consumer verified';
+    RAISE NOTICE 'generic join count consumer with GHD separator reduction verified';
 END
 $generic_ghd_count_consumer_plan$;
-NOTICE:  generic join count consumer verified
+NOTICE:  generic join count consumer with GHD separator reduction verified
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
 CREATE TEMP TABLE generic_ghd_binary_count ON COMMIT DROP AS
@@ -504,6 +526,716 @@ SELECT (SELECT total FROM generic_ghd_binary_count) AS binary_total,
 (1 row)
 
 ROLLBACK;
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN count(DISTINCT id(a)) AS total
+$$) AS (total agtype);
+                                              QUERY PLAN                                              
+------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE Generic Multiway Join) (actual rows=1.00 loops=1)
+   Output: ((count(DISTINCT (a.id)::agtype)))::agtype
+   Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
+   Generic Join Consumer: count(distinct key)
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
+   Generic Join Provider Mode: eager sorted array
+   Lazy Physical Provider: false
+   Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
+   Variable Order: 1(rti=2), 2(rti=4), 3(rti=6), 4(rti=8)
+   Component Count: 1
+   Component IDs: 1, 1, 1, 1
+   Reduction Shape: cyclic-core
+   GHD Mode: general GHD
+   GHD General Decomposition: true
+   GHD Fallback Reason: none
+   Reduction Descriptor Source: graph-join-match-ir
+   Reduction Order: none
+   Reduction Order Edges: 0
+   Yannakakis Step Count: 0
+   Yannakakis Bottom-Up Steps: 0
+   Yannakakis Top-Down Steps: 0
+   Yannakakis Step Plan: none
+   Yannakakis Step Filter Mode: global-domain provider filter
+   Reduction Core Variables: 4
+   Reduction Tail Separators: 0
+   GHD Bag Count: 2
+   GHD Bags: bag 1 cyclic-core: vars 1,2,3 providers 5,6; bag 2 cyclic-core: vars 1,4,3 providers 8,7
+   GHD Separator Count: 1
+   GHD Separators: bag 1->2 pair v1,v3
+   GHD Descriptor Source: graph-join-match-ir
+   Variable Count: 4
+   Provider Count: 8
+   Provider Rows Materialized: 512
+   Provider Tuples Materialized: 0
+   Provider Full Materialization: true
+   Provider Rows Read: 512
+   Provider Row Bytes Allocated: 40960 bytes
+   Provider Tuple Bytes Copied: 0 bytes
+   Semijoin Reduction Passes: 1
+   Yannakakis Bottom-Up Passes: 0
+   Yannakakis Top-Down Passes: 0
+   Yannakakis Steps Applied: 0
+   Yannakakis Bottom-Up Steps Applied: 0
+   Yannakakis Top-Down Steps Applied: 0
+   Reduction Order Applied: false
+   Semijoin Rows Removed: 0
+   Yannakakis Bottom-Up Rows Removed: 0
+   Yannakakis Top-Down Rows Removed: 0
+   Semijoin Provider Rows After: 512
+   Semijoin Final Domain Keys: 256
+   GHD Separator Reduction Passes: 1
+   GHD Leaf Tail Providers: 0
+   GHD Descriptor Separators Applied: 1
+   GHD Tail Domain Propagation Passes: 0
+   GHD Tail Domain Rows Removed: 0
+   GHD Separator Domain Keys: 128
+   GHD Leaf Tail Rows Removed: 0
+   GHD Cyclic Core Rows Removed: 0
+   Reduction Domain Builds: 12
+   Reduction Domain Rows Scanned: 768
+   Reduction Domain Keys Produced: 768
+   Reduction Domain Sorts: 4
+   Reduction Domain Sort Rows: 256
+   Complete Bindings: 64
+   Candidate Flat Rows: 64
+   Candidate Bag Combinations: 64
+   Flat Rows Materialized: 0
+   Flat Rows Avoided: 0
+   Consumer Flat Rows Avoided: 64
+   Row Goal Reached: false
+   Count Result: 64
+   Distinct Key Count: 64
+   Lazy Domain Views: 579
+   Lazy Domain Keys Scanned: 12736
+   Domain Scratch Allocations: 4
+   Domain Scratch Reuses: 189
+   Runtime Domain Builds: 579
+   Runtime Domain Rows Scanned: 12736
+   Prefix Range Builds: 568
+   Prefix Range Reuses: 456
+   Prefix Range Directory Searches: 456
+   Prefix Range Cursor Reuses: 0
+   Prefix Range Cache Hits: 448
+   Prefix Range Cache Misses: 64
+   Child Range Cache Hits: 256
+   Child Range Cache Misses: 512
+   Trie Child Range Reuses: 256
+   Trie Child Range Opens: 512
+   Trie Prefix Range Seeks: 512
+   Trie Pair Range Opens: 256
+   Reduction Scratch Allocations: 1
+   Reduction Scratch Reuses: 7
+   Vector Intersection Merge Calls: 74
+   Vector Intersection Galloping Calls: 320
+   Vector Intersection Galloping Steps: 3370
+   Uniqueness Constraint Groups: 1
+   Uniqueness Rejects: 0
+   Rows Emitted: 1
+   Rescans: 0
+   Peak Generic Join Memory: 148480 bytes
+   Spill Bytes: 0 bytes
+   ->  Seq Scan on generic_ghd."A" a (actual rows=64.00 loops=1)
+         Output: a.id
+   ->  Seq Scan on generic_ghd."B" b (actual rows=64.00 loops=1)
+         Output: b.id
+   ->  Seq Scan on generic_ghd."C" c (actual rows=64.00 loops=1)
+         Output: c.id
+   ->  Seq Scan on generic_ghd."D" d (actual rows=64.00 loops=1)
+         Output: d.id
+   ->  Seq Scan on generic_ghd."E1" e1 (actual rows=64.00 loops=1)
+         Output: e1.id, e1.start_id, e1.end_id
+   ->  Seq Scan on generic_ghd."E2" e2 (actual rows=64.00 loops=1)
+         Output: e2.id, e2.start_id, e2.end_id
+   ->  Seq Scan on generic_ghd."E3" e3 (actual rows=64.00 loops=1)
+         Output: e3.id, e3.end_id, e3.start_id
+   ->  Seq Scan on generic_ghd."E4" e4 (actual rows=64.00 loops=1)
+         Output: e4.id, e4.end_id, e4.start_id
+(118 rows)
+
+ROLLBACK;
+DO $generic_ghd_count_distinct_consumer_plan$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_distinct_consumer boolean := false;
+    has_count_result boolean := false;
+    has_distinct_count boolean := false;
+    has_no_flat_rows boolean := false;
+    has_consumer_avoids boolean := false;
+    has_rows_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+    PERFORM set_config('enable_hashagg', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+        SELECT *
+        FROM cypher('generic_ghd', $cypher$
+            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+                  -[e3:E3]->(d:D)-[e4:E4]->(a)
+            RETURN count(DISTINCT id(a)) AS total
+        $cypher$) AS (total agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_distinct_consumer := has_distinct_consumer OR
+            plan_text LIKE '%Generic Join Consumer: count(distinct key)%';
+        has_count_result := has_count_result OR
+            plan_text LIKE '%Count Result: 64%';
+        has_distinct_count := has_distinct_count OR
+            plan_text LIKE '%Distinct Key Count: 64%';
+        has_no_flat_rows := has_no_flat_rows OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_consumer_avoids := has_consumer_avoids OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 64%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_distinct_consumer OR
+       NOT has_count_result OR NOT has_distinct_count OR
+       NOT has_no_flat_rows OR NOT has_consumer_avoids OR
+       NOT has_rows_emitted THEN
+        RAISE EXCEPTION
+            'Generic Join count distinct-key consumer was not observed';
+    END IF;
+    RAISE NOTICE 'generic join count distinct-key consumer verified';
+END
+$generic_ghd_count_distinct_consumer_plan$;
+NOTICE:  generic join count distinct-key consumer verified
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_count_distinct ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN count(DISTINCT id(a)) AS total
+$$) AS (total agtype);
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+CREATE TEMP TABLE generic_ghd_join_count_distinct ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN count(DISTINCT id(a)) AS total
+$$) AS (total agtype);
+SELECT (SELECT total FROM generic_ghd_binary_count_distinct) AS binary_total,
+       (SELECT total FROM generic_ghd_join_count_distinct) AS generic_total,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_count_distinct
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_count_distinct)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_count_distinct
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_count_distinct)
+        ) diff) AS diff_rows;
+ binary_total | generic_total | diff_rows 
+--------------+---------------+-----------
+ 64           | 64            |         0
+(1 row)
+
+ROLLBACK;
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT EXISTS (
+    SELECT 1
+    FROM cypher('generic_ghd', $$
+        MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+              -[e3:E3]->(d:D)-[e4:E4]->(a),
+              (c)-[t:TX]->(x:X)
+        RETURN id(a) AS a
+    $$) AS (a agtype)
+) AS exists_match;
+                                                                      QUERY PLAN                                                                      
+------------------------------------------------------------------------------------------------------------------------------------------------------
+ Result (actual rows=1.00 loops=1)
+   Output: (InitPlan 1).col1
+   InitPlan 1
+     ->  Custom Scan (AGE Generic Multiway Join) (actual rows=1.00 loops=1)
+           Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
+           Generic Join Consumer: exists
+           Generic Join Row Goal: 1
+           Generic Join Row Goal Source: exists
+           Generic Join Provider Mode: eager sorted array
+           Lazy Physical Provider: false
+           Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
+           Variable Order: 1(rti=13), 2(rti=8), 3(rti=4), 4(rti=6), 5(rti=10)
+           Component Count: 1
+           Component IDs: 1, 1, 1, 1, 1
+           Reduction Shape: cyclic-with-tail
+           GHD Mode: general GHD
+           GHD General Decomposition: true
+           GHD Fallback Reason: none
+           Reduction Descriptor Source: graph-join-match-ir
+           Reduction Order: none
+           Reduction Order Edges: 0
+           Yannakakis Step Count: 0
+           Yannakakis Bottom-Up Steps: 0
+           Yannakakis Top-Down Steps: 0
+           Yannakakis Step Plan: none
+           Yannakakis Step Filter Mode: global-domain provider filter
+           Reduction Core Variables: 4
+           Reduction Tail Separators: 1
+           GHD Bag Count: 3
+           GHD Bags: bag 1 cyclic-core: vars 3,4,2 providers 6,7; bag 2 cyclic-core: vars 3,5,2 providers 9,8; bag 3 leaf-tail: vars 2,1 providers 10
+           GHD Separator Count: 2
+           GHD Separators: bag 1->2 pair v3,v2, bag 1->3 provider 10: v2->v1 via key2
+           GHD Descriptor Source: graph-join-match-ir
+           Variable Count: 5
+           Provider Count: 10
+           Provider Rows Materialized: 514
+           Provider Tuples Materialized: 0
+           Provider Full Materialization: true
+           Provider Rows Read: 514
+           Provider Row Bytes Allocated: 51200 bytes
+           Provider Tuple Bytes Copied: 0 bytes
+           Semijoin Reduction Passes: 2
+           Yannakakis Bottom-Up Passes: 0
+           Yannakakis Top-Down Passes: 0
+           Yannakakis Steps Applied: 0
+           Yannakakis Bottom-Up Steps Applied: 0
+           Yannakakis Top-Down Steps Applied: 0
+           Reduction Order Applied: false
+           Semijoin Rows Removed: 504
+           Yannakakis Bottom-Up Rows Removed: 0
+           Yannakakis Top-Down Rows Removed: 0
+           Semijoin Provider Rows After: 10
+           Semijoin Final Domain Keys: 5
+           GHD Separator Reduction Passes: 2
+           GHD Leaf Tail Providers: 1
+           GHD Descriptor Separators Applied: 2
+           GHD Tail Domain Propagation Passes: 0
+           GHD Tail Domain Rows Removed: 0
+           GHD Separator Domain Keys: 3
+           GHD Leaf Tail Rows Removed: 0
+           GHD Cyclic Core Rows Removed: 315
+           Reduction Domain Builds: 45
+           Reduction Domain Rows Scanned: 990
+           Reduction Domain Keys Produced: 990
+           Reduction Domain Sorts: 4
+           Reduction Domain Sort Rows: 256
+           Complete Bindings: 1
+           Candidate Flat Rows: 1
+           Candidate Bag Combinations: 1
+           Flat Rows Materialized: 0
+           Flat Rows Avoided: 0
+           Consumer Flat Rows Avoided: 1
+           Row Goal Rows Emitted: 1
+           Row Goal Flat Rows Avoided: 0
+           Row Goal Reached: true
+           Exists Result: true
+           Lazy Domain Views: 15
+           Lazy Domain Keys Scanned: 15
+           Domain Scratch Allocations: 5
+           Domain Scratch Reuses: 0
+           Runtime Domain Builds: 15
+           Runtime Domain Rows Scanned: 15
+           Prefix Range Builds: 10
+           Prefix Range Reuses: 0
+           Prefix Range Directory Searches: 0
+           Prefix Range Cursor Reuses: 0
+           Prefix Range Cache Hits: 0
+           Prefix Range Cache Misses: 10
+           Child Range Cache Hits: 5
+           Child Range Cache Misses: 10
+           Trie Child Range Reuses: 5
+           Trie Child Range Opens: 10
+           Trie Prefix Range Seeks: 10
+           Trie Pair Range Opens: 5
+           Reduction Scratch Allocations: 1
+           Reduction Scratch Reuses: 29
+           Vector Intersection Merge Calls: 36
+           Vector Intersection Galloping Calls: 4
+           Vector Intersection Galloping Steps: 4
+           Uniqueness Constraint Groups: 1
+           Uniqueness Rejects: 0
+           Rows Emitted: 1
+           Rescans: 0
+           Peak Generic Join Memory: 148608 bytes
+           Spill Bytes: 0 bytes
+           ->  Seq Scan on generic_ghd."X" x (actual rows=1.00 loops=1)
+                 Output: x.id
+           ->  Seq Scan on generic_ghd."C" c (actual rows=64.00 loops=1)
+                 Output: c.id
+           ->  Seq Scan on generic_ghd."A" a (actual rows=64.00 loops=1)
+                 Output: a.id
+           ->  Seq Scan on generic_ghd."B" b (actual rows=64.00 loops=1)
+                 Output: b.id
+           ->  Seq Scan on generic_ghd."D" d (actual rows=64.00 loops=1)
+                 Output: d.id
+           ->  Seq Scan on generic_ghd."E1" e1 (actual rows=64.00 loops=1)
+                 Output: e1.id, e1.start_id, e1.end_id
+           ->  Seq Scan on generic_ghd."E2" e2 (actual rows=64.00 loops=1)
+                 Output: e2.id, e2.end_id, e2.start_id
+           ->  Seq Scan on generic_ghd."E3" e3 (actual rows=64.00 loops=1)
+                 Output: e3.id, e3.start_id, e3.end_id
+           ->  Seq Scan on generic_ghd."E4" e4 (actual rows=64.00 loops=1)
+                 Output: e4.id, e4.end_id, e4.start_id
+           ->  Seq Scan on generic_ghd."TX" t (actual rows=1.00 loops=1)
+                 Output: t.end_id, t.start_id, t.id
+(125 rows)
+
+ROLLBACK;
+DO $generic_ghd_exists_consumer_plan$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_exists_consumer boolean := false;
+    has_row_goal boolean := false;
+    has_row_goal_source boolean := false;
+    has_exists_result boolean := false;
+    has_no_flat_rows boolean := false;
+    has_consumer_avoids boolean := false;
+    has_rows_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+        SELECT EXISTS (
+            SELECT 1
+            FROM cypher('generic_ghd', $cypher$
+                MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+                      -[e3:E3]->(d:D)-[e4:E4]->(a),
+                      (c)-[t:TX]->(x:X)
+                RETURN id(a) AS a
+            $cypher$) AS (a agtype)
+        ) AS exists_match
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_exists_consumer := has_exists_consumer OR
+            plan_text LIKE '%Generic Join Consumer: exists%';
+        has_row_goal := has_row_goal OR
+            plan_text LIKE '%Generic Join Row Goal: 1%';
+        has_row_goal_source := has_row_goal_source OR
+            plan_text LIKE '%Generic Join Row Goal Source: exists%';
+        has_exists_result := has_exists_result OR
+            plan_text LIKE '%Exists Result: true%';
+        has_no_flat_rows := has_no_flat_rows OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_consumer_avoids := has_consumer_avoids OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 1%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_exists_consumer OR
+       NOT has_row_goal OR NOT has_row_goal_source OR
+       NOT has_exists_result OR NOT has_no_flat_rows OR
+       NOT has_consumer_avoids OR NOT has_rows_emitted THEN
+        RAISE EXCEPTION
+            'Generic Join exists consumer was not observed';
+    END IF;
+    RAISE NOTICE 'generic join exists consumer verified';
+END
+$generic_ghd_exists_consumer_plan$;
+NOTICE:  generic join exists consumer verified
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_exists ON COMMIT DROP AS
+SELECT EXISTS (
+    SELECT 1
+    FROM cypher('generic_ghd', $$
+        MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+              -[e3:E3]->(d:D)-[e4:E4]->(a),
+              (c)-[t:TX]->(x:X)
+        RETURN id(a) AS a
+    $$) AS (a agtype)
+) AS exists_match;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE generic_ghd_join_exists ON COMMIT DROP AS
+SELECT EXISTS (
+    SELECT 1
+    FROM cypher('generic_ghd', $$
+        MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+              -[e3:E3]->(d:D)-[e4:E4]->(a),
+              (c)-[t:TX]->(x:X)
+        RETURN id(a) AS a
+    $$) AS (a agtype)
+) AS exists_match;
+SELECT (SELECT exists_match FROM generic_ghd_binary_exists) AS binary_exists,
+       (SELECT exists_match FROM generic_ghd_join_exists) AS generic_exists,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_exists
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_exists)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_exists
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_exists)
+        ) diff) AS diff_rows;
+ binary_exists | generic_exists | diff_rows 
+---------------+----------------+-----------
+ t             | t              |         0
+(1 row)
+
+ROLLBACK;
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN 1 AS one
+    LIMIT 1
+$$) AS (one agtype);
+                                                               QUERY PLAN                                                               
+----------------------------------------------------------------------------------------------------------------------------------------
+ Limit (actual rows=1.00 loops=1)
+   Output: '1'::agtype
+   ->  Custom Scan (AGE Generic Multiway Join) (actual rows=1.00 loops=1)
+         Output: '1'::agtype
+         Filter: (_ag_enforce_edge_uniqueness4(e1.id, e2.id, e3.id, e4.id) AND (e1.start_id = e4.end_id) AND (e3.end_id = e4.start_id))
+         Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
+         Generic Join Consumer: limit
+         Generic Join Row Goal: 1
+         Generic Join Row Goal Source: limit
+         Generic Join Provider Mode: eager sorted array
+         Lazy Physical Provider: false
+         Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
+         Variable Order: 1(rti=2), 2(rti=4), 3(rti=6), 4(rti=8)
+         Component Count: 1
+         Component IDs: 1, 1, 1, 1
+         Reduction Shape: cyclic-core
+         GHD Mode: general GHD
+         GHD General Decomposition: true
+         GHD Fallback Reason: none
+         Reduction Descriptor Source: graph-join-match-ir
+         Reduction Order: none
+         Reduction Order Edges: 0
+         Yannakakis Step Count: 0
+         Yannakakis Bottom-Up Steps: 0
+         Yannakakis Top-Down Steps: 0
+         Yannakakis Step Plan: none
+         Yannakakis Step Filter Mode: global-domain provider filter
+         Reduction Core Variables: 4
+         Reduction Tail Separators: 0
+         GHD Bag Count: 2
+         GHD Bags: bag 1 cyclic-core: vars 1,2,3 providers 5,6; bag 2 cyclic-core: vars 1,4,3 providers 8,7
+         GHD Separator Count: 1
+         GHD Separators: bag 1->2 pair v1,v3
+         GHD Descriptor Source: graph-join-match-ir
+         Variable Count: 4
+         Provider Count: 8
+         Provider Rows Materialized: 512
+         Provider Tuples Materialized: 0
+         Provider Full Materialization: true
+         Provider Rows Read: 512
+         Provider Row Bytes Allocated: 40960 bytes
+         Provider Tuple Bytes Copied: 0 bytes
+         Semijoin Reduction Passes: 1
+         Yannakakis Bottom-Up Passes: 0
+         Yannakakis Top-Down Passes: 0
+         Yannakakis Steps Applied: 0
+         Yannakakis Bottom-Up Steps Applied: 0
+         Yannakakis Top-Down Steps Applied: 0
+         Reduction Order Applied: false
+         Semijoin Rows Removed: 0
+         Yannakakis Bottom-Up Rows Removed: 0
+         Yannakakis Top-Down Rows Removed: 0
+         Semijoin Provider Rows After: 512
+         Semijoin Final Domain Keys: 256
+         GHD Separator Reduction Passes: 1
+         GHD Leaf Tail Providers: 0
+         GHD Descriptor Separators Applied: 1
+         GHD Tail Domain Propagation Passes: 0
+         GHD Tail Domain Rows Removed: 0
+         GHD Separator Domain Keys: 128
+         GHD Leaf Tail Rows Removed: 0
+         GHD Cyclic Core Rows Removed: 0
+         Reduction Domain Builds: 12
+         Reduction Domain Rows Scanned: 768
+         Reduction Domain Keys Produced: 768
+         Reduction Domain Sorts: 4
+         Reduction Domain Sort Rows: 256
+         Complete Bindings: 1
+         Candidate Flat Rows: 1
+         Candidate Bag Combinations: 1
+         Flat Rows Materialized: 1
+         Flat Rows Avoided: 0
+         Consumer Flat Rows Avoided: 0
+         Row Goal Rows Emitted: 1
+         Row Goal Flat Rows Avoided: 0
+         Row Goal Reached: true
+         Lazy Domain Views: 12
+         Lazy Domain Keys Scanned: 388
+         Domain Scratch Allocations: 4
+         Domain Scratch Reuses: 0
+         Runtime Domain Builds: 12
+         Runtime Domain Rows Scanned: 388
+         Prefix Range Builds: 8
+         Prefix Range Reuses: 0
+         Prefix Range Directory Searches: 0
+         Prefix Range Cursor Reuses: 0
+         Prefix Range Cache Hits: 0
+         Prefix Range Cache Misses: 8
+         Child Range Cache Hits: 4
+         Child Range Cache Misses: 8
+         Trie Child Range Reuses: 4
+         Trie Child Range Opens: 8
+         Trie Prefix Range Seeks: 8
+         Trie Pair Range Opens: 4
+         Reduction Scratch Allocations: 1
+         Reduction Scratch Reuses: 7
+         Vector Intersection Merge Calls: 11
+         Vector Intersection Galloping Calls: 5
+         Vector Intersection Galloping Steps: 5
+         Uniqueness Constraint Groups: 1
+         Uniqueness Rejects: 0
+         Rows Emitted: 1
+         Rescans: 0
+         Peak Generic Join Memory: 144512 bytes
+         Spill Bytes: 0 bytes
+         ->  Seq Scan on generic_ghd."A" a (actual rows=64.00 loops=1)
+               Output: a.id
+         ->  Seq Scan on generic_ghd."B" b (actual rows=64.00 loops=1)
+               Output: b.id
+         ->  Seq Scan on generic_ghd."C" c (actual rows=64.00 loops=1)
+               Output: c.id
+         ->  Seq Scan on generic_ghd."D" d (actual rows=64.00 loops=1)
+               Output: d.id
+         ->  Seq Scan on generic_ghd."E1" e1 (actual rows=64.00 loops=1)
+               Output: e1.id, e1.start_id, e1.end_id
+         ->  Seq Scan on generic_ghd."E2" e2 (actual rows=64.00 loops=1)
+               Output: e2.id, e2.start_id, e2.end_id
+         ->  Seq Scan on generic_ghd."E3" e3 (actual rows=64.00 loops=1)
+               Output: e3.id, e3.end_id, e3.start_id
+         ->  Seq Scan on generic_ghd."E4" e4 (actual rows=64.00 loops=1)
+               Output: e4.id, e4.end_id, e4.start_id
+(121 rows)
+
+ROLLBACK;
+DO $generic_ghd_limit_consumer_plan$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_limit_consumer boolean := false;
+    has_row_goal boolean := false;
+    has_row_goal_source boolean := false;
+    has_row_goal_reached boolean := false;
+    has_flat_row boolean := false;
+    has_consumer_avoids boolean := false;
+    has_rows_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+        SELECT *
+        FROM cypher('generic_ghd', $cypher$
+            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+                  -[e3:E3]->(d:D)-[e4:E4]->(a)
+            RETURN 1 AS one
+            LIMIT 1
+        $cypher$) AS (one agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_limit_consumer := has_limit_consumer OR
+            plan_text LIKE '%Generic Join Consumer: limit%';
+        has_row_goal := has_row_goal OR
+            plan_text LIKE '%Generic Join Row Goal: 1%';
+        has_row_goal_source := has_row_goal_source OR
+            plan_text LIKE '%Generic Join Row Goal Source: limit%';
+        has_row_goal_reached := has_row_goal_reached OR
+            plan_text LIKE '%Row Goal Reached: true%';
+        has_flat_row := has_flat_row OR
+            plan_text LIKE '%Flat Rows Materialized: 1%';
+        has_consumer_avoids := has_consumer_avoids OR
+            plan_text LIKE '%Consumer Flat Rows Avoided:%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_limit_consumer OR
+       NOT has_row_goal OR NOT has_row_goal_source OR
+       NOT has_row_goal_reached OR NOT has_flat_row OR
+       NOT has_consumer_avoids OR NOT has_rows_emitted THEN
+        RAISE EXCEPTION
+            'Generic Join limit consumer was not observed';
+    END IF;
+    RAISE NOTICE 'generic join limit consumer verified';
+END
+$generic_ghd_limit_consumer_plan$;
+NOTICE:  generic join limit consumer verified
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_limit ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN 1 AS one
+    LIMIT 1
+$$) AS (one agtype);
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE generic_ghd_join_limit ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN 1 AS one
+    LIMIT 1
+$$) AS (one agtype);
+SELECT (SELECT count(*) FROM generic_ghd_binary_limit) AS binary_rows,
+       (SELECT count(*) FROM generic_ghd_join_limit) AS generic_rows,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_limit
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_limit)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_limit
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_limit)
+        ) diff) AS diff_rows;
+ binary_rows | generic_rows | diff_rows 
+-------------+--------------+-----------
+           1 |            1 |         0
+(1 row)
+
+ROLLBACK;
 DO $generic_ghd_separator_plan$
 DECLARE
     plan_text text;
@@ -516,6 +1248,7 @@ DECLARE
     has_ghd_general boolean := false;
     has_ghd_fallback boolean := false;
     has_ghd_bag_count boolean := false;
+    has_ghd_bag_details boolean := false;
     has_ghd_separator_count boolean := false;
     has_ghd_separator_details boolean := false;
     has_ghd_descriptor_source boolean := false;
@@ -560,21 +1293,23 @@ BEGIN
         has_reduction_shape := has_reduction_shape OR
             plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
         has_ghd_mode := has_ghd_mode OR
-            plan_text LIKE '%GHD Mode: 2-core leaf-tail%';
+            plan_text LIKE '%GHD Mode: general GHD%';
         has_ghd_general := has_ghd_general OR
-            plan_text LIKE '%GHD General Decomposition: false%';
+            plan_text LIKE '%GHD General Decomposition: true%';
         has_ghd_fallback := has_ghd_fallback OR
-            plan_text LIKE
-            '%GHD Fallback Reason: general GHD decomposition is not implemented%';
+            plan_text LIKE '%GHD Fallback Reason: none%';
         has_descriptor_source := has_descriptor_source OR
             plan_text LIKE
             '%Reduction Descriptor Source: graph-join-match-ir%';
         has_ghd_bag_count := has_ghd_bag_count OR
-            plan_text LIKE '%GHD Bag Count: 2%';
+            plan_text LIKE '%GHD Bag Count: 3%';
+        has_ghd_bag_details := has_ghd_bag_details OR
+            plan_text LIKE
+            '%GHD Bags: bag 1 cyclic-core:%bag 2 cyclic-core:%bag 3 leaf-tail:%';
         has_ghd_separator_count := has_ghd_separator_count OR
-            plan_text LIKE '%GHD Separator Count: 1%';
+            plan_text LIKE '%GHD Separator Count: 2%';
         has_ghd_separator_details := has_ghd_separator_details OR
-            plan_text LIKE '%GHD Separators: provider %';
+            plan_text LIKE '%GHD Separators:%pair v%provider %';
         has_ghd_descriptor_source := has_ghd_descriptor_source OR
             plan_text LIKE '%GHD Descriptor Source: graph-join-match-ir%';
         has_reduction_core := has_reduction_core OR
@@ -582,15 +1317,15 @@ BEGIN
         has_reduction_tail := has_reduction_tail OR
             plan_text LIKE '%Reduction Tail Separators: 1%';
         has_separator_pass := has_separator_pass OR
-            plan_text LIKE '%GHD Separator Reduction Passes: 1%';
+            plan_text LIKE '%GHD Separator Reduction Passes: 2%';
         has_leaf_tail_provider := has_leaf_tail_provider OR
             plan_text LIKE '%GHD Leaf Tail Providers: 1%';
         has_descriptor_separators := has_descriptor_separators OR
-            plan_text LIKE '%GHD Descriptor Separators Applied: 1%';
+            plan_text LIKE '%GHD Descriptor Separators Applied: 2%';
         has_separator_domain := has_separator_domain OR
-            plan_text LIKE '%GHD Separator Domain Keys: 1%';
+            plan_text LIKE '%GHD Separator Domain Keys: 3%';
         has_core_pruning := has_core_pruning OR
-            plan_text LIKE '%GHD Cyclic Core Rows Removed: 189%';
+            plan_text LIKE '%GHD Cyclic Core Rows Removed: 315%';
         has_provider_rows := has_provider_rows OR
             plan_text ~ 'Provider Rows Materialized: [1-9][0-9]*';
         has_key_only_tuple_skip := has_key_only_tuple_skip OR
@@ -609,8 +1344,9 @@ BEGIN
        NOT has_ghd_mode OR NOT has_ghd_general OR
        NOT has_ghd_fallback OR
        NOT has_descriptor_source OR NOT has_reduction_core OR
-       NOT has_ghd_bag_count OR NOT has_ghd_separator_count OR
-       NOT has_ghd_separator_details OR NOT has_ghd_descriptor_source OR
+       NOT has_ghd_bag_count OR NOT has_ghd_bag_details OR
+       NOT has_ghd_separator_count OR NOT has_ghd_separator_details OR
+       NOT has_ghd_descriptor_source OR
        NOT has_reduction_tail OR
        NOT has_separator_pass OR
        NOT has_leaf_tail_provider OR
@@ -718,6 +1454,8 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Filter: ((tx.end_id = x.id) AND _ag_enforce_edge_uniqueness4(e1.id, e2.id, e3.id, e4.id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
    Generic Join Provider Mode: eager sorted array
    Lazy Physical Provider: false
    Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
@@ -725,9 +1463,9 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Component Count: 1
    Component IDs: 1, 1, 1, 1, 1, 1
    Reduction Shape: cyclic-with-tail
-   GHD Mode: 2-core leaf-tail
-   GHD General Decomposition: false
-   GHD Fallback Reason: general GHD decomposition is not implemented
+   GHD Mode: general GHD
+   GHD General Decomposition: true
+   GHD Fallback Reason: none
    Reduction Descriptor Source: graph-join-match-ir
    Reduction Order: none
    Reduction Order Edges: 0
@@ -738,9 +1476,10 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Yannakakis Step Filter Mode: global-domain provider filter
    Reduction Core Variables: 4
    Reduction Tail Separators: 2
-   GHD Bag Count: 3
-   GHD Separator Count: 2
-   GHD Separators: provider 11: v4->v1 via key2, provider 12: v3->v2 via key2
+   GHD Bag Count: 4
+   GHD Bags: bag 1 cyclic-core: vars 3,5,4 providers 7,8; bag 2 cyclic-core: vars 3,6,4 providers 10,9; bag 3 leaf-tail: vars 4,1 providers 11; bag 4 leaf-tail: vars 3,2 providers 12
+   GHD Separator Count: 3
+   GHD Separators: bag 1->2 pair v3,v4, bag 1->3 provider 11: v4->v1 via key2, bag 1->4 provider 12: v3->v2 via key2
    GHD Descriptor Source: graph-join-match-ir
    Variable Count: 6
    Provider Count: 12
@@ -762,12 +1501,12 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Yannakakis Top-Down Rows Removed: 0
    Semijoin Provider Rows After: 12
    Semijoin Final Domain Keys: 6
-   GHD Separator Reduction Passes: 1
+   GHD Separator Reduction Passes: 2
    GHD Leaf Tail Providers: 2
-   GHD Descriptor Separators Applied: 2
+   GHD Descriptor Separators Applied: 3
    GHD Tail Domain Propagation Passes: 0
    GHD Tail Domain Rows Removed: 0
-   GHD Separator Domain Keys: 2
+   GHD Separator Domain Keys: 4
    GHD Leaf Tail Rows Removed: 0
    GHD Cyclic Core Rows Removed: 378
    Reduction Domain Builds: 54
@@ -781,6 +1520,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Flat Rows Materialized: 1
    Flat Rows Avoided: 0
    Consumer Flat Rows Avoided: 0
+   Row Goal Reached: false
    Lazy Domain Views: 18
    Lazy Domain Keys Scanned: 18
    Domain Scratch Allocations: 6
@@ -808,7 +1548,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Uniqueness Rejects: 0
    Rows Emitted: 1
    Rescans: 0
-   Peak Generic Join Memory: 144384 bytes
+   Peak Generic Join Memory: 152576 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on generic_ghd."X" x (actual rows=1.00 loops=1)
          Output: x.id
@@ -834,7 +1574,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
          Output: tx.id, tx.end_id, tx.start_id
    ->  Seq Scan on generic_ghd."TY" ty (actual rows=1.00 loops=1)
          Output: ty.id, ty.end_id, ty.start_id
-(121 rows)
+(125 rows)
 
 ROLLBACK;
 DO $generic_ghd_multi_tail_plan$
@@ -849,6 +1589,7 @@ DECLARE
     has_ghd_general boolean := false;
     has_ghd_fallback boolean := false;
     has_ghd_bag_count boolean := false;
+    has_ghd_bag_details boolean := false;
     has_ghd_separator_count boolean := false;
     has_ghd_separator_details boolean := false;
     has_ghd_descriptor_source boolean := false;
@@ -890,21 +1631,23 @@ BEGIN
         has_reduction_shape := has_reduction_shape OR
             plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
         has_ghd_mode := has_ghd_mode OR
-            plan_text LIKE '%GHD Mode: 2-core leaf-tail%';
+            plan_text LIKE '%GHD Mode: general GHD%';
         has_ghd_general := has_ghd_general OR
-            plan_text LIKE '%GHD General Decomposition: false%';
+            plan_text LIKE '%GHD General Decomposition: true%';
         has_ghd_fallback := has_ghd_fallback OR
-            plan_text LIKE
-            '%GHD Fallback Reason: general GHD decomposition is not implemented%';
+            plan_text LIKE '%GHD Fallback Reason: none%';
         has_descriptor_source := has_descriptor_source OR
             plan_text LIKE
             '%Reduction Descriptor Source: graph-join-match-ir%';
         has_ghd_bag_count := has_ghd_bag_count OR
-            plan_text LIKE '%GHD Bag Count: 3%';
+            plan_text LIKE '%GHD Bag Count: 4%';
+        has_ghd_bag_details := has_ghd_bag_details OR
+            plan_text LIKE
+            '%GHD Bags: bag 1 cyclic-core:%bag 2 cyclic-core:%bag 3 leaf-tail:%bag 4 leaf-tail:%';
         has_ghd_separator_count := has_ghd_separator_count OR
-            plan_text LIKE '%GHD Separator Count: 2%';
+            plan_text LIKE '%GHD Separator Count: 3%';
         has_ghd_separator_details := has_ghd_separator_details OR
-            plan_text LIKE '%GHD Separators: provider %';
+            plan_text LIKE '%GHD Separators:%pair v%provider %provider %';
         has_ghd_descriptor_source := has_ghd_descriptor_source OR
             plan_text LIKE '%GHD Descriptor Source: graph-join-match-ir%';
         has_reduction_core := has_reduction_core OR
@@ -912,13 +1655,13 @@ BEGIN
         has_reduction_tail := has_reduction_tail OR
             plan_text LIKE '%Reduction Tail Separators: 2%';
         has_separator_pass := has_separator_pass OR
-            plan_text LIKE '%GHD Separator Reduction Passes: 1%';
+            plan_text LIKE '%GHD Separator Reduction Passes: 2%';
         has_leaf_tail_providers := has_leaf_tail_providers OR
             plan_text LIKE '%GHD Leaf Tail Providers: 2%';
         has_descriptor_separators := has_descriptor_separators OR
-            plan_text LIKE '%GHD Descriptor Separators Applied: 2%';
+            plan_text LIKE '%GHD Descriptor Separators Applied: 3%';
         has_separator_domain := has_separator_domain OR
-            plan_text LIKE '%GHD Separator Domain Keys: 2%';
+            plan_text LIKE '%GHD Separator Domain Keys: 4%';
         has_core_pruning := has_core_pruning OR
             plan_text LIKE '%GHD Cyclic Core Rows Removed: 378%';
         has_one_row := has_one_row OR
@@ -930,8 +1673,8 @@ BEGIN
        NOT has_ghd_mode OR NOT has_ghd_general OR
        NOT has_ghd_fallback OR
        NOT has_descriptor_source OR NOT has_ghd_bag_count OR
-       NOT has_ghd_separator_count OR NOT has_ghd_separator_details OR
-       NOT has_ghd_descriptor_source OR
+       NOT has_ghd_bag_details OR NOT has_ghd_separator_count OR
+       NOT has_ghd_separator_details OR NOT has_ghd_descriptor_source OR
        NOT has_reduction_core OR NOT has_reduction_tail OR
        NOT has_separator_pass OR NOT has_leaf_tail_providers OR
        NOT has_descriptor_separators OR NOT has_separator_domain OR
@@ -1373,6 +2116,8 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Filter: (_ag_enforce_edge_uniqueness4(e1.id, e2.id, e3.id, e4.id) AND (e1.start_id = e4.end_id) AND (e3.end_id = e4.start_id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
    Generic Join Provider Mode: eager sorted array
    Lazy Physical Provider: false
    Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
@@ -1380,9 +2125,9 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Component Count: 1
    Component IDs: 1, 1, 1, 1
    Reduction Shape: cyclic-core
-   GHD Mode: cyclic core only
-   GHD General Decomposition: false
-   GHD Fallback Reason: no leaf-tail separators
+   GHD Mode: general GHD
+   GHD General Decomposition: true
+   GHD Fallback Reason: none
    Reduction Descriptor Source: graph-join-match-ir
    Reduction Order: none
    Reduction Order Edges: 0
@@ -1393,9 +2138,10 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Yannakakis Step Filter Mode: global-domain provider filter
    Reduction Core Variables: 4
    Reduction Tail Separators: 0
-   GHD Bag Count: 1
-   GHD Separator Count: 0
-   GHD Separators: none
+   GHD Bag Count: 2
+   GHD Bags: bag 1 cyclic-core: vars 1,2,3 providers 5,6; bag 2 cyclic-core: vars 1,4,3 providers 8,7
+   GHD Separator Count: 1
+   GHD Separators: bag 1->2 pair v1,v3
    GHD Descriptor Source: graph-join-match-ir
    Variable Count: 4
    Provider Count: 8
@@ -1437,6 +2183,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Flat Rows Materialized: 0
    Flat Rows Avoided: 0
    Consumer Flat Rows Avoided: 0
+   Row Goal Reached: false
    Lazy Domain Views: 0
    Lazy Domain Keys Scanned: 0
    Domain Scratch Allocations: 0
@@ -1484,7 +2231,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
          Output: e3.id, e3.end_id, e3.start_id
    ->  Seq Scan on generic_ghd."E4" e4 (never executed)
          Output: e4.id, e4.end_id, e4.start_id
-(116 rows)
+(120 rows)
 
 ROLLBACK;
 /*
@@ -1594,6 +2341,8 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Filter: ((tw.end_id = w.id) AND _ag_enforce_edge_uniqueness4(e1.id, e2.id, e3.id, e4.id) AND _ag_enforce_edge_uniqueness3(tu.id, tv.id, tw.id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
    Generic Join Provider Mode: eager sorted array
    Lazy Physical Provider: false
    Provider Trie Ops: lazy sorted arrays with on-demand prefix directories
@@ -1601,9 +2350,9 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Component Count: 1
    Component IDs: 1, 1, 1, 1, 1, 1, 1
    Reduction Shape: cyclic-with-tail
-   GHD Mode: 2-core leaf-tail
-   GHD General Decomposition: false
-   GHD Fallback Reason: general GHD decomposition is not implemented
+   GHD Mode: general GHD
+   GHD General Decomposition: true
+   GHD Fallback Reason: none
    Reduction Descriptor Source: graph-join-match-ir
    Reduction Order: none
    Reduction Order Edges: 0
@@ -1614,9 +2363,10 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Yannakakis Step Filter Mode: global-domain provider filter
    Reduction Core Variables: 4
    Reduction Tail Separators: 1
-   GHD Bag Count: 2
-   GHD Separator Count: 1
-   GHD Separators: provider 12: v2->v6 via key1
+   GHD Bag Count: 3
+   GHD Bags: bag 1 cyclic-core: vars 3,4,2 providers 8,9; bag 2 cyclic-core: vars 3,5,2 providers 11,10; bag 3 leaf-tail: vars 2,6 providers 12
+   GHD Separator Count: 2
+   GHD Separators: bag 1->2 pair v3,v2, bag 1->3 provider 12: v2->v6 via key1
    GHD Descriptor Source: graph-join-match-ir
    Variable Count: 7
    Provider Count: 14
@@ -1626,7 +2376,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Provider Rows Read: 770
    Provider Row Bytes Allocated: 71680 bytes
    Provider Tuple Bytes Copied: 0 bytes
-   Semijoin Reduction Passes: 3
+   Semijoin Reduction Passes: 2
    Yannakakis Bottom-Up Passes: 0
    Yannakakis Top-Down Passes: 0
    Yannakakis Steps Applied: 0
@@ -1638,25 +2388,26 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Yannakakis Top-Down Rows Removed: 0
    Semijoin Provider Rows After: 14
    Semijoin Final Domain Keys: 7
-   GHD Separator Reduction Passes: 1
+   GHD Separator Reduction Passes: 2
    GHD Leaf Tail Providers: 1
-   GHD Descriptor Separators Applied: 1
+   GHD Descriptor Separators Applied: 2
    GHD Tail Domain Propagation Passes: 2
    GHD Tail Domain Rows Removed: 252
-   GHD Separator Domain Keys: 1
+   GHD Separator Domain Keys: 3
    GHD Leaf Tail Rows Removed: 252
-   GHD Cyclic Core Rows Removed: 189
-   Reduction Domain Builds: 126
-   Reduction Domain Rows Scanned: 3465
-   Reduction Domain Keys Produced: 3465
-   Reduction Domain Sorts: 17
-   Reduction Domain Sort Rows: 1088
+   GHD Cyclic Core Rows Removed: 315
+   Reduction Domain Builds: 105
+   Reduction Domain Rows Scanned: 3129
+   Reduction Domain Keys Produced: 3129
+   Reduction Domain Sorts: 15
+   Reduction Domain Sort Rows: 960
    Complete Bindings: 1
    Candidate Flat Rows: 1
    Candidate Bag Combinations: 1
    Flat Rows Materialized: 1
    Flat Rows Avoided: 0
    Consumer Flat Rows Avoided: 0
+   Row Goal Reached: false
    Lazy Domain Views: 21
    Lazy Domain Keys Scanned: 21
    Domain Scratch Allocations: 7
@@ -1676,15 +2427,15 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Trie Prefix Range Seeks: 14
    Trie Pair Range Opens: 7
    Reduction Scratch Allocations: 1
-   Reduction Scratch Reuses: 83
-   Vector Intersection Merge Calls: 91
-   Vector Intersection Galloping Calls: 7
-   Vector Intersection Galloping Steps: 7
+   Reduction Scratch Reuses: 69
+   Vector Intersection Merge Calls: 78
+   Vector Intersection Galloping Calls: 6
+   Vector Intersection Galloping Steps: 6
    Uniqueness Constraint Groups: 2
    Uniqueness Rejects: 0
    Rows Emitted: 1
    Rescans: 0
-   Peak Generic Join Memory: 275456 bytes
+   Peak Generic Join Memory: 283648 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on generic_ghd."W" w (actual rows=1.00 loops=1)
          Output: w.id
@@ -1714,7 +2465,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
          Output: tv.id, tv.start_id, tv.end_id
    ->  Seq Scan on generic_ghd."TW" tw (actual rows=1.00 loops=1)
          Output: tw.id, tw.end_id, tw.start_id
-(125 rows)
+(129 rows)
 
 ROLLBACK;
 DO $generic_ghd_deep_tail_plan$
@@ -1725,6 +2476,8 @@ DECLARE
     has_ghd_mode boolean := false;
     has_ghd_general boolean := false;
     has_ghd_fallback boolean := false;
+    has_ghd_bag_count boolean := false;
+    has_ghd_bag_details boolean := false;
     has_ghd_separator_count boolean := false;
     has_tail_domain_pass boolean := false;
     has_tail_domain_rows boolean := false;
@@ -1757,22 +2510,26 @@ BEGIN
         has_reduction_shape := has_reduction_shape OR
             plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
         has_ghd_mode := has_ghd_mode OR
-            plan_text LIKE '%GHD Mode: 2-core leaf-tail%';
+            plan_text LIKE '%GHD Mode: general GHD%';
         has_ghd_general := has_ghd_general OR
-            plan_text LIKE '%GHD General Decomposition: false%';
+            plan_text LIKE '%GHD General Decomposition: true%';
         has_ghd_fallback := has_ghd_fallback OR
+            plan_text LIKE '%GHD Fallback Reason: none%';
+        has_ghd_bag_count := has_ghd_bag_count OR
+            plan_text LIKE '%GHD Bag Count: 3%';
+        has_ghd_bag_details := has_ghd_bag_details OR
             plan_text LIKE
-            '%GHD Fallback Reason: general GHD decomposition is not implemented%';
+            '%GHD Bags: bag 1 cyclic-core:%bag 2 cyclic-core:%bag 3 leaf-tail:%';
         has_ghd_separator_count := has_ghd_separator_count OR
-            plan_text LIKE '%GHD Separator Count: 1%';
+            plan_text LIKE '%GHD Separator Count: 2%';
         has_tail_domain_pass := has_tail_domain_pass OR
             plan_text ~ 'GHD Tail Domain Propagation Passes: [1-9][0-9]*';
         has_tail_domain_rows := has_tail_domain_rows OR
             plan_text ~ 'GHD Tail Domain Rows Removed: [1-9][0-9]*';
         has_separator_domain := has_separator_domain OR
-            plan_text LIKE '%GHD Separator Domain Keys: 1%';
+            plan_text LIKE '%GHD Separator Domain Keys: 3%';
         has_core_pruning := has_core_pruning OR
-            plan_text LIKE '%GHD Cyclic Core Rows Removed: 189%';
+            plan_text LIKE '%GHD Cyclic Core Rows Removed: 315%';
         has_one_row := has_one_row OR
             plan_text LIKE '%Rows Emitted: 1%';
     END LOOP;
@@ -1780,6 +2537,7 @@ BEGIN
     IF NOT has_generic OR NOT has_reduction_shape OR
        NOT has_ghd_mode OR NOT has_ghd_general OR
        NOT has_ghd_fallback OR
+       NOT has_ghd_bag_count OR NOT has_ghd_bag_details OR
        NOT has_ghd_separator_count OR NOT has_tail_domain_pass OR
        NOT has_tail_domain_rows OR NOT has_separator_domain OR
        NOT has_core_pruning OR NOT has_one_row THEN

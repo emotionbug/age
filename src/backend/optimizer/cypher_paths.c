@@ -183,6 +183,9 @@ typedef enum AgeGenericPathPrivateField
     AGE_GENERIC_PATH_PRIVATE_REDUCTION_DESC,
     AGE_GENERIC_PATH_PRIVATE_CONSUMER,
     AGE_GENERIC_PATH_PRIVATE_OUTPUT_TYPE,
+    AGE_GENERIC_PATH_PRIVATE_ROW_GOAL,
+    AGE_GENERIC_PATH_PRIVATE_ROW_GOAL_SOURCE,
+    AGE_GENERIC_PATH_PRIVATE_DISTINCT_VARIABLE,
     AGE_GENERIC_PATH_PRIVATE_COUNT
 } AgeGenericPathPrivateField;
 
@@ -196,6 +199,9 @@ typedef enum AgeGenericPathProviderDescField
     AGE_GENERIC_PATH_PROVIDER_KEY2_EXPR,
     AGE_GENERIC_PATH_PROVIDER_EDGE_ID_EXPR,
     AGE_GENERIC_PATH_PROVIDER_OUTPUT_EXPRS,
+    AGE_GENERIC_PATH_PROVIDER_PHYSICAL_KIND,
+    AGE_GENERIC_PATH_PROVIDER_ADJ_INDEX_OID,
+    AGE_GENERIC_PATH_PROVIDER_ADJ_TERMINAL_LABEL_ID,
     AGE_GENERIC_PATH_PROVIDER_COUNT
 } AgeGenericPathProviderDescField;
 
@@ -325,8 +331,12 @@ static List *make_generic_ghd_bag_desc(int id, AgeGraphJoinGHDBagKind kind,
                                        List *variable_ids,
                                        List *provider_indexes);
 static List *make_generic_ghd_separator_desc(
-    int id, int parent_bag_id, int child_bag_id, int separator_variable,
-    int tail_variable, int provider_index, bool separator_is_key1);
+    int id, int parent_bag_id, int child_bag_id,
+    AgeGenericGHDSeparatorKind kind, List *separator_variables,
+    int separator_variable, int tail_variable, int provider_index,
+    bool separator_is_key1);
+static int generic_ghd_separator_kind_count(
+    List *ghd_separators, AgeGenericGHDSeparatorKind kind);
 static List *make_generic_semijoin_step_desc(
     int id, AgeGenericSemijoinStepPhase phase, int provider_index,
     int from_variable, int to_variable, int key_variable, bool key_is_key1);
@@ -352,6 +362,13 @@ static List *make_generic_vertex_path_desc(Index rti, int variable,
                                            Expr *key_expr);
 static List *make_generic_edge_path_desc(
     const AgeGenericHypergraphEdge *edge);
+static void mark_generic_edge_physical_path_desc(
+    PlannerInfo *root, Path *provider_path, List *variable_rtis, List *desc);
+static void mark_generic_lazy_physical_provider_descs(
+    PlannerInfo *root, List *variable_rtis, List *provider_paths,
+    List *provider_descs);
+static bool generic_edge_provider_target_is_key_only(Path *provider_path,
+                                                     List *desc);
 static double estimate_generic_pair_pressure(
     const AgeGenericHypergraph *hypergraph, double generic_work,
     double *max_pair_rows);
@@ -486,6 +503,14 @@ static void add_wcoj_fractional_row_goal_paths(PlannerInfo *root,
                                                RelOptInfo *input_rel,
                                                RelOptInfo *output_rel,
                                                FinalPathExtraData *extra);
+static void add_generic_limit_row_goal_paths(PlannerInfo *root,
+                                             RelOptInfo *input_rel,
+                                             RelOptInfo *output_rel,
+                                             FinalPathExtraData *extra);
+static void add_generic_fractional_row_goal_paths(PlannerInfo *root,
+                                                  RelOptInfo *input_rel,
+                                                  RelOptInfo *output_rel,
+                                                  FinalPathExtraData *extra);
 static CustomPath *make_adjacency_count_path(PlannerInfo *root,
                                               RelOptInfo *output_rel,
                                               AggPath *agg_path);
@@ -512,6 +537,20 @@ static CustomPath *copy_wcoj_path_with_row_goal(CustomPath *wcoj_path,
                                                 int64 row_goal,
                                                 int consumer_kind,
                                                 int row_goal_source);
+static Path *make_generic_limit_row_goal_path(PlannerInfo *root,
+                                              RelOptInfo *output_rel,
+                                              LimitPath *limit_path);
+static Path *make_generic_final_limit_row_goal_path(
+    PlannerInfo *root, RelOptInfo *output_rel, Path *path,
+    FinalPathExtraData *extra);
+static Path *make_generic_fractional_row_goal_path(PlannerInfo *root,
+                                                   RelOptInfo *output_rel,
+                                                   Path *path,
+                                                   int64 row_goal);
+static CustomPath *copy_generic_path_with_row_goal(CustomPath *generic_path,
+                                                   int64 row_goal,
+                                                   int consumer_kind,
+                                                   int row_goal_source);
 static int64 wcoj_tuple_fraction_row_goal(PlannerInfo *root,
                                           FinalPathExtraData *extra);
 static bool wcoj_limit_const_int64(Node *node, int64 *value);
@@ -556,6 +595,10 @@ static bool wcoj_count_clause_is_provider_local(List *provider_descs,
 static bool generic_count_restrictinfos_supported(CustomPath *generic_path);
 static bool generic_count_clause_is_key_equality(CustomPath *generic_path,
                                                  Node *clause);
+static bool is_count_distinct_generic_key_aggref(Aggref *aggref,
+                                                 CustomPath *generic_path,
+                                                 int *variable);
+static int generic_distinct_arg_variable(CustomPath *generic_path, Node *arg);
 static CustomPath *make_wcoj_sum_property_path(PlannerInfo *root,
                                                RelOptInfo *output_rel,
                                                AggPath *agg_path);
@@ -3233,7 +3276,8 @@ make_generic_match_component(const AgeGenericHypergraph *hypergraph,
         {
             return NULL;
         }
-        tail_separators = list_length(ghd_separators);
+        tail_separators = generic_ghd_separator_kind_count(
+            ghd_separators, AGE_GENERIC_GHD_SEPARATOR_LEAF_TAIL);
     }
     else
     {
@@ -3433,6 +3477,8 @@ make_generic_ghd_bag_desc(int id, AgeGraphJoinGHDBagKind kind,
 
 static List *
 make_generic_ghd_separator_desc(int id, int parent_bag_id, int child_bag_id,
+                                AgeGenericGHDSeparatorKind kind,
+                                List *separator_variables,
                                 int separator_variable, int tail_variable,
                                 int provider_index, bool separator_is_key1)
 {
@@ -3443,7 +3489,34 @@ make_generic_ghd_separator_desc(int id, int parent_bag_id, int child_bag_id,
     desc = lappend(desc, makeInteger(tail_variable));
     desc = lappend(desc, makeInteger(provider_index));
     desc = lappend(desc, makeInteger(separator_is_key1 ? 1 : 0));
+    desc = lappend(desc, makeInteger(kind));
+    desc = lappend(desc, separator_variables);
     return desc;
+}
+
+static int
+generic_ghd_separator_kind_count(List *ghd_separators,
+                                 AgeGenericGHDSeparatorKind kind)
+{
+    ListCell *lc;
+    int count = 0;
+
+    foreach(lc, ghd_separators)
+    {
+        List *desc = lfirst(lc);
+
+        if (desc == NIL || !IsA(desc, List) ||
+            list_length(desc) != AGE_GENERIC_GHD_SEPARATOR_DESC_COUNT)
+        {
+            continue;
+        }
+        if ((AgeGenericGHDSeparatorKind)intVal(list_nth(
+                desc, AGE_GENERIC_GHD_SEPARATOR_DESC_KIND)) == kind)
+        {
+            count++;
+        }
+    }
+    return count;
 }
 
 static List *
@@ -3463,14 +3536,176 @@ make_generic_semijoin_step_desc(int id, AgeGenericSemijoinStepPhase phase,
 }
 
 static bool
+try_make_generic_four_cycle_ghd(const AgeGenericHypergraph *hypergraph,
+                                const bool *core_variables, List **ghd_bags,
+                                List **ghd_separators, int *next_bag_id,
+                                int *next_separator_id,
+                                int *child_only_variable)
+{
+    int core_variable_count = 0;
+    int core_edge_count = 0;
+    int core_variables_list[4];
+    int core_edge_indexes[4];
+    int degree[4] = {0, 0, 0, 0};
+    int index;
+    int first_edge;
+    int second_edge = -1;
+    int third_edge = -1;
+    int fourth_edge = -1;
+    int u;
+    int v;
+    int w = -1;
+    int x = -1;
+    int parent_bag_id;
+    int child_bag_id;
+
+    for (index = 0; index < hypergraph->variable_count; index++)
+    {
+        if (!core_variables[index])
+            continue;
+        if (core_variable_count >= 4)
+            return false;
+        core_variables_list[core_variable_count++] = index;
+    }
+    if (core_variable_count != 4)
+        return false;
+
+    for (index = 0; index < hypergraph->edge_count; index++)
+    {
+        const AgeGenericHypergraphEdge *edge = &hypergraph->edges[index];
+        int left_pos = -1;
+        int right_pos = -1;
+        int pos;
+
+        if (!core_variables[edge->var1] || !core_variables[edge->var2])
+            continue;
+        if (core_edge_count >= 4)
+            return false;
+        core_edge_indexes[core_edge_count++] = index;
+        for (pos = 0; pos < core_variable_count; pos++)
+        {
+            if (core_variables_list[pos] == edge->var1)
+                left_pos = pos;
+            if (core_variables_list[pos] == edge->var2)
+                right_pos = pos;
+        }
+        if (left_pos < 0 || right_pos < 0 || left_pos == right_pos)
+            return false;
+        degree[left_pos]++;
+        degree[right_pos]++;
+    }
+    if (core_edge_count != 4)
+        return false;
+    for (index = 0; index < core_variable_count; index++)
+    {
+        if (degree[index] != 2)
+            return false;
+    }
+
+    first_edge = core_edge_indexes[0];
+    u = hypergraph->edges[first_edge].var1;
+    v = hypergraph->edges[first_edge].var2;
+    for (index = 1; index < core_edge_count; index++)
+    {
+        int edge_index = core_edge_indexes[index];
+        const AgeGenericHypergraphEdge *edge = &hypergraph->edges[edge_index];
+
+        if (edge->var1 == v && edge->var2 != u)
+        {
+            second_edge = edge_index;
+            w = edge->var2;
+            break;
+        }
+        if (edge->var2 == v && edge->var1 != u)
+        {
+            second_edge = edge_index;
+            w = edge->var1;
+            break;
+        }
+    }
+    if (second_edge < 0 || w < 0 || w == u)
+        return false;
+
+    for (index = 1; index < core_edge_count; index++)
+    {
+        int edge_index = core_edge_indexes[index];
+        const AgeGenericHypergraphEdge *edge = &hypergraph->edges[edge_index];
+
+        if (edge_index == second_edge)
+            continue;
+        if (edge->var1 == w && edge->var2 != v)
+        {
+            third_edge = edge_index;
+            x = edge->var2;
+            break;
+        }
+        if (edge->var2 == w && edge->var1 != v)
+        {
+            third_edge = edge_index;
+            x = edge->var1;
+            break;
+        }
+    }
+    if (third_edge < 0 || x < 0 || x == u || x == v || x == w)
+        return false;
+
+    for (index = 1; index < core_edge_count; index++)
+    {
+        int edge_index = core_edge_indexes[index];
+        const AgeGenericHypergraphEdge *edge = &hypergraph->edges[edge_index];
+
+        if (edge_index == second_edge || edge_index == third_edge)
+            continue;
+        if ((edge->var1 == x && edge->var2 == u) ||
+            (edge->var2 == x && edge->var1 == u))
+        {
+            fourth_edge = edge_index;
+            break;
+        }
+    }
+    if (fourth_edge < 0)
+        return false;
+
+    parent_bag_id = (*next_bag_id)++;
+    child_bag_id = (*next_bag_id)++;
+    *ghd_bags = lappend(
+        *ghd_bags,
+        make_generic_ghd_bag_desc(
+            parent_bag_id, AGE_GRAPH_JOIN_GHD_BAG_CYCLIC_CORE,
+            list_make3(makeInteger(u), makeInteger(v), makeInteger(w)),
+            list_make2(makeInteger(hypergraph->variable_count + first_edge),
+                       makeInteger(hypergraph->variable_count +
+                                   second_edge))));
+    *ghd_bags = lappend(
+        *ghd_bags,
+        make_generic_ghd_bag_desc(
+            child_bag_id, AGE_GRAPH_JOIN_GHD_BAG_CYCLIC_CORE,
+            list_make3(makeInteger(u), makeInteger(x), makeInteger(w)),
+            list_make2(makeInteger(hypergraph->variable_count + fourth_edge),
+                       makeInteger(hypergraph->variable_count +
+                                   third_edge))));
+    *ghd_separators = lappend(
+        *ghd_separators,
+        make_generic_ghd_separator_desc(
+            (*next_separator_id)++, parent_bag_id, child_bag_id,
+            AGE_GENERIC_GHD_SEPARATOR_PAIR,
+            list_make2(makeInteger(u), makeInteger(w)),
+            u, w, hypergraph->variable_count + fourth_edge, true));
+    *child_only_variable = x;
+    return true;
+}
+
+static bool
 make_generic_ghd_metadata(const AgeGenericHypergraph *hypergraph,
                           const bool *core_variables, List **ghd_bags,
                           List **ghd_separators)
 {
     List *core_variable_ids = NIL;
     List *core_provider_indexes = NIL;
-    int leaf_bag_id = 1;
+    int leaf_bag_id = 0;
     int separator_id = 0;
+    int split_child_only_variable = -1;
+    bool split_core = false;
     int index;
 
     Assert(ghd_bags != NULL);
@@ -3510,12 +3745,18 @@ make_generic_ghd_metadata(const AgeGenericHypergraph *hypergraph,
     if (core_variable_ids == NIL || core_provider_indexes == NIL)
         return true;
 
-    *ghd_bags = lappend(
-        *ghd_bags,
-        make_generic_ghd_bag_desc(0,
-                                  AGE_GRAPH_JOIN_GHD_BAG_CYCLIC_CORE,
-                                  core_variable_ids,
-                                  core_provider_indexes));
+    split_core = try_make_generic_four_cycle_ghd(
+        hypergraph, core_variables, ghd_bags, ghd_separators, &leaf_bag_id,
+        &separator_id, &split_child_only_variable);
+    if (!split_core)
+    {
+        *ghd_bags = lappend(
+            *ghd_bags,
+            make_generic_ghd_bag_desc(leaf_bag_id++,
+                                      AGE_GRAPH_JOIN_GHD_BAG_CYCLIC_CORE,
+                                      core_variable_ids,
+                                      core_provider_indexes));
+    }
 
     for (index = 0; index < hypergraph->edge_count; index++)
     {
@@ -3526,6 +3767,7 @@ make_generic_ghd_metadata(const AgeGenericHypergraph *hypergraph,
         int separator_variable;
         int tail_variable;
         bool separator_is_key1;
+        int parent_bag_id;
         List *leaf_variables;
         List *leaf_providers;
 
@@ -3547,6 +3789,8 @@ make_generic_ghd_metadata(const AgeGenericHypergraph *hypergraph,
         leaf_variables = list_make2(makeInteger(separator_variable),
                                     makeInteger(tail_variable));
         leaf_providers = list_make1(makeInteger(provider_index));
+        parent_bag_id = split_core &&
+            separator_variable == split_child_only_variable ? 1 : 0;
         *ghd_bags = lappend(
             *ghd_bags,
             make_generic_ghd_bag_desc(leaf_bag_id,
@@ -3555,7 +3799,10 @@ make_generic_ghd_metadata(const AgeGenericHypergraph *hypergraph,
         *ghd_separators = lappend(
             *ghd_separators,
             make_generic_ghd_separator_desc(
-                separator_id, 0, leaf_bag_id, separator_variable,
+                separator_id, parent_bag_id, leaf_bag_id,
+                AGE_GENERIC_GHD_SEPARATOR_LEAF_TAIL,
+                list_make1(makeInteger(separator_variable)),
+                separator_variable,
                 tail_variable, provider_index, separator_is_key1));
         leaf_bag_id++;
         separator_id++;
@@ -3726,6 +3973,7 @@ make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph,
     List *reduction_order_edges = NIL;
     List *semijoin_steps = NIL;
     List *component_ids = NIL;
+    List *ghd_bags = NIL;
     List *ghd_separators = NIL;
     List *desc;
     int index;
@@ -3767,6 +4015,7 @@ make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph,
         ghd_bag_count = component->ghd_bag_count;
         ghd_separator_count = component->ghd_separator_count;
         component_ids = copyObject(component->component_ids);
+        ghd_bags = copyObject(component->ghd_bags);
         ghd_separators = copyObject(component->ghd_separators);
         if (!hypergraph->cyclic)
         {
@@ -3861,6 +4110,7 @@ make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph,
     desc = lappend(desc, component_ids);
     desc = lappend(desc, makeInteger(AGE_GENERIC_REDUCTION_SOURCE_LOCAL));
     desc = lappend(desc, makeInteger(ghd_bag_count));
+    desc = lappend(desc, ghd_bags);
     desc = lappend(desc, makeInteger(ghd_separator_count));
     desc = lappend(desc, ghd_separators);
     desc = lappend(desc, semijoin_steps);
@@ -3877,6 +4127,16 @@ set_generic_reduction_desc_source(
     lfirst(list_nth_cell(reduction_desc,
                          AGE_GENERIC_REDUCTION_DESC_SOURCE)) =
         makeInteger(source);
+}
+
+static bool
+generic_reduction_has_ghd_separators(List *reduction_desc)
+{
+    if (list_length(reduction_desc) != AGE_GENERIC_REDUCTION_DESC_COUNT)
+        return false;
+
+    return intVal(list_nth(
+        reduction_desc, AGE_GENERIC_REDUCTION_DESC_GHD_SEPARATOR_COUNT)) > 0;
 }
 
 static List *
@@ -3955,6 +4215,10 @@ make_generic_vertex_path_desc(Index rti, int variable, Expr *key_expr)
     desc = lappend(desc, makeNullConst(GRAPHIDOID, -1, InvalidOid));
     desc = lappend(desc, makeNullConst(GRAPHIDOID, -1, InvalidOid));
     desc = lappend(desc, NIL);
+    desc = lappend(desc,
+                   makeInteger(AGE_GENERIC_PROVIDER_PHYSICAL_EAGER_SORTED_ARRAY));
+    desc = lappend(desc, make_wcoj_oid_const(InvalidOid));
+    desc = lappend(desc, makeInteger(0));
     Assert(list_length(desc) == AGE_GENERIC_PATH_PROVIDER_COUNT);
     return desc;
 }
@@ -4017,8 +4281,138 @@ make_generic_edge_path_desc(const AgeGenericHypergraphEdge *edge)
                            Anum_ag_label_edge_table_id,
                            GRAPHIDOID, -1, InvalidOid, 0));
     desc = lappend(desc, NIL);
+    desc = lappend(desc,
+                   makeInteger(AGE_GENERIC_PROVIDER_PHYSICAL_EAGER_SORTED_ARRAY));
+    desc = lappend(desc, make_wcoj_oid_const(InvalidOid));
+    desc = lappend(desc, makeInteger(0));
     Assert(list_length(desc) == AGE_GENERIC_PATH_PROVIDER_COUNT);
     return desc;
+}
+
+static void
+mark_generic_edge_physical_path_desc(PlannerInfo *root, Path *provider_path,
+                                     List *variable_rtis, List *desc)
+{
+    CypherWCOJTerminalEntry *entry;
+    RelOptInfo *rel;
+    Index edge_rti;
+    int source_variable;
+    int terminal_variable;
+    int var1;
+    int var2;
+
+    if (root == NULL || provider_path == NULL || variable_rtis == NIL ||
+        desc == NIL ||
+        list_length(desc) != AGE_GENERIC_PATH_PROVIDER_COUNT)
+    {
+        return;
+    }
+    if (intVal(list_nth(desc, AGE_GENERIC_PATH_PROVIDER_KIND)) !=
+        AGE_GENERIC_PROVIDER_EDGE)
+    {
+        return;
+    }
+
+    edge_rti = (Index)intVal(list_nth(
+        desc, AGE_GENERIC_PATH_PROVIDER_REL_RTI));
+    entry = find_wcoj_terminal_entry(root, edge_rti);
+    if (entry == NULL)
+        return;
+    var1 = intVal(list_nth(desc, AGE_GENERIC_PATH_PROVIDER_VAR1));
+    var2 = intVal(list_nth(desc, AGE_GENERIC_PATH_PROVIDER_VAR2));
+    source_variable = generic_variable_position(variable_rtis,
+                                                entry->source_rti);
+    terminal_variable = generic_variable_position(variable_rtis,
+                                                  entry->terminal_rti);
+
+    if (!OidIsValid(entry->index_oid) ||
+        entry->exact_terminal_bound ||
+        source_variable != var1 ||
+        terminal_variable != var2 ||
+        entry->edge_rti <= 0 ||
+        entry->edge_rti >= root->simple_rel_array_size)
+    {
+        return;
+    }
+
+    rel = root->simple_rel_array[entry->edge_rti];
+    if (rel == NULL || rel->baserestrictinfo != NIL ||
+        !generic_edge_provider_target_is_key_only(provider_path, desc))
+    {
+        return;
+    }
+
+    lfirst(list_nth_cell(desc, AGE_GENERIC_PATH_PROVIDER_PHYSICAL_KIND)) =
+        makeInteger(AGE_GENERIC_PROVIDER_PHYSICAL_ADJACENCY_EDGE);
+    lfirst(list_nth_cell(desc, AGE_GENERIC_PATH_PROVIDER_ADJ_INDEX_OID)) =
+        make_wcoj_oid_const(entry->index_oid);
+    lfirst(list_nth_cell(desc,
+                         AGE_GENERIC_PATH_PROVIDER_ADJ_TERMINAL_LABEL_ID)) =
+        makeInteger(entry->terminal_label_id);
+}
+
+static void
+mark_generic_lazy_physical_provider_descs(PlannerInfo *root,
+                                          List *variable_rtis,
+                                          List *provider_paths,
+                                          List *provider_descs)
+{
+    ListCell *path_cell;
+    ListCell *desc_cell;
+
+    if (root == NULL || variable_rtis == NIL ||
+        list_length(provider_paths) != list_length(provider_descs))
+    {
+        return;
+    }
+
+    forboth(path_cell, provider_paths, desc_cell, provider_descs)
+    {
+        Path *provider_path = lfirst(path_cell);
+        List *desc = lfirst(desc_cell);
+
+        mark_generic_edge_physical_path_desc(root, provider_path,
+                                             variable_rtis, desc);
+    }
+}
+
+static bool
+generic_edge_provider_target_is_key_only(Path *provider_path, List *desc)
+{
+    ListCell *lc;
+    Node *key1_expr;
+    Node *key2_expr;
+    Node *edge_id_expr;
+    int output_count;
+
+    if (provider_path == NULL || provider_path->pathtarget == NULL ||
+        desc == NIL || list_length(desc) != AGE_GENERIC_PATH_PROVIDER_COUNT)
+    {
+        return false;
+    }
+    output_count = list_length(provider_path->pathtarget->exprs);
+    if (output_count <= 0 || output_count > 3)
+        return false;
+
+    key1_expr = strip_implicit_coercions(
+        list_nth(desc, AGE_GENERIC_PATH_PROVIDER_KEY1_EXPR));
+    key2_expr = strip_implicit_coercions(
+        list_nth(desc, AGE_GENERIC_PATH_PROVIDER_KEY2_EXPR));
+    edge_id_expr = strip_implicit_coercions(
+        list_nth(desc, AGE_GENERIC_PATH_PROVIDER_EDGE_ID_EXPR));
+
+    foreach(lc, provider_path->pathtarget->exprs)
+    {
+        Node *expr = strip_implicit_coercions(lfirst(lc));
+
+        if (!equal(expr, key1_expr) &&
+            !equal(expr, key2_expr) &&
+            !equal(expr, edge_id_expr))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 /*
@@ -4416,6 +4810,12 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
         custom_path->custom_private, makeInteger(AGE_GENERIC_CONSUMER_ROWS));
     custom_path->custom_private = lappend(
         custom_path->custom_private, make_wcoj_oid_const(InvalidOid));
+    custom_path->custom_private = lappend(
+        custom_path->custom_private, make_int8_const(0));
+    custom_path->custom_private = lappend(
+        custom_path->custom_private, makeInteger(AGE_GENERIC_ROW_GOAL_NONE));
+    custom_path->custom_private = lappend(custom_path->custom_private,
+                                          makeInteger(-1));
     custom_path->methods = &age_generic_join_path_methods;
 
     add_path(joinrel, (Path *)custom_path);
@@ -4712,6 +5112,10 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
                                   (FinalPathExtraData *)extra);
     add_wcoj_fractional_row_goal_paths(root, input_rel, output_rel,
                                        (FinalPathExtraData *)extra);
+    add_generic_limit_row_goal_paths(root, input_rel, output_rel,
+                                     (FinalPathExtraData *)extra);
+    add_generic_fractional_row_goal_paths(root, input_rel, output_rel,
+                                          (FinalPathExtraData *)extra);
 
     if (cypher_detect_simple_property_projection(root, input_rel, output_rel,
                                                  &property_slots,
@@ -5250,6 +5654,356 @@ copy_wcoj_path_with_row_goal(CustomPath *wcoj_path, int64 row_goal,
         row_goal_path->custom_private, makeInteger(row_goal_source));
     row_goal_path->custom_private = lappend(row_goal_path->custom_private,
                                             NIL);
+
+    return row_goal_path;
+}
+
+static void
+add_generic_limit_row_goal_paths(PlannerInfo *root, RelOptInfo *input_rel,
+                                 RelOptInfo *output_rel,
+                                 FinalPathExtraData *extra)
+{
+    List *new_paths = NIL;
+    ListCell *lc;
+
+    if (root == NULL || root->parse == NULL || output_rel == NULL ||
+        output_rel->pathlist == NIL || extra == NULL ||
+        !extra->limit_needed || root->parse->sortClause != NIL ||
+        root->parse->limitOption != LIMIT_OPTION_COUNT ||
+        extra->offset_est != 0 || extra->count_est <= 0)
+    {
+        return;
+    }
+
+    foreach(lc, output_rel->pathlist)
+    {
+        Path *path = lfirst(lc);
+        Path *row_goal_path;
+
+        if (IsA(path, LimitPath))
+            row_goal_path = make_generic_limit_row_goal_path(
+                root, output_rel, (LimitPath *)path);
+        else
+            row_goal_path = make_generic_final_limit_row_goal_path(
+                root, output_rel, path, extra);
+        if (row_goal_path != NULL)
+            new_paths = lappend(new_paths, row_goal_path);
+    }
+
+    if (input_rel != NULL && input_rel != output_rel)
+    {
+        foreach(lc, input_rel->pathlist)
+        {
+            Path *path = lfirst(lc);
+            Path *row_goal_path;
+
+            row_goal_path = make_generic_final_limit_row_goal_path(
+                root, output_rel, path, extra);
+            if (row_goal_path != NULL)
+                new_paths = lappend(new_paths, row_goal_path);
+        }
+    }
+
+    foreach(lc, new_paths)
+        add_path(output_rel, lfirst(lc));
+}
+
+static void
+add_generic_fractional_row_goal_paths(PlannerInfo *root,
+                                      RelOptInfo *input_rel,
+                                      RelOptInfo *output_rel,
+                                      FinalPathExtraData *extra)
+{
+    List *new_paths = NIL;
+    ListCell *lc;
+    int64 row_goal;
+
+    if (root == NULL || output_rel == NULL || output_rel->pathlist == NIL)
+        return;
+
+    row_goal = wcoj_tuple_fraction_row_goal(root, extra);
+    if (row_goal <= 0)
+        return;
+
+    foreach(lc, output_rel->pathlist)
+    {
+        Path *path = lfirst(lc);
+        Path *row_goal_path;
+
+        row_goal_path = make_generic_fractional_row_goal_path(
+            root, output_rel, path, row_goal);
+        if (row_goal_path != NULL)
+            new_paths = lappend(new_paths, row_goal_path);
+    }
+
+    if (input_rel != NULL && input_rel != output_rel)
+    {
+        foreach(lc, input_rel->pathlist)
+        {
+            Path *path = lfirst(lc);
+            Path *row_goal_path;
+
+            row_goal_path = make_generic_fractional_row_goal_path(
+                root, output_rel, path, row_goal);
+            if (row_goal_path != NULL)
+                new_paths = lappend(new_paths, row_goal_path);
+        }
+    }
+
+    foreach(lc, new_paths)
+        add_path(output_rel, lfirst(lc));
+}
+
+static Path *
+make_generic_final_limit_row_goal_path(PlannerInfo *root,
+                                       RelOptInfo *output_rel, Path *path,
+                                       FinalPathExtraData *extra)
+{
+    CustomPath *generic_path;
+    CustomPath *row_goal_subpath;
+    Path *row_goal_path;
+    PathTarget *projection_target = NULL;
+
+    if (root == NULL || root->parse == NULL || output_rel == NULL ||
+        path == NULL || extra == NULL)
+    {
+        return NULL;
+    }
+    while (IsA(path, ProjectionPath))
+    {
+        ProjectionPath *projection_path = (ProjectionPath *)path;
+
+        projection_target = projection_path->path.pathtarget;
+        path = projection_path->subpath;
+    }
+    if (!IsA(path, CustomPath))
+        return NULL;
+
+    generic_path = (CustomPath *)path;
+    if (generic_path->methods != &age_generic_join_path_methods)
+        return NULL;
+
+    row_goal_subpath = copy_generic_path_with_row_goal(
+        generic_path, extra->count_est, AGE_GENERIC_CONSUMER_LIMIT,
+        AGE_GENERIC_ROW_GOAL_LIMIT);
+    if (row_goal_subpath == NULL)
+        return NULL;
+    if (projection_target != NULL)
+        row_goal_subpath->path.pathtarget = projection_target;
+
+    row_goal_path = (Path *)create_limit_path(
+        root, output_rel, (Path *)row_goal_subpath,
+        root->parse->limitOffset, root->parse->limitCount,
+        root->parse->limitOption, extra->offset_est, extra->count_est);
+    row_goal_path->total_cost = Max(row_goal_path->startup_cost,
+                                    row_goal_path->total_cost -
+                                    cpu_tuple_cost);
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE Generic Join final limit row-goal path "
+                             "added: row_goal=" INT64_FORMAT
+                             " original_cost=%.2f new_cost=%.2f",
+                             extra->count_est, path->total_cost,
+                             row_goal_path->total_cost)));
+
+    return row_goal_path;
+}
+
+static Path *
+make_generic_fractional_row_goal_path(PlannerInfo *root,
+                                      RelOptInfo *output_rel, Path *path,
+                                      int64 row_goal)
+{
+    CustomPath *generic_path;
+    CustomPath *row_goal_path;
+    PathTarget *projection_target = NULL;
+
+    if (root == NULL || output_rel == NULL || path == NULL || row_goal <= 0)
+        return NULL;
+
+    while (IsA(path, ProjectionPath))
+    {
+        ProjectionPath *projection_path = (ProjectionPath *)path;
+
+        projection_target = projection_path->path.pathtarget;
+        path = projection_path->subpath;
+    }
+    if (!IsA(path, CustomPath))
+        return NULL;
+
+    generic_path = (CustomPath *)path;
+    if (generic_path->methods != &age_generic_join_path_methods ||
+        row_goal != 1 || projection_target != NULL ||
+        generic_path->path.pathtarget == NULL ||
+        generic_path->path.pathtarget->exprs != NIL ||
+        !generic_count_restrictinfos_supported(generic_path))
+    {
+        return NULL;
+    }
+
+    row_goal_path = copy_generic_path_with_row_goal(
+        generic_path, row_goal, AGE_GENERIC_CONSUMER_EXISTS,
+        AGE_GENERIC_ROW_GOAL_EXISTS);
+    if (row_goal_path == NULL)
+        return NULL;
+    row_goal_path->path.parent = output_rel;
+    row_goal_path->path.total_cost = Max(
+        row_goal_path->path.startup_cost,
+        row_goal_path->path.total_cost - cpu_tuple_cost);
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE Generic Join exists row-goal path added: "
+                             "row_goal=" INT64_FORMAT
+                             " tuple_fraction=%.6f original_cost=%.2f "
+                             "new_cost=%.2f",
+                             row_goal, root->tuple_fraction,
+                             path->total_cost,
+                             row_goal_path->path.total_cost)));
+
+    return (Path *)row_goal_path;
+}
+
+static Path *
+make_generic_limit_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
+                                 LimitPath *limit_path)
+{
+    CustomPath *generic_path;
+    CustomPath *row_goal_subpath;
+    LimitPath *row_goal_path;
+    int64 row_goal;
+
+    (void)root;
+
+    if (output_rel == NULL || limit_path == NULL ||
+        limit_path->limitOption != LIMIT_OPTION_COUNT ||
+        !wcoj_limit_const_int64(limit_path->limitCount, &row_goal) ||
+        row_goal <= 0 ||
+        !wcoj_limit_offset_is_zero(limit_path->limitOffset) ||
+        limit_path->subpath == NULL ||
+        !IsA(limit_path->subpath, CustomPath))
+    {
+        return NULL;
+    }
+
+    generic_path = (CustomPath *)limit_path->subpath;
+    if (generic_path->methods != &age_generic_join_path_methods)
+        return NULL;
+
+    row_goal_subpath = copy_generic_path_with_row_goal(
+        generic_path, row_goal, AGE_GENERIC_CONSUMER_LIMIT,
+        AGE_GENERIC_ROW_GOAL_LIMIT);
+    if (row_goal_subpath == NULL)
+        return NULL;
+
+    row_goal_path = palloc(sizeof(*row_goal_path));
+    memcpy(row_goal_path, limit_path, sizeof(*row_goal_path));
+    row_goal_path->path.pathtype = T_Limit;
+    row_goal_path->path.parent = output_rel;
+    row_goal_path->subpath = (Path *)row_goal_subpath;
+    row_goal_path->path.startup_cost = limit_path->path.startup_cost;
+    row_goal_path->path.total_cost = Max(
+        row_goal_path->path.startup_cost,
+        limit_path->path.total_cost - cpu_tuple_cost);
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE Generic Join limit row-goal path added: "
+                             "row_goal=" INT64_FORMAT
+                             " original_cost=%.2f new_cost=%.2f",
+                             row_goal,
+                             limit_path->path.total_cost,
+                             row_goal_path->path.total_cost)));
+
+    return (Path *)row_goal_path;
+}
+
+static CustomPath *
+copy_generic_path_with_row_goal(CustomPath *generic_path, int64 row_goal,
+                                int consumer_kind, int row_goal_source)
+{
+    CustomPath *row_goal_path;
+    Const *existing_row_goal;
+    int existing_consumer_kind;
+    int64 existing_goal;
+    double row_fraction;
+
+    if (generic_path == NULL || row_goal <= 0 ||
+        generic_path->methods != &age_generic_join_path_methods ||
+        list_length(generic_path->custom_private) !=
+            AGE_GENERIC_PATH_PRIVATE_COUNT)
+    {
+        return NULL;
+    }
+
+    existing_consumer_kind = intVal(list_nth(
+        generic_path->custom_private, AGE_GENERIC_PATH_PRIVATE_CONSUMER));
+    if (existing_consumer_kind != AGE_GENERIC_CONSUMER_ROWS)
+        return NULL;
+    if (consumer_kind != AGE_GENERIC_CONSUMER_LIMIT &&
+        consumer_kind != AGE_GENERIC_CONSUMER_EXISTS)
+    {
+        return NULL;
+    }
+    if ((consumer_kind == AGE_GENERIC_CONSUMER_LIMIT &&
+         row_goal_source != AGE_GENERIC_ROW_GOAL_LIMIT) ||
+        (consumer_kind == AGE_GENERIC_CONSUMER_EXISTS &&
+         row_goal_source != AGE_GENERIC_ROW_GOAL_EXISTS))
+    {
+        return NULL;
+    }
+
+    existing_row_goal = list_nth_node(
+        Const, generic_path->custom_private,
+        AGE_GENERIC_PATH_PRIVATE_ROW_GOAL);
+    if (existing_row_goal->constisnull ||
+        existing_row_goal->consttype != INT8OID)
+    {
+        return NULL;
+    }
+    existing_goal = DatumGetInt64(existing_row_goal->constvalue);
+    if (existing_goal != 0)
+        return NULL;
+
+    row_goal_path = makeNode(CustomPath);
+    memcpy(row_goal_path, generic_path, sizeof(*row_goal_path));
+    row_goal_path->path.rows = consumer_kind == AGE_GENERIC_CONSUMER_EXISTS ?
+        1.0 : clamp_row_est(Min(generic_path->path.rows, (double)row_goal));
+    row_fraction = (double)row_goal / Max(generic_path->path.rows, 1.0);
+    if (row_fraction < 1.0)
+    {
+        Cost run_cost = Max(generic_path->path.total_cost -
+                            generic_path->path.startup_cost, 0.0);
+
+        row_goal_path->path.total_cost =
+            row_goal_path->path.startup_cost +
+            run_cost * Max(row_fraction, 0.01) + cpu_tuple_cost;
+        row_goal_path->path.total_cost = Max(
+            row_goal_path->path.startup_cost,
+            Min(row_goal_path->path.total_cost,
+                generic_path->path.total_cost));
+    }
+    row_goal_path->custom_paths = list_copy(generic_path->custom_paths);
+    row_goal_path->custom_restrictinfo = generic_path->custom_restrictinfo;
+    row_goal_path->custom_private = list_make4(
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_VARIABLE_RTIS)),
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_PROVIDER_DESCS)),
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_RISK_ADJUSTED)),
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_REDUCTION_DESC)));
+    row_goal_path->custom_private = lappend(row_goal_path->custom_private,
+                                            makeInteger(consumer_kind));
+    row_goal_path->custom_private = lappend(
+        row_goal_path->custom_private,
+        consumer_kind == AGE_GENERIC_CONSUMER_EXISTS ?
+        make_wcoj_oid_const(AGTYPEOID) : make_wcoj_oid_const(InvalidOid));
+    row_goal_path->custom_private = lappend(row_goal_path->custom_private,
+                                            make_int8_const(row_goal));
+    row_goal_path->custom_private = lappend(row_goal_path->custom_private,
+                                            makeInteger(row_goal_source));
+    row_goal_path->custom_private = lappend(row_goal_path->custom_private,
+                                            makeInteger(-1));
 
     return row_goal_path;
 }
@@ -5960,8 +6714,12 @@ make_generic_count_path(PlannerInfo *root, RelOptInfo *output_rel,
     CustomPath *generic_path;
     CustomPath *count_path;
     Aggref *aggref;
-
-    (void)root;
+    Oid output_type = InvalidOid;
+    int consumer_kind;
+    int distinct_variable = -1;
+    List *count_variable_rtis;
+    List *count_provider_descs;
+    List *count_reduction_desc;
 
     if (output_rel == NULL || agg_path == NULL ||
         agg_path->aggsplit != AGGSPLIT_SIMPLE ||
@@ -5972,8 +6730,9 @@ make_generic_count_path(PlannerInfo *root, RelOptInfo *output_rel,
         return NULL;
     }
 
-    aggref = wcoj_count_target_aggref(agg_path->path.pathtarget, NULL);
-    if (!is_plain_count_star_aggref(aggref))
+    aggref = wcoj_count_target_aggref(agg_path->path.pathtarget,
+                                      &output_type);
+    if (output_type != INT8OID && output_type != AGTYPEOID)
         return NULL;
 
     generic_input_path = agg_path->subpath;
@@ -6011,6 +6770,19 @@ make_generic_count_path(PlannerInfo *root, RelOptInfo *output_rel,
     {
         return NULL;
     }
+    if (is_plain_count_star_aggref(aggref))
+    {
+        consumer_kind = AGE_GENERIC_CONSUMER_COUNT;
+    }
+    else if (is_count_distinct_generic_key_aggref(
+                 aggref, generic_path, &distinct_variable))
+    {
+        consumer_kind = AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY;
+    }
+    else
+    {
+        return NULL;
+    }
 
     count_path = makeNode(CustomPath);
     count_path->path.pathtype = T_CustomScan;
@@ -6045,18 +6817,36 @@ make_generic_count_path(PlannerInfo *root, RelOptInfo *output_rel,
         copyObject(list_nth(generic_path->custom_private,
                             AGE_GENERIC_PATH_PRIVATE_REDUCTION_DESC)));
     count_path->custom_private = lappend(
-        count_path->custom_private, makeInteger(AGE_GENERIC_CONSUMER_COUNT));
+        count_path->custom_private, makeInteger(consumer_kind));
     count_path->custom_private = lappend(
         count_path->custom_private, make_wcoj_oid_const(INT8OID));
+    count_path->custom_private = lappend(
+        count_path->custom_private, make_int8_const(0));
+    count_path->custom_private = lappend(
+        count_path->custom_private, makeInteger(AGE_GENERIC_ROW_GOAL_NONE));
+    count_path->custom_private = lappend(count_path->custom_private,
+                                         makeInteger(distinct_variable));
+    count_variable_rtis = list_nth(
+        count_path->custom_private, AGE_GENERIC_PATH_PRIVATE_VARIABLE_RTIS);
+    count_provider_descs = list_nth(
+        count_path->custom_private, AGE_GENERIC_PATH_PRIVATE_PROVIDER_DESCS);
+    count_reduction_desc = list_nth(
+        count_path->custom_private, AGE_GENERIC_PATH_PRIVATE_REDUCTION_DESC);
+    if (!generic_reduction_has_ghd_separators(count_reduction_desc))
+    {
+        mark_generic_lazy_physical_provider_descs(root, count_variable_rtis,
+                                                  count_path->custom_paths,
+                                                  count_provider_descs);
+    }
     count_path->methods = &age_generic_join_path_methods;
 
     ereport(DEBUG2,
             (errmsg_internal("AGE Generic Join count path added: "
                              "providers=%d source_cost=%.2f "
-                             "count_cost=%.2f",
+                             "count_cost=%.2f consumer=%d",
                              list_length(generic_path->custom_paths),
                              generic_path->path.total_cost,
-                             count_path->path.total_cost)));
+                             count_path->path.total_cost, consumer_kind)));
 
     return count_path;
 }
@@ -6702,6 +7492,97 @@ generic_count_restrictinfos_supported(CustomPath *generic_path)
         return false;
     }
     return true;
+}
+
+static bool
+is_count_distinct_generic_key_aggref(Aggref *aggref, CustomPath *generic_path,
+                                     int *variable)
+{
+    TargetEntry *arg_tle;
+    int key_variable;
+
+    if (variable != NULL)
+        *variable = -1;
+    if (!is_count_aggref(aggref) || aggref->aggstar ||
+        list_length(aggref->args) != 1 ||
+        aggref->aggdistinct == NIL ||
+        list_length(aggref->aggdistinct) != 1)
+    {
+        return false;
+    }
+
+    arg_tle = linitial_node(TargetEntry, aggref->args);
+    if (arg_tle == NULL || arg_tle->expr == NULL)
+        return false;
+
+    key_variable = generic_distinct_arg_variable(
+        generic_path, (Node *)arg_tle->expr);
+    if (key_variable < 0)
+        return false;
+    if (variable != NULL)
+        *variable = key_variable;
+    return true;
+}
+
+static int
+generic_distinct_arg_variable(CustomPath *generic_path, Node *arg)
+{
+    Node *key_arg;
+    List *provider_descs;
+    ListCell *lc;
+
+    if (generic_path == NULL ||
+        list_length(generic_path->custom_private) !=
+            AGE_GENERIC_PATH_PRIVATE_COUNT)
+    {
+        return -1;
+    }
+
+    key_arg = wcoj_unwrap_distinct_key_arg(arg);
+    if (key_arg == NULL)
+        return -1;
+
+    provider_descs = list_nth(generic_path->custom_private,
+                              AGE_GENERIC_PATH_PRIVATE_PROVIDER_DESCS);
+    foreach(lc, provider_descs)
+    {
+        List *provider_desc = lfirst_node(List, lc);
+        Node *key1_expr;
+        Node *key2_expr;
+        int provider_kind;
+
+        if (list_length(provider_desc) != AGE_GENERIC_PATH_PROVIDER_COUNT)
+            return -1;
+
+        provider_kind = intVal(list_nth(
+            provider_desc, AGE_GENERIC_PATH_PROVIDER_KIND));
+        key1_expr = strip_implicit_coercions(
+            list_nth(provider_desc, AGE_GENERIC_PATH_PROVIDER_KEY1_EXPR));
+        if (key1_expr != NULL && exprType(key1_expr) == GRAPHIDOID &&
+            equal(key_arg, key1_expr))
+        {
+            return intVal(list_nth(provider_desc,
+                                   AGE_GENERIC_PATH_PROVIDER_VAR1));
+        }
+
+        if (provider_kind == AGE_GENERIC_PROVIDER_EDGE)
+        {
+            key2_expr = strip_implicit_coercions(
+                list_nth(provider_desc,
+                         AGE_GENERIC_PATH_PROVIDER_KEY2_EXPR));
+            if (key2_expr != NULL && exprType(key2_expr) == GRAPHIDOID &&
+                equal(key_arg, key2_expr))
+            {
+                return intVal(list_nth(provider_desc,
+                                       AGE_GENERIC_PATH_PROVIDER_VAR2));
+            }
+        }
+        else if (provider_kind != AGE_GENERIC_PROVIDER_VERTEX)
+        {
+            return -1;
+        }
+    }
+    return -1;
 }
 
 static bool
@@ -16791,6 +17672,20 @@ build_wcoj_exists_custom_scan_tlist(List *provider_tlist)
     return lcons(exists_tle, provider_tlist);
 }
 
+static List *
+build_generic_exists_custom_scan_tlist(List *provider_tlist)
+{
+    Const *exists_value;
+    TargetEntry *exists_tle;
+
+    exists_value = makeConst(AGTYPEOID, -1, InvalidOid, -1,
+                             boolean_to_agtype(true), false, false);
+    exists_tle = makeTargetEntry((Expr *)exists_value, 1,
+                                 pstrdup("generic_exists"), false);
+
+    return lcons(exists_tle, provider_tlist);
+}
+
 static Expr *
 wcoj_count_scan_expr(PathTarget *target)
 {
@@ -16877,7 +17772,11 @@ generic_consumer_first_scan_resno(int consumer_kind)
     case AGE_GENERIC_CONSUMER_ROWS:
         return 1;
     case AGE_GENERIC_CONSUMER_COUNT:
+    case AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY:
+    case AGE_GENERIC_CONSUMER_EXISTS:
         return 2;
+    case AGE_GENERIC_CONSUMER_LIMIT:
+        return 1;
     }
     elog(ERROR, "invalid AGE Generic Join consumer kind %d", consumer_kind);
     return 1;
@@ -16959,6 +17858,18 @@ build_generic_custom_scan_tlist(List *custom_plans, List *provider_descs,
                                 AGE_GENERIC_PATH_PROVIDER_VAR2)),
             makeInteger(key1_attno), makeInteger(key2_attno));
         exec_desc = lappend(exec_desc, makeInteger(edge_id_attno));
+        exec_desc = lappend(exec_desc,
+                            copyObject(list_nth(
+                                path_desc,
+                                AGE_GENERIC_PATH_PROVIDER_PHYSICAL_KIND)));
+        exec_desc = lappend(exec_desc,
+                            copyObject(list_nth(
+                                path_desc,
+                                AGE_GENERIC_PATH_PROVIDER_ADJ_INDEX_OID)));
+        exec_desc = lappend(exec_desc,
+                            copyObject(list_nth(
+                                path_desc,
+                                AGE_GENERIC_PATH_PROVIDER_ADJ_TERMINAL_LABEL_ID)));
         Assert(list_length(exec_desc) == AGE_GENERIC_PROVIDER_DESC_COUNT);
         *exec_provider_descs = lappend(*exec_provider_descs, exec_desc);
     }
@@ -16980,7 +17891,11 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
     List *uniqueness_groups;
     List *reduction_desc;
     Const *output_type_const;
+    Const *row_goal_const;
     Oid output_type;
+    int64 row_goal;
+    int row_goal_source;
+    int distinct_variable;
     int consumer_kind;
 
     (void)root;
@@ -17004,33 +17919,78 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
     output_type_const = list_nth_node(
         Const, best_path->custom_private,
         AGE_GENERIC_PATH_PRIVATE_OUTPUT_TYPE);
+    row_goal_const = list_nth_node(
+        Const, best_path->custom_private,
+        AGE_GENERIC_PATH_PRIVATE_ROW_GOAL);
+    row_goal_source = intVal(list_nth(
+        best_path->custom_private, AGE_GENERIC_PATH_PRIVATE_ROW_GOAL_SOURCE));
+    distinct_variable = intVal(list_nth(
+        best_path->custom_private, AGE_GENERIC_PATH_PRIVATE_DISTINCT_VARIABLE));
     if (list_length(variable_rtis) < 3 ||
         list_length(provider_descs) != list_length(custom_plans) ||
         list_length(reduction_desc) != AGE_GENERIC_REDUCTION_DESC_COUNT ||
         (consumer_kind != AGE_GENERIC_CONSUMER_ROWS &&
-         consumer_kind != AGE_GENERIC_CONSUMER_COUNT) ||
+         consumer_kind != AGE_GENERIC_CONSUMER_COUNT &&
+         consumer_kind != AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_EXISTS &&
+         consumer_kind != AGE_GENERIC_CONSUMER_LIMIT) ||
         output_type_const->constisnull ||
-        output_type_const->consttype != OIDOID)
+        output_type_const->consttype != OIDOID ||
+        row_goal_const->constisnull ||
+        row_goal_const->consttype != INT8OID)
     {
         elog(ERROR, "invalid AGE Generic Join descriptor arity");
     }
     output_type = DatumGetObjectId(output_type_const->constvalue);
-    if ((consumer_kind == AGE_GENERIC_CONSUMER_ROWS &&
+    row_goal = DatumGetInt64(row_goal_const->constvalue);
+    if (((consumer_kind == AGE_GENERIC_CONSUMER_ROWS ||
+          consumer_kind == AGE_GENERIC_CONSUMER_LIMIT) &&
          OidIsValid(output_type)) ||
-        (consumer_kind == AGE_GENERIC_CONSUMER_COUNT &&
-         output_type != INT8OID && output_type != AGTYPEOID))
+        ((consumer_kind == AGE_GENERIC_CONSUMER_COUNT ||
+          consumer_kind == AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY) &&
+         output_type != INT8OID && output_type != AGTYPEOID) ||
+        (consumer_kind == AGE_GENERIC_CONSUMER_EXISTS &&
+         output_type != AGTYPEOID))
     {
         elog(ERROR, "invalid AGE Generic Join consumer descriptor");
+    }
+    if (row_goal < 0 ||
+        (consumer_kind != AGE_GENERIC_CONSUMER_LIMIT &&
+         consumer_kind != AGE_GENERIC_CONSUMER_EXISTS && row_goal != 0) ||
+        (consumer_kind == AGE_GENERIC_CONSUMER_LIMIT &&
+         (row_goal <= 0 || row_goal_source != AGE_GENERIC_ROW_GOAL_LIMIT)) ||
+        (consumer_kind == AGE_GENERIC_CONSUMER_EXISTS &&
+         (row_goal <= 0 || row_goal_source != AGE_GENERIC_ROW_GOAL_EXISTS)) ||
+        (row_goal == 0 && row_goal_source != AGE_GENERIC_ROW_GOAL_NONE) ||
+        (row_goal > 0 &&
+         row_goal_source != AGE_GENERIC_ROW_GOAL_LIMIT &&
+         row_goal_source != AGE_GENERIC_ROW_GOAL_EXISTS))
+    {
+        elog(ERROR, "invalid AGE Generic Join row goal descriptor");
+    }
+    if ((consumer_kind == AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY &&
+         (distinct_variable < 0 ||
+          distinct_variable >= list_length(variable_rtis))) ||
+        (consumer_kind != AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY &&
+         distinct_variable != -1))
+    {
+        elog(ERROR, "invalid AGE Generic Join distinct variable descriptor");
     }
 
     custom_scan_tlist = build_generic_custom_scan_tlist(
         custom_plans, provider_descs,
         generic_consumer_first_scan_resno(consumer_kind),
         &exec_provider_descs);
-    if (consumer_kind == AGE_GENERIC_CONSUMER_COUNT)
+    if (consumer_kind == AGE_GENERIC_CONSUMER_COUNT ||
+        consumer_kind == AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY)
     {
         custom_scan_tlist = build_wcoj_count_custom_scan_tlist(
             best_path->path.pathtarget, custom_scan_tlist);
+    }
+    else if (consumer_kind == AGE_GENERIC_CONSUMER_EXISTS)
+    {
+        custom_scan_tlist = build_generic_exists_custom_scan_tlist(
+            custom_scan_tlist);
     }
     plan_tlist = tlist != NIL ? copyObject(tlist) :
         build_wcoj_plan_tlist(best_path->path.pathtarget);
@@ -17046,7 +18006,9 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
     cs->scan.plan.parallel_safe = false;
     cs->scan.plan.async_capable = false;
     cs->scan.plan.targetlist = plan_tlist;
-    cs->scan.plan.qual = consumer_kind == AGE_GENERIC_CONSUMER_ROWS ?
+    cs->scan.plan.qual =
+        (consumer_kind == AGE_GENERIC_CONSUMER_ROWS ||
+         consumer_kind == AGE_GENERIC_CONSUMER_LIMIT) ?
         extract_actual_clauses(best_path->custom_restrictinfo, false) : NIL;
     cs->scan.plan.lefttree = NULL;
     cs->scan.plan.righttree = NULL;
@@ -17061,6 +18023,12 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
                                  makeInteger(consumer_kind));
     cs->custom_private = lappend(cs->custom_private,
                                  copyObject(output_type_const));
+    cs->custom_private = lappend(cs->custom_private,
+                                 copyObject(row_goal_const));
+    cs->custom_private = lappend(cs->custom_private,
+                                 makeInteger(row_goal_source));
+    cs->custom_private = lappend(cs->custom_private,
+                                 makeInteger(distinct_variable));
     cs->custom_scan_tlist = custom_scan_tlist;
     cs->custom_relids = NULL;
     cs->methods = &age_generic_join_scan_methods;

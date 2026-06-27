@@ -261,13 +261,14 @@ or threshold checks run.  The raw plan text is the default review target.  The
 PASS/FAIL telemetry summary is secondary and only checks that the logs include
 survivor batching, alpha-acyclic semijoin reduction, factorized source bags and
 shared enumerators, Generic Join provider materialization and trie/cache ops,
-WCOJ row goals, semiring consumers, and explicit 2-core leaf-tail GHD separator
-pruning counters.
+WCOJ row goals, semiring consumers, explicit GHD separator pruning counters,
+and general GHD pair separators.
 
 Regression coverage should follow the same plan-first ordering: standalone
-`EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)`
+`EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS ON)`
 blocks expose the full direct payload, source-bag factorization, semiring
-consumer, and row-goal plans before any grep-style telemetry assertions run.
+consumer, row-goal, and shared/local buffer plans before any grep-style
+telemetry assertions run.
 
 ```sh
 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
@@ -351,9 +352,10 @@ guards operational.
 leaf tails and verifies that cyclic components still choose Generic Join,
 preserve key-only output materialization, expose the current eager sorted-array
 physical provider in the raw plan, reuse prefix ranges, and apply multi-tail
-separator pruning.  The raw plan reports `GHD Mode: 2-core leaf-tail`,
-`GHD General Decomposition: false`, and the fallback reason so this gate does
-not imply a general GHD decomposition.
+separator pruning.  The raw plan reports `GHD Mode: general GHD`,
+`GHD General Decomposition: true`, `GHD Fallback Reason: none`, and the
+pair-plus-leaf separator list.  The script prints the full plan first and uses
+the grep checks only as secondary guards over that plan text.
 
 ```sh
 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \

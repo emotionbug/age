@@ -12,7 +12,7 @@ SET enable_hashjoin = off;
 SET enable_mergejoin = off;
 
 \echo 'generic preserve: four cycle'
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
 SELECT count(*)
 FROM cypher('generic_join_preserve', $$
     MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
@@ -22,7 +22,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
         e1 agtype, e2 agtype, e3 agtype, e4 agtype);
 
 \echo 'generic preserve: four cycle with two tails'
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
 SELECT count(*)
 FROM cypher('generic_join_preserve', $$
     MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)

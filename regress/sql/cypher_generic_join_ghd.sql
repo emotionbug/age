@@ -124,6 +124,10 @@ DECLARE
     has_no_flat_rows boolean := false;
     has_consumer_avoids boolean := false;
     has_rows_emitted boolean := false;
+    has_eager_provider boolean := false;
+    has_full_materialization boolean := false;
+    has_separator_pass boolean := false;
+    has_descriptor_separators boolean := false;
 BEGIN
     PERFORM set_config('age.enable_wcoj', 'on', true);
     PERFORM set_config('enable_nestloop', 'off', true);
@@ -153,15 +157,25 @@ BEGIN
             plan_text LIKE '%Consumer Flat Rows Avoided: 1%';
         has_rows_emitted := has_rows_emitted OR
             plan_text LIKE '%Rows Emitted: 1%';
+        has_eager_provider := has_eager_provider OR
+            plan_text LIKE '%Lazy Physical Provider: false%';
+        has_full_materialization := has_full_materialization OR
+            plan_text LIKE '%Provider Full Materialization: true%';
+        has_separator_pass := has_separator_pass OR
+            plan_text LIKE '%GHD Separator Reduction Passes: 2%';
+        has_descriptor_separators := has_descriptor_separators OR
+            plan_text LIKE '%GHD Descriptor Separators Applied: 2%';
     END LOOP;
 
     IF NOT has_generic OR NOT has_count_consumer OR
        NOT has_count_result OR NOT has_no_flat_rows OR
-       NOT has_consumer_avoids OR NOT has_rows_emitted THEN
+       NOT has_consumer_avoids OR NOT has_rows_emitted OR
+       NOT has_eager_provider OR NOT has_full_materialization OR
+       NOT has_separator_pass OR NOT has_descriptor_separators THEN
         RAISE EXCEPTION
-            'Generic Join count consumer was not observed';
+            'Generic Join count consumer with GHD separator reduction was not observed';
     END IF;
-    RAISE NOTICE 'generic join count consumer verified';
+    RAISE NOTICE 'generic join count consumer with GHD separator reduction verified';
 END
 $generic_ghd_count_consumer_plan$;
 
@@ -202,6 +216,337 @@ SELECT (SELECT total FROM generic_ghd_binary_count) AS binary_total,
         ) diff) AS diff_rows;
 ROLLBACK;
 
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN count(DISTINCT id(a)) AS total
+$$) AS (total agtype);
+ROLLBACK;
+
+DO $generic_ghd_count_distinct_consumer_plan$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_distinct_consumer boolean := false;
+    has_count_result boolean := false;
+    has_distinct_count boolean := false;
+    has_no_flat_rows boolean := false;
+    has_consumer_avoids boolean := false;
+    has_rows_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+    PERFORM set_config('enable_hashagg', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+        SELECT *
+        FROM cypher('generic_ghd', $cypher$
+            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+                  -[e3:E3]->(d:D)-[e4:E4]->(a)
+            RETURN count(DISTINCT id(a)) AS total
+        $cypher$) AS (total agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_distinct_consumer := has_distinct_consumer OR
+            plan_text LIKE '%Generic Join Consumer: count(distinct key)%';
+        has_count_result := has_count_result OR
+            plan_text LIKE '%Count Result: 64%';
+        has_distinct_count := has_distinct_count OR
+            plan_text LIKE '%Distinct Key Count: 64%';
+        has_no_flat_rows := has_no_flat_rows OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_consumer_avoids := has_consumer_avoids OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 64%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_distinct_consumer OR
+       NOT has_count_result OR NOT has_distinct_count OR
+       NOT has_no_flat_rows OR NOT has_consumer_avoids OR
+       NOT has_rows_emitted THEN
+        RAISE EXCEPTION
+            'Generic Join count distinct-key consumer was not observed';
+    END IF;
+    RAISE NOTICE 'generic join count distinct-key consumer verified';
+END
+$generic_ghd_count_distinct_consumer_plan$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_count_distinct ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN count(DISTINCT id(a)) AS total
+$$) AS (total agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+CREATE TEMP TABLE generic_ghd_join_count_distinct ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN count(DISTINCT id(a)) AS total
+$$) AS (total agtype);
+
+SELECT (SELECT total FROM generic_ghd_binary_count_distinct) AS binary_total,
+       (SELECT total FROM generic_ghd_join_count_distinct) AS generic_total,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_count_distinct
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_count_distinct)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_count_distinct
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_count_distinct)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT EXISTS (
+    SELECT 1
+    FROM cypher('generic_ghd', $$
+        MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+              -[e3:E3]->(d:D)-[e4:E4]->(a),
+              (c)-[t:TX]->(x:X)
+        RETURN id(a) AS a
+    $$) AS (a agtype)
+) AS exists_match;
+ROLLBACK;
+
+DO $generic_ghd_exists_consumer_plan$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_exists_consumer boolean := false;
+    has_row_goal boolean := false;
+    has_row_goal_source boolean := false;
+    has_exists_result boolean := false;
+    has_no_flat_rows boolean := false;
+    has_consumer_avoids boolean := false;
+    has_rows_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+        SELECT EXISTS (
+            SELECT 1
+            FROM cypher('generic_ghd', $cypher$
+                MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+                      -[e3:E3]->(d:D)-[e4:E4]->(a),
+                      (c)-[t:TX]->(x:X)
+                RETURN id(a) AS a
+            $cypher$) AS (a agtype)
+        ) AS exists_match
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_exists_consumer := has_exists_consumer OR
+            plan_text LIKE '%Generic Join Consumer: exists%';
+        has_row_goal := has_row_goal OR
+            plan_text LIKE '%Generic Join Row Goal: 1%';
+        has_row_goal_source := has_row_goal_source OR
+            plan_text LIKE '%Generic Join Row Goal Source: exists%';
+        has_exists_result := has_exists_result OR
+            plan_text LIKE '%Exists Result: true%';
+        has_no_flat_rows := has_no_flat_rows OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_consumer_avoids := has_consumer_avoids OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 1%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_exists_consumer OR
+       NOT has_row_goal OR NOT has_row_goal_source OR
+       NOT has_exists_result OR NOT has_no_flat_rows OR
+       NOT has_consumer_avoids OR NOT has_rows_emitted THEN
+        RAISE EXCEPTION
+            'Generic Join exists consumer was not observed';
+    END IF;
+    RAISE NOTICE 'generic join exists consumer verified';
+END
+$generic_ghd_exists_consumer_plan$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_exists ON COMMIT DROP AS
+SELECT EXISTS (
+    SELECT 1
+    FROM cypher('generic_ghd', $$
+        MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+              -[e3:E3]->(d:D)-[e4:E4]->(a),
+              (c)-[t:TX]->(x:X)
+        RETURN id(a) AS a
+    $$) AS (a agtype)
+) AS exists_match;
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE generic_ghd_join_exists ON COMMIT DROP AS
+SELECT EXISTS (
+    SELECT 1
+    FROM cypher('generic_ghd', $$
+        MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+              -[e3:E3]->(d:D)-[e4:E4]->(a),
+              (c)-[t:TX]->(x:X)
+        RETURN id(a) AS a
+    $$) AS (a agtype)
+) AS exists_match;
+
+SELECT (SELECT exists_match FROM generic_ghd_binary_exists) AS binary_exists,
+       (SELECT exists_match FROM generic_ghd_join_exists) AS generic_exists,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_exists
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_exists)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_exists
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_exists)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN 1 AS one
+    LIMIT 1
+$$) AS (one agtype);
+ROLLBACK;
+
+DO $generic_ghd_limit_consumer_plan$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_limit_consumer boolean := false;
+    has_row_goal boolean := false;
+    has_row_goal_source boolean := false;
+    has_row_goal_reached boolean := false;
+    has_flat_row boolean := false;
+    has_consumer_avoids boolean := false;
+    has_rows_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+        SELECT *
+        FROM cypher('generic_ghd', $cypher$
+            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+                  -[e3:E3]->(d:D)-[e4:E4]->(a)
+            RETURN 1 AS one
+            LIMIT 1
+        $cypher$) AS (one agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_limit_consumer := has_limit_consumer OR
+            plan_text LIKE '%Generic Join Consumer: limit%';
+        has_row_goal := has_row_goal OR
+            plan_text LIKE '%Generic Join Row Goal: 1%';
+        has_row_goal_source := has_row_goal_source OR
+            plan_text LIKE '%Generic Join Row Goal Source: limit%';
+        has_row_goal_reached := has_row_goal_reached OR
+            plan_text LIKE '%Row Goal Reached: true%';
+        has_flat_row := has_flat_row OR
+            plan_text LIKE '%Flat Rows Materialized: 1%';
+        has_consumer_avoids := has_consumer_avoids OR
+            plan_text LIKE '%Consumer Flat Rows Avoided:%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_limit_consumer OR
+       NOT has_row_goal OR NOT has_row_goal_source OR
+       NOT has_row_goal_reached OR NOT has_flat_row OR
+       NOT has_consumer_avoids OR NOT has_rows_emitted THEN
+        RAISE EXCEPTION
+            'Generic Join limit consumer was not observed';
+    END IF;
+    RAISE NOTICE 'generic join limit consumer verified';
+END
+$generic_ghd_limit_consumer_plan$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_limit ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN 1 AS one
+    LIMIT 1
+$$) AS (one agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE generic_ghd_join_limit ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN 1 AS one
+    LIMIT 1
+$$) AS (one agtype);
+
+SELECT (SELECT count(*) FROM generic_ghd_binary_limit) AS binary_rows,
+       (SELECT count(*) FROM generic_ghd_join_limit) AS generic_rows,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_limit
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_limit)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_limit
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_limit)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
 DO $generic_ghd_separator_plan$
 DECLARE
     plan_text text;
@@ -214,6 +559,7 @@ DECLARE
     has_ghd_general boolean := false;
     has_ghd_fallback boolean := false;
     has_ghd_bag_count boolean := false;
+    has_ghd_bag_details boolean := false;
     has_ghd_separator_count boolean := false;
     has_ghd_separator_details boolean := false;
     has_ghd_descriptor_source boolean := false;
@@ -258,21 +604,23 @@ BEGIN
         has_reduction_shape := has_reduction_shape OR
             plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
         has_ghd_mode := has_ghd_mode OR
-            plan_text LIKE '%GHD Mode: 2-core leaf-tail%';
+            plan_text LIKE '%GHD Mode: general GHD%';
         has_ghd_general := has_ghd_general OR
-            plan_text LIKE '%GHD General Decomposition: false%';
+            plan_text LIKE '%GHD General Decomposition: true%';
         has_ghd_fallback := has_ghd_fallback OR
-            plan_text LIKE
-            '%GHD Fallback Reason: general GHD decomposition is not implemented%';
+            plan_text LIKE '%GHD Fallback Reason: none%';
         has_descriptor_source := has_descriptor_source OR
             plan_text LIKE
             '%Reduction Descriptor Source: graph-join-match-ir%';
         has_ghd_bag_count := has_ghd_bag_count OR
-            plan_text LIKE '%GHD Bag Count: 2%';
+            plan_text LIKE '%GHD Bag Count: 3%';
+        has_ghd_bag_details := has_ghd_bag_details OR
+            plan_text LIKE
+            '%GHD Bags: bag 1 cyclic-core:%bag 2 cyclic-core:%bag 3 leaf-tail:%';
         has_ghd_separator_count := has_ghd_separator_count OR
-            plan_text LIKE '%GHD Separator Count: 1%';
+            plan_text LIKE '%GHD Separator Count: 2%';
         has_ghd_separator_details := has_ghd_separator_details OR
-            plan_text LIKE '%GHD Separators: provider %';
+            plan_text LIKE '%GHD Separators:%pair v%provider %';
         has_ghd_descriptor_source := has_ghd_descriptor_source OR
             plan_text LIKE '%GHD Descriptor Source: graph-join-match-ir%';
         has_reduction_core := has_reduction_core OR
@@ -280,15 +628,15 @@ BEGIN
         has_reduction_tail := has_reduction_tail OR
             plan_text LIKE '%Reduction Tail Separators: 1%';
         has_separator_pass := has_separator_pass OR
-            plan_text LIKE '%GHD Separator Reduction Passes: 1%';
+            plan_text LIKE '%GHD Separator Reduction Passes: 2%';
         has_leaf_tail_provider := has_leaf_tail_provider OR
             plan_text LIKE '%GHD Leaf Tail Providers: 1%';
         has_descriptor_separators := has_descriptor_separators OR
-            plan_text LIKE '%GHD Descriptor Separators Applied: 1%';
+            plan_text LIKE '%GHD Descriptor Separators Applied: 2%';
         has_separator_domain := has_separator_domain OR
-            plan_text LIKE '%GHD Separator Domain Keys: 1%';
+            plan_text LIKE '%GHD Separator Domain Keys: 3%';
         has_core_pruning := has_core_pruning OR
-            plan_text LIKE '%GHD Cyclic Core Rows Removed: 189%';
+            plan_text LIKE '%GHD Cyclic Core Rows Removed: 315%';
         has_provider_rows := has_provider_rows OR
             plan_text ~ 'Provider Rows Materialized: [1-9][0-9]*';
         has_key_only_tuple_skip := has_key_only_tuple_skip OR
@@ -307,8 +655,9 @@ BEGIN
        NOT has_ghd_mode OR NOT has_ghd_general OR
        NOT has_ghd_fallback OR
        NOT has_descriptor_source OR NOT has_reduction_core OR
-       NOT has_ghd_bag_count OR NOT has_ghd_separator_count OR
-       NOT has_ghd_separator_details OR NOT has_ghd_descriptor_source OR
+       NOT has_ghd_bag_count OR NOT has_ghd_bag_details OR
+       NOT has_ghd_separator_count OR NOT has_ghd_separator_details OR
+       NOT has_ghd_descriptor_source OR
        NOT has_reduction_tail OR
        NOT has_separator_pass OR
        NOT has_leaf_tail_provider OR
@@ -413,6 +762,7 @@ DECLARE
     has_ghd_general boolean := false;
     has_ghd_fallback boolean := false;
     has_ghd_bag_count boolean := false;
+    has_ghd_bag_details boolean := false;
     has_ghd_separator_count boolean := false;
     has_ghd_separator_details boolean := false;
     has_ghd_descriptor_source boolean := false;
@@ -454,21 +804,23 @@ BEGIN
         has_reduction_shape := has_reduction_shape OR
             plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
         has_ghd_mode := has_ghd_mode OR
-            plan_text LIKE '%GHD Mode: 2-core leaf-tail%';
+            plan_text LIKE '%GHD Mode: general GHD%';
         has_ghd_general := has_ghd_general OR
-            plan_text LIKE '%GHD General Decomposition: false%';
+            plan_text LIKE '%GHD General Decomposition: true%';
         has_ghd_fallback := has_ghd_fallback OR
-            plan_text LIKE
-            '%GHD Fallback Reason: general GHD decomposition is not implemented%';
+            plan_text LIKE '%GHD Fallback Reason: none%';
         has_descriptor_source := has_descriptor_source OR
             plan_text LIKE
             '%Reduction Descriptor Source: graph-join-match-ir%';
         has_ghd_bag_count := has_ghd_bag_count OR
-            plan_text LIKE '%GHD Bag Count: 3%';
+            plan_text LIKE '%GHD Bag Count: 4%';
+        has_ghd_bag_details := has_ghd_bag_details OR
+            plan_text LIKE
+            '%GHD Bags: bag 1 cyclic-core:%bag 2 cyclic-core:%bag 3 leaf-tail:%bag 4 leaf-tail:%';
         has_ghd_separator_count := has_ghd_separator_count OR
-            plan_text LIKE '%GHD Separator Count: 2%';
+            plan_text LIKE '%GHD Separator Count: 3%';
         has_ghd_separator_details := has_ghd_separator_details OR
-            plan_text LIKE '%GHD Separators: provider %';
+            plan_text LIKE '%GHD Separators:%pair v%provider %provider %';
         has_ghd_descriptor_source := has_ghd_descriptor_source OR
             plan_text LIKE '%GHD Descriptor Source: graph-join-match-ir%';
         has_reduction_core := has_reduction_core OR
@@ -476,13 +828,13 @@ BEGIN
         has_reduction_tail := has_reduction_tail OR
             plan_text LIKE '%Reduction Tail Separators: 2%';
         has_separator_pass := has_separator_pass OR
-            plan_text LIKE '%GHD Separator Reduction Passes: 1%';
+            plan_text LIKE '%GHD Separator Reduction Passes: 2%';
         has_leaf_tail_providers := has_leaf_tail_providers OR
             plan_text LIKE '%GHD Leaf Tail Providers: 2%';
         has_descriptor_separators := has_descriptor_separators OR
-            plan_text LIKE '%GHD Descriptor Separators Applied: 2%';
+            plan_text LIKE '%GHD Descriptor Separators Applied: 3%';
         has_separator_domain := has_separator_domain OR
-            plan_text LIKE '%GHD Separator Domain Keys: 2%';
+            plan_text LIKE '%GHD Separator Domain Keys: 4%';
         has_core_pruning := has_core_pruning OR
             plan_text LIKE '%GHD Cyclic Core Rows Removed: 378%';
         has_one_row := has_one_row OR
@@ -494,8 +846,8 @@ BEGIN
        NOT has_ghd_mode OR NOT has_ghd_general OR
        NOT has_ghd_fallback OR
        NOT has_descriptor_source OR NOT has_ghd_bag_count OR
-       NOT has_ghd_separator_count OR NOT has_ghd_separator_details OR
-       NOT has_ghd_descriptor_source OR
+       NOT has_ghd_bag_details OR NOT has_ghd_separator_count OR
+       NOT has_ghd_separator_details OR NOT has_ghd_descriptor_source OR
        NOT has_reduction_core OR NOT has_reduction_tail OR
        NOT has_separator_pass OR NOT has_leaf_tail_providers OR
        NOT has_descriptor_separators OR NOT has_separator_domain OR
@@ -908,6 +1260,8 @@ DECLARE
     has_ghd_mode boolean := false;
     has_ghd_general boolean := false;
     has_ghd_fallback boolean := false;
+    has_ghd_bag_count boolean := false;
+    has_ghd_bag_details boolean := false;
     has_ghd_separator_count boolean := false;
     has_tail_domain_pass boolean := false;
     has_tail_domain_rows boolean := false;
@@ -940,22 +1294,26 @@ BEGIN
         has_reduction_shape := has_reduction_shape OR
             plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
         has_ghd_mode := has_ghd_mode OR
-            plan_text LIKE '%GHD Mode: 2-core leaf-tail%';
+            plan_text LIKE '%GHD Mode: general GHD%';
         has_ghd_general := has_ghd_general OR
-            plan_text LIKE '%GHD General Decomposition: false%';
+            plan_text LIKE '%GHD General Decomposition: true%';
         has_ghd_fallback := has_ghd_fallback OR
+            plan_text LIKE '%GHD Fallback Reason: none%';
+        has_ghd_bag_count := has_ghd_bag_count OR
+            plan_text LIKE '%GHD Bag Count: 3%';
+        has_ghd_bag_details := has_ghd_bag_details OR
             plan_text LIKE
-            '%GHD Fallback Reason: general GHD decomposition is not implemented%';
+            '%GHD Bags: bag 1 cyclic-core:%bag 2 cyclic-core:%bag 3 leaf-tail:%';
         has_ghd_separator_count := has_ghd_separator_count OR
-            plan_text LIKE '%GHD Separator Count: 1%';
+            plan_text LIKE '%GHD Separator Count: 2%';
         has_tail_domain_pass := has_tail_domain_pass OR
             plan_text ~ 'GHD Tail Domain Propagation Passes: [1-9][0-9]*';
         has_tail_domain_rows := has_tail_domain_rows OR
             plan_text ~ 'GHD Tail Domain Rows Removed: [1-9][0-9]*';
         has_separator_domain := has_separator_domain OR
-            plan_text LIKE '%GHD Separator Domain Keys: 1%';
+            plan_text LIKE '%GHD Separator Domain Keys: 3%';
         has_core_pruning := has_core_pruning OR
-            plan_text LIKE '%GHD Cyclic Core Rows Removed: 189%';
+            plan_text LIKE '%GHD Cyclic Core Rows Removed: 315%';
         has_one_row := has_one_row OR
             plan_text LIKE '%Rows Emitted: 1%';
     END LOOP;
@@ -963,6 +1321,7 @@ BEGIN
     IF NOT has_generic OR NOT has_reduction_shape OR
        NOT has_ghd_mode OR NOT has_ghd_general OR
        NOT has_ghd_fallback OR
+       NOT has_ghd_bag_count OR NOT has_ghd_bag_details OR
        NOT has_ghd_separator_count OR NOT has_tail_domain_pass OR
        NOT has_tail_domain_rows OR NOT has_separator_domain OR
        NOT has_core_pruning OR NOT has_one_row THEN

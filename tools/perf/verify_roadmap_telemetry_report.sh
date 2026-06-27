@@ -358,12 +358,13 @@ emit_category "ghd separator"
 emit_metric "ghd separator" "shape" \
             "$preserve_log" 'Reduction Shape: cyclic-with-tail'
 emit_metric "ghd separator" "mode" \
-            "$preserve_log" 'GHD Mode: 2-core leaf-tail'
+            "$preserve_log" 'GHD Mode: general GHD'
 emit_metric "ghd separator" "general decomposition" \
-            "$preserve_log" 'GHD General Decomposition: false'
+            "$preserve_log" 'GHD General Decomposition: true'
 emit_metric "ghd separator" "fallback reason" \
-            "$preserve_log" \
-            'GHD Fallback Reason: general GHD decomposition is not implemented'
+            "$preserve_log" 'GHD Fallback Reason: none'
+emit_metric "ghd separator" "pair separator" \
+            "$preserve_log" 'GHD Separators: .*pair v'
 emit_metric "ghd separator" "passes" \
             "$preserve_log" 'GHD Separator Reduction Passes: [1-9][0-9]*'
 emit_metric "ghd separator" "leaf tail providers" \

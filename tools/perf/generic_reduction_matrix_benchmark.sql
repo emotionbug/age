@@ -14,7 +14,7 @@ SET enable_hashjoin = off;
 SET enable_mergejoin = off;
 
 \echo 'generic reduction matrix: acyclic leaf-pruned chain'
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
 SELECT count(*)
 FROM cypher('generic_reduction_matrix', $$
     MATCH (a:A)-[h:H]->(p:P),

@@ -200,6 +200,7 @@ struct AgeWCOJJoinScanState
     AgeWCOJPostingProvider *providers;
     TupleTableSlot **group_slots;
     AgeWCOJTupleGroup *groups;
+    AgeBindingNode *active_binding_node;
     AgeBindingFlatEnumerator flat_enumerator;
     int64 *stage_survivors;
     MemoryContext group_context;
@@ -247,6 +248,13 @@ struct AgeWCOJJoinScanState
     int64 candidate_combinations;
     int64 flat_rows_materialized;
     int64 consumer_flat_rows_avoided;
+    int64 active_binding_node_flat_rows_base;
+    int64 binding_nodes_created;
+    int64 binding_node_source_bags;
+    int64 binding_node_edge_bags;
+    int64 binding_node_materialized_flat_rows;
+    int64 binding_node_flat_rows_avoided;
+    int64 peak_binding_node_memory;
     int64 cursor_advances;
     int64 seek_calls;
     int64 posting_rows_scanned;
@@ -369,6 +377,8 @@ static void update_age_wcoj_payload_block_budget(
     AgeWCOJJoinScanState *state);
 static int64 current_age_wcoj_source_bag_bytes(
     AgeWCOJJoinScanState *state);
+static int64 current_age_wcoj_binding_node_memory(
+    AgeWCOJJoinScanState *state);
 static int64 current_age_wcoj_factor_memory(AgeWCOJJoinScanState *state);
 static void reset_age_wcoj_survivor_block(AgeWCOJJoinScanState *state);
 static bool age_wcoj_payload_run_filter(
@@ -413,6 +423,9 @@ static int age_wcoj_group_logical_count(void *callback_state,
                                         int source_index);
 static bool age_wcoj_group_edge_id(void *callback_state, int source_index,
                                    int tuple_index, graphid *edge_id);
+static AgeBindingNode *build_age_wcoj_binding_node(
+    AgeWCOJJoinScanState *state, graphid matched_key);
+static void finish_age_wcoj_binding_node(AgeWCOJJoinScanState *state);
 static TupleTableSlot *materialize_age_wcoj_group_entry(
     AgeWCOJJoinScanState *state, int child_index, int tuple_index);
 static void clear_age_wcoj_group(AgeWCOJJoinScanState *state);
@@ -1270,6 +1283,7 @@ current_age_wcoj_factor_memory(AgeWCOJJoinScanState *state)
     int source_index;
 
     bytes = current_age_wcoj_source_bag_bytes(state);
+    add_wcoj_counter(&bytes, current_age_wcoj_binding_node_memory(state));
     if (state->survivor_block_capacity > 0)
     {
         add_wcoj_byte_counter(&bytes, sizeof(graphid) *
@@ -1306,17 +1320,30 @@ current_age_wcoj_factor_memory(AgeWCOJJoinScanState *state)
     return bytes;
 }
 
+static int64
+current_age_wcoj_binding_node_memory(AgeWCOJJoinScanState *state)
+{
+    if (state->active_binding_node == NULL)
+        return 0;
+    return age_binding_node_memory_bytes(state->active_binding_node);
+}
+
 static void
 update_age_wcoj_peak_memory(AgeWCOJJoinScanState *state)
 {
     Size current_memory = 0;
     int64 source_bag_bytes;
+    int64 binding_node_memory;
     int64 factor_memory;
     int source_index;
 
     source_bag_bytes = current_age_wcoj_source_bag_bytes(state);
     if (source_bag_bytes > state->peak_source_bag_bytes)
         state->peak_source_bag_bytes = source_bag_bytes;
+
+    binding_node_memory = current_age_wcoj_binding_node_memory(state);
+    if (binding_node_memory > state->peak_binding_node_memory)
+        state->peak_binding_node_memory = binding_node_memory;
 
     factor_memory = current_age_wcoj_factor_memory(state);
     if (factor_memory > state->peak_factor_memory)
@@ -1868,6 +1895,73 @@ age_wcoj_group_edge_id(void *callback_state, int source_index,
         &state->groups[source_index], tuple_index, edge_id);
 }
 
+static AgeBindingNode *
+build_age_wcoj_binding_node(AgeWCOJJoinScanState *state, graphid matched_key)
+{
+    AgeBindingNode *node;
+    int source_index;
+
+    node = age_binding_create_node(state->group_context, matched_key, true);
+    increment_wcoj_counter(&state->binding_nodes_created);
+
+    for (source_index = 0; source_index < state->arity; source_index++)
+    {
+        AgeWCOJTupleGroup *group = &state->groups[source_index];
+
+        if (group->count <= 0)
+            elog(ERROR, "invalid AGE WCOJ binding node factor");
+
+        if (group->kind == AGE_WCOJ_TUPLE_GROUP_ADJACENCY)
+        {
+            if (group->adjacency_payload_count <= 0)
+            {
+                elog(ERROR,
+                     "invalid AGE WCOJ binding node adjacency factor");
+            }
+            age_binding_node_add_edge_bag(
+                node, -1, 0, group->adjacency_payload_count,
+                group->count, group->adjacency_payloads, 0);
+            increment_wcoj_counter(&state->binding_node_edge_bags);
+        }
+        else if (group->kind == AGE_WCOJ_TUPLE_GROUP_ROWS)
+        {
+            age_binding_node_add_source_bag(
+                node, matched_key, 0, group->count, group->tuples, 0);
+            increment_wcoj_counter(&state->binding_node_source_bags);
+        }
+        else
+        {
+            elog(ERROR, "invalid AGE WCOJ binding node tuple group kind");
+        }
+    }
+
+    (void)age_binding_node_flat_cardinality(node);
+    return node;
+}
+
+static void
+finish_age_wcoj_binding_node(AgeWCOJJoinScanState *state)
+{
+    AgeBindingNode *node = state->active_binding_node;
+    int64 materialized_rows;
+
+    if (node == NULL)
+        return;
+
+    materialized_rows = state->flat_rows_materialized -
+        state->active_binding_node_flat_rows_base;
+    if (materialized_rows < 0)
+        materialized_rows = 0;
+    age_binding_node_note_flat_enumeration(node, materialized_rows);
+    add_wcoj_counter(&state->binding_node_materialized_flat_rows,
+                     age_binding_node_materialized_flat_rows(node));
+    add_wcoj_counter(&state->binding_node_flat_rows_avoided,
+                     age_binding_node_flat_rows_avoided(node));
+    update_age_wcoj_peak_memory(state);
+    state->active_binding_node = NULL;
+    state->active_binding_node_flat_rows_base = 0;
+}
+
 static void
 clear_age_wcoj_group(AgeWCOJJoinScanState *state)
 {
@@ -1876,6 +1970,7 @@ clear_age_wcoj_group(AgeWCOJJoinScanState *state)
     if (state->group_context == NULL)
         return;
 
+    finish_age_wcoj_binding_node(state);
     for (child_index = 0; child_index < state->arity; child_index++)
     {
         if (state->group_slots[child_index] != NULL)
@@ -3531,10 +3626,19 @@ collect_age_wcoj_group(AgeWCOJJoinScanState *state, graphid matched_key)
         return false;
 
     increment_wcoj_counter(&state->groups_matched);
+    state->active_binding_node = build_age_wcoj_binding_node(
+        state, matched_key);
+    state->active_binding_node_flat_rows_base =
+        state->flat_rows_materialized;
     flat_rows = age_binding_begin_flat_enumerator(
         &state->flat_enumerator, age_wcoj_group_logical_count,
         age_wcoj_uniqueness_may_reject(state) ? age_wcoj_group_edge_id : NULL,
         state, state->uniqueness_groups);
+    if (flat_rows != age_binding_node_candidate_flat_rows(
+            state->active_binding_node))
+    {
+        elog(ERROR, "AGE WCOJ binding node cardinality mismatch");
+    }
     add_wcoj_counter(&state->candidate_flat_rows, flat_rows);
 
     update_age_wcoj_peak_memory(state);
@@ -5281,6 +5385,14 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
                                state->source_bag_keys, es);
         ExplainPropertyInteger("Factorized Binding Source Bags", NULL,
                                state->source_bag_keys, es);
+        ExplainPropertyInteger("Binding Nodes Created", NULL,
+                               state->binding_nodes_created, es);
+        ExplainPropertyInteger("Binding Node Source Bags", NULL,
+                               state->binding_node_source_bags, es);
+        ExplainPropertyInteger("Binding Node Edge Bags", NULL,
+                               state->binding_node_edge_bags, es);
+        ExplainPropertyInteger("Binding Node Memory", "bytes",
+                               state->peak_binding_node_memory, es);
         ExplainPropertyInteger("Source Bag Bytes", "bytes",
                                state->peak_source_bag_bytes, es);
         ExplainPropertyInteger("Source Bag Memory Reserve", "bytes",
@@ -5313,6 +5425,8 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
             age_binding_flat_enumerator_steps(&state->flat_enumerator), es);
         ExplainPropertyInteger("Flat Rows Avoided", NULL,
                                flat_rows_avoided, es);
+        ExplainPropertyInteger("Binding Node Flat Rows Avoided", NULL,
+                               state->binding_node_flat_rows_avoided, es);
         ExplainPropertyInteger("Consumer Flat Rows Avoided", NULL,
                                state->consumer_flat_rows_avoided, es);
         ExplainPropertyInteger("Row Goal Survivor Blocks Clamped", NULL,
