@@ -174,6 +174,7 @@ REGRESS = scan \
           age_global_graph \
           age_adjacency \
           cypher_wcoj_semantics \
+          cypher_generic_join_ghd \
           age_load \
           index \
           analyze \

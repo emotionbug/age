@@ -201,13 +201,6 @@ typedef struct AgeGenericVertexOrder
     int degree;
 } AgeGenericVertexOrder;
 
-typedef struct AgeGenericEdgeEstimate
-{
-    int var1;
-    int var2;
-    double rows;
-} AgeGenericEdgeEstimate;
-
 typedef struct AgeWCOJPathBuildState
 {
     List *paths;
@@ -250,6 +243,36 @@ typedef struct CypherWCOJTerminalEntry
     bool exact_terminal_bound;
 } CypherWCOJTerminalEntry;
 
+typedef struct AgeGenericHypergraphVariable
+{
+    Index rti;
+    int id;
+    int degree;
+    double rows;
+} AgeGenericHypergraphVariable;
+
+typedef struct AgeGenericHypergraphEdge
+{
+    CypherWCOJTerminalEntry *entry;
+    int source_variable;
+    int terminal_variable;
+    int var1;
+    int var2;
+    double rows;
+} AgeGenericHypergraphEdge;
+
+typedef struct AgeGenericHypergraph
+{
+    List *variable_rtis;
+    AgeGenericHypergraphVariable *variables;
+    AgeGenericHypergraphEdge *edges;
+    int variable_count;
+    int edge_count;
+    bool connected;
+    bool cyclic;
+    bool star;
+} AgeGenericHypergraph;
+
 static set_rel_pathlist_hook_type prev_set_rel_pathlist_hook;
 static set_join_pathlist_hook_type prev_set_join_pathlist_hook;
 static create_upper_paths_hook_type prev_create_upper_paths_hook;
@@ -272,12 +295,14 @@ static void set_join_pathlist(PlannerInfo *root, RelOptInfo *joinrel,
 static void add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
                                   JoinType jointype,
                                   JoinPathExtraData *extra);
-static bool generic_component_is_cyclic(List *entries,
-                                        List *variable_rtis);
-static bool generic_component_is_connected(List *entries,
-                                           List *variable_rtis);
-static bool generic_component_is_star(List *entries,
-                                      List *variable_rtis);
+static AgeGenericHypergraph *build_generic_hypergraph(PlannerInfo *root,
+                                                      List *entries);
+static bool generic_component_is_cyclic(
+    const AgeGenericHypergraph *hypergraph);
+static bool generic_component_is_connected(
+    const AgeGenericHypergraph *hypergraph);
+static bool generic_component_is_star(
+    const AgeGenericHypergraph *hypergraph);
 static List *generic_variable_order(PlannerInfo *root, List *entries);
 static List *collect_generic_restrictinfos(PlannerInfo *root,
                                            Relids component_relids,
@@ -288,11 +313,10 @@ static Path *prepare_generic_provider_path(
 static List *make_generic_vertex_path_desc(Index rti, int variable,
                                            Expr *key_expr);
 static List *make_generic_edge_path_desc(
-    CypherWCOJTerminalEntry *entry, List *variable_rtis);
+    const AgeGenericHypergraphEdge *edge);
 static double estimate_generic_pair_pressure(
-    const double *vertex_rows, int variable_count,
-    const AgeGenericEdgeEstimate *edges, int edge_count,
-    double generic_work, double *max_pair_rows);
+    const AgeGenericHypergraph *hypergraph, double generic_work,
+    double *max_pair_rows);
 static Path *cheapest_generic_competing_path(RelOptInfo *joinrel);
 static Plan *plan_age_generic_join_path(
     PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tlist,
@@ -387,7 +411,11 @@ static List *build_wcoj_custom_scan_tlist(List *custom_plans,
                                           List **provider_local_quals);
 static List *build_wcoj_count_custom_scan_tlist(PathTarget *target,
                                                 List *provider_tlist);
+static List *build_wcoj_group_count_custom_scan_tlist(PathTarget *target,
+                                                      List *provider_tlist);
 static Expr *wcoj_count_scan_expr(PathTarget *target);
+static Aggref *wcoj_count_expr_aggref(Node *expr, Oid *output_type);
+static int wcoj_consumer_first_scan_resno(int consumer_kind);
 static List *build_wcoj_plan_tlist(PathTarget *target);
 static List *build_edge_uniqueness_groups(List *restrictinfos,
                                           List *provider_descs,
@@ -403,6 +431,10 @@ static void add_wcoj_limit_row_goal_paths(PlannerInfo *root,
                                           RelOptInfo *input_rel,
                                           RelOptInfo *output_rel,
                                           FinalPathExtraData *extra);
+static void add_wcoj_fractional_row_goal_paths(PlannerInfo *root,
+                                               RelOptInfo *input_rel,
+                                               RelOptInfo *output_rel,
+                                               FinalPathExtraData *extra);
 static CustomPath *make_adjacency_count_path(PlannerInfo *root,
                                               RelOptInfo *output_rel,
                                               AggPath *agg_path);
@@ -415,10 +447,31 @@ static Path *make_wcoj_limit_row_goal_path(PlannerInfo *root,
 static Path *make_wcoj_final_limit_row_goal_path(
     PlannerInfo *root, RelOptInfo *output_rel, Path *path,
     FinalPathExtraData *extra);
+static Path *make_wcoj_fractional_row_goal_path(PlannerInfo *root,
+                                                RelOptInfo *output_rel,
+                                                Path *path,
+                                                int64 row_goal);
 static CustomPath *copy_wcoj_path_with_row_goal(CustomPath *wcoj_path,
                                                 int64 row_goal);
+static int64 wcoj_tuple_fraction_row_goal(PlannerInfo *root,
+                                          FinalPathExtraData *extra);
 static bool wcoj_limit_const_int64(Node *node, int64 *value);
 static bool wcoj_limit_offset_is_zero(Node *node);
+static int wcoj_count_consumer_kind(PathTarget *target,
+                                    CustomPath *wcoj_path,
+                                    Oid *output_type);
+static Aggref *wcoj_count_target_aggref(PathTarget *target,
+                                        Oid *output_type);
+static bool is_count_aggref(Aggref *aggref);
+static bool is_count_distinct_key_aggref(Aggref *aggref,
+                                         CustomPath *wcoj_path);
+static bool is_group_count_key_target(PathTarget *target,
+                                      AggPath *agg_path,
+                                      CustomPath *wcoj_path,
+                                      Oid *output_type);
+static bool wcoj_distinct_arg_matches_key(CustomPath *wcoj_path,
+                                          Node *arg);
+static Node *wcoj_unwrap_distinct_key_arg(Node *node);
 static bool extract_adjacency_count_input(AggPath *agg_path,
                                           Path **source_path,
                                           Const **index_oid,
@@ -2856,27 +2909,92 @@ generic_union_find_root(int *parents, int index)
     return index;
 }
 
-static bool
-generic_component_is_cyclic(List *entries, List *variable_rtis)
+static AgeGenericHypergraph *
+build_generic_hypergraph(PlannerInfo *root, List *entries)
 {
-    int variable_count = list_length(variable_rtis);
-    int *parents;
+    AgeGenericHypergraph *graph;
     ListCell *lc;
+    int edge_index = 0;
     int index;
 
-    if (list_length(entries) < 3 || variable_count < 3)
-        return false;
-    parents = palloc(sizeof(int) * variable_count);
-    for (index = 0; index < variable_count; index++)
-        parents[index] = index;
+    if (root == NULL || entries == NIL)
+        return NULL;
+
+    graph = palloc0(sizeof(*graph));
+    graph->variable_rtis = generic_variable_order(root, entries);
+    graph->variable_count = list_length(graph->variable_rtis);
+    graph->edge_count = list_length(entries);
+    if (graph->variable_rtis == NIL || graph->variable_count < 2 ||
+        graph->edge_count <= 0)
+    {
+        return NULL;
+    }
+
+    graph->variables = palloc0(sizeof(AgeGenericHypergraphVariable) *
+                               graph->variable_count);
+    index = 0;
+    foreach(lc, graph->variable_rtis)
+    {
+        Index rti = (Index)intVal(lfirst(lc));
+        RelOptInfo *rel = root->simple_rel_array[rti];
+
+        graph->variables[index].rti = rti;
+        graph->variables[index].id = index;
+        graph->variables[index].rows =
+            rel != NULL ? Max(rel->rows, 1.0) : 1.0;
+        index++;
+    }
+
+    graph->edges = palloc0(sizeof(AgeGenericHypergraphEdge) *
+                           graph->edge_count);
 
     foreach(lc, entries)
     {
         CypherWCOJTerminalEntry *entry = lfirst(lc);
-        int left = generic_variable_position(variable_rtis,
+        int left = generic_variable_position(graph->variable_rtis,
                                              entry->source_rti);
-        int right = generic_variable_position(variable_rtis,
+        int right = generic_variable_position(graph->variable_rtis,
                                               entry->terminal_rti);
+
+        if (left < 0 || right < 0 || left == right)
+            return NULL;
+
+        graph->edges[edge_index].entry = entry;
+        graph->edges[edge_index].source_variable = left;
+        graph->edges[edge_index].terminal_variable = right;
+        graph->edges[edge_index].var1 = Min(left, right);
+        graph->edges[edge_index].var2 = Max(left, right);
+        graph->variables[left].degree++;
+        graph->variables[right].degree++;
+        edge_index++;
+    }
+
+    graph->connected = generic_component_is_connected(graph);
+    graph->cyclic = generic_component_is_cyclic(graph);
+    graph->star = generic_component_is_star(graph);
+    return graph;
+}
+
+static bool
+generic_component_is_cyclic(const AgeGenericHypergraph *hypergraph)
+{
+    int *parents;
+    int index;
+
+    if (hypergraph == NULL || hypergraph->edge_count < 3 ||
+        hypergraph->variable_count < 3)
+    {
+        return false;
+    }
+    parents = palloc(sizeof(int) * hypergraph->variable_count);
+    for (index = 0; index < hypergraph->variable_count; index++)
+        parents[index] = index;
+
+    for (index = 0; index < hypergraph->edge_count; index++)
+    {
+        const AgeGenericHypergraphEdge *edge = &hypergraph->edges[index];
+        int left = edge->source_variable;
+        int right = edge->terminal_variable;
         int left_root;
         int right_root;
 
@@ -2892,27 +3010,27 @@ generic_component_is_cyclic(List *entries, List *variable_rtis)
 }
 
 static bool
-generic_component_is_connected(List *entries, List *variable_rtis)
+generic_component_is_connected(const AgeGenericHypergraph *hypergraph)
 {
-    int variable_count = list_length(variable_rtis);
     int *parents;
-    ListCell *lc;
     int reference_root;
     int index;
 
-    if (entries == NIL || variable_count < 2)
+    if (hypergraph == NULL || hypergraph->edge_count <= 0 ||
+        hypergraph->variable_count < 2)
+    {
         return false;
-    parents = palloc(sizeof(int) * variable_count);
-    for (index = 0; index < variable_count; index++)
+    }
+
+    parents = palloc(sizeof(int) * hypergraph->variable_count);
+    for (index = 0; index < hypergraph->variable_count; index++)
         parents[index] = index;
 
-    foreach(lc, entries)
+    for (index = 0; index < hypergraph->edge_count; index++)
     {
-        CypherWCOJTerminalEntry *entry = lfirst(lc);
-        int left = generic_variable_position(variable_rtis,
-                                             entry->source_rti);
-        int right = generic_variable_position(variable_rtis,
-                                              entry->terminal_rti);
+        const AgeGenericHypergraphEdge *edge = &hypergraph->edges[index];
+        int left = edge->source_variable;
+        int right = edge->terminal_variable;
         int left_root;
         int right_root;
 
@@ -2925,7 +3043,7 @@ generic_component_is_connected(List *entries, List *variable_rtis)
     }
 
     reference_root = generic_union_find_root(parents, 0);
-    for (index = 1; index < variable_count; index++)
+    for (index = 1; index < hypergraph->variable_count; index++)
     {
         if (generic_union_find_root(parents, index) != reference_root)
             return false;
@@ -2934,33 +3052,29 @@ generic_component_is_connected(List *entries, List *variable_rtis)
 }
 
 static bool
-generic_component_is_star(List *entries, List *variable_rtis)
+generic_component_is_star(const AgeGenericHypergraph *hypergraph)
 {
-    int variable_count = list_length(variable_rtis);
-    int edge_count = list_length(entries);
-    int *degrees;
-    ListCell *lc;
     int index;
 
-    if (edge_count < 2 || variable_count < 3)
+    if (hypergraph == NULL || hypergraph->edge_count < 2 ||
+        hypergraph->variable_count < 3)
+    {
         return false;
-    degrees = palloc0(sizeof(int) * variable_count);
-    foreach(lc, entries)
-    {
-        CypherWCOJTerminalEntry *entry = lfirst(lc);
-        int left = generic_variable_position(variable_rtis,
-                                             entry->source_rti);
-        int right = generic_variable_position(variable_rtis,
-                                              entry->terminal_rti);
-
-        if (left < 0 || right < 0 || left == right)
-            return false;
-        degrees[left]++;
-        degrees[right]++;
     }
-    for (index = 0; index < variable_count; index++)
+
+    for (index = 0; index < hypergraph->edge_count; index++)
     {
-        if (degrees[index] == edge_count)
+        const AgeGenericHypergraphEdge *edge = &hypergraph->edges[index];
+
+        if (edge->source_variable < 0 || edge->terminal_variable < 0 ||
+            edge->source_variable == edge->terminal_variable)
+        {
+            return false;
+        }
+    }
+    for (index = 0; index < hypergraph->variable_count; index++)
+    {
+        if (hypergraph->variables[index].degree == hypergraph->edge_count)
             return true;
     }
     return false;
@@ -3047,9 +3161,9 @@ make_generic_vertex_path_desc(Index rti, int variable, Expr *key_expr)
 }
 
 static List *
-make_generic_edge_path_desc(CypherWCOJTerminalEntry *entry,
-                            List *variable_rtis)
+make_generic_edge_path_desc(const AgeGenericHypergraphEdge *edge)
 {
+    CypherWCOJTerminalEntry *entry;
     AttrNumber source_attno;
     Expr *source_expr;
     Expr *terminal_expr;
@@ -3061,6 +3175,9 @@ make_generic_edge_path_desc(CypherWCOJTerminalEntry *entry,
     int var2;
     List *desc;
 
+    if (edge == NULL || edge->entry == NULL)
+        return NIL;
+    entry = edge->entry;
     source_attno = entry->terminal_attno ==
         Anum_ag_label_edge_table_end_id ?
         Anum_ag_label_edge_table_start_id :
@@ -3069,10 +3186,8 @@ make_generic_edge_path_desc(CypherWCOJTerminalEntry *entry,
                                   -1, InvalidOid, 0);
     terminal_expr = (Expr *)makeVar(entry->edge_rti, entry->terminal_attno,
                                     GRAPHIDOID, -1, InvalidOid, 0);
-    source_variable = generic_variable_position(variable_rtis,
-                                                entry->source_rti);
-    terminal_variable = generic_variable_position(variable_rtis,
-                                                  entry->terminal_rti);
+    source_variable = edge->source_variable;
+    terminal_variable = edge->terminal_variable;
     if (source_variable < 0 || terminal_variable < 0 ||
         source_variable == terminal_variable)
     {
@@ -3115,11 +3230,9 @@ make_generic_edge_path_desc(CypherWCOJTerminalEntry *entry,
  * sequence of parameterized graph expansions on dense multiway patterns.
  */
 static double
-estimate_generic_pair_pressure(const double *vertex_rows,
-                                int variable_count,
-                                const AgeGenericEdgeEstimate *edges,
-                                int edge_count, double generic_work,
-                                double *max_pair_rows)
+estimate_generic_pair_pressure(const AgeGenericHypergraph *hypergraph,
+                               double generic_work,
+                               double *max_pair_rows)
 {
     double maximum = 0;
     int left;
@@ -3127,34 +3240,39 @@ estimate_generic_pair_pressure(const double *vertex_rows,
 
     if (max_pair_rows != NULL)
         *max_pair_rows = 0;
-    if (vertex_rows == NULL || edges == NULL || variable_count <= 0 ||
-        edge_count < 2)
+    if (hypergraph == NULL || hypergraph->variables == NULL ||
+        hypergraph->edges == NULL || hypergraph->variable_count <= 0 ||
+        hypergraph->edge_count < 2)
         return 0;
 
-    for (left = 0; left < edge_count; left++)
+    for (left = 0; left < hypergraph->edge_count; left++)
     {
-        for (right = left + 1; right < edge_count; right++)
+        for (right = left + 1; right < hypergraph->edge_count; right++)
         {
+            const AgeGenericHypergraphEdge *left_edge =
+                &hypergraph->edges[left];
+            const AgeGenericHypergraphEdge *right_edge =
+                &hypergraph->edges[right];
             int shared = -1;
             double pair_rows;
 
-            if (edges[left].var1 == edges[right].var1 ||
-                edges[left].var1 == edges[right].var2)
-                shared = edges[left].var1;
-            if (edges[left].var2 == edges[right].var1 ||
-                edges[left].var2 == edges[right].var2)
+            if (left_edge->var1 == right_edge->var1 ||
+                left_edge->var1 == right_edge->var2)
+                shared = left_edge->var1;
+            if (left_edge->var2 == right_edge->var1 ||
+                left_edge->var2 == right_edge->var2)
             {
                 /* Parallel relations share both endpoints, not one level. */
-                if (shared >= 0 && shared != edges[left].var2)
+                if (shared >= 0 && shared != left_edge->var2)
                     continue;
-                shared = edges[left].var2;
+                shared = left_edge->var2;
             }
-            if (shared < 0 || shared >= variable_count)
+            if (shared < 0 || shared >= hypergraph->variable_count)
                 continue;
 
-            pair_rows = Max(edges[left].rows, 1.0) *
-                Max(edges[right].rows, 1.0) /
-                Max(vertex_rows[shared], 1.0);
+            pair_rows = Max(left_edge->rows, 1.0) *
+                Max(right_edge->rows, 1.0) /
+                Max(hypergraph->variables[shared].rows, 1.0);
             maximum = Max(maximum, pair_rows);
         }
     }
@@ -3259,8 +3377,7 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     CustomPath *custom_path;
     CustomPath *existing_path;
     Path *competing_path;
-    AgeGenericEdgeEstimate *edge_estimates;
-    double *vertex_rows;
+    AgeGenericHypergraph *hypergraph;
     Cost startup_cost = 0;
     Cost total_cost = 0;
     double input_rows = 0;
@@ -3270,8 +3387,7 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     bool is_star;
     bool risk_adjusted;
     double risk_cost_factor = AGE_GENERIC_COMPETING_COST_FACTOR;
-    int edge_count = 0;
-    int variable_count;
+    int edge_index;
     int disabled_nodes = 0;
 
     if (!age_enable_wcoj || root == NULL || joinrel == NULL ||
@@ -3309,22 +3425,18 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
         !bms_equal(covered_relids, joinrel->relids))
         return;
 
-    variable_rtis = generic_variable_order(root, entries);
-    if (variable_rtis == NIL ||
-        !generic_component_is_connected(entries, variable_rtis))
+    hypergraph = build_generic_hypergraph(root, entries);
+    if (hypergraph == NULL || !hypergraph->connected)
         return;
-    is_cyclic = generic_component_is_cyclic(entries, variable_rtis);
-    is_star = generic_component_is_star(entries, variable_rtis);
+    variable_rtis = hypergraph->variable_rtis;
+    is_cyclic = hypergraph->cyclic;
+    is_star = hypergraph->star;
 
     /* The direct WCOJ path has a lower-overhead batched star executor. */
     if (!is_cyclic && is_star)
         return;
     restrictinfos = collect_generic_restrictinfos(
         root, covered_relids, extra->restrictlist);
-    variable_count = list_length(variable_rtis);
-    vertex_rows = palloc0(sizeof(double) * variable_count);
-    edge_estimates = palloc0(sizeof(AgeGenericEdgeEstimate) *
-                             list_length(entries));
 
     foreach(lc, variable_rtis)
     {
@@ -3348,17 +3460,18 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
             copyObject(provider_path->pathtarget->exprs);
         provider_paths = lappend(provider_paths, provider_path);
         provider_descs = lappend(provider_descs, desc);
-        vertex_rows[variable] = Max(provider_path->rows, 1.0);
+        hypergraph->variables[variable].rows = Max(provider_path->rows, 1.0);
         startup_cost += provider_path->startup_cost;
         total_cost += provider_path->total_cost;
         input_rows += provider_path->rows;
         disabled_nodes += provider_path->disabled_nodes;
     }
 
-    foreach(lc, entries)
+    for (edge_index = 0; edge_index < hypergraph->edge_count; edge_index++)
     {
-        CypherWCOJTerminalEntry *entry = lfirst(lc);
-        List *desc = make_generic_edge_path_desc(entry, variable_rtis);
+        AgeGenericHypergraphEdge *edge = &hypergraph->edges[edge_index];
+        CypherWCOJTerminalEntry *entry = edge->entry;
+        List *desc = make_generic_edge_path_desc(edge);
         Expr *key1_expr;
         Expr *key2_expr;
         Expr *edge_id_expr;
@@ -3385,12 +3498,7 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
             copyObject(provider_path->pathtarget->exprs);
         provider_paths = lappend(provider_paths, provider_path);
         provider_descs = lappend(provider_descs, desc);
-        edge_estimates[edge_count].var1 = intVal(list_nth(
-            desc, AGE_GENERIC_PATH_PROVIDER_VAR1));
-        edge_estimates[edge_count].var2 = intVal(list_nth(
-            desc, AGE_GENERIC_PATH_PROVIDER_VAR2));
-        edge_estimates[edge_count].rows = Max(provider_path->rows, 1.0);
-        edge_count++;
+        edge->rows = Max(provider_path->rows, 1.0);
         startup_cost += provider_path->startup_cost;
         total_cost += provider_path->total_cost;
         input_rows += provider_path->rows;
@@ -3398,9 +3506,8 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     }
 
     competing_path = cheapest_generic_competing_path(joinrel);
-    pair_pressure = estimate_generic_pair_pressure(
-        vertex_rows, variable_count, edge_estimates, edge_count,
-        input_rows, &max_pair_rows);
+    pair_pressure = estimate_generic_pair_pressure(hypergraph, input_rows,
+                                                   &max_pair_rows);
     risk_adjusted = generic_join_needs_risk_adjustment(
         competing_path, max_pair_rows, pair_pressure);
 
@@ -3763,6 +3870,8 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
                                                  (FinalPathExtraData *)extra);
     add_wcoj_limit_row_goal_paths(root, input_rel, output_rel,
                                   (FinalPathExtraData *)extra);
+    add_wcoj_fractional_row_goal_paths(root, input_rel, output_rel,
+                                       (FinalPathExtraData *)extra);
 
     if (cypher_detect_simple_property_projection(root, input_rel, output_rel,
                                                  &property_slots,
@@ -3898,6 +4007,51 @@ add_wcoj_limit_row_goal_paths(PlannerInfo *root, RelOptInfo *input_rel,
         add_path(output_rel, lfirst(lc));
 }
 
+static void
+add_wcoj_fractional_row_goal_paths(PlannerInfo *root, RelOptInfo *input_rel,
+                                   RelOptInfo *output_rel,
+                                   FinalPathExtraData *extra)
+{
+    List *new_paths = NIL;
+    ListCell *lc;
+    int64 row_goal;
+
+    if (root == NULL || output_rel == NULL || output_rel->pathlist == NIL)
+        return;
+
+    row_goal = wcoj_tuple_fraction_row_goal(root, extra);
+    if (row_goal <= 0)
+        return;
+
+    foreach(lc, output_rel->pathlist)
+    {
+        Path *path = lfirst(lc);
+        Path *row_goal_path;
+
+        row_goal_path = make_wcoj_fractional_row_goal_path(
+            root, output_rel, path, row_goal);
+        if (row_goal_path != NULL)
+            new_paths = lappend(new_paths, row_goal_path);
+    }
+
+    if (input_rel != NULL && input_rel != output_rel)
+    {
+        foreach(lc, input_rel->pathlist)
+        {
+            Path *path = lfirst(lc);
+            Path *row_goal_path;
+
+            row_goal_path = make_wcoj_fractional_row_goal_path(
+                root, output_rel, path, row_goal);
+            if (row_goal_path != NULL)
+                new_paths = lappend(new_paths, row_goal_path);
+        }
+    }
+
+    foreach(lc, new_paths)
+        add_path(output_rel, lfirst(lc));
+}
+
 static Path *
 make_wcoj_final_limit_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
                                     Path *path, FinalPathExtraData *extra)
@@ -3952,6 +4106,54 @@ make_wcoj_final_limit_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
 }
 
 static Path *
+make_wcoj_fractional_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
+                                   Path *path, int64 row_goal)
+{
+    CustomPath *wcoj_path;
+    CustomPath *row_goal_path;
+    PathTarget *projection_target = NULL;
+
+    if (root == NULL || output_rel == NULL || path == NULL || row_goal <= 0)
+        return NULL;
+
+    while (IsA(path, ProjectionPath))
+    {
+        ProjectionPath *projection_path = (ProjectionPath *)path;
+
+        projection_target = projection_path->path.pathtarget;
+        path = projection_path->subpath;
+    }
+    if (!IsA(path, CustomPath))
+        return NULL;
+
+    wcoj_path = (CustomPath *)path;
+    if (wcoj_path->methods != &age_wcoj_join_path_methods)
+        return NULL;
+
+    row_goal_path = copy_wcoj_path_with_row_goal(wcoj_path, row_goal);
+    if (row_goal_path == NULL)
+        return NULL;
+    row_goal_path->path.parent = output_rel;
+    if (projection_target != NULL)
+        row_goal_path->path.pathtarget = projection_target;
+
+    row_goal_path->path.total_cost = Max(
+        row_goal_path->path.startup_cost,
+        row_goal_path->path.total_cost - cpu_tuple_cost);
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE WCOJ fractional row-goal path added: "
+                             "row_goal=" INT64_FORMAT
+                             " tuple_fraction=%.6f original_cost=%.2f "
+                             "new_cost=%.2f",
+                             row_goal, root->tuple_fraction,
+                             path->total_cost,
+                             row_goal_path->path.total_cost)));
+
+    return (Path *)row_goal_path;
+}
+
+static Path *
 make_wcoj_limit_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
                               LimitPath *limit_path)
 {
@@ -4000,6 +4202,33 @@ make_wcoj_limit_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
                              row_goal_path->path.total_cost)));
 
     return (Path *)row_goal_path;
+}
+
+static int64
+wcoj_tuple_fraction_row_goal(PlannerInfo *root, FinalPathExtraData *extra)
+{
+    int64 row_goal;
+
+    if (root == NULL || root->parse == NULL)
+        return 0;
+    if (extra != NULL && extra->limit_needed)
+        return 0;
+    if (root->parse->limitCount != NULL ||
+        root->parse->limitOffset != NULL ||
+        root->parse->sortClause != NIL)
+    {
+        return 0;
+    }
+    if (root->tuple_fraction < 1.0 ||
+        root->tuple_fraction > (double)PG_INT64_MAX)
+    {
+        return 0;
+    }
+
+    row_goal = (int64)root->tuple_fraction;
+    if ((double)row_goal < root->tuple_fraction)
+        row_goal++;
+    return row_goal;
 }
 
 static CustomPath *
@@ -4123,34 +4352,360 @@ wcoj_limit_offset_is_zero(Node *node)
     return value == 0;
 }
 
+static int
+wcoj_count_consumer_kind(PathTarget *target, CustomPath *wcoj_path,
+                         Oid *output_type)
+{
+    Aggref *aggref = wcoj_count_target_aggref(target, output_type);
+
+    if (aggref == NULL || output_type == NULL ||
+        (*output_type != INT8OID && *output_type != AGTYPEOID))
+    {
+        return -1;
+    }
+    if (is_plain_count_star_aggref(aggref))
+        return AGE_WCOJ_CONSUMER_COUNT;
+    if (is_count_distinct_key_aggref(aggref, wcoj_path))
+        return AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY;
+    return -1;
+}
+
+static bool
+is_group_count_key_target(PathTarget *target, AggPath *agg_path,
+                          CustomPath *wcoj_path, Oid *output_type)
+{
+    SortGroupClause *group_clause;
+    Node *group_expr;
+    Node *count_expr;
+    Aggref *aggref;
+    Oid count_type = InvalidOid;
+
+    if (output_type != NULL)
+        *output_type = InvalidOid;
+    if (target == NULL || agg_path == NULL || wcoj_path == NULL ||
+        target->sortgrouprefs == NULL ||
+        list_length(target->exprs) != 2 ||
+        list_length(agg_path->groupClause) != 1)
+    {
+        return false;
+    }
+
+    group_clause = linitial_node(SortGroupClause, agg_path->groupClause);
+    if (target->sortgrouprefs[0] != group_clause->tleSortGroupRef ||
+        target->sortgrouprefs[1] != 0)
+    {
+        return false;
+    }
+
+    group_expr = linitial(target->exprs);
+    count_expr = lsecond(target->exprs);
+    if (!wcoj_distinct_arg_matches_key(wcoj_path, group_expr))
+        return false;
+
+    aggref = wcoj_count_expr_aggref(count_expr, &count_type);
+    if (!is_plain_count_star_aggref(aggref) ||
+        (count_type != INT8OID && count_type != AGTYPEOID))
+    {
+        return false;
+    }
+
+    if (output_type != NULL)
+        *output_type = count_type;
+    return true;
+}
+
+static Aggref *
+wcoj_count_target_aggref(PathTarget *target, Oid *output_type)
+{
+    Node *expr;
+
+    if (output_type != NULL)
+        *output_type = InvalidOid;
+    if (target == NULL || list_length(target->exprs) != 1)
+        return NULL;
+
+    expr = strip_implicit_coercions(linitial(target->exprs));
+    if (expr != NULL && IsA(expr, Aggref))
+    {
+        if (output_type != NULL)
+            *output_type = exprType(expr);
+        return castNode(Aggref, expr);
+    }
+
+    if (expr != NULL && IsA(expr, FuncExpr))
+    {
+        FuncExpr *func = castNode(FuncExpr, expr);
+        char *func_name = get_func_name(func->funcid);
+        Node *arg;
+        bool is_agtype_count_wrapper;
+
+        is_agtype_count_wrapper =
+            func_name != NULL &&
+            strcmp(func_name, "int8_to_agtype") == 0 &&
+            get_func_namespace(func->funcid) == ag_catalog_namespace_id() &&
+            func->funcresulttype == AGTYPEOID &&
+            list_length(func->args) == 1;
+        if (func_name != NULL)
+            pfree(func_name);
+        if (!is_agtype_count_wrapper)
+            return NULL;
+
+        arg = strip_implicit_coercions(linitial(func->args));
+        if (arg != NULL && IsA(arg, Aggref))
+        {
+            if (output_type != NULL)
+                *output_type = AGTYPEOID;
+            return castNode(Aggref, arg);
+        }
+    }
+
+    return NULL;
+}
+
+static Aggref *
+wcoj_count_expr_aggref(Node *expr, Oid *output_type)
+{
+    expr = strip_implicit_coercions(expr);
+    if (output_type != NULL)
+        *output_type = InvalidOid;
+    if (expr != NULL && IsA(expr, Aggref))
+    {
+        if (output_type != NULL)
+            *output_type = exprType(expr);
+        return castNode(Aggref, expr);
+    }
+
+    if (expr != NULL && IsA(expr, FuncExpr))
+    {
+        FuncExpr *func = castNode(FuncExpr, expr);
+        char *func_name = get_func_name(func->funcid);
+        Node *arg;
+        bool is_agtype_count_wrapper;
+
+        is_agtype_count_wrapper =
+            func_name != NULL &&
+            strcmp(func_name, "int8_to_agtype") == 0 &&
+            get_func_namespace(func->funcid) == ag_catalog_namespace_id() &&
+            func->funcresulttype == AGTYPEOID &&
+            list_length(func->args) == 1;
+        if (func_name != NULL)
+            pfree(func_name);
+        if (!is_agtype_count_wrapper)
+            return NULL;
+
+        arg = strip_implicit_coercions(linitial(func->args));
+        if (arg != NULL && IsA(arg, Aggref))
+        {
+            if (output_type != NULL)
+                *output_type = AGTYPEOID;
+            return castNode(Aggref, arg);
+        }
+    }
+
+    return NULL;
+}
+
+static bool
+is_count_aggref(Aggref *aggref)
+{
+    char *func_name;
+    bool result;
+
+    if (aggref == NULL || aggref->aggdirectargs != NIL ||
+        aggref->aggorder != NIL || aggref->aggfilter != NULL ||
+        aggref->aggkind != AGGKIND_NORMAL || aggref->agglevelsup != 0 ||
+        aggref->aggtype != INT8OID ||
+        get_func_namespace(aggref->aggfnoid) != PG_CATALOG_NAMESPACE)
+    {
+        return false;
+    }
+
+    func_name = get_func_name(aggref->aggfnoid);
+    result = func_name != NULL && strcmp(func_name, "count") == 0;
+    if (func_name != NULL)
+        pfree(func_name);
+    return result;
+}
+
+static bool
+is_count_distinct_key_aggref(Aggref *aggref, CustomPath *wcoj_path)
+{
+    TargetEntry *arg_tle;
+
+    if (!is_count_aggref(aggref) || aggref->aggstar ||
+        list_length(aggref->args) != 1 ||
+        aggref->aggdistinct == NIL ||
+        list_length(aggref->aggdistinct) != 1)
+    {
+        return false;
+    }
+
+    arg_tle = linitial_node(TargetEntry, aggref->args);
+    if (arg_tle == NULL || arg_tle->expr == NULL)
+        return false;
+
+    return wcoj_distinct_arg_matches_key(wcoj_path, (Node *)arg_tle->expr);
+}
+
+static bool
+wcoj_distinct_arg_matches_key(CustomPath *wcoj_path, Node *arg)
+{
+    List *key_exprs;
+    ListCell *lc;
+    Node *key_arg;
+
+    if (wcoj_path == NULL || list_length(wcoj_path->custom_private) !=
+        AGE_WCOJ_PATH_PRIVATE_COUNT)
+    {
+        return false;
+    }
+
+    key_arg = wcoj_unwrap_distinct_key_arg(arg);
+    if (key_arg == NULL)
+        return false;
+
+    key_exprs = list_nth(wcoj_path->custom_private,
+                         AGE_WCOJ_PATH_PRIVATE_KEY_EXPRS);
+    foreach(lc, key_exprs)
+    {
+        Node *key_expr = strip_implicit_coercions(lfirst(lc));
+
+        if (key_expr != NULL && exprType(key_expr) == GRAPHIDOID &&
+            equal(key_arg, key_expr))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static Node *
+wcoj_unwrap_distinct_key_arg(Node *node)
+{
+    node = strip_implicit_coercions(node);
+    if (node == NULL)
+        return NULL;
+    if (exprType(node) == GRAPHIDOID)
+        return node;
+
+    if (IsA(node, FuncExpr))
+    {
+        FuncExpr *func = castNode(FuncExpr, node);
+        char *func_name = get_func_name(func->funcid);
+        bool unwrap_graphid_cast;
+
+        unwrap_graphid_cast =
+            func_name != NULL &&
+            (strcmp(func_name, "graphid_to_agtype") == 0 ||
+             strcmp(func_name, "int8_to_agtype") == 0) &&
+            get_func_namespace(func->funcid) == ag_catalog_namespace_id() &&
+            func->funcresulttype == AGTYPEOID &&
+            list_length(func->args) == 1;
+        if (func_name != NULL)
+            pfree(func_name);
+        if (unwrap_graphid_cast)
+        {
+            Node *arg = strip_implicit_coercions(linitial(func->args));
+
+            if (arg != NULL && exprType(arg) == GRAPHIDOID)
+                return arg;
+        }
+    }
+    else if (IsA(node, CoerceViaIO))
+    {
+        CoerceViaIO *coerce = castNode(CoerceViaIO, node);
+        Node *arg = strip_implicit_coercions((Node *)coerce->arg);
+
+        if (coerce->resulttype == AGTYPEOID && arg != NULL &&
+            exprType(arg) == GRAPHIDOID)
+        {
+            return arg;
+        }
+    }
+
+    return NULL;
+}
+
 static CustomPath *
 make_wcoj_count_path(PlannerInfo *root, RelOptInfo *output_rel,
                      AggPath *agg_path)
 {
+    Path *wcoj_input_path;
     CustomPath *wcoj_path;
     CustomPath *count_path;
     Oid output_type;
+    int consumer_kind;
+    bool skipped_input_sort = false;
     List *key_exprs;
     List *estimated_postings;
     List *provider_descs;
 
     if (root == NULL || output_rel == NULL || agg_path == NULL ||
-        agg_path->aggstrategy != AGG_PLAIN ||
         agg_path->aggsplit != AGGSPLIT_SIMPLE ||
-        agg_path->groupClause != NIL || agg_path->qual != NIL ||
-        agg_path->subpath == NULL || !IsA(agg_path->subpath, CustomPath))
+        agg_path->qual != NIL || agg_path->subpath == NULL)
+    {
+        return NULL;
+    }
+    if (agg_path->groupClause == NIL)
+    {
+        if (agg_path->aggstrategy != AGG_PLAIN)
+            return NULL;
+    }
+    else if (list_length(agg_path->groupClause) != 1)
     {
         return NULL;
     }
 
-    output_type = adjacency_count_output_type(agg_path->path.pathtarget);
-    if (output_type != INT8OID && output_type != AGTYPEOID)
+    wcoj_input_path = agg_path->subpath;
+    for (;;)
+    {
+        if (IsA(wcoj_input_path, SortPath))
+        {
+            SortPath *sort_path = (SortPath *)wcoj_input_path;
+
+            skipped_input_sort = true;
+            wcoj_input_path = sort_path->subpath;
+            continue;
+        }
+        if (IsA(wcoj_input_path, ProjectionPath))
+        {
+            ProjectionPath *projection_path = (ProjectionPath *)wcoj_input_path;
+
+            wcoj_input_path = projection_path->subpath;
+            continue;
+        }
+        break;
+    }
+    if (wcoj_input_path == NULL || !IsA(wcoj_input_path, CustomPath))
         return NULL;
 
-    wcoj_path = (CustomPath *)agg_path->subpath;
+    wcoj_path = (CustomPath *)wcoj_input_path;
     if (wcoj_path->methods != &age_wcoj_join_path_methods ||
         !wcoj_count_path_is_direct(wcoj_path) ||
         !wcoj_count_restrictinfos_supported(wcoj_path))
+    {
+        return NULL;
+    }
+
+    if (agg_path->groupClause != NIL)
+    {
+        if (!is_group_count_key_target(agg_path->path.pathtarget,
+                                       agg_path, wcoj_path, &output_type))
+        {
+            return NULL;
+        }
+        consumer_kind = AGE_WCOJ_CONSUMER_GROUP_COUNT;
+    }
+    else
+    {
+        consumer_kind = wcoj_count_consumer_kind(
+            agg_path->path.pathtarget, wcoj_path, &output_type);
+        if (consumer_kind < 0)
+            return NULL;
+    }
+    if (skipped_input_sort &&
+        consumer_kind != AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY &&
+        consumer_kind != AGE_WCOJ_CONSUMER_GROUP_COUNT)
     {
         return NULL;
     }
@@ -4173,7 +4728,9 @@ make_wcoj_count_path(PlannerInfo *root, RelOptInfo *output_rel,
     count_path->path.parallel_safe = false;
     count_path->path.parallel_workers = 0;
     count_path->path.pathkeys = NIL;
-    count_path->path.rows = 1.0;
+    count_path->path.rows =
+        consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT ?
+        Max(1.0, agg_path->path.rows) : 1.0;
     count_path->path.disabled_nodes = wcoj_path->path.disabled_nodes;
     count_path->path.startup_cost = wcoj_path->path.startup_cost;
     count_path->path.total_cost = wcoj_path->path.total_cost +
@@ -4191,7 +4748,7 @@ make_wcoj_count_path(PlannerInfo *root, RelOptInfo *output_rel,
         copyObject(key_exprs), copyObject(estimated_postings),
         copyObject(provider_descs));
     count_path->custom_private = lappend(
-        count_path->custom_private, makeInteger(AGE_WCOJ_CONSUMER_COUNT));
+        count_path->custom_private, makeInteger(consumer_kind));
     count_path->custom_private = lappend(
         count_path->custom_private, make_wcoj_oid_const(INT8OID));
     count_path->custom_private = lappend(
@@ -4201,10 +4758,11 @@ make_wcoj_count_path(PlannerInfo *root, RelOptInfo *output_rel,
     ereport(DEBUG2,
             (errmsg_internal("AGE WCOJ count path added: sources=%d "
                              "source_cost=%.2f count_cost=%.2f "
-                             "output_type=%u",
+                             "output_type=%u consumer=%d",
                              list_length(wcoj_path->custom_paths),
                              wcoj_path->path.total_cost,
-                             count_path->path.total_cost, output_type)));
+                             count_path->path.total_cost, output_type,
+                             consumer_kind)));
 
     return count_path;
 }
@@ -4618,20 +5176,12 @@ adjacency_count_output_type(PathTarget *target)
 static bool
 is_plain_count_star_aggref(Aggref *aggref)
 {
-    char *func_name;
-
-    if (aggref == NULL || !aggref->aggstar || aggref->aggdirectargs != NIL ||
-        aggref->args != NIL || aggref->aggorder != NIL ||
-        aggref->aggdistinct != NIL || aggref->aggfilter != NULL ||
-        aggref->aggkind != AGGKIND_NORMAL || aggref->agglevelsup != 0 ||
-        aggref->aggtype != INT8OID ||
-        get_func_namespace(aggref->aggfnoid) != PG_CATALOG_NAMESPACE)
+    if (!is_count_aggref(aggref) || !aggref->aggstar ||
+        aggref->args != NIL || aggref->aggdistinct != NIL)
     {
         return false;
     }
-
-    func_name = get_func_name(aggref->aggfnoid);
-    return func_name != NULL && strcmp(func_name, "count") == 0;
+    return true;
 }
 
 static Plan *
@@ -14229,51 +14779,73 @@ build_wcoj_count_custom_scan_tlist(PathTarget *target, List *provider_tlist)
     return list_concat(count_tlist, provider_tlist);
 }
 
+static List *
+build_wcoj_group_count_custom_scan_tlist(PathTarget *target,
+                                         List *provider_tlist)
+{
+    List *scan_tlist;
+    TargetEntry *group_tle;
+    TargetEntry *count_tle;
+
+    if (target == NULL || list_length(target->exprs) != 2)
+        elog(ERROR, "invalid AGE WCOJ group count target");
+
+    group_tle = makeTargetEntry((Expr *)copyObject(linitial(target->exprs)),
+                                1, pstrdup("wcoj_group_key"), false);
+    count_tle = makeTargetEntry(wcoj_count_scan_expr(target), 2,
+                                pstrdup("wcoj_group_count"), false);
+    if (target->sortgrouprefs != NULL)
+    {
+        group_tle->ressortgroupref = target->sortgrouprefs[0];
+        count_tle->ressortgroupref = target->sortgrouprefs[1];
+    }
+    scan_tlist = list_make2(group_tle, count_tle);
+
+    return list_concat(scan_tlist, provider_tlist);
+}
+
 static Expr *
 wcoj_count_scan_expr(PathTarget *target)
 {
+    Aggref *aggref;
     Node *expr;
 
-    if (target == NULL || list_length(target->exprs) != 1)
+    if (target == NULL ||
+        (list_length(target->exprs) != 1 &&
+         list_length(target->exprs) != 2))
         elog(ERROR, "invalid AGE WCOJ count scan target");
 
-    expr = linitial(target->exprs);
-    while (expr != NULL && IsA(expr, RelabelType))
-        expr = (Node *)castNode(RelabelType, expr)->arg;
-
-    if (expr != NULL && IsA(expr, Aggref) &&
-        is_plain_count_star_aggref((Aggref *)expr))
+    expr = list_length(target->exprs) == 1 ?
+        linitial(target->exprs) : lsecond(target->exprs);
+    aggref = wcoj_count_expr_aggref(expr, NULL);
+    if (aggref != NULL &&
+        (is_plain_count_star_aggref(aggref) ||
+         (is_count_aggref(aggref) && !aggref->aggstar &&
+          list_length(aggref->args) == 1 &&
+          aggref->aggdistinct != NIL)))
     {
-        return (Expr *)copyObject(expr);
-    }
-
-    if (expr != NULL && IsA(expr, FuncExpr))
-    {
-        FuncExpr *func = castNode(FuncExpr, expr);
-        char *func_name = get_func_name(func->funcid);
-        Node *arg;
-
-        if (func_name == NULL || strcmp(func_name, "int8_to_agtype") != 0 ||
-            get_func_namespace(func->funcid) != ag_catalog_namespace_id() ||
-            func->funcresulttype != AGTYPEOID ||
-            list_length(func->args) != 1)
-        {
-            if (func_name != NULL)
-                pfree(func_name);
-            elog(ERROR, "invalid AGE WCOJ count scan target");
-        }
-        pfree(func_name);
-
-        arg = linitial(func->args);
-        if (IsA(arg, Aggref) &&
-            is_plain_count_star_aggref((Aggref *)arg))
-        {
-            return (Expr *)copyObject(arg);
-        }
+        return (Expr *)copyObject(aggref);
     }
 
     elog(ERROR, "invalid AGE WCOJ count scan target");
     return NULL;
+}
+
+static int
+wcoj_consumer_first_scan_resno(int consumer_kind)
+{
+    switch (consumer_kind)
+    {
+    case AGE_WCOJ_CONSUMER_ROWS:
+        return 1;
+    case AGE_WCOJ_CONSUMER_COUNT:
+    case AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY:
+        return 2;
+    case AGE_WCOJ_CONSUMER_GROUP_COUNT:
+        return 3;
+    }
+    elog(ERROR, "invalid AGE WCOJ consumer kind %d", consumer_kind);
+    return 1;
 }
 
 static List *
@@ -14481,14 +15053,18 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
     if (list_length(provider_descs) != list_length(custom_plans))
         elog(ERROR, "invalid AGE WCOJ provider descriptor");
     if ((consumer_kind != AGE_WCOJ_CONSUMER_ROWS &&
-         consumer_kind != AGE_WCOJ_CONSUMER_COUNT) ||
+         consumer_kind != AGE_WCOJ_CONSUMER_COUNT &&
+         consumer_kind != AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY &&
+         consumer_kind != AGE_WCOJ_CONSUMER_GROUP_COUNT) ||
         output_type_const->constisnull ||
         output_type_const->consttype != OIDOID)
     {
         elog(ERROR, "invalid AGE WCOJ consumer descriptor");
     }
     output_type = DatumGetObjectId(output_type_const->constvalue);
-    if (consumer_kind == AGE_WCOJ_CONSUMER_COUNT &&
+    if ((consumer_kind == AGE_WCOJ_CONSUMER_COUNT ||
+         consumer_kind == AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT) &&
         output_type != INT8OID && output_type != AGTYPEOID)
     {
         elog(ERROR, "invalid AGE WCOJ count output type %u", output_type);
@@ -14506,12 +15082,18 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
 
     custom_scan_tlist = build_wcoj_custom_scan_tlist(
         custom_plans, key_exprs, provider_descs,
-        consumer_kind == AGE_WCOJ_CONSUMER_COUNT ? 2 : 1,
+        wcoj_consumer_first_scan_resno(consumer_kind),
         &key_attnos,
         &exec_provider_descs, &provider_local_quals);
-    if (consumer_kind == AGE_WCOJ_CONSUMER_COUNT)
+    if (consumer_kind == AGE_WCOJ_CONSUMER_COUNT ||
+        consumer_kind == AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY)
     {
         custom_scan_tlist = build_wcoj_count_custom_scan_tlist(
+            best_path->path.pathtarget, custom_scan_tlist);
+    }
+    else if (consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT)
+    {
+        custom_scan_tlist = build_wcoj_group_count_custom_scan_tlist(
             best_path->path.pathtarget, custom_scan_tlist);
     }
     plan_tlist = tlist != NIL ? copyObject(tlist) :
@@ -14529,8 +15111,8 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
     cs->scan.plan.parallel_safe = false;
     cs->scan.plan.async_capable = false;
     cs->scan.plan.targetlist = plan_tlist;
-    cs->scan.plan.qual = consumer_kind == AGE_WCOJ_CONSUMER_COUNT ?
-        NIL : extract_actual_clauses(qual_restrictinfos, false);
+    cs->scan.plan.qual = consumer_kind == AGE_WCOJ_CONSUMER_ROWS ?
+        extract_actual_clauses(qual_restrictinfos, false) : NIL;
     cs->scan.plan.lefttree = NULL;
     cs->scan.plan.righttree = NULL;
     cs->scan.scanrelid = 0;

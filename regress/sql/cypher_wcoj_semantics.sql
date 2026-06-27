@@ -578,6 +578,116 @@ BEGIN
 END
 $wcoj_count_consumer_telemetry$;
 
+SELECT total FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN count(DISTINCT id(t)) AS total
+$$) AS (total agtype);
+
+SELECT key, total FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, count(*) AS total
+$$) AS (key agtype, total agtype)
+ORDER BY key;
+
+DO $wcoj_group_count_consumer_telemetry$
+DECLARE
+    plan_text text;
+    has_wcoj boolean := false;
+    has_group_consumer boolean := false;
+    has_count_result boolean := false;
+    has_flat_rows_avoided boolean := false;
+    has_one_row_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('wcoj_lowering', $cypher$
+            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+                  (s2:S {id: 2})-[e2:E]->(t),
+                  (s3:S {id: 3})-[e3:E]->(t)
+            RETURN id(t) AS key, count(*) AS total
+        $cypher$) AS (key agtype, total agtype)
+    $plan$
+    LOOP
+        has_wcoj := has_wcoj OR
+            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
+        has_group_consumer := has_group_consumer OR
+            plan_text LIKE '%WCOJ Consumer: group count(key)%';
+        has_count_result := has_count_result OR
+            plan_text LIKE '%Count Result: 24%';
+        has_flat_rows_avoided := has_flat_rows_avoided OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 24%';
+        has_one_row_emitted := has_one_row_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_wcoj OR NOT has_group_consumer OR
+       NOT has_count_result OR NOT has_flat_rows_avoided OR
+       NOT has_one_row_emitted THEN
+        RAISE EXCEPTION
+            'WCOJ group-count consumer telemetry was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj group-count consumer telemetry verified';
+END
+$wcoj_group_count_consumer_telemetry$;
+
+DO $wcoj_count_distinct_key_consumer_telemetry$
+DECLARE
+    plan_text text;
+    has_wcoj boolean := false;
+    has_distinct_consumer boolean := false;
+    has_count_result boolean := false;
+    has_flat_rows_avoided boolean := false;
+    has_one_row_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN
+        SELECT plan::text
+        FROM cypher('wcoj_lowering', $$
+            EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+                  (s2:S {id: 2})-[e2:E]->(t),
+                  (s3:S {id: 3})-[e3:E]->(t)
+            RETURN count(DISTINCT id(t)) AS total
+        $$) AS (plan agtype)
+    LOOP
+        has_wcoj := has_wcoj OR
+            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
+        has_distinct_consumer := has_distinct_consumer OR
+            plan_text LIKE '%WCOJ Consumer: count(distinct key)%';
+        has_count_result := has_count_result OR
+            plan_text LIKE '%Count Result: 1%';
+        has_flat_rows_avoided := has_flat_rows_avoided OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 24%';
+        has_one_row_emitted := has_one_row_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_wcoj OR NOT has_distinct_consumer OR
+       NOT has_count_result OR NOT has_flat_rows_avoided OR
+       NOT has_one_row_emitted THEN
+        RAISE EXCEPTION
+            'WCOJ count distinct-key consumer telemetry was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj count distinct-key consumer telemetry verified';
+END
+$wcoj_count_distinct_key_consumer_telemetry$;
+
 -- Add a second star after the automatic-plan assertion.  Its first two
 -- branches meet at one terminal while the third reaches another.
 SELECT * FROM cypher('wcoj_lowering', $$
@@ -623,11 +733,20 @@ ANALYZE wcoj_lowering."S";
 ANALYZE wcoj_lowering."T";
 ANALYZE wcoj_lowering."E";
 
+SELECT key, total FROM cypher('wcoj_lowering', $$
+    MATCH (s7:S {id: 7})-[e7:E]->(t:T),
+          (s8:S {id: 8})-[e8:E]->(t),
+          (s9:S {id: 9})-[e9:E]->(t)
+    RETURN id(t) AS key, count(*) AS total
+$$) AS (key agtype, total agtype)
+ORDER BY key;
+
 DO $wcoj_survivor_batch_telemetry$
 DECLARE
     plan_text text;
     has_one_block boolean := false;
     has_three_batches boolean := false;
+    has_zero_restarts boolean := false;
     has_three_source_keys boolean := false;
     has_three_distinct_source_keys boolean := false;
     has_forty_eight_restarts_avoided boolean := false;
@@ -657,6 +776,8 @@ BEGIN
             plan_text LIKE '%Survivor Blocks: 1%';
         has_three_batches := has_three_batches OR
             plan_text LIKE '%Payload Scan Batches: 3%';
+        has_zero_restarts := has_zero_restarts OR
+            plan_text LIKE '%Payload Scan Restarts: 0%';
         has_three_source_keys := has_three_source_keys OR
             plan_text LIKE '%Payload Source Keys Scanned: 3%';
         has_three_distinct_source_keys := has_three_distinct_source_keys OR
@@ -677,6 +798,7 @@ BEGIN
     END LOOP;
 
     IF NOT has_one_block OR NOT has_three_batches OR
+       NOT has_zero_restarts OR
        NOT has_three_source_keys OR NOT has_three_distinct_source_keys OR
        NOT has_forty_eight_restarts_avoided OR
        NOT has_fifty_one_payload_rows_scanned OR
@@ -698,6 +820,7 @@ DECLARE
     has_rows_emitted boolean := false;
     has_block_clamp boolean := false;
     has_goal_reached boolean := false;
+    has_spill_bytes boolean := false;
 BEGIN
     PERFORM set_config('age.enable_wcoj', 'on', true);
     PERFORM set_config('age.wcoj_engine', 'merge', true);
@@ -728,16 +851,162 @@ BEGIN
             plan_text LIKE '%Row Goal Survivor Blocks Clamped: 1%';
         has_goal_reached := has_goal_reached OR
             plan_text LIKE '%Row Goal Reached: true%';
+        has_spill_bytes := has_spill_bytes OR
+            plan_text LIKE '%Spill Bytes: 0 bytes%';
     END LOOP;
 
     IF NOT has_limit OR NOT has_wcoj OR NOT has_row_goal OR
        NOT has_rows_emitted OR NOT has_block_clamp OR
-       NOT has_goal_reached THEN
+       NOT has_goal_reached OR NOT has_spill_bytes THEN
         RAISE EXCEPTION 'WCOJ limit row-goal telemetry was not observed';
     END IF;
     RAISE NOTICE 'wcoj limit row-goal telemetry verified';
 END
 $wcoj_limit_row_goal_telemetry$;
+
+SELECT ok FROM cypher('wcoj_lowering', $$
+    RETURN EXISTS {
+        MATCH (s7:S {id: 7})-[e7:E]->(t:T),
+              (s8:S {id: 8})-[e8:E]->(t),
+              (s9:S {id: 9})-[e9:E]->(t)
+        RETURN t
+    } AS ok
+$$) AS (ok agtype);
+
+DO $wcoj_exists_row_goal_telemetry$
+DECLARE
+    plan_text text;
+    has_result boolean := false;
+    has_initplan boolean := false;
+    has_wcoj boolean := false;
+    has_row_goal boolean := false;
+    has_rows_emitted boolean := false;
+    has_block_clamp boolean := false;
+    has_goal_reached boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('wcoj_lowering', $cypher$
+            RETURN EXISTS {
+                MATCH (s7:S {id: 7})-[e7:E]->(t:T),
+                      (s8:S {id: 8})-[e8:E]->(t),
+                      (s9:S {id: 9})-[e9:E]->(t)
+                RETURN t
+            } AS ok
+        $cypher$) AS (ok agtype)
+    $plan$
+    LOOP
+        has_result := has_result OR plan_text LIKE '%Result%';
+        has_initplan := has_initplan OR plan_text LIKE '%InitPlan%';
+        has_wcoj := has_wcoj OR
+            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
+        has_row_goal := has_row_goal OR
+            plan_text LIKE '%WCOJ Row Goal: 1%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+        has_block_clamp := has_block_clamp OR
+            plan_text LIKE '%Row Goal Survivor Blocks Clamped: 1%';
+        has_goal_reached := has_goal_reached OR
+            plan_text LIKE '%Row Goal Reached: true%';
+    END LOOP;
+
+    IF NOT has_result OR NOT has_initplan OR NOT has_wcoj OR
+       NOT has_row_goal OR NOT has_rows_emitted OR NOT has_block_clamp OR
+       NOT has_goal_reached THEN
+        RAISE EXCEPTION 'WCOJ exists row-goal telemetry was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj exists row-goal telemetry verified';
+END
+$wcoj_exists_row_goal_telemetry$;
+
+-- Sparse overlap in progressive exact-set filtering should skip long runs in
+-- the larger candidate array instead of merge-walking every key.  The first
+-- branch has eighty terminals; the middle branch has three terminals; the
+-- final branch has eighty terminals.
+INSERT INTO wcoj_lowering."S" (id, properties)
+SELECT _graphid(_label_id('wcoj_lowering', 'S'), source_no),
+       format('{"id":%s}', source_no)::agtype
+FROM generate_series(20, 22) source_no;
+INSERT INTO wcoj_lowering."T" (id, properties)
+SELECT _graphid(_label_id('wcoj_lowering', 'T'), target_no),
+       format('{"id":%s}', target_no)::agtype
+FROM generate_series(300, 379) target_no;
+INSERT INTO wcoj_lowering."E" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('wcoj_lowering', 'E'),
+                30000 + target_no - 300),
+       _graphid(_label_id('wcoj_lowering', 'S'), 20),
+       _graphid(_label_id('wcoj_lowering', 'T'), target_no),
+       '{}'::agtype
+FROM generate_series(300, 379) target_no;
+INSERT INTO wcoj_lowering."E" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('wcoj_lowering', 'E'),
+                30100 + target_no - 300),
+       _graphid(_label_id('wcoj_lowering', 'S'), 21),
+       _graphid(_label_id('wcoj_lowering', 'T'), target_no),
+       '{}'::agtype
+FROM (VALUES (300), (340), (379)) target(target_no);
+INSERT INTO wcoj_lowering."E" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('wcoj_lowering', 'E'),
+                30200 + target_no - 300),
+       _graphid(_label_id('wcoj_lowering', 'S'), 22),
+       _graphid(_label_id('wcoj_lowering', 'T'), target_no),
+       '{}'::agtype
+FROM generate_series(300, 379) target_no;
+
+DO $wcoj_galloping_intersection_telemetry$
+DECLARE
+    plan_text text;
+    has_wcoj boolean := false;
+    has_progressive_plan boolean := false;
+    has_galloping_calls boolean := false;
+    has_galloping_steps boolean := false;
+    has_three_rows boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'progressive', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('wcoj_lowering', $cypher$
+            MATCH (s20:S {id: 20})-[e20:E]->(t:T),
+                  (s21:S {id: 21})-[e21:E]->(t),
+                  (s22:S {id: 22})-[e22:E]->(t)
+            RETURN id(e20), id(e21), id(e22), id(t)
+        $cypher$) AS (eid20 agtype, eid21 agtype,
+                      eid22 agtype, tid agtype)
+    $plan$
+    LOOP
+        has_wcoj := has_wcoj OR
+            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
+        has_progressive_plan := has_progressive_plan OR
+            plan_text LIKE '%Planned Engine: progressive%';
+        has_galloping_calls := has_galloping_calls OR
+            plan_text ~ 'Intersection Galloping Calls: [1-9][0-9]*';
+        has_galloping_steps := has_galloping_steps OR
+            plan_text ~ 'Intersection Galloping Steps: [1-9][0-9]*';
+        has_three_rows := has_three_rows OR
+            plan_text LIKE '%Rows Emitted: 3%';
+    END LOOP;
+
+    IF NOT has_wcoj OR NOT has_progressive_plan OR
+       NOT has_galloping_calls OR NOT has_galloping_steps OR
+       NOT has_three_rows THEN
+        RAISE EXCEPTION 'WCOJ galloping intersection telemetry was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj galloping intersection telemetry verified';
+END
+$wcoj_galloping_intersection_telemetry$;
 
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
@@ -874,6 +1143,176 @@ END
 $wcoj_payload_mixed_telemetry$;
 
 SELECT drop_graph('wcoj_payload_mixed', true);
+
+-- Large edge property payloads should spill out of the survivor block instead
+-- of growing batch_context without bound.  Count stays factorized and does not
+-- need to read the spilled properties back, but edge-local quals still force
+-- the direct providers to fetch and spill them.
+SELECT create_graph('wcoj_payload_spill');
+SELECT create_vlabel('wcoj_payload_spill', 'S');
+SELECT create_vlabel('wcoj_payload_spill', 'T');
+SELECT create_elabel('wcoj_payload_spill', 'E');
+INSERT INTO wcoj_payload_spill."S" (id, properties)
+SELECT _graphid(_label_id('wcoj_payload_spill', 'S'), source_no),
+       format('{"id":%s}', source_no)::agtype
+FROM generate_series(1, 3) source_no;
+INSERT INTO wcoj_payload_spill."T" (id, properties)
+SELECT _graphid(_label_id('wcoj_payload_spill', 'T'), target_no),
+       format('{"id":%s}', target_no)::agtype
+FROM generate_series(1, 8) target_no;
+INSERT INTO wcoj_payload_spill."E" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('wcoj_payload_spill', 'E'),
+                30000 + (source_no - 1) * 8 + target_no),
+       _graphid(_label_id('wcoj_payload_spill', 'S'), source_no),
+       _graphid(_label_id('wcoj_payload_spill', 'T'), target_no),
+       format('{"keep":true,"pad":"%s","w":%s}',
+              repeat('x', 20000), target_no)::agtype
+FROM generate_series(1, 3) source_no,
+     generate_series(1, 8) target_no;
+CREATE INDEX wcoj_payload_spill_adj
+ON wcoj_payload_spill."E" USING age_adjacency(start_id, id, end_id);
+ANALYZE wcoj_payload_spill."S";
+ANALYZE wcoj_payload_spill."T";
+ANALYZE wcoj_payload_spill."E";
+
+DO $wcoj_payload_spill_telemetry$
+DECLARE
+    plan_text text;
+    has_wcoj boolean := false;
+    has_count_consumer boolean := false;
+    has_batched boolean := false;
+    has_payload_spill_rows boolean := false;
+    has_spill_bytes boolean := false;
+    has_count_result boolean := false;
+BEGIN
+    PERFORM set_config('work_mem', '64kB', true);
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('wcoj_payload_spill', $cypher$
+            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+                  (s2:S {id: 2})-[e2:E]->(t),
+                  (s3:S {id: 3})-[e3:E]->(t)
+            WHERE e1.keep = true AND e2.keep = true AND e3.keep = true
+            RETURN count(*) AS total
+        $cypher$) AS (total agtype)
+    $plan$
+    LOOP
+        has_wcoj := has_wcoj OR
+            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
+        has_count_consumer := has_count_consumer OR
+            plan_text LIKE '%WCOJ Consumer: count(*)%';
+        has_batched := has_batched OR
+            plan_text LIKE '%Batched Payload Materialization: true%';
+        has_payload_spill_rows := has_payload_spill_rows OR
+            plan_text ~ 'Payload Rows Spilled: [1-9][0-9]*';
+        has_spill_bytes := has_spill_bytes OR
+            plan_text ~ 'Spill Bytes: [1-9][0-9]* bytes';
+        has_count_result := has_count_result OR
+            plan_text LIKE '%Count Result: 8%';
+    END LOOP;
+
+    IF NOT has_wcoj OR NOT has_count_consumer OR NOT has_batched OR
+       NOT has_payload_spill_rows OR NOT has_spill_bytes OR
+       NOT has_count_result THEN
+        RAISE EXCEPTION 'WCOJ payload spill telemetry was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj payload spill telemetry verified';
+END
+$wcoj_payload_spill_telemetry$;
+
+DO $wcoj_payload_spill_restore$
+DECLARE
+    plan_text text;
+    has_wcoj boolean := false;
+    has_payload_spill_rows boolean := false;
+    has_spill_bytes boolean := false;
+    has_rows_emitted boolean := false;
+BEGIN
+    PERFORM set_config('work_mem', '64kB', true);
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('wcoj_payload_spill', $cypher$
+            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+                  (s2:S {id: 2})-[e2:E]->(t),
+                  (s3:S {id: 3})-[e3:E]->(t)
+            WHERE e1.keep = true AND e2.keep = true AND e3.keep = true
+            RETURN e1, id(t)
+            LIMIT 1
+        $cypher$) AS (e1 agtype, tid agtype)
+    $plan$
+    LOOP
+        has_wcoj := has_wcoj OR
+            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
+        has_payload_spill_rows := has_payload_spill_rows OR
+            plan_text ~ 'Payload Rows Spilled: [1-9][0-9]*';
+        has_spill_bytes := has_spill_bytes OR
+            plan_text ~ 'Spill Bytes: [1-9][0-9]* bytes';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_wcoj OR NOT has_payload_spill_rows OR
+       NOT has_spill_bytes OR NOT has_rows_emitted THEN
+        RAISE EXCEPTION 'WCOJ payload spill restore path was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj payload spill restore verified';
+END
+$wcoj_payload_spill_restore$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_payload_spill_binary ON COMMIT DROP AS
+SELECT total
+FROM cypher('wcoj_payload_spill', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    WHERE e1.keep = true AND e2.keep = true AND e3.keep = true
+    RETURN count(*) AS total
+$$) AS (total agtype);
+
+SET LOCAL work_mem = '64kB';
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_payload_spill_direct ON COMMIT DROP AS
+SELECT total
+FROM cypher('wcoj_payload_spill', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    WHERE e1.keep = true AND e2.keep = true AND e3.keep = true
+    RETURN count(*) AS total
+$$) AS (total agtype);
+
+SELECT (SELECT count(*) FROM wcoj_payload_spill_binary) AS binary_rows,
+       (SELECT count(*) FROM wcoj_payload_spill_direct) AS direct_rows,
+       (SELECT count(*) FROM (
+           (TABLE wcoj_payload_spill_binary
+            EXCEPT ALL TABLE wcoj_payload_spill_direct)
+           UNION ALL
+           (TABLE wcoj_payload_spill_direct
+            EXCEPT ALL TABLE wcoj_payload_spill_binary)
+       ) diff) AS diff_rows;
+ROLLBACK;
+
+SELECT drop_graph('wcoj_payload_spill', true);
 
 -- Direct providers are independent per pattern descriptor.  This star mixes
 -- three edge labels and an incoming middle branch while preserving 2 * 3 * 4
@@ -1439,6 +1878,7 @@ DECLARE
     has_provider_rows_after boolean := false;
     has_final_domain_keys boolean := false;
     has_rows_emitted boolean := false;
+    has_spill_bytes boolean := false;
 BEGIN
     PERFORM set_config('age.enable_wcoj', 'on', true);
     PERFORM set_config('enable_nestloop', 'off', true);
@@ -1467,11 +1907,14 @@ BEGIN
             plan_text LIKE '%Semijoin Final Domain Keys: 131%';
         has_rows_emitted := has_rows_emitted OR
             plan_text LIKE '%Rows Emitted: 128%';
+        has_spill_bytes := has_spill_bytes OR
+            plan_text LIKE '%Spill Bytes: 0 bytes%';
     END LOOP;
 
     IF NOT has_generic OR NOT has_semijoin_passes OR
        NOT has_rows_removed OR NOT has_provider_rows_after OR
-       NOT has_final_domain_keys OR NOT has_rows_emitted THEN
+       NOT has_final_domain_keys OR NOT has_rows_emitted OR
+       NOT has_spill_bytes THEN
         RAISE EXCEPTION 'acyclic Generic Join semijoin reduction was not observed';
     END IF;
     RAISE NOTICE 'wcoj acyclic semijoin reduction verified';
@@ -1638,6 +2081,169 @@ SELECT (SELECT count(*) FROM generic_binary_tree) AS binary_rows,
            UNION ALL
            (TABLE generic_semijoin_tree
             EXCEPT ALL TABLE generic_binary_tree)
+       ) diff) AS diff_rows;
+ROLLBACK;
+
+-- A snowflake-shaped acyclic component has several leaves sharing the
+-- reduced C separator.  This keeps the query outside the star fast path while
+-- verifying that semijoin pruning propagates across more than one branch.
+SELECT create_vlabel('wcoj_generic', 'R');
+SELECT create_vlabel('wcoj_generic', 'S');
+SELECT create_elabel('wcoj_generic', 'H1');
+SELECT create_elabel('wcoj_generic', 'H2');
+SELECT create_elabel('wcoj_generic', 'H3');
+SELECT create_elabel('wcoj_generic', 'H4');
+SELECT create_elabel('wcoj_generic', 'H5');
+SELECT create_elabel('wcoj_generic', 'H6');
+INSERT INTO wcoj_generic."R" (id, properties)
+VALUES (_graphid(_label_id('wcoj_generic', 'R'), 1), '{}'::agtype);
+INSERT INTO wcoj_generic."S" (id, properties)
+VALUES (_graphid(_label_id('wcoj_generic', 'S'), 1), '{}'::agtype);
+INSERT INTO wcoj_generic."H1" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('wcoj_generic', 'H1'), i),
+       _graphid(_label_id('wcoj_generic', 'A'), i),
+       _graphid(_label_id('wcoj_generic', 'B'), 1),
+       '{}'::agtype
+FROM generate_series(1, 128) i;
+INSERT INTO wcoj_generic."H2" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('wcoj_generic', 'H2'), i),
+       _graphid(_label_id('wcoj_generic', 'B'), 1),
+       _graphid(_label_id('wcoj_generic', 'C'), i),
+       '{}'::agtype
+FROM generate_series(1, 128) i;
+INSERT INTO wcoj_generic."H3" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('wcoj_generic', 'H3'), i),
+       _graphid(_label_id('wcoj_generic', 'C'), 127 + i),
+       _graphid(_label_id('wcoj_generic', 'D'), 1),
+       '{}'::agtype
+FROM generate_series(1, 128) i;
+INSERT INTO wcoj_generic."H4" (id, start_id, end_id, properties)
+VALUES (_graphid(_label_id('wcoj_generic', 'H4'), 1),
+        _graphid(_label_id('wcoj_generic', 'C'), 128),
+        _graphid(_label_id('wcoj_generic', 'Q'), 1),
+        '{}'::agtype);
+INSERT INTO wcoj_generic."H5" (id, start_id, end_id, properties)
+VALUES (_graphid(_label_id('wcoj_generic', 'H5'), 1),
+        _graphid(_label_id('wcoj_generic', 'R'), 1),
+        _graphid(_label_id('wcoj_generic', 'C'), 128),
+        '{}'::agtype);
+INSERT INTO wcoj_generic."H6" (id, start_id, end_id, properties)
+VALUES (_graphid(_label_id('wcoj_generic', 'H6'), 1),
+        _graphid(_label_id('wcoj_generic', 'C'), 128),
+        _graphid(_label_id('wcoj_generic', 'S'), 1),
+        '{}'::agtype);
+CREATE INDEX wcoj_generic_h1_out
+ON wcoj_generic."H1" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX wcoj_generic_h2_out
+ON wcoj_generic."H2" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX wcoj_generic_h3_out
+ON wcoj_generic."H3" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX wcoj_generic_h4_out
+ON wcoj_generic."H4" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX wcoj_generic_h5_out
+ON wcoj_generic."H5" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX wcoj_generic_h6_out
+ON wcoj_generic."H6" USING age_adjacency(start_id, id, end_id);
+ANALYZE wcoj_generic."R";
+ANALYZE wcoj_generic."S";
+ANALYZE wcoj_generic."H1";
+ANALYZE wcoj_generic."H2";
+ANALYZE wcoj_generic."H3";
+ANALYZE wcoj_generic."H4";
+ANALYZE wcoj_generic."H5";
+ANALYZE wcoj_generic."H6";
+
+DO $wcoj_snowflake_semijoin_plan$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_semijoin_passes boolean := false;
+    has_rows_removed boolean := false;
+    has_provider_rows_after boolean := false;
+    has_final_domain_keys boolean := false;
+    has_rows_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('wcoj_generic', $cypher$
+            MATCH (a:A)-[h1:H1]->(b:B)-[h2:H2]->(c:C)-[h3:H3]->(d:D),
+                  (c)-[h4:H4]->(q:Q),
+                  (r:R)-[h5:H5]->(c),
+                  (c)-[h6:H6]->(s:S)
+            RETURN id(a), id(b), id(c), id(d), id(q), id(r), id(s),
+                   id(h1), id(h2), id(h3), id(h4), id(h5), id(h6)
+        $cypher$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
+                      r agtype, s agtype, h1 agtype, h2 agtype, h3 agtype,
+                      h4 agtype, h5 agtype, h6 agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_semijoin_passes := has_semijoin_passes OR
+            plan_text LIKE '%Semijoin Reduction Passes: 2%';
+        has_rows_removed := has_rows_removed OR
+            plan_text LIKE '%Semijoin Rows Removed: 508%';
+        has_provider_rows_after := has_provider_rows_after OR
+            plan_text LIKE '%Semijoin Provider Rows After: 267%';
+        has_final_domain_keys := has_final_domain_keys OR
+            plan_text LIKE '%Semijoin Final Domain Keys: 134%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 128%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_semijoin_passes OR
+       NOT has_rows_removed OR NOT has_provider_rows_after OR
+       NOT has_final_domain_keys OR NOT has_rows_emitted THEN
+        RAISE EXCEPTION 'snowflake Generic Join semijoin reduction was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj snowflake semijoin reduction verified';
+END
+$wcoj_snowflake_semijoin_plan$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_binary_snowflake ON COMMIT DROP AS
+SELECT * FROM cypher('wcoj_generic', $$
+    MATCH (a:A)-[h1:H1]->(b:B)-[h2:H2]->(c:C)-[h3:H3]->(d:D),
+          (c)-[h4:H4]->(q:Q),
+          (r:R)-[h5:H5]->(c),
+          (c)-[h6:H6]->(s:S)
+    RETURN id(a), id(b), id(c), id(d), id(q), id(r), id(s),
+           id(h1), id(h2), id(h3), id(h4), id(h5), id(h6)
+$$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
+        r agtype, s agtype, h1 agtype, h2 agtype, h3 agtype,
+        h4 agtype, h5 agtype, h6 agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE generic_semijoin_snowflake ON COMMIT DROP AS
+SELECT * FROM cypher('wcoj_generic', $$
+    MATCH (a:A)-[h1:H1]->(b:B)-[h2:H2]->(c:C)-[h3:H3]->(d:D),
+          (c)-[h4:H4]->(q:Q),
+          (r:R)-[h5:H5]->(c),
+          (c)-[h6:H6]->(s:S)
+    RETURN id(a), id(b), id(c), id(d), id(q), id(r), id(s),
+           id(h1), id(h2), id(h3), id(h4), id(h5), id(h6)
+$$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
+        r agtype, s agtype, h1 agtype, h2 agtype, h3 agtype,
+        h4 agtype, h5 agtype, h6 agtype);
+
+SELECT (SELECT count(*) FROM generic_binary_snowflake) AS binary_rows,
+       (SELECT count(*) FROM generic_semijoin_snowflake) AS generic_rows,
+       (SELECT count(*) FROM (
+           (TABLE generic_binary_snowflake
+            EXCEPT ALL TABLE generic_semijoin_snowflake)
+           UNION ALL
+           (TABLE generic_semijoin_snowflake
+            EXCEPT ALL TABLE generic_binary_snowflake)
        ) diff) AS diff_rows;
 ROLLBACK;
 

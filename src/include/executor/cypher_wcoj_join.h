@@ -53,7 +53,9 @@ typedef enum AgeWCOJProviderKind
 typedef enum AgeWCOJConsumerKind
 {
     AGE_WCOJ_CONSUMER_ROWS = 0,
-    AGE_WCOJ_CONSUMER_COUNT
+    AGE_WCOJ_CONSUMER_COUNT,
+    AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY,
+    AGE_WCOJ_CONSUMER_GROUP_COUNT
 } AgeWCOJConsumerKind;
 
 /*

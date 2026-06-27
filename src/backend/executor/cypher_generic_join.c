@@ -28,6 +28,8 @@
 #include "utils/graphid.h"
 #include "utils/memutils.h"
 
+#define AGE_GENERIC_GALLOPING_MIN_RATIO 8
+
 typedef struct AgeGenericRow
 {
     graphid key1;
@@ -36,6 +38,14 @@ typedef struct AgeGenericRow
     bool edge_id_valid;
     MinimalTuple tuple;
 } AgeGenericRow;
+
+typedef enum AgeGenericOutputSource
+{
+    AGE_GENERIC_OUTPUT_SOURCE_NONE = 0,
+    AGE_GENERIC_OUTPUT_SOURCE_KEY1,
+    AGE_GENERIC_OUTPUT_SOURCE_KEY2,
+    AGE_GENERIC_OUTPUT_SOURCE_EDGE_ID
+} AgeGenericOutputSource;
 
 typedef struct AgeGenericProvider
 {
@@ -47,27 +57,58 @@ typedef struct AgeGenericProvider
     AttrNumber edge_id_attno;
     PlanState *plan_state;
     TupleTableSlot *tuple_slot;
+    AgeGenericOutputSource *output_sources;
+    int output_width;
+    bool key_only_output;
     AgeGenericRow *rows;
     int row_count;
     int row_capacity;
     int bag_start;
     int bag_count;
+    graphid cached_key1;
+    int cached_key1_start;
+    int cached_key1_end;
+    bool cached_key1_valid;
 } AgeGenericProvider;
 
 typedef struct AgeGenericLevel
 {
     MemoryContext context;
     graphid *candidates;
+    graphid *candidate_buffer;
+    int candidate_capacity;
     int candidate_count;
     int next_candidate;
     bool initialized;
 } AgeGenericLevel;
+
+typedef struct AgeGenericDomainView
+{
+    AgeGenericProvider *provider;
+    int variable;
+    int start;
+    int end;
+    bool use_key2;
+} AgeGenericDomainView;
 
 typedef struct AgeGenericDomain
 {
     graphid *keys;
     int count;
 } AgeGenericDomain;
+
+typedef struct AgeGenericDomainScratch
+{
+    graphid *keys;
+    int capacity;
+} AgeGenericDomainScratch;
+
+typedef struct AgeGenericSeparatorDomain
+{
+    graphid *keys;
+    int count;
+    bool initialized;
+} AgeGenericSeparatorDomain;
 
 typedef struct AgeGenericJoinState
 {
@@ -86,21 +127,40 @@ typedef struct AgeGenericJoinState
     bool *selected_edge_id_valid;
     Bitmapset **uniqueness_groups;
     int uniqueness_group_count;
+    AgeGenericDomainScratch reduction_scratch;
     bool combination_started;
     MemoryContext data_context;
     bool materialized;
     bool exhausted;
     int64 rows_materialized;
+    int64 tuples_materialized;
     int64 semijoin_passes;
     int64 semijoin_rows_removed;
     int64 semijoin_provider_rows_after;
     int64 semijoin_final_domain_keys;
+    int64 separator_reduction_passes;
+    int64 separator_leaf_tail_providers;
+    int64 separator_domain_keys;
+    int64 separator_leaf_tail_rows_removed;
+    int64 separator_cyclic_core_rows_removed;
     int64 bindings_completed;
     int64 candidate_flat_rows;
     int64 candidate_combinations;
     int64 uniqueness_rejects;
     int64 rows_emitted;
     int64 rescans;
+    int64 spill_bytes;
+    int64 lazy_domain_views;
+    int64 lazy_domain_keys_scanned;
+    int64 lazy_domain_scratch_allocations;
+    int64 lazy_domain_scratch_reuses;
+    int64 lazy_prefix_range_builds;
+    int64 lazy_prefix_range_reuses;
+    int64 reduction_scratch_allocations;
+    int64 reduction_scratch_reuses;
+    int64 vector_intersection_merge_calls;
+    int64 vector_intersection_galloping_calls;
+    int64 vector_intersection_galloping_steps;
     Size peak_memory;
 } AgeGenericJoinState;
 
@@ -133,6 +193,10 @@ static void rescan_age_generic_join(CustomScanState *node);
 static void explain_age_generic_join(CustomScanState *node, List *ancestors,
                                      ExplainState *es);
 static void reduce_generic_providers(AgeGenericJoinState *state);
+static void reduce_generic_leaf_tail_separators(
+    AgeGenericJoinState *state, MemoryContext reduction_context);
+static void initialize_generic_provider_output(
+    AgeGenericProvider *provider, TupleDesc tuple_desc, EState *estate);
 
 const CustomScanMethods age_generic_join_scan_methods = {
     AGE_GENERIC_JOIN_SCAN_NAME,
@@ -259,7 +323,16 @@ append_generic_row(AgeGenericJoinState *state, AgeGenericProvider *provider,
     provider->rows[provider->row_count].key2 = key2;
     provider->rows[provider->row_count].edge_id = edge_id;
     provider->rows[provider->row_count].edge_id_valid = edge_id_valid;
-    provider->rows[provider->row_count].tuple = ExecCopySlotMinimalTuple(slot);
+    if (provider->key_only_output)
+    {
+        provider->rows[provider->row_count].tuple = NULL;
+    }
+    else
+    {
+        provider->rows[provider->row_count].tuple =
+            ExecCopySlotMinimalTuple(slot);
+        increment_generic_counter(&state->tuples_materialized);
+    }
     provider->row_count++;
     MemoryContextSwitchTo(oldcontext);
 
@@ -366,11 +439,36 @@ upper_bound_key1(AgeGenericProvider *provider, graphid key)
     return low;
 }
 
-static int
-lower_bound_pair(AgeGenericProvider *provider, graphid key1, graphid key2)
+static void
+generic_provider_key1_range(AgeGenericJoinState *state,
+                            AgeGenericProvider *provider, graphid key,
+                            int *start, int *end)
 {
-    int low = lower_bound_key1(provider, key1);
-    int high = upper_bound_key1(provider, key1);
+    if (provider->cached_key1_valid && provider->cached_key1 == key)
+    {
+        *start = provider->cached_key1_start;
+        *end = provider->cached_key1_end;
+        increment_generic_counter(&state->lazy_prefix_range_reuses);
+        return;
+    }
+
+    *start = lower_bound_key1(provider, key);
+    *end = upper_bound_key1(provider, key);
+    provider->cached_key1 = key;
+    provider->cached_key1_start = *start;
+    provider->cached_key1_end = *end;
+    provider->cached_key1_valid = true;
+    increment_generic_counter(&state->lazy_prefix_range_builds);
+}
+
+static int
+lower_bound_pair(AgeGenericJoinState *state, AgeGenericProvider *provider,
+                 graphid key1, graphid key2)
+{
+    int low;
+    int high;
+
+    generic_provider_key1_range(state, provider, key1, &low, &high);
 
     while (low < high)
     {
@@ -385,10 +483,13 @@ lower_bound_pair(AgeGenericProvider *provider, graphid key1, graphid key2)
 }
 
 static int
-upper_bound_pair(AgeGenericProvider *provider, graphid key1, graphid key2)
+upper_bound_pair(AgeGenericJoinState *state, AgeGenericProvider *provider,
+                 graphid key1, graphid key2)
 {
-    int low = lower_bound_key1(provider, key1);
-    int high = upper_bound_key1(provider, key1);
+    int low;
+    int high;
+
+    generic_provider_key1_range(state, provider, key1, &low, &high);
 
     while (low < high)
     {
@@ -402,57 +503,376 @@ upper_bound_pair(AgeGenericProvider *provider, graphid key1, graphid key2)
     return low;
 }
 
-static graphid *
-provider_domain(AgeGenericJoinState *state, AgeGenericProvider *provider,
-                int variable, MemoryContext context, int *domain_count)
+static void
+ensure_generic_level_capacity(AgeGenericJoinState *state,
+                              AgeGenericLevel *level, int required)
 {
-    graphid *domain;
+    MemoryContext oldcontext;
+    int new_capacity;
+
+    if (required <= 0)
+        return;
+    if ((Size)required > MaxAllocSize / sizeof(graphid))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("AGE Generic Join domain is too large")));
+    }
+    if (level->candidate_capacity >= required)
+    {
+        increment_generic_counter(&state->lazy_domain_scratch_reuses);
+        return;
+    }
+
+    new_capacity = Max(level->candidate_capacity, 128);
+    while (new_capacity < required)
+    {
+        if (new_capacity > MaxAllocSize / (sizeof(graphid) * 2))
+            new_capacity = required;
+        else
+            new_capacity *= 2;
+    }
+
+    oldcontext = MemoryContextSwitchTo(state->data_context);
+    if (level->candidate_buffer == NULL)
+        level->candidate_buffer = palloc(sizeof(graphid) * new_capacity);
+    else
+        level->candidate_buffer = repalloc(
+            level->candidate_buffer, sizeof(graphid) * new_capacity);
+    MemoryContextSwitchTo(oldcontext);
+    level->candidate_capacity = new_capacity;
+    increment_generic_counter(&state->lazy_domain_scratch_allocations);
+    state->peak_memory = Max(state->peak_memory,
+                             MemoryContextMemAllocated(state->data_context,
+                                                       true));
+}
+
+static graphid *
+ensure_generic_reduction_scratch_capacity(AgeGenericJoinState *state,
+                                          int required)
+{
+    MemoryContext oldcontext;
+    int new_capacity;
+
+    if (required <= 0)
+        return NULL;
+    if ((Size)required > MaxAllocSize / sizeof(graphid))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("AGE Generic Join reduction scratch is too large")));
+    }
+    if (state->reduction_scratch.capacity >= required)
+    {
+        increment_generic_counter(&state->reduction_scratch_reuses);
+        return state->reduction_scratch.keys;
+    }
+
+    new_capacity = Max(state->reduction_scratch.capacity, 128);
+    while (new_capacity < required)
+    {
+        if (new_capacity > MaxAllocSize / (sizeof(graphid) * 2))
+            new_capacity = required;
+        else
+            new_capacity *= 2;
+    }
+
+    oldcontext = MemoryContextSwitchTo(state->data_context);
+    if (state->reduction_scratch.keys == NULL)
+        state->reduction_scratch.keys = palloc(sizeof(graphid) * new_capacity);
+    else
+        state->reduction_scratch.keys = repalloc(
+            state->reduction_scratch.keys, sizeof(graphid) * new_capacity);
+    MemoryContextSwitchTo(oldcontext);
+    state->reduction_scratch.capacity = new_capacity;
+    increment_generic_counter(&state->reduction_scratch_allocations);
+    state->peak_memory = Max(state->peak_memory,
+                             MemoryContextMemAllocated(state->data_context,
+                                                       true));
+    return state->reduction_scratch.keys;
+}
+
+static graphid
+generic_domain_view_key(const AgeGenericDomainView *view, int row_index)
+{
+    AgeGenericRow *row = &view->provider->rows[row_index];
+
+    return view->use_key2 ? row->key2 : row->key1;
+}
+
+static bool
+build_generic_domain_view(AgeGenericJoinState *state,
+                          AgeGenericProvider *provider, int variable,
+                          AgeGenericDomainView *view)
+{
     int start = 0;
     int end = provider->row_count;
-    int row_index;
-    int count = 0;
-    graphid previous = 0;
-    bool have_previous = false;
     bool use_key2 = false;
-    MemoryContext oldcontext;
 
-    *domain_count = 0;
     if (provider->row_count == 0)
-        return NULL;
-
+        return false;
     if (provider->kind == AGE_GENERIC_PROVIDER_EDGE &&
         provider->var2 == variable)
     {
-        graphid prefix = state->bindings[provider->var1];
-
-        start = lower_bound_key1(provider, prefix);
-        end = upper_bound_key1(provider, prefix);
+        generic_provider_key1_range(state, provider,
+                                    state->bindings[provider->var1],
+                                    &start, &end);
         use_key2 = true;
     }
     else if (provider->var1 != variable)
     {
-        return NULL;
+        return false;
     }
     if (start >= end)
-        return NULL;
+        return false;
 
-    oldcontext = MemoryContextSwitchTo(context);
-    domain = palloc(sizeof(graphid) * (end - start));
-    MemoryContextSwitchTo(oldcontext);
-    for (row_index = start; row_index < end; row_index++)
+    view->provider = provider;
+    view->variable = variable;
+    view->start = start;
+    view->end = end;
+    view->use_key2 = use_key2;
+    increment_generic_counter(&state->lazy_domain_views);
+    return true;
+}
+
+static int
+copy_generic_domain_view(AgeGenericJoinState *state, AgeGenericLevel *level,
+                         const AgeGenericDomainView *view)
+{
+    int row_index;
+    int count = 0;
+    graphid previous = 0;
+    bool have_previous = false;
+
+    ensure_generic_level_capacity(state, level, view->end - view->start);
+    for (row_index = view->start; row_index < view->end; row_index++)
     {
-        graphid value = use_key2 ? provider->rows[row_index].key2 :
-            provider->rows[row_index].key1;
+        graphid value = generic_domain_view_key(view, row_index);
 
         if (!have_previous || value != previous)
         {
-            domain[count++] = value;
+            level->candidate_buffer[count++] = value;
             previous = value;
             have_previous = true;
         }
     }
-    *domain_count = count;
-    return domain;
+    add_generic_counter(&state->lazy_domain_keys_scanned,
+                        view->end - view->start);
+    return count;
+}
+
+static bool
+generic_domain_view_next_distinct(AgeGenericJoinState *state,
+                                  const AgeGenericDomainView *view,
+                                  int *row_index, graphid *key)
+{
+    graphid value;
+    int start;
+
+    if (*row_index >= view->end)
+        return false;
+    start = *row_index;
+    value = generic_domain_view_key(view, *row_index);
+    do
+    {
+        (*row_index)++;
+    } while (*row_index < view->end &&
+             generic_domain_view_key(view, *row_index) == value);
+    add_generic_counter(&state->lazy_domain_keys_scanned,
+                        *row_index - start);
+    *key = value;
+    return true;
+}
+
+static int
+generic_graphid_galloping_lower_bound(AgeGenericJoinState *state,
+                                      const graphid *values, int value_count,
+                                      int start_index, graphid target)
+{
+    int low;
+    int high;
+    int bound;
+
+    if (start_index >= value_count)
+        return value_count;
+
+    increment_generic_counter(&state->vector_intersection_galloping_steps);
+    if (values[start_index] >= target)
+        return start_index;
+
+    bound = 1;
+    while (bound < value_count - start_index)
+    {
+        int probe = start_index + bound;
+
+        increment_generic_counter(
+            &state->vector_intersection_galloping_steps);
+        if (values[probe] >= target)
+            break;
+        if (bound > (value_count - start_index) / 2)
+        {
+            bound = value_count - start_index;
+            break;
+        }
+        bound *= 2;
+    }
+
+    low = start_index + bound / 2 + 1;
+    high = Min(start_index + bound + 1, value_count);
+    while (low < high)
+    {
+        int middle = low + (high - low) / 2;
+
+        increment_generic_counter(
+            &state->vector_intersection_galloping_steps);
+        if (values[middle] < target)
+            low = middle + 1;
+        else
+            high = middle;
+    }
+    return low;
+}
+
+static int
+generic_domain_view_galloping_lower_bound(AgeGenericJoinState *state,
+                                          const AgeGenericDomainView *view,
+                                          int start_index, graphid target)
+{
+    int low;
+    int high;
+    int bound;
+
+    if (start_index >= view->end)
+        return view->end;
+
+    increment_generic_counter(&state->vector_intersection_galloping_steps);
+    if (generic_domain_view_key(view, start_index) >= target)
+        return start_index;
+
+    bound = 1;
+    while (bound < view->end - start_index)
+    {
+        int probe = start_index + bound;
+
+        increment_generic_counter(
+            &state->vector_intersection_galloping_steps);
+        if (generic_domain_view_key(view, probe) >= target)
+            break;
+        if (bound > (view->end - start_index) / 2)
+        {
+            bound = view->end - start_index;
+            break;
+        }
+        bound *= 2;
+    }
+
+    low = start_index + bound / 2 + 1;
+    high = Min(start_index + bound + 1, view->end);
+    while (low < high)
+    {
+        int middle = low + (high - low) / 2;
+
+        increment_generic_counter(
+            &state->vector_intersection_galloping_steps);
+        if (generic_domain_view_key(view, middle) < target)
+            low = middle + 1;
+        else
+            high = middle;
+    }
+    return low;
+}
+
+static int
+intersect_generic_candidates_with_view(AgeGenericJoinState *state,
+                                       graphid *candidates,
+                                       int candidate_count,
+                                       const AgeGenericDomainView *view)
+{
+    int candidate_index = 0;
+    int domain_index = view->start;
+    int output_count = 0;
+    int view_row_count = view->end - view->start;
+
+    if (candidate_count <= 0 || view_row_count <= 0)
+        return 0;
+
+    if ((int64)view_row_count >=
+        (int64)candidate_count * AGE_GENERIC_GALLOPING_MIN_RATIO)
+    {
+        increment_generic_counter(
+            &state->vector_intersection_galloping_calls);
+        while (candidate_index < candidate_count && domain_index < view->end)
+        {
+            graphid candidate = candidates[candidate_index];
+
+            domain_index = generic_domain_view_galloping_lower_bound(
+                state, view, domain_index, candidate);
+            if (domain_index >= view->end)
+                break;
+            if (generic_domain_view_key(view, domain_index) == candidate)
+            {
+                candidates[output_count++] = candidate;
+                domain_index++;
+            }
+            candidate_index++;
+        }
+        return output_count;
+    }
+
+    if ((int64)candidate_count >=
+        (int64)view_row_count * AGE_GENERIC_GALLOPING_MIN_RATIO)
+    {
+        graphid domain_key;
+
+        increment_generic_counter(
+            &state->vector_intersection_galloping_calls);
+        while (candidate_index < candidate_count &&
+               generic_domain_view_next_distinct(state, view, &domain_index,
+                                                 &domain_key))
+        {
+            candidate_index = generic_graphid_galloping_lower_bound(
+                state, candidates, candidate_count, candidate_index,
+                domain_key);
+            if (candidate_index >= candidate_count)
+                break;
+            if (candidates[candidate_index] == domain_key)
+            {
+                candidates[output_count++] = domain_key;
+                candidate_index++;
+            }
+        }
+        return output_count;
+    }
+
+    increment_generic_counter(&state->vector_intersection_merge_calls);
+    {
+        graphid domain_key;
+        bool have_domain = generic_domain_view_next_distinct(
+            state, view, &domain_index, &domain_key);
+
+        while (candidate_index < candidate_count && have_domain)
+        {
+            graphid candidate = candidates[candidate_index];
+
+            if (candidate < domain_key)
+            {
+                candidate_index++;
+            }
+            else if (candidate > domain_key)
+            {
+                have_domain = generic_domain_view_next_distinct(
+                    state, view, &domain_index, &domain_key);
+            }
+            else
+            {
+                candidates[output_count++] = candidate;
+                candidate_index++;
+                have_domain = generic_domain_view_next_distinct(
+                    state, view, &domain_index, &domain_key);
+            }
+        }
+    }
+    return output_count;
 }
 
 static int
@@ -498,8 +918,10 @@ compare_generic_graphids(const void *left, const void *right)
  * key1 prefix, so it needs a compact scratch sort for query-wide reduction.
  */
 static graphid *
-generic_provider_unbound_domain(AgeGenericProvider *provider, int variable,
-                                MemoryContext context, int *domain_count)
+generic_provider_unbound_domain(AgeGenericJoinState *state,
+                                AgeGenericProvider *provider, int variable,
+                                MemoryContext context, bool use_scratch,
+                                int *domain_count)
 {
     graphid *domain;
     bool use_key2;
@@ -518,9 +940,17 @@ generic_provider_unbound_domain(AgeGenericProvider *provider, int variable,
     else
         return NULL;
 
-    oldcontext = MemoryContextSwitchTo(context);
-    domain = palloc(sizeof(graphid) * provider->row_count);
-    MemoryContextSwitchTo(oldcontext);
+    if (use_scratch)
+    {
+        domain = ensure_generic_reduction_scratch_capacity(
+            state, provider->row_count);
+    }
+    else
+    {
+        oldcontext = MemoryContextSwitchTo(context);
+        domain = palloc(sizeof(graphid) * provider->row_count);
+        MemoryContextSwitchTo(oldcontext);
+    }
     for (row_index = 0; row_index < provider->row_count; row_index++)
     {
         domain[row_index] = use_key2 ? provider->rows[row_index].key2 :
@@ -567,7 +997,8 @@ build_generic_reduction_domains(AgeGenericJoinState *state,
 
             variable = endpoint == 0 ? provider->var1 : provider->var2;
             provider_domain = generic_provider_unbound_domain(
-                provider, variable, context, &provider_domain_count);
+                state, provider, variable, context, initialized[variable],
+                &provider_domain_count);
             if (provider_domain_count <= 0)
                 return false;
             if (!initialized[variable])
@@ -664,7 +1095,354 @@ filter_generic_provider(AgeGenericProvider *provider,
         write_index++;
     }
     provider->row_count = write_index;
+    provider->cached_key1_valid = false;
     return (int64)old_count - write_index;
+}
+
+static bool
+generic_provider_has_variable(AgeGenericProvider *provider, int variable)
+{
+    if (provider->var1 == variable)
+        return true;
+    return provider->kind == AGE_GENERIC_PROVIDER_EDGE &&
+        provider->var2 == variable;
+}
+
+static int64
+filter_generic_provider_on_variable(AgeGenericProvider *provider,
+                                    int variable,
+                                    const AgeGenericDomain *domain)
+{
+    int read_index;
+    int write_index = 0;
+    int old_count = provider->row_count;
+    bool use_key2 = false;
+
+    if (provider->var1 == variable)
+        use_key2 = false;
+    else if (provider->kind == AGE_GENERIC_PROVIDER_EDGE &&
+             provider->var2 == variable)
+        use_key2 = true;
+    else
+        return 0;
+
+    for (read_index = 0; read_index < old_count; read_index++)
+    {
+        AgeGenericRow *row = &provider->rows[read_index];
+        graphid key = use_key2 ? row->key2 : row->key1;
+
+        if (!generic_domain_contains(domain, key))
+            continue;
+        if (write_index != read_index)
+            provider->rows[write_index] = *row;
+        write_index++;
+    }
+    provider->row_count = write_index;
+    provider->cached_key1_valid = false;
+    return (int64)old_count - write_index;
+}
+
+static bool *
+build_generic_cycle_core_variables(AgeGenericJoinState *state,
+                                   MemoryContext context, bool *has_core)
+{
+    bool *core_variables;
+    bool *edge_alive;
+    int *degree;
+    bool changed;
+    int provider_index;
+    int variable;
+
+    core_variables = MemoryContextAllocZero(
+        context, sizeof(bool) * state->variable_count);
+    edge_alive = MemoryContextAllocZero(
+        context, sizeof(bool) * state->provider_count);
+    degree = MemoryContextAllocZero(
+        context, sizeof(int) * state->variable_count);
+
+    for (provider_index = 0;
+         provider_index < state->provider_count;
+         provider_index++)
+    {
+        AgeGenericProvider *provider = &state->providers[provider_index];
+
+        if (provider->kind != AGE_GENERIC_PROVIDER_EDGE)
+            continue;
+        edge_alive[provider_index] = true;
+        degree[provider->var1]++;
+        degree[provider->var2]++;
+    }
+
+    do
+    {
+        changed = false;
+        for (provider_index = 0;
+             provider_index < state->provider_count;
+             provider_index++)
+        {
+            AgeGenericProvider *provider = &state->providers[provider_index];
+
+            if (!edge_alive[provider_index])
+                continue;
+            if (degree[provider->var1] > 1 && degree[provider->var2] > 1)
+                continue;
+            edge_alive[provider_index] = false;
+            degree[provider->var1]--;
+            degree[provider->var2]--;
+            changed = true;
+        }
+    } while (changed);
+
+    *has_core = false;
+    for (variable = 0; variable < state->variable_count; variable++)
+    {
+        if (degree[variable] >= 2)
+        {
+            core_variables[variable] = true;
+            *has_core = true;
+        }
+    }
+    return core_variables;
+}
+
+static bool
+generic_leaf_tail_edge_info(AgeGenericProvider *provider,
+                            const bool *core_variables,
+                            int *separator_variable, int *tail_variable,
+                            bool *separator_is_key1)
+{
+    bool key1_is_core;
+    bool key2_is_core;
+
+    if (provider->kind != AGE_GENERIC_PROVIDER_EDGE)
+        return false;
+
+    key1_is_core = core_variables[provider->var1];
+    key2_is_core = core_variables[provider->var2];
+    if (key1_is_core == key2_is_core)
+        return false;
+
+    if (key1_is_core)
+    {
+        *separator_variable = provider->var1;
+        *tail_variable = provider->var2;
+        *separator_is_key1 = true;
+    }
+    else
+    {
+        *separator_variable = provider->var2;
+        *tail_variable = provider->var1;
+        *separator_is_key1 = false;
+    }
+    return true;
+}
+
+static bool
+generic_provider_is_cyclic_core(AgeGenericProvider *provider,
+                                const bool *core_variables)
+{
+    if (provider->kind == AGE_GENERIC_PROVIDER_VERTEX)
+        return core_variables[provider->var1];
+    return core_variables[provider->var1] && core_variables[provider->var2];
+}
+
+static graphid *
+build_generic_tail_separator_domain(AgeGenericJoinState *state,
+                                    AgeGenericProvider *provider,
+                                    int tail_variable,
+                                    bool separator_is_key1,
+                                    const AgeGenericDomain *local_domains,
+                                    MemoryContext context, bool use_scratch,
+                                    int *domain_count)
+{
+    graphid *domain;
+    int row_index;
+    int count = 0;
+    MemoryContext oldcontext;
+
+    *domain_count = 0;
+    if (provider->row_count <= 0 ||
+        local_domains[tail_variable].count <= 0)
+    {
+        return NULL;
+    }
+
+    if (use_scratch)
+    {
+        domain = ensure_generic_reduction_scratch_capacity(
+            state, provider->row_count);
+    }
+    else
+    {
+        oldcontext = MemoryContextSwitchTo(context);
+        domain = palloc(sizeof(graphid) * provider->row_count);
+        MemoryContextSwitchTo(oldcontext);
+    }
+    for (row_index = 0; row_index < provider->row_count; row_index++)
+    {
+        AgeGenericRow *row = &provider->rows[row_index];
+        graphid separator_key = separator_is_key1 ? row->key1 : row->key2;
+        graphid tail_key = separator_is_key1 ? row->key2 : row->key1;
+
+        if (generic_domain_contains(&local_domains[tail_variable], tail_key))
+            domain[count++] = separator_key;
+    }
+    if (count <= 0)
+        return NULL;
+    if (count > 1)
+        qsort(domain, count, sizeof(graphid), compare_generic_graphids);
+    for (row_index = 0; row_index < count; row_index++)
+    {
+        if (*domain_count == 0 ||
+            domain[row_index] != domain[*domain_count - 1])
+        {
+            domain[(*domain_count)++] = domain[row_index];
+        }
+    }
+    return domain;
+}
+
+static void
+reduce_generic_leaf_tail_separators(AgeGenericJoinState *state,
+                                    MemoryContext reduction_context)
+{
+    bool has_core = false;
+    bool found_leaf_tail = false;
+    bool *core_variables;
+    AgeGenericDomain *local_domains;
+    AgeGenericSeparatorDomain *separator_domains;
+    int provider_index;
+    int variable;
+
+    core_variables = build_generic_cycle_core_variables(
+        state, reduction_context, &has_core);
+    if (!has_core)
+        return;
+
+    local_domains = MemoryContextAllocZero(
+        reduction_context,
+        sizeof(AgeGenericDomain) * state->variable_count);
+    if (!build_generic_reduction_domains(state, reduction_context,
+                                         local_domains))
+    {
+        state->exhausted = true;
+        return;
+    }
+
+    separator_domains = MemoryContextAllocZero(
+        reduction_context,
+        sizeof(AgeGenericSeparatorDomain) * state->variable_count);
+    for (provider_index = 0;
+         provider_index < state->provider_count;
+         provider_index++)
+    {
+        AgeGenericProvider *provider = &state->providers[provider_index];
+        graphid *separator_domain;
+        int separator_domain_count;
+        int separator_variable;
+        int tail_variable;
+        bool separator_is_key1;
+
+        if (!generic_leaf_tail_edge_info(provider, core_variables,
+                                         &separator_variable,
+                                         &tail_variable,
+                                         &separator_is_key1))
+        {
+            continue;
+        }
+
+        found_leaf_tail = true;
+        increment_generic_counter(&state->separator_leaf_tail_providers);
+        separator_domain = build_generic_tail_separator_domain(
+            state, provider, tail_variable, separator_is_key1, local_domains,
+            reduction_context,
+            separator_domains[separator_variable].initialized,
+            &separator_domain_count);
+        if (separator_domain_count <= 0)
+        {
+            state->exhausted = true;
+            break;
+        }
+
+        if (!separator_domains[separator_variable].initialized)
+        {
+            separator_domains[separator_variable].keys = separator_domain;
+            separator_domains[separator_variable].count =
+                separator_domain_count;
+            separator_domains[separator_variable].initialized = true;
+        }
+        else
+        {
+            separator_domains[separator_variable].count =
+                intersect_generic_domains(
+                    separator_domains[separator_variable].keys,
+                    separator_domains[separator_variable].count,
+                    separator_domain, separator_domain_count);
+            if (separator_domains[separator_variable].count <= 0)
+            {
+                state->exhausted = true;
+                break;
+            }
+        }
+    }
+
+    if (!found_leaf_tail)
+        return;
+
+    increment_generic_counter(&state->separator_reduction_passes);
+    if (state->exhausted)
+        return;
+
+    for (variable = 0; variable < state->variable_count; variable++)
+    {
+        AgeGenericDomain separator_domain;
+
+        if (!separator_domains[variable].initialized)
+            continue;
+        separator_domain.keys = separator_domains[variable].keys;
+        separator_domain.count = separator_domains[variable].count;
+        add_generic_counter(&state->separator_domain_keys,
+                            separator_domain.count);
+
+        for (provider_index = 0;
+             provider_index < state->provider_count;
+             provider_index++)
+        {
+            AgeGenericProvider *provider = &state->providers[provider_index];
+            int64 rows_removed;
+            int separator_variable;
+            int tail_variable;
+            bool separator_is_key1;
+
+            if (!generic_provider_has_variable(provider, variable))
+                continue;
+
+            rows_removed = filter_generic_provider_on_variable(
+                provider, variable, &separator_domain);
+            if (generic_provider_is_cyclic_core(provider, core_variables))
+            {
+                add_generic_counter(
+                    &state->separator_cyclic_core_rows_removed,
+                    rows_removed);
+            }
+            else if (generic_leaf_tail_edge_info(provider, core_variables,
+                                                 &separator_variable,
+                                                 &tail_variable,
+                                                 &separator_is_key1))
+            {
+                add_generic_counter(
+                    &state->separator_leaf_tail_rows_removed,
+                    rows_removed);
+            }
+            add_generic_counter(&state->semijoin_rows_removed,
+                                rows_removed);
+            if (provider->row_count <= 0)
+            {
+                state->exhausted = true;
+                return;
+            }
+        }
+    }
 }
 
 /*
@@ -686,6 +1464,19 @@ reduce_generic_providers(AgeGenericJoinState *state)
         "AGE Generic Join semijoin reduction", ALLOCSET_SMALL_SIZES);
     state->semijoin_provider_rows_after = 0;
     state->semijoin_final_domain_keys = 0;
+    reduce_generic_leaf_tail_separators(state, reduction_context);
+    state->peak_memory = Max(
+        state->peak_memory,
+        MemoryContextMemAllocated(state->data_context, true) +
+        MemoryContextMemAllocated(reduction_context, true));
+    if (state->exhausted)
+    {
+        state->semijoin_provider_rows_after =
+            generic_provider_row_total(state);
+        state->semijoin_final_domain_keys = 0;
+        MemoryContextDelete(reduction_context);
+        return;
+    }
     for (pass = 0; pass < max_passes; pass++)
     {
         AgeGenericDomain *domains;
@@ -744,46 +1535,43 @@ static void
 build_generic_level(AgeGenericJoinState *state, int depth)
 {
     AgeGenericLevel *level = &state->levels[depth];
-    graphid *candidates = NULL;
     int candidate_count = 0;
     int provider_index;
     bool found_provider = false;
 
     MemoryContextReset(level->context);
+    level->candidates = NULL;
     for (provider_index = 0;
          provider_index < state->provider_count;
          provider_index++)
     {
         AgeGenericProvider *provider = &state->providers[provider_index];
-        graphid *domain;
-        int domain_count;
+        AgeGenericDomainView view;
 
         if (provider->var1 != depth && provider->var2 != depth)
             continue;
-        domain = provider_domain(state, provider, depth, level->context,
-                                 &domain_count);
         found_provider = true;
-        if (domain_count == 0)
+        if (!build_generic_domain_view(state, provider, depth, &view))
         {
             candidate_count = 0;
-            candidates = NULL;
             break;
         }
-        if (candidates == NULL)
+        if (level->candidates == NULL)
         {
-            candidates = domain;
-            candidate_count = domain_count;
+            candidate_count = copy_generic_domain_view(state, level, &view);
+            level->candidates = level->candidate_buffer;
         }
         else
         {
-            candidate_count = intersect_generic_domains(
-                candidates, candidate_count, domain, domain_count);
+            candidate_count = intersect_generic_candidates_with_view(
+                state, level->candidates, candidate_count, &view);
             if (candidate_count == 0)
                 break;
         }
     }
 
-    level->candidates = found_provider ? candidates : NULL;
+    if (!found_provider)
+        level->candidates = NULL;
     level->candidate_count = found_provider ? candidate_count : 0;
     level->next_candidate = 0;
     level->initialized = true;
@@ -818,15 +1606,14 @@ prepare_generic_bags(AgeGenericJoinState *state)
 
         if (provider->kind == AGE_GENERIC_PROVIDER_VERTEX)
         {
-            start = lower_bound_key1(provider, key1);
-            end = upper_bound_key1(provider, key1);
+            generic_provider_key1_range(state, provider, key1, &start, &end);
         }
         else
         {
             graphid key2 = state->bindings[provider->var2];
 
-            start = lower_bound_pair(provider, key1, key2);
-            end = upper_bound_pair(provider, key1, key2);
+            start = lower_bound_pair(state, provider, key1, key2);
+            end = upper_bound_pair(state, provider, key1, key2);
         }
         provider->bag_start = start;
         provider->bag_count = end - start;
@@ -1004,19 +1791,61 @@ materialize_generic_combination(AgeGenericJoinState *state)
             state->combination_indexes[provider_index]];
         int attr_index;
 
-        ExecStoreMinimalTuple(row->tuple, provider->tuple_slot, false);
-        slot_getallattrs(provider->tuple_slot);
-        for (attr_index = 0;
-             attr_index < provider->tuple_slot->tts_tupleDescriptor->natts;
-             attr_index++)
+        if (provider->key_only_output)
         {
-            if (raw_index >= raw_slot->tts_tupleDescriptor->natts)
-                elog(ERROR, "AGE Generic Join raw tuple width overflow");
-            raw_slot->tts_values[raw_index] =
-                provider->tuple_slot->tts_values[attr_index];
-            raw_slot->tts_isnull[raw_index] =
-                provider->tuple_slot->tts_isnull[attr_index];
-            raw_index++;
+            for (attr_index = 0; attr_index < provider->output_width;
+                 attr_index++)
+            {
+                if (raw_index >= raw_slot->tts_tupleDescriptor->natts)
+                    elog(ERROR, "AGE Generic Join raw tuple width overflow");
+                switch (provider->output_sources[attr_index])
+                {
+                case AGE_GENERIC_OUTPUT_SOURCE_KEY1:
+                    raw_slot->tts_values[raw_index] =
+                        GRAPHID_GET_DATUM(row->key1);
+                    raw_slot->tts_isnull[raw_index] = false;
+                    break;
+                case AGE_GENERIC_OUTPUT_SOURCE_KEY2:
+                    raw_slot->tts_values[raw_index] =
+                        GRAPHID_GET_DATUM(row->key2);
+                    raw_slot->tts_isnull[raw_index] = false;
+                    break;
+                case AGE_GENERIC_OUTPUT_SOURCE_EDGE_ID:
+                    if (row->edge_id_valid)
+                    {
+                        raw_slot->tts_values[raw_index] =
+                            GRAPHID_GET_DATUM(row->edge_id);
+                        raw_slot->tts_isnull[raw_index] = false;
+                    }
+                    else
+                    {
+                        raw_slot->tts_values[raw_index] = (Datum)0;
+                        raw_slot->tts_isnull[raw_index] = true;
+                    }
+                    break;
+                default:
+                    elog(ERROR, "invalid AGE Generic Join key-only output");
+                }
+                raw_index++;
+            }
+        }
+        else
+        {
+            if (row->tuple == NULL || provider->tuple_slot == NULL)
+                elog(ERROR, "invalid AGE Generic Join materialized tuple");
+            ExecStoreMinimalTuple(row->tuple, provider->tuple_slot, false);
+            slot_getallattrs(provider->tuple_slot);
+            for (attr_index = 0; attr_index < provider->output_width;
+                 attr_index++)
+            {
+                if (raw_index >= raw_slot->tts_tupleDescriptor->natts)
+                    elog(ERROR, "AGE Generic Join raw tuple width overflow");
+                raw_slot->tts_values[raw_index] =
+                    provider->tuple_slot->tts_values[attr_index];
+                raw_slot->tts_isnull[raw_index] =
+                    provider->tuple_slot->tts_isnull[attr_index];
+                raw_index++;
+            }
         }
     }
     if (raw_index != raw_slot->tts_tupleDescriptor->natts)
@@ -1090,6 +1919,80 @@ initialize_generic_uniqueness_groups(AgeGenericJoinState *state,
     }
 }
 
+static bool
+generic_provider_output_source(AgeGenericProvider *provider, AttrNumber attno,
+                               Oid typid, AgeGenericOutputSource *source)
+{
+    if (typid != GRAPHIDOID)
+        return false;
+    if (attno == provider->key1_attno)
+    {
+        *source = AGE_GENERIC_OUTPUT_SOURCE_KEY1;
+        return true;
+    }
+    if (provider->kind == AGE_GENERIC_PROVIDER_EDGE &&
+        attno == provider->key2_attno)
+    {
+        *source = AGE_GENERIC_OUTPUT_SOURCE_KEY2;
+        return true;
+    }
+    if (provider->kind == AGE_GENERIC_PROVIDER_EDGE &&
+        attno == provider->edge_id_attno)
+    {
+        *source = AGE_GENERIC_OUTPUT_SOURCE_EDGE_ID;
+        return true;
+    }
+    return false;
+}
+
+static void
+initialize_generic_provider_output(AgeGenericProvider *provider,
+                                   TupleDesc tuple_desc, EState *estate)
+{
+    MemoryContext oldcontext;
+    int attr_index;
+
+    if (tuple_desc->natts <= 0)
+        elog(ERROR, "AGE Generic Join provider has no output columns");
+    if ((Size)tuple_desc->natts >
+        MaxAllocSize / sizeof(AgeGenericOutputSource))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("AGE Generic Join provider output is too wide")));
+    }
+
+    provider->output_width = tuple_desc->natts;
+    provider->key_only_output = true;
+
+    oldcontext = MemoryContextSwitchTo(estate->es_query_cxt);
+    provider->output_sources =
+        palloc0(sizeof(AgeGenericOutputSource) * provider->output_width);
+    MemoryContextSwitchTo(oldcontext);
+
+    for (attr_index = 0; attr_index < provider->output_width; attr_index++)
+    {
+        Form_pg_attribute attr = TupleDescAttr(tuple_desc, attr_index);
+        AttrNumber attno = (AttrNumber)(attr_index + 1);
+        AgeGenericOutputSource source = AGE_GENERIC_OUTPUT_SOURCE_NONE;
+
+        if (attr->attisdropped ||
+            !generic_provider_output_source(provider, attno, attr->atttypid,
+                                            &source))
+        {
+            provider->key_only_output = false;
+            break;
+        }
+        provider->output_sources[attr_index] = source;
+    }
+
+    if (!provider->key_only_output)
+    {
+        provider->tuple_slot = ExecInitExtraTupleSlot(
+            estate, tuple_desc, &TTSOpsMinimalTuple);
+    }
+}
+
 static void
 initialize_generic_provider(AgeGenericJoinState *state,
                             AgeGenericProvider *provider,
@@ -1131,8 +2034,7 @@ initialize_generic_provider(AgeGenericJoinState *state,
         elog(ERROR, "invalid AGE Generic Join edge provider");
     }
 
-    provider->tuple_slot = ExecInitExtraTupleSlot(
-        estate, tuple_desc, &TTSOpsMinimalTuple);
+    initialize_generic_provider_output(provider, tuple_desc, estate);
 }
 
 static void
@@ -1219,11 +2121,18 @@ reset_age_generic_join_state(AgeGenericJoinState *state)
         provider->row_capacity = 0;
         provider->bag_start = 0;
         provider->bag_count = 0;
+        provider->cached_key1_valid = false;
         state->combination_indexes[provider_index] = -1;
         state->selected_edge_id_valid[provider_index] = false;
     }
+    state->reduction_scratch.keys = NULL;
+    state->reduction_scratch.capacity = 0;
     for (depth = 0; depth < state->variable_count; depth++)
+    {
+        state->levels[depth].candidate_buffer = NULL;
+        state->levels[depth].candidate_capacity = 0;
         reset_generic_level(state, depth);
+    }
     state->search_started = false;
     state->binding_ready = false;
     state->combination_started = false;
@@ -1293,7 +2202,7 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
 
     (void)ancestors;
     ExplainPropertyText("Generic Join Algorithm",
-                        "trie-ordered variable DFS with delayed edge bags",
+                        "lazy domain views with vectorized intersections and delayed edge bags",
                         es);
     ExplainPropertyText("Variable Order", variable_order, es);
     ExplainPropertyInteger("Variable Count", NULL, state->variable_count, es);
@@ -1308,6 +2217,8 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
 
         ExplainPropertyInteger("Provider Rows Materialized", NULL,
                                state->rows_materialized, es);
+        ExplainPropertyInteger("Provider Tuples Materialized", NULL,
+                               state->tuples_materialized, es);
         ExplainPropertyInteger("Semijoin Reduction Passes", NULL,
                                state->semijoin_passes, es);
         ExplainPropertyInteger("Semijoin Rows Removed", NULL,
@@ -1316,6 +2227,16 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                                state->semijoin_provider_rows_after, es);
         ExplainPropertyInteger("Semijoin Final Domain Keys", NULL,
                                state->semijoin_final_domain_keys, es);
+        ExplainPropertyInteger("GHD Separator Reduction Passes", NULL,
+                               state->separator_reduction_passes, es);
+        ExplainPropertyInteger("GHD Leaf Tail Providers", NULL,
+                               state->separator_leaf_tail_providers, es);
+        ExplainPropertyInteger("GHD Separator Domain Keys", NULL,
+                               state->separator_domain_keys, es);
+        ExplainPropertyInteger("GHD Leaf Tail Rows Removed", NULL,
+                               state->separator_leaf_tail_rows_removed, es);
+        ExplainPropertyInteger("GHD Cyclic Core Rows Removed", NULL,
+                               state->separator_cyclic_core_rows_removed, es);
         ExplainPropertyInteger("Complete Bindings", NULL,
                                state->bindings_completed, es);
         ExplainPropertyInteger("Candidate Flat Rows", NULL,
@@ -1324,6 +2245,30 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                                state->candidate_combinations, es);
         ExplainPropertyInteger("Flat Rows Avoided", NULL,
                                flat_rows_avoided, es);
+        ExplainPropertyInteger("Lazy Domain Views", NULL,
+                               state->lazy_domain_views, es);
+        ExplainPropertyInteger("Lazy Domain Keys Scanned", NULL,
+                               state->lazy_domain_keys_scanned, es);
+        ExplainPropertyInteger("Domain Scratch Allocations", NULL,
+                               state->lazy_domain_scratch_allocations, es);
+        ExplainPropertyInteger("Domain Scratch Reuses", NULL,
+                               state->lazy_domain_scratch_reuses, es);
+        ExplainPropertyInteger("Prefix Range Builds", NULL,
+                               state->lazy_prefix_range_builds, es);
+        ExplainPropertyInteger("Prefix Range Reuses", NULL,
+                               state->lazy_prefix_range_reuses, es);
+        ExplainPropertyInteger("Reduction Scratch Allocations", NULL,
+                               state->reduction_scratch_allocations, es);
+        ExplainPropertyInteger("Reduction Scratch Reuses", NULL,
+                               state->reduction_scratch_reuses, es);
+        ExplainPropertyInteger("Vector Intersection Merge Calls", NULL,
+                               state->vector_intersection_merge_calls, es);
+        ExplainPropertyInteger("Vector Intersection Galloping Calls", NULL,
+                               state->vector_intersection_galloping_calls,
+                               es);
+        ExplainPropertyInteger("Vector Intersection Galloping Steps", NULL,
+                               state->vector_intersection_galloping_steps,
+                               es);
         ExplainPropertyInteger("Uniqueness Constraint Groups", NULL,
                                state->uniqueness_group_count, es);
         ExplainPropertyInteger("Uniqueness Rejects", NULL,
@@ -1332,6 +2277,8 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
         ExplainPropertyInteger("Rescans", NULL, state->rescans, es);
         ExplainPropertyInteger("Peak Generic Join Memory", "bytes",
                                (int64)state->peak_memory, es);
+        ExplainPropertyInteger("Spill Bytes", "bytes",
+                               state->spill_bytes, es);
     }
     pfree(variable_order);
 }
