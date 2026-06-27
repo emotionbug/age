@@ -181,6 +181,8 @@ typedef enum AgeGenericPathPrivateField
     AGE_GENERIC_PATH_PRIVATE_PROVIDER_DESCS,
     AGE_GENERIC_PATH_PRIVATE_RISK_ADJUSTED,
     AGE_GENERIC_PATH_PRIVATE_REDUCTION_DESC,
+    AGE_GENERIC_PATH_PRIVATE_CONSUMER,
+    AGE_GENERIC_PATH_PRIVATE_OUTPUT_TYPE,
     AGE_GENERIC_PATH_PRIVATE_COUNT
 } AgeGenericPathPrivateField;
 
@@ -325,11 +327,15 @@ static List *make_generic_ghd_bag_desc(int id, AgeGraphJoinGHDBagKind kind,
 static List *make_generic_ghd_separator_desc(
     int id, int parent_bag_id, int child_bag_id, int separator_variable,
     int tail_variable, int provider_index, bool separator_is_key1);
+static List *make_generic_semijoin_step_desc(
+    int id, AgeGenericSemijoinStepPhase phase, int provider_index,
+    int from_variable, int to_variable, int key_variable, bool key_is_key1);
 static bool make_generic_ghd_metadata(
     const AgeGenericHypergraph *hypergraph, const bool *core_variables,
     List **ghd_bags, List **ghd_separators);
-static List *make_generic_leaf_peel_order(
-    const AgeGenericHypergraph *hypergraph);
+static bool make_generic_leaf_peel_plan(
+    const AgeGenericHypergraph *hypergraph, List **order_edges,
+    List **semijoin_steps);
 static List *make_generic_reduction_desc(
     const AgeGenericHypergraph *hypergraph,
     const AgeGraphJoinMatchComponent *component);
@@ -353,6 +359,7 @@ static Path *cheapest_generic_competing_path(RelOptInfo *joinrel);
 static Plan *plan_age_generic_join_path(
     PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tlist,
     List *clauses, List *custom_plans);
+static int generic_consumer_first_scan_resno(int consumer_kind);
 
 static void add_wcoj_join_path(PlannerInfo *root, RelOptInfo *joinrel,
                                RelOptInfo *outerrel, RelOptInfo *innerrel,
@@ -467,6 +474,8 @@ static void add_adjacency_count_paths(PlannerInfo *root,
                                       RelOptInfo *output_rel);
 static void add_wcoj_count_paths(PlannerInfo *root,
                                  RelOptInfo *output_rel);
+static void add_generic_count_paths(PlannerInfo *root,
+                                    RelOptInfo *output_rel);
 static void add_wcoj_distinct_key_paths(PlannerInfo *root,
                                         RelOptInfo *output_rel);
 static void add_wcoj_limit_row_goal_paths(PlannerInfo *root,
@@ -483,6 +492,9 @@ static CustomPath *make_adjacency_count_path(PlannerInfo *root,
 static CustomPath *make_wcoj_count_path(PlannerInfo *root,
                                         RelOptInfo *output_rel,
                                         AggPath *agg_path);
+static CustomPath *make_generic_count_path(PlannerInfo *root,
+                                           RelOptInfo *output_rel,
+                                           AggPath *agg_path);
 static CustomPath *make_wcoj_distinct_key_path(PlannerInfo *root,
                                                RelOptInfo *output_rel,
                                                Path *distinct_path);
@@ -510,6 +522,7 @@ static int wcoj_count_consumer_kind(PathTarget *target,
 static Aggref *wcoj_count_target_aggref(PathTarget *target,
                                         Oid *output_type);
 static bool is_count_aggref(Aggref *aggref);
+static bool is_count_key_aggref(Aggref *aggref, CustomPath *wcoj_path);
 static bool is_count_distinct_key_aggref(Aggref *aggref,
                                          CustomPath *wcoj_path);
 static bool is_group_count_key_target(PathTarget *target,
@@ -540,6 +553,9 @@ static bool wcoj_count_clause_is_key_equality(CustomPath *wcoj_path,
 static bool wcoj_count_clause_is_edge_uniqueness(Node *clause);
 static bool wcoj_count_clause_is_provider_local(List *provider_descs,
                                                 Node *clause);
+static bool generic_count_restrictinfos_supported(CustomPath *generic_path);
+static bool generic_count_clause_is_key_equality(CustomPath *generic_path,
+                                                 Node *clause);
 static CustomPath *make_wcoj_sum_property_path(PlannerInfo *root,
                                                RelOptInfo *output_rel,
                                                AggPath *agg_path);
@@ -551,7 +567,8 @@ static bool is_group_sum_property_key_target(PathTarget *target,
                                              CustomPath *wcoj_path,
                                              Oid *output_type,
                                              Aggref **aggref);
-static bool is_age_sum_agtype_aggref(Aggref *aggref);
+static int wcoj_property_aggregate_consumer_kind(Aggref *aggref,
+                                                 bool grouped);
 static bool wcoj_sum_property_arg(Aggref *aggref, Index *edge_rti,
                                   Const **property_key);
 static bool wcoj_sum_property_prepare_direct(
@@ -3176,6 +3193,7 @@ make_generic_match_component(const AgeGenericHypergraph *hypergraph,
     AgeGraphJoinMatchComponent *component;
     List *component_ids = NIL;
     List *reduction_order_edges = NIL;
+    List *semijoin_steps = NIL;
     List *ghd_bags = NIL;
     List *ghd_separators = NIL;
     bool *core_variable_flags = NULL;
@@ -3224,9 +3242,14 @@ make_generic_match_component(const AgeGenericHypergraph *hypergraph,
             if (hypergraph->variables[index].degree > 1)
                 core_variables++;
         }
-        reduction_order_edges = make_generic_leaf_peel_order(hypergraph);
-        if (list_length(reduction_order_edges) != hypergraph->edge_count)
+        if (!make_generic_leaf_peel_plan(hypergraph,
+                                         &reduction_order_edges,
+                                         &semijoin_steps) ||
+            list_length(reduction_order_edges) != hypergraph->edge_count ||
+            list_length(semijoin_steps) != hypergraph->edge_count * 2)
+        {
             return NULL;
+        }
     }
 
     component = palloc0(sizeof(*component));
@@ -3234,6 +3257,7 @@ make_generic_match_component(const AgeGenericHypergraph *hypergraph,
     component->variable_rtis = copyObject(hypergraph->variable_rtis);
     component->component_ids = component_ids;
     component->reduction_order_edges = reduction_order_edges;
+    component->semijoin_steps = semijoin_steps;
     component->ghd_bags = ghd_bags;
     component->ghd_separators = ghd_separators;
     component->variable_count = hypergraph->variable_count;
@@ -3243,6 +3267,7 @@ make_generic_match_component(const AgeGenericHypergraph *hypergraph,
     component->tail_separator_count = tail_separators;
     component->reduction_order_edge_count =
         list_length(reduction_order_edges);
+    component->semijoin_step_count = list_length(semijoin_steps);
     component->ghd_bag_count = list_length(ghd_bags);
     component->ghd_separator_count = list_length(ghd_separators);
     if (!hypergraph->cyclic)
@@ -3287,6 +3312,7 @@ generic_match_component_matches_hypergraph(
         component->tail_separator_count == expected->tail_separator_count &&
         component->reduction_order_edge_count ==
         expected->reduction_order_edge_count &&
+        component->semijoin_step_count == expected->semijoin_step_count &&
         component->ghd_bag_count == expected->ghd_bag_count &&
         component->ghd_separator_count == expected->ghd_separator_count &&
         component->shape == expected->shape &&
@@ -3298,6 +3324,7 @@ generic_match_component_matches_hypergraph(
         equal(component->component_ids, expected->component_ids) &&
         equal(component->reduction_order_edges,
               expected->reduction_order_edges) &&
+        equal(component->semijoin_steps, expected->semijoin_steps) &&
         equal(component->ghd_bags, expected->ghd_bags) &&
         equal(component->ghd_separators, expected->ghd_separators);
 
@@ -3419,6 +3446,22 @@ make_generic_ghd_separator_desc(int id, int parent_bag_id, int child_bag_id,
     return desc;
 }
 
+static List *
+make_generic_semijoin_step_desc(int id, AgeGenericSemijoinStepPhase phase,
+                                int provider_index, int from_variable,
+                                int to_variable, int key_variable,
+                                bool key_is_key1)
+{
+    List *desc = list_make4(makeInteger(id), makeInteger(phase),
+                            makeInteger(provider_index),
+                            makeInteger(from_variable));
+
+    desc = lappend(desc, makeInteger(to_variable));
+    desc = lappend(desc, makeInteger(key_variable));
+    desc = lappend(desc, makeInteger(key_is_key1 ? 1 : 0));
+    return desc;
+}
+
 static bool
 make_generic_ghd_metadata(const AgeGenericHypergraph *hypergraph,
                           const bool *core_variables, List **ghd_bags,
@@ -3521,28 +3564,42 @@ make_generic_ghd_metadata(const AgeGenericHypergraph *hypergraph,
     return true;
 }
 
-static List *
-make_generic_leaf_peel_order(const AgeGenericHypergraph *hypergraph)
+static bool
+make_generic_leaf_peel_plan(const AgeGenericHypergraph *hypergraph,
+                            List **order_edges, List **semijoin_steps)
 {
     bool *edge_alive;
     int *degree;
     List *order = NIL;
+    List *steps = NIL;
+    int *peel_edge_indexes;
+    int *leaf_variables;
+    int *separator_variables;
+    int peel_count = 0;
+    int step_id = 0;
     int remaining_edges;
     int expected_edges;
     int index;
 
+    Assert(order_edges != NULL);
+    Assert(semijoin_steps != NULL);
+    *order_edges = NIL;
+    *semijoin_steps = NIL;
     if (hypergraph == NULL || hypergraph->variables == NULL ||
         hypergraph->edges == NULL || hypergraph->cyclic ||
         hypergraph->component_count <= 0 || hypergraph->variable_count < 2)
     {
-        return NIL;
+        return false;
     }
     expected_edges = hypergraph->variable_count - hypergraph->component_count;
     if (expected_edges <= 0 || hypergraph->edge_count != expected_edges)
-        return NIL;
+        return false;
 
     edge_alive = palloc(sizeof(bool) * hypergraph->edge_count);
     degree = palloc0(sizeof(int) * hypergraph->variable_count);
+    peel_edge_indexes = palloc(sizeof(int) * hypergraph->edge_count);
+    leaf_variables = palloc(sizeof(int) * hypergraph->edge_count);
+    separator_variables = palloc(sizeof(int) * hypergraph->edge_count);
     for (index = 0; index < hypergraph->edge_count; index++)
     {
         const AgeGenericHypergraphEdge *edge = &hypergraph->edges[index];
@@ -3554,7 +3611,10 @@ make_generic_leaf_peel_order(const AgeGenericHypergraph *hypergraph)
             list_free(order);
             pfree(edge_alive);
             pfree(degree);
-            return NIL;
+            pfree(peel_edge_indexes);
+            pfree(leaf_variables);
+            pfree(separator_variables);
+            return false;
         }
         edge_alive[index] = true;
         degree[edge->var1]++;
@@ -3583,20 +3643,74 @@ make_generic_leaf_peel_order(const AgeGenericHypergraph *hypergraph)
             list_free(order);
             pfree(edge_alive);
             pfree(degree);
-            return NIL;
+            pfree(peel_edge_indexes);
+            pfree(leaf_variables);
+            pfree(separator_variables);
+            return false;
         }
 
         edge_alive[peel_edge] = false;
-        degree[hypergraph->edges[peel_edge].var1]--;
-        degree[hypergraph->edges[peel_edge].var2]--;
+        if (degree[hypergraph->edges[peel_edge].var1] == 1)
+        {
+            leaf_variables[peel_count] =
+                hypergraph->edges[peel_edge].var1;
+            separator_variables[peel_count] =
+                hypergraph->edges[peel_edge].var2;
+        }
+        else
+        {
+            leaf_variables[peel_count] =
+                hypergraph->edges[peel_edge].var2;
+            separator_variables[peel_count] =
+                hypergraph->edges[peel_edge].var1;
+        }
+        peel_edge_indexes[peel_count++] = peel_edge;
         order = lappend(order,
                         makeInteger(hypergraph->variable_count + peel_edge));
+        degree[hypergraph->edges[peel_edge].var1]--;
+        degree[hypergraph->edges[peel_edge].var2]--;
         remaining_edges--;
+    }
+
+    for (index = peel_count - 1; index >= 0; index--)
+    {
+        int edge_index = peel_edge_indexes[index];
+        int provider_index = hypergraph->variable_count + edge_index;
+        int from_variable = leaf_variables[index];
+        int to_variable = separator_variables[index];
+        int key_variable = to_variable;
+
+        steps = lappend(
+            steps,
+            make_generic_semijoin_step_desc(
+                step_id++, AGE_GENERIC_SEMIJOIN_STEP_BOTTOM_UP,
+                provider_index, from_variable, to_variable, key_variable,
+                hypergraph->edges[edge_index].var1 == key_variable));
+    }
+    for (index = 0; index < peel_count; index++)
+    {
+        int edge_index = peel_edge_indexes[index];
+        int provider_index = hypergraph->variable_count + edge_index;
+        int from_variable = separator_variables[index];
+        int to_variable = leaf_variables[index];
+        int key_variable = to_variable;
+
+        steps = lappend(
+            steps,
+            make_generic_semijoin_step_desc(
+                step_id++, AGE_GENERIC_SEMIJOIN_STEP_TOP_DOWN,
+                provider_index, from_variable, to_variable, key_variable,
+                hypergraph->edges[edge_index].var1 == key_variable));
     }
 
     pfree(edge_alive);
     pfree(degree);
-    return order;
+    pfree(peel_edge_indexes);
+    pfree(leaf_variables);
+    pfree(separator_variables);
+    *order_edges = order;
+    *semijoin_steps = steps;
+    return true;
 }
 
 static List *
@@ -3610,6 +3724,7 @@ make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph,
     int ghd_bag_count = 0;
     int ghd_separator_count = 0;
     List *reduction_order_edges = NIL;
+    List *semijoin_steps = NIL;
     List *component_ids = NIL;
     List *ghd_separators = NIL;
     List *desc;
@@ -3660,13 +3775,18 @@ make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph,
                 component->reduction_order_edge_count !=
                 hypergraph->edge_count ||
                 list_length(component->reduction_order_edges) !=
-                hypergraph->edge_count)
+                hypergraph->edge_count ||
+                component->semijoin_step_count !=
+                hypergraph->edge_count * 2 ||
+                list_length(component->semijoin_steps) !=
+                component->semijoin_step_count)
             {
                 return NIL;
             }
             order_kind = AGE_GENERIC_REDUCTION_ORDER_LEAF_PEEL;
             reduction_order_edges =
                 copyObject(component->reduction_order_edges);
+            semijoin_steps = copyObject(component->semijoin_steps);
         }
     }
     else
@@ -3721,9 +3841,15 @@ make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph,
         }
         else
         {
-            reduction_order_edges = make_generic_leaf_peel_order(hypergraph);
-            if (list_length(reduction_order_edges) != hypergraph->edge_count)
+            if (!make_generic_leaf_peel_plan(hypergraph,
+                                             &reduction_order_edges,
+                                             &semijoin_steps) ||
+                list_length(reduction_order_edges) !=
+                hypergraph->edge_count ||
+                list_length(semijoin_steps) != hypergraph->edge_count * 2)
+            {
                 return NIL;
+            }
             order_kind = AGE_GENERIC_REDUCTION_ORDER_LEAF_PEEL;
         }
     }
@@ -3737,6 +3863,7 @@ make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph,
     desc = lappend(desc, makeInteger(ghd_bag_count));
     desc = lappend(desc, makeInteger(ghd_separator_count));
     desc = lappend(desc, ghd_separators);
+    desc = lappend(desc, semijoin_steps);
     return desc;
 }
 
@@ -4285,6 +4412,10 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     custom_path->custom_private = list_make4(
         copyObject(variable_rtis), copyObject(provider_descs),
         makeInteger(risk_adjusted), reduction_desc);
+    custom_path->custom_private = lappend(
+        custom_path->custom_private, makeInteger(AGE_GENERIC_CONSUMER_ROWS));
+    custom_path->custom_private = lappend(
+        custom_path->custom_private, make_wcoj_oid_const(InvalidOid));
     custom_path->methods = &age_generic_join_path_methods;
 
     add_path(joinrel, (Path *)custom_path);
@@ -4558,6 +4689,7 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
         }
         add_adjacency_count_paths(root, output_rel);
         add_wcoj_count_paths(root, output_rel);
+        add_generic_count_paths(root, output_rel);
         add_narrow_typed_collect_paths(root, output_rel);
         add_narrow_array_agg_property_paths(root, output_rel);
         return;
@@ -4662,6 +4794,33 @@ add_wcoj_count_paths(PlannerInfo *root, RelOptInfo *output_rel)
                                                         (AggPath *)path);
         if (consumer_path != NULL)
             new_paths = lappend(new_paths, consumer_path);
+    }
+
+    foreach(lc, new_paths)
+        add_path(output_rel, lfirst(lc));
+}
+
+static void
+add_generic_count_paths(PlannerInfo *root, RelOptInfo *output_rel)
+{
+    List *new_paths = NIL;
+    ListCell *lc;
+
+    if (root == NULL || output_rel == NULL || output_rel->pathlist == NIL)
+        return;
+
+    foreach(lc, output_rel->pathlist)
+    {
+        Path *path = (Path *)lfirst(lc);
+        CustomPath *count_path;
+
+        if (!IsA(path, AggPath))
+            continue;
+
+        count_path = make_generic_count_path(root, output_rel,
+                                             (AggPath *)path);
+        if (count_path != NULL)
+            new_paths = lappend(new_paths, count_path);
     }
 
     foreach(lc, new_paths)
@@ -5148,7 +5307,8 @@ wcoj_count_consumer_kind(PathTarget *target, CustomPath *wcoj_path,
     {
         return -1;
     }
-    if (is_plain_count_star_aggref(aggref))
+    if (is_plain_count_star_aggref(aggref) ||
+        is_count_key_aggref(aggref, wcoj_path))
         return AGE_WCOJ_CONSUMER_COUNT;
     if (is_count_distinct_key_aggref(aggref, wcoj_path))
         return AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY;
@@ -5188,7 +5348,8 @@ is_group_count_key_target(PathTarget *target, AggPath *agg_path,
         return false;
 
     aggref = wcoj_count_expr_aggref(count_expr, &count_type);
-    if (!is_plain_count_star_aggref(aggref) ||
+    if ((!is_plain_count_star_aggref(aggref) &&
+         !is_count_key_aggref(aggref, wcoj_path)) ||
         (count_type != INT8OID && count_type != AGTYPEOID))
     {
         return false;
@@ -5384,6 +5545,24 @@ is_wcoj_distinct_key_target(PathTarget *target, CustomPath *wcoj_path,
     if (output_type != NULL)
         *output_type = expr_type;
     return true;
+}
+
+static bool
+is_count_key_aggref(Aggref *aggref, CustomPath *wcoj_path)
+{
+    TargetEntry *arg_tle;
+
+    if (!is_count_aggref(aggref) || aggref->aggstar ||
+        list_length(aggref->args) != 1 || aggref->aggdistinct != NIL)
+    {
+        return false;
+    }
+
+    arg_tle = linitial_node(TargetEntry, aggref->args);
+    if (arg_tle == NULL || arg_tle->expr == NULL)
+        return false;
+
+    return wcoj_distinct_arg_matches_key(wcoj_path, (Node *)arg_tle->expr);
 }
 
 static bool
@@ -5774,6 +5953,115 @@ make_wcoj_count_path(PlannerInfo *root, RelOptInfo *output_rel,
 }
 
 static CustomPath *
+make_generic_count_path(PlannerInfo *root, RelOptInfo *output_rel,
+                        AggPath *agg_path)
+{
+    Path *generic_input_path;
+    CustomPath *generic_path;
+    CustomPath *count_path;
+    Aggref *aggref;
+
+    (void)root;
+
+    if (output_rel == NULL || agg_path == NULL ||
+        agg_path->aggsplit != AGGSPLIT_SIMPLE ||
+        agg_path->qual != NIL || agg_path->subpath == NULL ||
+        agg_path->groupClause != NIL ||
+        agg_path->aggstrategy != AGG_PLAIN)
+    {
+        return NULL;
+    }
+
+    aggref = wcoj_count_target_aggref(agg_path->path.pathtarget, NULL);
+    if (!is_plain_count_star_aggref(aggref))
+        return NULL;
+
+    generic_input_path = agg_path->subpath;
+    for (;;)
+    {
+        if (IsA(generic_input_path, SortPath))
+        {
+            SortPath *sort_path = (SortPath *)generic_input_path;
+
+            generic_input_path = sort_path->subpath;
+            continue;
+        }
+        if (IsA(generic_input_path, ProjectionPath))
+        {
+            ProjectionPath *projection_path =
+                (ProjectionPath *)generic_input_path;
+
+            generic_input_path = projection_path->subpath;
+            continue;
+        }
+        break;
+    }
+    if (generic_input_path == NULL || !IsA(generic_input_path, CustomPath))
+        return NULL;
+
+    generic_path = (CustomPath *)generic_input_path;
+    if (generic_path->methods != &age_generic_join_path_methods ||
+        generic_path->path.param_info != NULL ||
+        list_length(generic_path->custom_private) !=
+            AGE_GENERIC_PATH_PRIVATE_COUNT ||
+        intVal(list_nth(generic_path->custom_private,
+                        AGE_GENERIC_PATH_PRIVATE_CONSUMER)) !=
+            AGE_GENERIC_CONSUMER_ROWS ||
+        !generic_count_restrictinfos_supported(generic_path))
+    {
+        return NULL;
+    }
+
+    count_path = makeNode(CustomPath);
+    count_path->path.pathtype = T_CustomScan;
+    count_path->path.parent = output_rel;
+    count_path->path.pathtarget = agg_path->path.pathtarget;
+    count_path->path.param_info = NULL;
+    count_path->path.parallel_aware = false;
+    count_path->path.parallel_safe = false;
+    count_path->path.parallel_workers = 0;
+    count_path->path.pathkeys = NIL;
+    count_path->path.rows = 1.0;
+    count_path->path.disabled_nodes = generic_path->path.disabled_nodes;
+    count_path->path.startup_cost = generic_path->path.startup_cost;
+    count_path->path.total_cost = generic_path->path.total_cost +
+        cpu_operator_cost + cpu_tuple_cost;
+    if (count_path->path.total_cost >= agg_path->path.total_cost)
+    {
+        count_path->path.total_cost = Max(
+            count_path->path.startup_cost,
+            agg_path->path.total_cost - cpu_operator_cost);
+    }
+    count_path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+    count_path->custom_paths = list_copy(generic_path->custom_paths);
+    count_path->custom_restrictinfo = generic_path->custom_restrictinfo;
+    count_path->custom_private = list_make4(
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_VARIABLE_RTIS)),
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_PROVIDER_DESCS)),
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_RISK_ADJUSTED)),
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_REDUCTION_DESC)));
+    count_path->custom_private = lappend(
+        count_path->custom_private, makeInteger(AGE_GENERIC_CONSUMER_COUNT));
+    count_path->custom_private = lappend(
+        count_path->custom_private, make_wcoj_oid_const(INT8OID));
+    count_path->methods = &age_generic_join_path_methods;
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE Generic Join count path added: "
+                             "providers=%d source_cost=%.2f "
+                             "count_cost=%.2f",
+                             list_length(generic_path->custom_paths),
+                             generic_path->path.total_cost,
+                             count_path->path.total_cost)));
+
+    return count_path;
+}
+
+static CustomPath *
 make_wcoj_sum_property_path(PlannerInfo *root, RelOptInfo *output_rel,
                             AggPath *agg_path)
 {
@@ -5791,6 +6079,7 @@ make_wcoj_sum_property_path(PlannerInfo *root, RelOptInfo *output_rel,
     List *sum_desc;
     int provider_index;
     int consumer_kind;
+    bool avg_consumer;
     bool skipped_input_sort = false;
 
     if (root == NULL || output_rel == NULL || agg_path == NULL ||
@@ -5811,16 +6100,20 @@ make_wcoj_sum_property_path(PlannerInfo *root, RelOptInfo *output_rel,
         {
             return NULL;
         }
-        consumer_kind = AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY;
+        consumer_kind = wcoj_property_aggregate_consumer_kind(aggref, true);
     }
     else
     {
         aggref = wcoj_sum_property_target_aggref(agg_path->path.pathtarget,
                                                  &output_type);
-        consumer_kind = AGE_WCOJ_CONSUMER_SUM_PROPERTY;
+        consumer_kind = wcoj_property_aggregate_consumer_kind(aggref, false);
     }
-    if (!is_age_sum_agtype_aggref(aggref) ||
-        output_type != AGTYPEOID ||
+    avg_consumer = consumer_kind == AGE_WCOJ_CONSUMER_AVG_PROPERTY ||
+        consumer_kind == AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY;
+    if (consumer_kind < 0 ||
+        ((!avg_consumer && output_type != AGTYPEOID) ||
+         (avg_consumer &&
+          output_type != AGTYPEOID && output_type != FLOAT8OID)) ||
         !wcoj_sum_property_arg(aggref, &edge_rti, &property_key))
     {
         return NULL;
@@ -5847,7 +6140,10 @@ make_wcoj_sum_property_path(PlannerInfo *root, RelOptInfo *output_rel,
         break;
     }
     if ((skipped_input_sort &&
-         consumer_kind != AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY) ||
+         consumer_kind != AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY &&
+         consumer_kind != AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY &&
+         consumer_kind != AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY &&
+         consumer_kind != AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY) ||
         wcoj_input_path == NULL || !IsA(wcoj_input_path, CustomPath))
     {
         return NULL;
@@ -5864,10 +6160,15 @@ make_wcoj_sum_property_path(PlannerInfo *root, RelOptInfo *output_rel,
     {
         return NULL;
     }
-    if (consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY &&
-        !is_group_sum_property_key_target(agg_path->path.pathtarget,
-                                          agg_path, wcoj_path, &output_type,
-                                          NULL))
+    if ((consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY) &&
+        (!is_group_sum_property_key_target(agg_path->path.pathtarget,
+                                           agg_path, wcoj_path, &output_type,
+                                           &aggref) ||
+         wcoj_property_aggregate_consumer_kind(aggref, true) !=
+         consumer_kind))
     {
         return NULL;
     }
@@ -5898,7 +6199,10 @@ make_wcoj_sum_property_path(PlannerInfo *root, RelOptInfo *output_rel,
     sum_path->path.parallel_workers = 0;
     sum_path->path.pathkeys = NIL;
     sum_path->path.rows =
-        consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY ?
+        (consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY) ?
         Max(1.0, agg_path->path.rows) : 1.0;
     sum_path->path.disabled_nodes = wcoj_path->path.disabled_nodes;
     sum_path->path.startup_cost = wcoj_path->path.startup_cost;
@@ -5919,7 +6223,7 @@ make_wcoj_sum_property_path(PlannerInfo *root, RelOptInfo *output_rel,
     sum_path->custom_private = lappend(
         sum_path->custom_private, makeInteger(consumer_kind));
     sum_path->custom_private = lappend(
-        sum_path->custom_private, make_wcoj_oid_const(AGTYPEOID));
+        sum_path->custom_private, make_wcoj_oid_const(output_type));
     sum_path->custom_private = lappend(
         sum_path->custom_private, make_int8_const(0));
     sum_path->custom_private = lappend(
@@ -5928,9 +6232,9 @@ make_wcoj_sum_property_path(PlannerInfo *root, RelOptInfo *output_rel,
     sum_path->methods = &age_wcoj_join_path_methods;
 
     ereport(DEBUG2,
-            (errmsg_internal("AGE WCOJ sum-property path added: sources=%d "
-                             "provider=%d source_cost=%.2f sum_cost=%.2f "
-                             "consumer=%d",
+            (errmsg_internal("AGE WCOJ property aggregate path added: "
+                             "sources=%d provider=%d source_cost=%.2f "
+                             "aggregate_cost=%.2f consumer=%d",
                              list_length(paths), provider_index + 1,
                              wcoj_path->path.total_cost,
                              sum_path->path.total_cost, consumer_kind)));
@@ -5953,14 +6257,24 @@ wcoj_sum_property_target_aggref(PathTarget *target, Oid *output_type)
 static Aggref *
 wcoj_sum_property_expr_aggref(Node *expr, Oid *output_type)
 {
+    CypherScalarFinalHandoff handoff;
+
     if (output_type != NULL)
         *output_type = InvalidOid;
+    if (expr != NULL && output_type != NULL)
+        *output_type = exprType(expr);
     expr = strip_implicit_coercions(expr);
     if (expr != NULL && IsA(expr, Aggref))
     {
-        if (output_type != NULL)
-            *output_type = exprType(expr);
         return castNode(Aggref, expr);
+    }
+
+    if (cypher_extract_scalar_final_handoff(expr, &handoff))
+    {
+        Node *scalar_expr = strip_implicit_coercions(handoff.scalar_expr);
+
+        if (scalar_expr != NULL && IsA(scalar_expr, Aggref))
+            return castNode(Aggref, scalar_expr);
     }
 
     return NULL;
@@ -5976,6 +6290,7 @@ is_group_sum_property_key_target(PathTarget *target, AggPath *agg_path,
     Node *sum_expr;
     Aggref *sum_aggref;
     Oid sum_type = InvalidOid;
+    int consumer_kind;
 
     if (output_type != NULL)
         *output_type = InvalidOid;
@@ -6005,7 +6320,12 @@ is_group_sum_property_key_target(PathTarget *target, AggPath *agg_path,
     }
 
     sum_aggref = wcoj_sum_property_expr_aggref(sum_expr, &sum_type);
-    if (!is_age_sum_agtype_aggref(sum_aggref) || sum_type != AGTYPEOID)
+    consumer_kind = wcoj_property_aggregate_consumer_kind(sum_aggref, true);
+    if (consumer_kind < 0 ||
+        ((consumer_kind != AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY &&
+          sum_type != AGTYPEOID) ||
+         (consumer_kind == AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY &&
+          sum_type != AGTYPEOID && sum_type != FLOAT8OID)))
         return false;
 
     if (output_type != NULL)
@@ -6015,28 +6335,51 @@ is_group_sum_property_key_target(PathTarget *target, AggPath *agg_path,
     return true;
 }
 
-static bool
-is_age_sum_agtype_aggref(Aggref *aggref)
+static int
+wcoj_property_aggregate_consumer_kind(Aggref *aggref, bool grouped)
 {
     char *func_name;
-    bool result;
+    int result = -1;
 
     if (aggref == NULL || aggref->aggdirectargs != NIL ||
         aggref->aggorder != NIL || aggref->aggdistinct != NIL ||
         aggref->aggfilter != NULL ||
         aggref->aggkind != AGGKIND_NORMAL || aggref->agglevelsup != 0 ||
-        aggref->aggtype != AGTYPEOID ||
-        list_length(aggref->aggargtypes) != 1 ||
-        linitial_oid(aggref->aggargtypes) != AGTYPEOID ||
         aggref->aggstar ||
         list_length(aggref->args) != 1 ||
         get_func_namespace(aggref->aggfnoid) != ag_catalog_namespace_id())
     {
-        return false;
+        return -1;
     }
 
     func_name = get_func_name(aggref->aggfnoid);
-    result = func_name != NULL && strcmp(func_name, "age_sum") == 0;
+    if (func_name != NULL)
+    {
+        if (strcmp(func_name, "age_sum") == 0 &&
+            aggref->aggtype == AGTYPEOID)
+        {
+            result = grouped ? AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY :
+                AGE_WCOJ_CONSUMER_SUM_PROPERTY;
+        }
+        else if (strcmp(func_name, "age_min") == 0 &&
+                 aggref->aggtype == AGTYPEOID)
+        {
+            result = grouped ? AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY :
+                AGE_WCOJ_CONSUMER_MIN_PROPERTY;
+        }
+        else if (strcmp(func_name, "age_max") == 0 &&
+                 aggref->aggtype == AGTYPEOID)
+        {
+            result = grouped ? AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY :
+                AGE_WCOJ_CONSUMER_MAX_PROPERTY;
+        }
+        else if (strcmp(func_name, "age_avg") == 0 &&
+                 aggref->aggtype == FLOAT8OID)
+        {
+            result = grouped ? AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY :
+                AGE_WCOJ_CONSUMER_AVG_PROPERTY;
+        }
+    }
     if (func_name != NULL)
         pfree(func_name);
     return result;
@@ -6057,7 +6400,7 @@ wcoj_sum_property_arg(Aggref *aggref, Index *edge_rti, Const **property_key)
         *edge_rti = 0;
     if (property_key != NULL)
         *property_key = NULL;
-    if (!is_age_sum_agtype_aggref(aggref))
+    if (wcoj_property_aggregate_consumer_kind(aggref, false) < 0)
         return false;
 
     arg_tle = linitial_node(TargetEntry, aggref->args);
@@ -6324,6 +6667,102 @@ wcoj_count_restrictinfos_supported(CustomPath *wcoj_path)
         }
     }
     return true;
+}
+
+static bool
+generic_count_restrictinfos_supported(CustomPath *generic_path)
+{
+    ListCell *lc;
+
+    if (generic_path == NULL ||
+        generic_path->methods != &age_generic_join_path_methods)
+    {
+        return false;
+    }
+
+    foreach(lc, generic_path->custom_restrictinfo)
+    {
+        RestrictInfo *rinfo;
+
+        if (!IsA(lfirst(lc), RestrictInfo))
+            return false;
+        rinfo = lfirst_node(RestrictInfo, lc);
+        if (rinfo->pseudoconstant || rinfo->clause == NULL)
+        {
+            return false;
+        }
+        if (rinfo->mergeopfamilies != NIL &&
+            generic_count_clause_is_key_equality(generic_path,
+                                                 (Node *)rinfo->clause))
+        {
+            continue;
+        }
+        if (wcoj_count_clause_is_edge_uniqueness((Node *)rinfo->clause))
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool
+generic_count_clause_is_key_equality(CustomPath *generic_path, Node *clause)
+{
+    OpExpr *op;
+    Node *left;
+    Node *right;
+    List *provider_descs;
+    ListCell *lc;
+    bool left_is_key = false;
+    bool right_is_key = false;
+
+    if (generic_path == NULL || clause == NULL || !IsA(clause, OpExpr) ||
+        list_length(generic_path->custom_private) !=
+            AGE_GENERIC_PATH_PRIVATE_COUNT)
+    {
+        return false;
+    }
+    op = castNode(OpExpr, clause);
+    if (list_length(op->args) != 2)
+        return false;
+
+    left = strip_implicit_coercions(linitial(op->args));
+    right = strip_implicit_coercions(lsecond(op->args));
+    provider_descs = list_nth(generic_path->custom_private,
+                              AGE_GENERIC_PATH_PRIVATE_PROVIDER_DESCS);
+    foreach(lc, provider_descs)
+    {
+        List *provider_desc = lfirst_node(List, lc);
+        Node *key1_expr;
+        Node *key2_expr;
+        int provider_kind;
+
+        if (list_length(provider_desc) != AGE_GENERIC_PATH_PROVIDER_COUNT)
+            return false;
+
+        provider_kind = intVal(list_nth(
+            provider_desc, AGE_GENERIC_PATH_PROVIDER_KIND));
+        key1_expr = strip_implicit_coercions(
+            list_nth(provider_desc, AGE_GENERIC_PATH_PROVIDER_KEY1_EXPR));
+        left_is_key = left_is_key || equal(left, key1_expr);
+        right_is_key = right_is_key || equal(right, key1_expr);
+
+        if (provider_kind == AGE_GENERIC_PROVIDER_EDGE)
+        {
+            key2_expr = strip_implicit_coercions(
+                list_nth(provider_desc,
+                         AGE_GENERIC_PATH_PROVIDER_KEY2_EXPR));
+            left_is_key = left_is_key || equal(left, key2_expr);
+            right_is_key = right_is_key || equal(right, key2_expr);
+        }
+        else if (provider_kind != AGE_GENERIC_PROVIDER_VERTEX)
+        {
+            return false;
+        }
+
+        if (left_is_key && right_is_key)
+            return true;
+    }
+    return false;
 }
 
 static bool
@@ -16369,8 +16808,7 @@ wcoj_count_scan_expr(PathTarget *target)
     if (aggref != NULL &&
         (is_plain_count_star_aggref(aggref) ||
          (is_count_aggref(aggref) && !aggref->aggstar &&
-          list_length(aggref->args) == 1 &&
-          aggref->aggdistinct != NIL)))
+          list_length(aggref->args) == 1)))
     {
         return (Expr *)copyObject(aggref);
     }
@@ -16393,8 +16831,8 @@ wcoj_sum_property_scan_expr(PathTarget *target)
     expr = list_length(target->exprs) == 1 ?
         linitial(target->exprs) : lsecond(target->exprs);
     aggref = wcoj_sum_property_expr_aggref(expr, NULL);
-    if (is_age_sum_agtype_aggref(aggref))
-        return (Expr *)copyObject(aggref);
+    if (wcoj_property_aggregate_consumer_kind(aggref, false) >= 0)
+        return (Expr *)copyObject(expr);
 
     elog(ERROR, "invalid AGE WCOJ sum-property scan target");
     return NULL;
@@ -16415,8 +16853,14 @@ wcoj_consumer_first_scan_resno(int consumer_kind)
     case AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY:
         return 3;
     case AGE_WCOJ_CONSUMER_SUM_PROPERTY:
+    case AGE_WCOJ_CONSUMER_MIN_PROPERTY:
+    case AGE_WCOJ_CONSUMER_MAX_PROPERTY:
+    case AGE_WCOJ_CONSUMER_AVG_PROPERTY:
         return 2;
     case AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY:
+    case AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY:
+    case AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY:
+    case AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY:
         return 3;
     case AGE_WCOJ_CONSUMER_EXISTS:
         return 2;
@@ -16425,14 +16869,29 @@ wcoj_consumer_first_scan_resno(int consumer_kind)
     return 1;
 }
 
+static int
+generic_consumer_first_scan_resno(int consumer_kind)
+{
+    switch (consumer_kind)
+    {
+    case AGE_GENERIC_CONSUMER_ROWS:
+        return 1;
+    case AGE_GENERIC_CONSUMER_COUNT:
+        return 2;
+    }
+    elog(ERROR, "invalid AGE Generic Join consumer kind %d", consumer_kind);
+    return 1;
+}
+
 static List *
 build_generic_custom_scan_tlist(List *custom_plans, List *provider_descs,
+                                int first_scan_resno,
                                 List **exec_provider_descs)
 {
     List *scan_tlist = NIL;
     ListCell *plan_cell;
     ListCell *desc_cell;
-    int scan_resno = 1;
+    int scan_resno = first_scan_resno;
 
     *exec_provider_descs = NIL;
     if (list_length(custom_plans) != list_length(provider_descs))
@@ -16520,6 +16979,9 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
     List *plan_tlist;
     List *uniqueness_groups;
     List *reduction_desc;
+    Const *output_type_const;
+    Oid output_type;
+    int consumer_kind;
 
     (void)root;
     (void)clauses;
@@ -16537,15 +16999,39 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
         best_path->custom_private, AGE_GENERIC_PATH_PRIVATE_PROVIDER_DESCS);
     reduction_desc = list_nth(
         best_path->custom_private, AGE_GENERIC_PATH_PRIVATE_REDUCTION_DESC);
+    consumer_kind = intVal(list_nth(
+        best_path->custom_private, AGE_GENERIC_PATH_PRIVATE_CONSUMER));
+    output_type_const = list_nth_node(
+        Const, best_path->custom_private,
+        AGE_GENERIC_PATH_PRIVATE_OUTPUT_TYPE);
     if (list_length(variable_rtis) < 3 ||
         list_length(provider_descs) != list_length(custom_plans) ||
-        list_length(reduction_desc) != AGE_GENERIC_REDUCTION_DESC_COUNT)
+        list_length(reduction_desc) != AGE_GENERIC_REDUCTION_DESC_COUNT ||
+        (consumer_kind != AGE_GENERIC_CONSUMER_ROWS &&
+         consumer_kind != AGE_GENERIC_CONSUMER_COUNT) ||
+        output_type_const->constisnull ||
+        output_type_const->consttype != OIDOID)
     {
         elog(ERROR, "invalid AGE Generic Join descriptor arity");
     }
+    output_type = DatumGetObjectId(output_type_const->constvalue);
+    if ((consumer_kind == AGE_GENERIC_CONSUMER_ROWS &&
+         OidIsValid(output_type)) ||
+        (consumer_kind == AGE_GENERIC_CONSUMER_COUNT &&
+         output_type != INT8OID && output_type != AGTYPEOID))
+    {
+        elog(ERROR, "invalid AGE Generic Join consumer descriptor");
+    }
 
     custom_scan_tlist = build_generic_custom_scan_tlist(
-        custom_plans, provider_descs, &exec_provider_descs);
+        custom_plans, provider_descs,
+        generic_consumer_first_scan_resno(consumer_kind),
+        &exec_provider_descs);
+    if (consumer_kind == AGE_GENERIC_CONSUMER_COUNT)
+    {
+        custom_scan_tlist = build_wcoj_count_custom_scan_tlist(
+            best_path->path.pathtarget, custom_scan_tlist);
+    }
     plan_tlist = tlist != NIL ? copyObject(tlist) :
         build_wcoj_plan_tlist(best_path->path.pathtarget);
     uniqueness_groups = build_edge_uniqueness_groups(
@@ -16560,8 +17046,8 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
     cs->scan.plan.parallel_safe = false;
     cs->scan.plan.async_capable = false;
     cs->scan.plan.targetlist = plan_tlist;
-    cs->scan.plan.qual = extract_actual_clauses(
-        best_path->custom_restrictinfo, false);
+    cs->scan.plan.qual = consumer_kind == AGE_GENERIC_CONSUMER_ROWS ?
+        extract_actual_clauses(best_path->custom_restrictinfo, false) : NIL;
     cs->scan.plan.lefttree = NULL;
     cs->scan.plan.righttree = NULL;
     cs->scan.scanrelid = 0;
@@ -16571,6 +17057,10 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
     cs->custom_private = list_make5(
         makeInteger(list_length(variable_rtis)), copyObject(variable_rtis),
         exec_provider_descs, uniqueness_groups, copyObject(reduction_desc));
+    cs->custom_private = lappend(cs->custom_private,
+                                 makeInteger(consumer_kind));
+    cs->custom_private = lappend(cs->custom_private,
+                                 copyObject(output_type_const));
     cs->custom_scan_tlist = custom_scan_tlist;
     cs->custom_relids = NULL;
     cs->methods = &age_generic_join_scan_methods;
@@ -16647,6 +17137,12 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
          consumer_kind != AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY &&
          consumer_kind != AGE_WCOJ_CONSUMER_SUM_PROPERTY &&
          consumer_kind != AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY &&
+         consumer_kind != AGE_WCOJ_CONSUMER_MIN_PROPERTY &&
+         consumer_kind != AGE_WCOJ_CONSUMER_MAX_PROPERTY &&
+         consumer_kind != AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY &&
+         consumer_kind != AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY &&
+         consumer_kind != AGE_WCOJ_CONSUMER_AVG_PROPERTY &&
+         consumer_kind != AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY &&
          consumer_kind != AGE_WCOJ_CONSUMER_EXISTS) ||
         output_type_const->constisnull ||
         output_type_const->consttype != OIDOID)
@@ -16670,9 +17166,20 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
              output_type);
     }
     if ((consumer_kind == AGE_WCOJ_CONSUMER_SUM_PROPERTY ||
-         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY) &&
-        (output_type != AGTYPEOID ||
-         list_length(consumer_desc) != AGE_WCOJ_SUM_PROPERTY_COUNT))
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_MIN_PROPERTY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_MAX_PROPERTY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_AVG_PROPERTY ||
+         consumer_kind == AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY) &&
+        (((consumer_kind != AGE_WCOJ_CONSUMER_AVG_PROPERTY &&
+           consumer_kind != AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY &&
+           output_type != AGTYPEOID) ||
+          ((consumer_kind == AGE_WCOJ_CONSUMER_AVG_PROPERTY ||
+            consumer_kind == AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY) &&
+           output_type != AGTYPEOID && output_type != FLOAT8OID) ||
+         list_length(consumer_desc) != AGE_WCOJ_SUM_PROPERTY_COUNT)))
     {
         elog(ERROR, "invalid AGE WCOJ sum-property descriptor");
     }
@@ -16724,12 +17231,18 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
         custom_scan_tlist = build_wcoj_group_count_custom_scan_tlist(
             best_path->path.pathtarget, custom_scan_tlist);
     }
-    else if (consumer_kind == AGE_WCOJ_CONSUMER_SUM_PROPERTY)
+    else if (consumer_kind == AGE_WCOJ_CONSUMER_SUM_PROPERTY ||
+             consumer_kind == AGE_WCOJ_CONSUMER_MIN_PROPERTY ||
+             consumer_kind == AGE_WCOJ_CONSUMER_MAX_PROPERTY ||
+             consumer_kind == AGE_WCOJ_CONSUMER_AVG_PROPERTY)
     {
         custom_scan_tlist = build_wcoj_sum_property_custom_scan_tlist(
             best_path->path.pathtarget, custom_scan_tlist);
     }
-    else if (consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY)
+    else if (consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY ||
+             consumer_kind == AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY ||
+             consumer_kind == AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY ||
+             consumer_kind == AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY)
     {
         custom_scan_tlist = build_wcoj_group_sum_property_custom_scan_tlist(
             best_path->path.pathtarget, custom_scan_tlist);

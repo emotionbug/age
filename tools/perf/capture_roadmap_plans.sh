@@ -207,6 +207,19 @@ capture_workload \
     printf -- '- database: `%s`\n' "$database"
     printf -- '- log_dir: `%s`\n' "$log_dir"
     printf -- '- skip_setup: `%s`\n\n' "$skip_setup"
+    printf '## Raw Plan Artifact Index\n\n'
+    printf 'Use these complete logs as the primary evidence. Gate summaries and '
+    printf 'counter greps are secondary checks over the same plan text.\n\n'
+    printf -- '- WCOJ payload, completion, and cycle disclosure: `%s`\n' \
+           "$log_dir/wcoj-completion-plans.log"
+    printf -- '- WCOJ semijoin/Yannakakis disclosure: `%s`\n' \
+           "$log_dir/wcoj-semijoin-plans.log"
+    printf -- '- WCOJ semiring consumer disclosure: `%s`\n' \
+           "$log_dir/wcoj-semiring-plans.log"
+    printf -- '- Generic Join GHD/count disclosure: `%s`\n' \
+           "$log_dir/generic-join-preservation-plans.log"
+    printf -- '- Generic reduction matrix/Yannakakis disclosure: `%s`\n\n' \
+           "$log_dir/generic-reduction-matrix-plans.log"
     printf '## Parameters\n\n'
     printf -- '- runs: `%s`\n' "$runs"
     printf -- '- star_sources: `%s`\n' "$star_sources"

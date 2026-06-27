@@ -8,7 +8,15 @@ trap 'rm -rf "$tmpdir"' EXIT
 pg_config=${PG_CONFIG:-/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config}
 database=${PGDATABASE:-agebench}
 fanout=${GENERIC_REDUCTION_FANOUT:-1024}
-out="$tmpdir/generic-reduction.out"
+raw_plan_log=${GENERIC_REDUCTION_RAW_PLAN_LOG:-}
+
+if [[ -n "$raw_plan_log" ]]; then
+    mkdir -p "$(dirname -- "$raw_plan_log")"
+    out=$raw_plan_log
+else
+    out="$tmpdir/generic-reduction.out"
+fi
+: > "$out"
 
 if [[ ! -x "$pg_config" ]]; then
     echo "PG_CONFIG is not executable: $pg_config" >&2
@@ -71,10 +79,14 @@ require 'Custom Scan \(AGE Generic Multiway Join\)' 'Generic Join custom scan'
 require 'Reduction Shape: alpha-acyclic' 'alpha-acyclic shape'
 require 'Reduction Order: leaf-peel' 'leaf-peel order'
 require 'Reduction Order Applied: true' 'ordered semijoin application'
+require 'Yannakakis Step Count: [1-9][0-9]*' 'Yannakakis step count'
+require 'Yannakakis Step Plan: bottom-up:' 'Yannakakis step plan'
+require 'Yannakakis Step Filter Mode: global-domain provider filter' 'Yannakakis step filter mode'
+require 'Yannakakis Steps Applied: [1-9][0-9]*' 'Yannakakis applied steps'
 require 'Semijoin Reduction Passes: 2' 'two semijoin passes'
 require 'Semijoin Rows Removed: [1-9][0-9]*' 'rows removed'
 require 'Rows Emitted: 1' 'single final binding'
 require 'Peak Generic Join Memory: [1-9][0-9]* bytes' 'memory telemetry'
 
-printf 'generic_reduction_original_rows=%s retained_rows=%s fanout=%s\n' \
-       "$original_rows" "$provider_rows_after" "$fanout"
+printf 'generic_reduction_original_rows=%s retained_rows=%s fanout=%s raw_plan_log=%s\n' \
+       "$original_rows" "$provider_rows_after" "$fanout" "$out"

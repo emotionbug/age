@@ -265,6 +265,41 @@ $wcoj_planner_lifetime$;
 -- payloads.  The edge-local property predicate leaves 1 * 2 * 3 combinations;
 -- the source-side helper rows repeat one source graphid three times and must be
 -- factorized to one intersection build while restoring all 72 bag rows.
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'leapfrog';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    WHERE e1.keep = true AND e2.keep = true AND e3.keep = true
+    RETURN id(e1), id(e2), id(e3), id(t)
+$$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'leapfrog';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (h:H),
+          (s1:S)-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    WHERE h.source_id = s1.id
+    RETURN h.tag, id(e1), id(e2), id(e3), id(t)
+$$) AS (tag agtype, eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
+ROLLBACK;
+
 DO $wcoj_direct_provider_telemetry$
 DECLARE
     plan_text text;
@@ -555,6 +590,22 @@ SELECT total FROM cypher('wcoj_lowering', $$
     RETURN count(*) AS total
 $$) AS (total agtype);
 
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN count(*) AS total
+$$) AS (total agtype);
+ROLLBACK;
+
 DO $wcoj_count_consumer_telemetry$
 DECLARE
     plan_text text;
@@ -617,8 +668,84 @@ SELECT total FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
           (s3:S {id: 3})-[e3:E]->(t)
+    RETURN count(id(t)) AS total
+$$) AS (total agtype);
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN count(id(t)) AS total
+$$) AS (total agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_count_key_binary ON COMMIT DROP AS
+SELECT total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN count(id(t)) AS total
+$$) AS (total agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_count_key_direct ON COMMIT DROP AS
+SELECT total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN count(id(t)) AS total
+$$) AS (total agtype);
+
+SELECT (SELECT total FROM wcoj_count_key_binary) AS binary_total,
+       (SELECT total FROM wcoj_count_key_direct) AS direct_total,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_count_key_binary
+             EXCEPT ALL TABLE wcoj_count_key_direct)
+            UNION ALL
+            (TABLE wcoj_count_key_direct
+             EXCEPT ALL TABLE wcoj_count_key_binary)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+SELECT total FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
     RETURN sum(e1.score) AS total
 $$) AS (total agtype);
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+ROLLBACK;
 
 DO $wcoj_sum_property_consumer_telemetry$
 DECLARE
@@ -707,6 +834,218 @@ SELECT (SELECT total FROM wcoj_sum_property_binary) AS binary_total,
         ) diff) AS diff_rows;
 ROLLBACK;
 
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN avg(e1.score) AS value
+$$) AS (value agtype);
+ROLLBACK;
+
+DO $wcoj_avg_property_consumer_telemetry$
+DECLARE
+    plan_text text;
+    has_wcoj boolean := false;
+    has_avg_consumer boolean := false;
+    has_batched_payload boolean := false;
+    has_flat_rows_avoided boolean := false;
+    has_avg_input_rows boolean := false;
+    has_one_row_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN
+        SELECT plan::text
+        FROM cypher('wcoj_lowering', $$
+            EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+                  (s2:S {id: 2})-[e2:E]->(t),
+                  (s3:S {id: 3})-[e3:E]->(t)
+            RETURN avg(e1.score) AS value
+        $$) AS (plan agtype)
+    LOOP
+        has_wcoj := has_wcoj OR
+            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
+        has_avg_consumer := has_avg_consumer OR
+            plan_text LIKE '%WCOJ Consumer: avg(property)%';
+        has_batched_payload := has_batched_payload OR
+            plan_text LIKE '%Batched Payload Materialization: true%';
+        has_flat_rows_avoided := has_flat_rows_avoided OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 24%';
+        has_avg_input_rows := has_avg_input_rows OR
+            plan_text LIKE '%Avg Property Input Rows: 24%';
+        has_one_row_emitted := has_one_row_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_wcoj OR NOT has_avg_consumer OR
+       NOT has_batched_payload OR NOT has_flat_rows_avoided OR
+       NOT has_avg_input_rows OR NOT has_one_row_emitted THEN
+        RAISE EXCEPTION
+            'WCOJ avg-property consumer telemetry was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj avg-property consumer telemetry verified';
+END
+$wcoj_avg_property_consumer_telemetry$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_avg_property_binary ON COMMIT DROP AS
+SELECT value
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN avg(e1.score) AS value
+$$) AS (value agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_avg_property_direct ON COMMIT DROP AS
+SELECT value
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN avg(e1.score) AS value
+$$) AS (value agtype);
+
+SELECT (SELECT value FROM wcoj_avg_property_binary) AS binary_value,
+       (SELECT value FROM wcoj_avg_property_direct) AS direct_value,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_avg_property_binary
+             EXCEPT ALL TABLE wcoj_avg_property_direct)
+            UNION ALL
+            (TABLE wcoj_avg_property_direct
+             EXCEPT ALL TABLE wcoj_avg_property_binary)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+-- Min/max property consumers use the same payload provider shape as
+-- sum(property) but avoid flat row materialization while retaining the
+-- extremal property value.
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN min(e1.score) AS value
+$$) AS (value agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_min_property_binary ON COMMIT DROP AS
+SELECT value
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN min(e1.score) AS value
+$$) AS (value agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_min_property_direct ON COMMIT DROP AS
+SELECT value
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN min(e1.score) AS value
+$$) AS (value agtype);
+
+SELECT (SELECT value FROM wcoj_min_property_binary) AS binary_value,
+       (SELECT value FROM wcoj_min_property_direct) AS direct_value,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_min_property_binary
+             EXCEPT ALL TABLE wcoj_min_property_direct)
+            UNION ALL
+            (TABLE wcoj_min_property_direct
+             EXCEPT ALL TABLE wcoj_min_property_binary)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN max(e1.score) AS value
+$$) AS (value agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_max_property_binary ON COMMIT DROP AS
+SELECT value
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN max(e1.score) AS value
+$$) AS (value agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_max_property_direct ON COMMIT DROP AS
+SELECT value
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN max(e1.score) AS value
+$$) AS (value agtype);
+
+SELECT (SELECT value FROM wcoj_max_property_binary) AS binary_value,
+       (SELECT value FROM wcoj_max_property_direct) AS direct_value,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_max_property_binary
+             EXCEPT ALL TABLE wcoj_max_property_direct)
+            UNION ALL
+            (TABLE wcoj_max_property_direct
+             EXCEPT ALL TABLE wcoj_max_property_binary)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
 SELECT key, total FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
@@ -714,6 +1053,22 @@ SELECT key, total FROM cypher('wcoj_lowering', $$
     RETURN id(t) AS key, sum(e1.score) AS total
 $$) AS (key agtype, total agtype)
 ORDER BY key;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+ROLLBACK;
 
 DO $wcoj_group_sum_property_consumer_telemetry$
 DECLARE
@@ -804,6 +1159,220 @@ SELECT (SELECT count(*) FROM wcoj_group_sum_property_binary) AS binary_rows,
             UNION ALL
             (TABLE wcoj_group_sum_property_direct
              EXCEPT ALL TABLE wcoj_group_sum_property_binary)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, avg(e1.score) AS value
+$$) AS (key agtype, value agtype);
+ROLLBACK;
+
+DO $wcoj_group_avg_property_consumer_telemetry$
+DECLARE
+    plan_text text;
+    has_wcoj boolean := false;
+    has_group_avg_consumer boolean := false;
+    has_batched_payload boolean := false;
+    has_flat_rows_avoided boolean := false;
+    has_avg_provider boolean := false;
+    has_avg_input_rows boolean := false;
+    has_one_row_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('wcoj_lowering', $cypher$
+            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+                  (s2:S {id: 2})-[e2:E]->(t),
+                  (s3:S {id: 3})-[e3:E]->(t)
+            RETURN id(t) AS key, avg(e1.score) AS value
+        $cypher$) AS (key agtype, value agtype)
+    $plan$
+    LOOP
+        has_wcoj := has_wcoj OR
+            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
+        has_group_avg_consumer := has_group_avg_consumer OR
+            plan_text LIKE '%WCOJ Consumer: group avg(property)%';
+        has_batched_payload := has_batched_payload OR
+            plan_text LIKE '%Batched Payload Materialization: true%';
+        has_flat_rows_avoided := has_flat_rows_avoided OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 24%';
+        has_avg_provider := has_avg_provider OR
+            plan_text LIKE '%Avg Property Provider: 1%';
+        has_avg_input_rows := has_avg_input_rows OR
+            plan_text LIKE '%Avg Property Input Rows: 24%';
+        has_one_row_emitted := has_one_row_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_wcoj OR NOT has_group_avg_consumer OR
+       NOT has_batched_payload OR NOT has_flat_rows_avoided OR
+       NOT has_avg_provider OR NOT has_avg_input_rows OR
+       NOT has_one_row_emitted THEN
+        RAISE EXCEPTION
+            'WCOJ group avg-property consumer telemetry was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj group avg-property consumer telemetry verified';
+END
+$wcoj_group_avg_property_consumer_telemetry$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_group_avg_property_binary ON COMMIT DROP AS
+SELECT key, value
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, avg(e1.score) AS value
+$$) AS (key agtype, value agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_group_avg_property_direct ON COMMIT DROP AS
+SELECT key, value
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, avg(e1.score) AS value
+$$) AS (key agtype, value agtype);
+
+SELECT (SELECT count(*) FROM wcoj_group_avg_property_binary) AS binary_rows,
+       (SELECT count(*) FROM wcoj_group_avg_property_direct) AS direct_rows,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_group_avg_property_binary
+             EXCEPT ALL TABLE wcoj_group_avg_property_direct)
+            UNION ALL
+            (TABLE wcoj_group_avg_property_direct
+             EXCEPT ALL TABLE wcoj_group_avg_property_binary)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, min(e1.score) AS value
+$$) AS (key agtype, value agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_group_min_property_binary ON COMMIT DROP AS
+SELECT key, value
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, min(e1.score) AS value
+$$) AS (key agtype, value agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_group_min_property_direct ON COMMIT DROP AS
+SELECT key, value
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, min(e1.score) AS value
+$$) AS (key agtype, value agtype);
+
+SELECT (SELECT count(*) FROM wcoj_group_min_property_binary) AS binary_rows,
+       (SELECT count(*) FROM wcoj_group_min_property_direct) AS direct_rows,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_group_min_property_binary
+             EXCEPT ALL TABLE wcoj_group_min_property_direct)
+            UNION ALL
+            (TABLE wcoj_group_min_property_direct
+             EXCEPT ALL TABLE wcoj_group_min_property_binary)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, max(e1.score) AS value
+$$) AS (key agtype, value agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_group_max_property_binary ON COMMIT DROP AS
+SELECT key, value
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, max(e1.score) AS value
+$$) AS (key agtype, value agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_group_max_property_direct ON COMMIT DROP AS
+SELECT key, value
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, max(e1.score) AS value
+$$) AS (key agtype, value agtype);
+
+SELECT (SELECT count(*) FROM wcoj_group_max_property_binary) AS binary_rows,
+       (SELECT count(*) FROM wcoj_group_max_property_direct) AS direct_rows,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_group_max_property_binary
+             EXCEPT ALL TABLE wcoj_group_max_property_direct)
+            UNION ALL
+            (TABLE wcoj_group_max_property_direct
+             EXCEPT ALL TABLE wcoj_group_max_property_binary)
         ) diff) AS diff_rows;
 ROLLBACK;
 
@@ -964,6 +1533,69 @@ BEGIN
     RAISE NOTICE 'wcoj group-count consumer telemetry verified';
 END
 $wcoj_group_count_consumer_telemetry$;
+
+SELECT key, total FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, count(id(t)) AS total
+$$) AS (key agtype, total agtype)
+ORDER BY key;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, count(id(t)) AS total
+$$) AS (key agtype, total agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_group_count_key_binary ON COMMIT DROP AS
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, count(id(t)) AS total
+$$) AS (key agtype, total agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+CREATE TEMP TABLE wcoj_group_count_key_direct ON COMMIT DROP AS
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, count(id(t)) AS total
+$$) AS (key agtype, total agtype);
+
+SELECT (SELECT count(*) FROM wcoj_group_count_key_binary) AS binary_rows,
+       (SELECT count(*) FROM wcoj_group_count_key_direct) AS direct_rows,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_group_count_key_binary
+             EXCEPT ALL TABLE wcoj_group_count_key_direct)
+            UNION ALL
+            (TABLE wcoj_group_count_key_direct
+             EXCEPT ALL TABLE wcoj_group_count_key_binary)
+        ) diff) AS diff_rows;
+ROLLBACK;
 
 SELECT key, total FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1147,6 +1779,24 @@ SELECT (SELECT count(*) FROM wcoj_distinct_key_binary) AS binary_rows,
            (TABLE wcoj_distinct_key_direct
             EXCEPT ALL TABLE wcoj_distinct_key_binary)
        ) diff) AS diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    RETURN EXISTS {
+        MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+              (s2:S {id: 2})-[e2:E]->(t),
+              (s3:S {id: 3})-[e3:E]->(t)
+        RETURN t
+    } AS ok
+$$) AS (ok agtype);
 ROLLBACK;
 
 DO $wcoj_exists_factorized_row_goal_telemetry$
@@ -1351,9 +2001,9 @@ $wcoj_survivor_batch_telemetry$;
 
 /*
  * A high-multiplicity survivor block can exceed the soft batch budget before
- * true payload-bucket spill exists.  The executor must keep the block
- * complete, record the overrun, and reduce later block capacity from observed
- * payload fanout without changing count semantics.
+ * final row emission.  The executor spills compact payload buckets, loads
+ * the active survivor bucket on demand, and preserves count semantics without
+ * keeping the whole payload block resident.
  */
 SELECT create_graph('wcoj_payload_budget');
 SELECT create_vlabel('wcoj_payload_budget', 'S');
@@ -1387,10 +2037,11 @@ DECLARE
     plan_text text;
     has_wcoj boolean := false;
     has_batched boolean := false;
-    has_multiple_blocks boolean := false;
-    has_budget_overrun boolean := false;
-    has_capacity_clamp boolean := false;
     has_peak_payload_rows boolean := false;
+    has_bucket_blocks_spilled boolean := false;
+    has_bucket_rows_spilled boolean := false;
+    has_bucket_bytes_spilled boolean := false;
+    has_spill_bytes boolean := false;
     has_count_result boolean := false;
 BEGIN
     PERFORM set_config('work_mem', '64kB', true);
@@ -1415,26 +2066,84 @@ BEGIN
             plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
         has_batched := has_batched OR
             plan_text LIKE '%Batched Payload Materialization: true%';
-        has_multiple_blocks := has_multiple_blocks OR
-            plan_text ~ 'Survivor Blocks: [2-9][0-9]*';
-        has_budget_overrun := has_budget_overrun OR
-            plan_text ~ 'Payload Block Budget Overruns: [1-9][0-9]*';
-        has_capacity_clamp := has_capacity_clamp OR
-            plan_text ~ 'Payload Block Capacity Clamps: [1-9][0-9]*';
         has_peak_payload_rows := has_peak_payload_rows OR
             plan_text ~ 'Peak Payload Block Rows: [1-9][0-9]*';
+        has_bucket_blocks_spilled := has_bucket_blocks_spilled OR
+            plan_text ~ 'Payload Bucket Blocks Spilled: [1-9][0-9]*';
+        has_bucket_rows_spilled := has_bucket_rows_spilled OR
+            plan_text ~ 'Payload Bucket Rows Spilled: [1-9][0-9]*';
+        has_bucket_bytes_spilled := has_bucket_bytes_spilled OR
+            plan_text ~ 'Payload Bucket Bytes Spilled: [1-9][0-9]* bytes';
+        has_spill_bytes := has_spill_bytes OR
+            plan_text ~ 'Spill Bytes: [1-9][0-9]* bytes';
         has_count_result := has_count_result OR
             plan_text LIKE '%Count Result: 81920%';
     END LOOP;
 
-    IF NOT has_wcoj OR NOT has_batched OR NOT has_multiple_blocks OR
-       NOT has_budget_overrun OR NOT has_capacity_clamp OR
-       NOT has_peak_payload_rows OR NOT has_count_result THEN
-        RAISE EXCEPTION 'WCOJ payload block budget guard was not observed';
+    IF NOT has_wcoj OR NOT has_batched OR NOT has_peak_payload_rows OR
+       NOT has_bucket_blocks_spilled OR NOT has_bucket_rows_spilled OR
+       NOT has_bucket_bytes_spilled OR NOT has_spill_bytes OR
+       NOT has_count_result THEN
+        RAISE EXCEPTION 'WCOJ payload bucket spill was not observed';
     END IF;
-    RAISE NOTICE 'wcoj payload block budget guard verified';
+    RAISE NOTICE 'wcoj payload bucket spill verified';
 END
 $wcoj_payload_block_budget_guard$;
+
+BEGIN;
+SET LOCAL work_mem = '64kB';
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_payload_budget', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN count(*) AS total
+$$) AS (total agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_payload_bucket_spill_binary ON COMMIT DROP AS
+SELECT total
+FROM cypher('wcoj_payload_budget', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN count(*) AS total
+$$) AS (total agtype);
+
+SET LOCAL work_mem = '64kB';
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_payload_bucket_spill_direct ON COMMIT DROP AS
+SELECT total
+FROM cypher('wcoj_payload_budget', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN count(*) AS total
+$$) AS (total agtype);
+
+SELECT (SELECT total FROM wcoj_payload_bucket_spill_binary) AS binary_total,
+       (SELECT total FROM wcoj_payload_bucket_spill_direct) AS direct_total,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_payload_bucket_spill_binary
+             EXCEPT ALL TABLE wcoj_payload_bucket_spill_direct)
+            UNION ALL
+            (TABLE wcoj_payload_bucket_spill_direct
+             EXCEPT ALL TABLE wcoj_payload_bucket_spill_binary)
+        ) diff) AS diff_rows;
+ROLLBACK;
 SELECT drop_graph('wcoj_payload_budget', true);
 
 DO $wcoj_limit_row_goal_telemetry$
@@ -1704,6 +2413,368 @@ SELECT (SELECT count(*) FROM wcoj_survivor_batch_binary) AS binary_rows,
            (TABLE wcoj_survivor_batch_direct
             EXCEPT ALL TABLE wcoj_survivor_batch_binary)
        ) diff) AS diff_rows;
+ROLLBACK;
+
+-- Same-edge relationship uniqueness inside WCOJ semiring consumers.  The first
+-- two source variables match the same single S vertex, so e1 and e2 can bind
+-- the same physical edge to the shared terminal.  The explicit uniqueness
+-- predicate mirrors the parser-emitted relationship-uniqueness check while
+-- keeping the rejection inside the WCOJ semiring consumer path.
+INSERT INTO wcoj_lowering."S" (id, properties)
+VALUES (_graphid(_label_id('wcoj_lowering', 'S'), 900),
+        '{"id":900}'::agtype),
+       (_graphid(_label_id('wcoj_lowering', 'S'), 901),
+        '{"id":901}'::agtype);
+INSERT INTO wcoj_lowering."T" (id, properties)
+VALUES (_graphid(_label_id('wcoj_lowering', 'T'), 1900),
+        '{"id":1900}'::agtype);
+INSERT INTO wcoj_lowering."E" (id, start_id, end_id, properties)
+VALUES (_graphid(_label_id('wcoj_lowering', 'E'), 90000),
+        _graphid(_label_id('wcoj_lowering', 'S'), 900),
+        _graphid(_label_id('wcoj_lowering', 'T'), 1900),
+        '{"score":10}'::agtype),
+       (_graphid(_label_id('wcoj_lowering', 'E'), 90001),
+        _graphid(_label_id('wcoj_lowering', 'S'), 900),
+        _graphid(_label_id('wcoj_lowering', 'T'), 1900),
+        '{"score":20}'::agtype),
+       (_graphid(_label_id('wcoj_lowering', 'E'), 90002),
+        _graphid(_label_id('wcoj_lowering', 'S'), 901),
+        _graphid(_label_id('wcoj_lowering', 'T'), 1900),
+        '{"score":30}'::agtype);
+ANALYZE wcoj_lowering."S";
+ANALYZE wcoj_lowering."T";
+ANALYZE wcoj_lowering."E";
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+          (s2:S {id: 900})-[e2:E]->(t),
+          (s3:S {id: 901})-[e3:E]->(t)
+    WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+    RETURN count(*) AS total
+$$) AS (total agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+          (s2:S {id: 900})-[e2:E]->(t),
+          (s3:S {id: 901})-[e3:E]->(t)
+    WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+          (s2:S {id: 900})-[e2:E]->(t),
+          (s3:S {id: 901})-[e3:E]->(t)
+    WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+    RETURN id(t) AS key, count(*) AS total
+$$) AS (key agtype, total agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+          (s2:S {id: 900})-[e2:E]->(t),
+          (s3:S {id: 901})-[e3:E]->(t)
+    WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+    RETURN id(t) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+ROLLBACK;
+
+DO $wcoj_same_edge_semiring_telemetry$
+DECLARE
+    plan_text text;
+    has_count_consumer boolean := false;
+    has_count_result boolean := false;
+    has_count_flat_zero boolean := false;
+    has_count_uniqueness_rejects boolean := false;
+    has_sum_consumer boolean := false;
+    has_sum_input_rows boolean := false;
+    has_sum_flat_zero boolean := false;
+    has_sum_uniqueness_rejects boolean := false;
+    has_group_count_consumer boolean := false;
+    has_group_count_result boolean := false;
+    has_group_count_flat_zero boolean := false;
+    has_group_count_uniqueness_rejects boolean := false;
+    has_group_sum_consumer boolean := false;
+    has_group_sum_input_rows boolean := false;
+    has_group_sum_flat_zero boolean := false;
+    has_group_sum_uniqueness_rejects boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF,
+                 BUFFERS OFF)
+        SELECT *
+        FROM cypher('wcoj_lowering', $cypher$
+            MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+                  (s2:S {id: 900})-[e2:E]->(t),
+                  (s3:S {id: 901})-[e3:E]->(t)
+            WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+            RETURN count(*) AS total
+        $cypher$) AS (total agtype)
+    $plan$
+    LOOP
+        has_count_consumer := has_count_consumer OR
+            plan_text LIKE '%WCOJ Consumer: count(*)%';
+        has_count_result := has_count_result OR
+            plan_text LIKE '%Count Result: 2%';
+        has_count_flat_zero := has_count_flat_zero OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_count_uniqueness_rejects := has_count_uniqueness_rejects OR
+            plan_text ~ 'Uniqueness Rejects: [1-9][0-9]*';
+    END LOOP;
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF,
+                 BUFFERS OFF)
+        SELECT *
+        FROM cypher('wcoj_lowering', $cypher$
+            MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+                  (s2:S {id: 900})-[e2:E]->(t),
+                  (s3:S {id: 901})-[e3:E]->(t)
+            WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+            RETURN sum(e1.score) AS total
+        $cypher$) AS (total agtype)
+    $plan$
+    LOOP
+        has_sum_consumer := has_sum_consumer OR
+            plan_text LIKE '%WCOJ Consumer: sum(property)%';
+        has_sum_input_rows := has_sum_input_rows OR
+            plan_text LIKE '%Sum Property Input Rows: 2%';
+        has_sum_flat_zero := has_sum_flat_zero OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_sum_uniqueness_rejects := has_sum_uniqueness_rejects OR
+            plan_text ~ 'Uniqueness Rejects: [1-9][0-9]*';
+    END LOOP;
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF,
+                 BUFFERS OFF)
+        SELECT *
+        FROM cypher('wcoj_lowering', $cypher$
+            MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+                  (s2:S {id: 900})-[e2:E]->(t),
+                  (s3:S {id: 901})-[e3:E]->(t)
+            WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+            RETURN id(t) AS key, count(*) AS total
+        $cypher$) AS (key agtype, total agtype)
+    $plan$
+    LOOP
+        has_group_count_consumer := has_group_count_consumer OR
+            plan_text LIKE '%WCOJ Consumer: group count(key)%';
+        has_group_count_result := has_group_count_result OR
+            plan_text LIKE '%Count Result: 2%';
+        has_group_count_flat_zero := has_group_count_flat_zero OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_group_count_uniqueness_rejects :=
+            has_group_count_uniqueness_rejects OR
+            plan_text ~ 'Uniqueness Rejects: [1-9][0-9]*';
+    END LOOP;
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF,
+                 BUFFERS OFF)
+        SELECT *
+        FROM cypher('wcoj_lowering', $cypher$
+            MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+                  (s2:S {id: 900})-[e2:E]->(t),
+                  (s3:S {id: 901})-[e3:E]->(t)
+            WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+            RETURN id(t) AS key, sum(e1.score) AS total
+        $cypher$) AS (key agtype, total agtype)
+    $plan$
+    LOOP
+        has_group_sum_consumer := has_group_sum_consumer OR
+            plan_text LIKE '%WCOJ Consumer: group sum(property)%';
+        has_group_sum_input_rows := has_group_sum_input_rows OR
+            plan_text LIKE '%Sum Property Input Rows: 2%';
+        has_group_sum_flat_zero := has_group_sum_flat_zero OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_group_sum_uniqueness_rejects :=
+            has_group_sum_uniqueness_rejects OR
+            plan_text ~ 'Uniqueness Rejects: [1-9][0-9]*';
+    END LOOP;
+
+    IF NOT has_count_consumer OR NOT has_count_result OR
+       NOT has_count_flat_zero OR NOT has_count_uniqueness_rejects OR
+       NOT has_sum_consumer OR NOT has_sum_input_rows OR
+       NOT has_sum_flat_zero OR NOT has_sum_uniqueness_rejects OR
+       NOT has_group_count_consumer OR NOT has_group_count_result OR
+       NOT has_group_count_flat_zero OR
+       NOT has_group_count_uniqueness_rejects OR
+       NOT has_group_sum_consumer OR NOT has_group_sum_input_rows OR
+       NOT has_group_sum_flat_zero OR
+       NOT has_group_sum_uniqueness_rejects THEN
+        RAISE EXCEPTION
+            'WCOJ same-edge semiring uniqueness telemetry was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj same-edge semiring uniqueness verified';
+END
+$wcoj_same_edge_semiring_telemetry$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_same_edge_count_binary ON COMMIT DROP AS
+SELECT total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+          (s2:S {id: 900})-[e2:E]->(t),
+          (s3:S {id: 901})-[e3:E]->(t)
+    WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+    RETURN count(*) AS total
+$$) AS (total agtype);
+CREATE TEMP TABLE wcoj_same_edge_sum_binary ON COMMIT DROP AS
+SELECT total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+          (s2:S {id: 900})-[e2:E]->(t),
+          (s3:S {id: 901})-[e3:E]->(t)
+    WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+CREATE TEMP TABLE wcoj_same_edge_group_count_binary ON COMMIT DROP AS
+SELECT key, total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+          (s2:S {id: 900})-[e2:E]->(t),
+          (s3:S {id: 901})-[e3:E]->(t)
+    WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+    RETURN id(t) AS key, count(*) AS total
+$$) AS (key agtype, total agtype);
+CREATE TEMP TABLE wcoj_same_edge_group_sum_binary ON COMMIT DROP AS
+SELECT key, total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+          (s2:S {id: 900})-[e2:E]->(t),
+          (s3:S {id: 901})-[e3:E]->(t)
+    WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+    RETURN id(t) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_same_edge_count_direct ON COMMIT DROP AS
+SELECT total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+          (s2:S {id: 900})-[e2:E]->(t),
+          (s3:S {id: 901})-[e3:E]->(t)
+    WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+    RETURN count(*) AS total
+$$) AS (total agtype);
+CREATE TEMP TABLE wcoj_same_edge_sum_direct ON COMMIT DROP AS
+SELECT total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+          (s2:S {id: 900})-[e2:E]->(t),
+          (s3:S {id: 901})-[e3:E]->(t)
+    WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+CREATE TEMP TABLE wcoj_same_edge_group_count_direct ON COMMIT DROP AS
+SELECT key, total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+          (s2:S {id: 900})-[e2:E]->(t),
+          (s3:S {id: 901})-[e3:E]->(t)
+    WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+    RETURN id(t) AS key, count(*) AS total
+$$) AS (key agtype, total agtype);
+CREATE TEMP TABLE wcoj_same_edge_group_sum_direct ON COMMIT DROP AS
+SELECT key, total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
+          (s2:S {id: 900})-[e2:E]->(t),
+          (s3:S {id: 901})-[e3:E]->(t)
+    WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
+    RETURN id(t) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+
+SELECT (SELECT total FROM wcoj_same_edge_count_binary) AS binary_total,
+       (SELECT total FROM wcoj_same_edge_count_direct) AS direct_total,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_same_edge_count_binary
+             EXCEPT ALL TABLE wcoj_same_edge_count_direct)
+            UNION ALL
+            (TABLE wcoj_same_edge_count_direct
+             EXCEPT ALL TABLE wcoj_same_edge_count_binary)
+        ) diff) AS diff_rows;
+SELECT (SELECT total FROM wcoj_same_edge_sum_binary) AS binary_total,
+       (SELECT total FROM wcoj_same_edge_sum_direct) AS direct_total,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_same_edge_sum_binary
+             EXCEPT ALL TABLE wcoj_same_edge_sum_direct)
+            UNION ALL
+            (TABLE wcoj_same_edge_sum_direct
+             EXCEPT ALL TABLE wcoj_same_edge_sum_binary)
+        ) diff) AS diff_rows;
+SELECT (SELECT count(*) FROM wcoj_same_edge_group_count_binary)
+           AS binary_rows,
+       (SELECT count(*) FROM wcoj_same_edge_group_count_direct)
+           AS direct_rows,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_same_edge_group_count_binary
+             EXCEPT ALL TABLE wcoj_same_edge_group_count_direct)
+            UNION ALL
+            (TABLE wcoj_same_edge_group_count_direct
+             EXCEPT ALL TABLE wcoj_same_edge_group_count_binary)
+        ) diff) AS diff_rows;
+SELECT (SELECT count(*) FROM wcoj_same_edge_group_sum_binary)
+           AS binary_rows,
+       (SELECT count(*) FROM wcoj_same_edge_group_sum_direct)
+           AS direct_rows,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_same_edge_group_sum_binary
+             EXCEPT ALL TABLE wcoj_same_edge_group_sum_direct)
+            UNION ALL
+            (TABLE wcoj_same_edge_group_sum_direct
+             EXCEPT ALL TABLE wcoj_same_edge_group_sum_binary)
+        ) diff) AS diff_rows;
 ROLLBACK;
 
 SELECT drop_graph('wcoj_lowering', true);
@@ -2531,6 +3602,20 @@ ANALYZE wcoj_generic."F1";
 ANALYZE wcoj_generic."F2";
 ANALYZE wcoj_generic."F3";
 
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_generic', $$
+    MATCH (a:A)-[f1:F1]->(b:B)-[f2:F2]->(c:C)-[f3:F3]->(d:D)
+    RETURN id(a), id(b), id(c), id(d), id(f1), id(f2), id(f3)
+$$) AS (a agtype, b agtype, c agtype, d agtype,
+        f1 agtype, f2 agtype, f3 agtype);
+ROLLBACK;
+
 DO $wcoj_acyclic_semijoin_plan$
 DECLARE
     plan_text text;
@@ -2538,9 +3623,15 @@ DECLARE
     has_reduction_shape boolean := false;
     has_reduction_order boolean := false;
     has_reduction_order_edges boolean := false;
+    has_semijoin_step_count boolean := false;
+    has_bottom_up_steps boolean := false;
+    has_top_down_steps boolean := false;
+    has_step_plan boolean := false;
+    has_step_filter_mode boolean := false;
     has_semijoin_passes boolean := false;
     has_bottom_up_pass boolean := false;
     has_top_down_pass boolean := false;
+    has_steps_applied boolean := false;
     has_reduction_order_applied boolean := false;
     has_rows_removed boolean := false;
     has_provider_rows_after boolean := false;
@@ -2554,7 +3645,7 @@ BEGIN
     PERFORM set_config('enable_mergejoin', 'off', true);
 
     FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
         SELECT *
         FROM cypher('wcoj_generic', $cypher$
             MATCH (a:A)-[f1:F1]->(b:B)-[f2:F2]->(c:C)-[f3:F3]->(d:D)
@@ -2571,12 +3662,24 @@ BEGIN
             plan_text LIKE '%Reduction Order: leaf-peel%';
         has_reduction_order_edges := has_reduction_order_edges OR
             plan_text LIKE '%Reduction Order Edges: 3%';
+        has_semijoin_step_count := has_semijoin_step_count OR
+            plan_text LIKE '%Yannakakis Step Count: 6%';
+        has_bottom_up_steps := has_bottom_up_steps OR
+            plan_text LIKE '%Yannakakis Bottom-Up Steps: 3%';
+        has_top_down_steps := has_top_down_steps OR
+            plan_text LIKE '%Yannakakis Top-Down Steps: 3%';
+        has_step_plan := has_step_plan OR
+            plan_text LIKE '%Yannakakis Step Plan: bottom-up:%top-down:%';
+        has_step_filter_mode := has_step_filter_mode OR
+            plan_text LIKE '%Yannakakis Step Filter Mode: global-domain provider filter%';
         has_semijoin_passes := has_semijoin_passes OR
             plan_text LIKE '%Semijoin Reduction Passes: 2%';
         has_bottom_up_pass := has_bottom_up_pass OR
             plan_text LIKE '%Yannakakis Bottom-Up Passes: 1%';
         has_top_down_pass := has_top_down_pass OR
             plan_text LIKE '%Yannakakis Top-Down Passes: 1%';
+        has_steps_applied := has_steps_applied OR
+            plan_text LIKE '%Yannakakis Steps Applied: 6%';
         has_reduction_order_applied := has_reduction_order_applied OR
             plan_text LIKE '%Reduction Order Applied: true%';
         has_rows_removed := has_rows_removed OR
@@ -2593,8 +3696,11 @@ BEGIN
 
     IF NOT has_generic OR NOT has_reduction_shape OR
        NOT has_reduction_order OR NOT has_reduction_order_edges OR
-       NOT has_semijoin_passes OR NOT has_bottom_up_pass OR
-       NOT has_top_down_pass OR NOT has_reduction_order_applied OR
+       NOT has_semijoin_step_count OR NOT has_bottom_up_steps OR
+       NOT has_top_down_steps OR NOT has_step_plan OR
+       NOT has_step_filter_mode OR NOT has_semijoin_passes OR
+       NOT has_bottom_up_pass OR NOT has_top_down_pass OR
+       NOT has_steps_applied OR NOT has_reduction_order_applied OR
        NOT has_rows_removed OR NOT has_provider_rows_after OR
        NOT has_final_domain_keys OR NOT has_rows_emitted OR
        NOT has_spill_bytes THEN
@@ -2754,6 +3860,22 @@ ANALYZE wcoj_generic."G2";
 ANALYZE wcoj_generic."G3";
 ANALYZE wcoj_generic."G4";
 
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_generic', $$
+    MATCH (a:A)-[g1:G1]->(b:B)-[g2:G2]->(c:C)-[g3:G3]->(d:D),
+          (c)-[g4:G4]->(q:Q)
+    RETURN id(a), id(b), id(c), id(d), id(q),
+           id(g1), id(g2), id(g3), id(g4)
+$$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
+        g1 agtype, g2 agtype, g3 agtype, g4 agtype);
+ROLLBACK;
+
 DO $wcoj_tree_semijoin_plan$
 DECLARE
     plan_text text;
@@ -2761,9 +3883,15 @@ DECLARE
     has_reduction_shape boolean := false;
     has_reduction_order boolean := false;
     has_reduction_order_edges boolean := false;
+    has_semijoin_step_count boolean := false;
+    has_bottom_up_steps boolean := false;
+    has_top_down_steps boolean := false;
+    has_step_plan boolean := false;
+    has_step_filter_mode boolean := false;
     has_semijoin_passes boolean := false;
     has_bottom_up_pass boolean := false;
     has_top_down_pass boolean := false;
+    has_steps_applied boolean := false;
     has_reduction_order_applied boolean := false;
     has_rows_removed boolean := false;
     has_provider_rows_after boolean := false;
@@ -2776,7 +3904,7 @@ BEGIN
     PERFORM set_config('enable_mergejoin', 'off', true);
 
     FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
         SELECT *
         FROM cypher('wcoj_generic', $cypher$
             MATCH (a:A)-[g1:G1]->(b:B)-[g2:G2]->(c:C)-[g3:G3]->(d:D),
@@ -2795,12 +3923,24 @@ BEGIN
             plan_text LIKE '%Reduction Order: leaf-peel%';
         has_reduction_order_edges := has_reduction_order_edges OR
             plan_text LIKE '%Reduction Order Edges: 4%';
+        has_semijoin_step_count := has_semijoin_step_count OR
+            plan_text LIKE '%Yannakakis Step Count: 8%';
+        has_bottom_up_steps := has_bottom_up_steps OR
+            plan_text LIKE '%Yannakakis Bottom-Up Steps: 4%';
+        has_top_down_steps := has_top_down_steps OR
+            plan_text LIKE '%Yannakakis Top-Down Steps: 4%';
+        has_step_plan := has_step_plan OR
+            plan_text LIKE '%Yannakakis Step Plan: bottom-up:%top-down:%';
+        has_step_filter_mode := has_step_filter_mode OR
+            plan_text LIKE '%Yannakakis Step Filter Mode: global-domain provider filter%';
         has_semijoin_passes := has_semijoin_passes OR
             plan_text LIKE '%Semijoin Reduction Passes: 2%';
         has_bottom_up_pass := has_bottom_up_pass OR
             plan_text LIKE '%Yannakakis Bottom-Up Passes: 1%';
         has_top_down_pass := has_top_down_pass OR
             plan_text LIKE '%Yannakakis Top-Down Passes: 1%';
+        has_steps_applied := has_steps_applied OR
+            plan_text LIKE '%Yannakakis Steps Applied: 8%';
         has_reduction_order_applied := has_reduction_order_applied OR
             plan_text LIKE '%Reduction Order Applied: true%';
         has_rows_removed := has_rows_removed OR
@@ -2815,8 +3955,11 @@ BEGIN
 
     IF NOT has_generic OR NOT has_reduction_shape OR
        NOT has_reduction_order OR NOT has_reduction_order_edges OR
-       NOT has_semijoin_passes OR NOT has_bottom_up_pass OR
-       NOT has_top_down_pass OR NOT has_reduction_order_applied OR
+       NOT has_semijoin_step_count OR NOT has_bottom_up_steps OR
+       NOT has_top_down_steps OR NOT has_step_plan OR
+       NOT has_step_filter_mode OR NOT has_semijoin_passes OR
+       NOT has_bottom_up_pass OR NOT has_top_down_pass OR
+       NOT has_steps_applied OR NOT has_reduction_order_applied OR
        NOT has_rows_removed OR NOT has_provider_rows_after OR
        NOT has_final_domain_keys OR NOT has_rows_emitted THEN
         RAISE EXCEPTION 'branching Generic Join semijoin reduction was not observed';
@@ -2929,6 +4072,25 @@ ANALYZE wcoj_generic."H4";
 ANALYZE wcoj_generic."H5";
 ANALYZE wcoj_generic."H6";
 
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_generic', $$
+    MATCH (a:A)-[h1:H1]->(b:B)-[h2:H2]->(c:C)-[h3:H3]->(d:D),
+          (c)-[h4:H4]->(q:Q),
+          (r:R)-[h5:H5]->(c),
+          (c)-[h6:H6]->(s:S)
+    RETURN id(a), id(b), id(c), id(d), id(q), id(r), id(s),
+           id(h1), id(h2), id(h3), id(h4), id(h5), id(h6)
+$$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
+        r agtype, s agtype, h1 agtype, h2 agtype, h3 agtype,
+        h4 agtype, h5 agtype, h6 agtype);
+ROLLBACK;
+
 DO $wcoj_snowflake_semijoin_plan$
 DECLARE
     plan_text text;
@@ -2936,9 +4098,15 @@ DECLARE
     has_reduction_shape boolean := false;
     has_reduction_order boolean := false;
     has_reduction_order_edges boolean := false;
+    has_semijoin_step_count boolean := false;
+    has_bottom_up_steps boolean := false;
+    has_top_down_steps boolean := false;
+    has_step_plan boolean := false;
+    has_step_filter_mode boolean := false;
     has_semijoin_passes boolean := false;
     has_bottom_up_pass boolean := false;
     has_top_down_pass boolean := false;
+    has_steps_applied boolean := false;
     has_reduction_order_applied boolean := false;
     has_rows_removed boolean := false;
     has_provider_rows_after boolean := false;
@@ -2951,7 +4119,7 @@ BEGIN
     PERFORM set_config('enable_mergejoin', 'off', true);
 
     FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
         SELECT *
         FROM cypher('wcoj_generic', $cypher$
             MATCH (a:A)-[h1:H1]->(b:B)-[h2:H2]->(c:C)-[h3:H3]->(d:D),
@@ -2973,12 +4141,24 @@ BEGIN
             plan_text LIKE '%Reduction Order: leaf-peel%';
         has_reduction_order_edges := has_reduction_order_edges OR
             plan_text LIKE '%Reduction Order Edges: 6%';
+        has_semijoin_step_count := has_semijoin_step_count OR
+            plan_text LIKE '%Yannakakis Step Count: 12%';
+        has_bottom_up_steps := has_bottom_up_steps OR
+            plan_text LIKE '%Yannakakis Bottom-Up Steps: 6%';
+        has_top_down_steps := has_top_down_steps OR
+            plan_text LIKE '%Yannakakis Top-Down Steps: 6%';
+        has_step_plan := has_step_plan OR
+            plan_text LIKE '%Yannakakis Step Plan: bottom-up:%top-down:%';
+        has_step_filter_mode := has_step_filter_mode OR
+            plan_text LIKE '%Yannakakis Step Filter Mode: global-domain provider filter%';
         has_semijoin_passes := has_semijoin_passes OR
             plan_text LIKE '%Semijoin Reduction Passes: 2%';
         has_bottom_up_pass := has_bottom_up_pass OR
             plan_text LIKE '%Yannakakis Bottom-Up Passes: 1%';
         has_top_down_pass := has_top_down_pass OR
             plan_text LIKE '%Yannakakis Top-Down Passes: 1%';
+        has_steps_applied := has_steps_applied OR
+            plan_text LIKE '%Yannakakis Steps Applied: 12%';
         has_reduction_order_applied := has_reduction_order_applied OR
             plan_text LIKE '%Reduction Order Applied: true%';
         has_rows_removed := has_rows_removed OR
@@ -2993,8 +4173,11 @@ BEGIN
 
     IF NOT has_generic OR NOT has_reduction_shape OR
        NOT has_reduction_order OR NOT has_reduction_order_edges OR
-       NOT has_semijoin_passes OR NOT has_bottom_up_pass OR
-       NOT has_top_down_pass OR NOT has_reduction_order_applied OR
+       NOT has_semijoin_step_count OR NOT has_bottom_up_steps OR
+       NOT has_top_down_steps OR NOT has_step_plan OR
+       NOT has_step_filter_mode OR NOT has_semijoin_passes OR
+       NOT has_bottom_up_pass OR NOT has_top_down_pass OR
+       NOT has_steps_applied OR NOT has_reduction_order_applied OR
        NOT has_rows_removed OR NOT has_provider_rows_after OR
        NOT has_final_domain_keys OR NOT has_rows_emitted THEN
         RAISE EXCEPTION 'snowflake Generic Join semijoin reduction was not observed';

@@ -52,6 +52,7 @@
 typedef struct AgeWCOJJoinScanState AgeWCOJJoinScanState;
 typedef struct AgeWCOJPostingProvider AgeWCOJPostingProvider;
 typedef struct AgeWCOJBatchPayload AgeWCOJBatchPayload;
+typedef struct AgeWCOJPayloadBucketSpill AgeWCOJPayloadBucketSpill;
 
 typedef enum AgeWCOJTupleGroupKind
 {
@@ -89,6 +90,16 @@ struct AgeWCOJBatchPayload
     int properties_spill_fileno;
     off_t properties_spill_offset;
     int32 properties_spill_size;
+};
+
+struct AgeWCOJPayloadBucketSpill
+{
+    bool spilled;
+    int spill_fileno;
+    off_t spill_offset;
+    int32 spill_size;
+    int payload_count;
+    int logical_count;
 };
 
 typedef struct AgeWCOJPayloadRunFilterState
@@ -168,6 +179,7 @@ struct AgeWCOJPostingProvider
     AgeWCOJTupleGroup *batch_groups;
     AgeWCOJBatchPayload *batch_payloads;
     AgeEdgeBag *batch_payload_ranges;
+    AgeWCOJPayloadBucketSpill *batch_payload_bucket_spills;
     int batch_payload_count;
     int batch_payload_capacity;
     double observed_payloads_per_survivor;
@@ -223,6 +235,8 @@ struct AgeWCOJJoinScanState
     bool sum_executed;
     bool sum_has_value;
     agtype_value sum_value;
+    agtype *property_aggregate_value;
+    float8 avg_sum;
     bool batch_payload_enabled;
     bool survivor_input_exhausted;
     int64 groups_matched;
@@ -265,6 +279,9 @@ struct AgeWCOJJoinScanState
     int64 peak_payload_block_rows;
     int64 spill_bytes;
     int64 payload_rows_spilled;
+    int64 payload_bucket_blocks_spilled;
+    int64 payload_bucket_rows_spilled;
+    int64 payload_bucket_bytes_spilled;
     int64 source_bag_memory_reserve;
     int64 peak_source_bag_bytes;
     int64 peak_factor_memory;
@@ -365,9 +382,16 @@ static bool should_spill_age_wcoj_payload_property(
     AgeWCOJPostingProvider *provider, const AgeAdjacencyPayload *payload);
 static void spill_age_wcoj_payload_property(
     AgeWCOJPostingProvider *provider, AgeWCOJBatchPayload *entry);
+static void spill_age_wcoj_copied_payload_property(
+    AgeWCOJPostingProvider *provider, AgeWCOJBatchPayload *entry);
 static void restore_age_wcoj_payload_property(
     AgeWCOJPostingProvider *provider, AgeWCOJBatchPayload *entry,
     MemoryContext context);
+static void spill_age_wcoj_payload_buckets(
+    AgeWCOJPostingProvider *provider);
+static AgeWCOJBatchPayload *load_age_wcoj_payload_bucket(
+    AgeWCOJPostingProvider *provider, int survivor_index,
+    const AgeEdgeBag *range, MemoryContext context);
 static int find_age_wcoj_survivor_index(AgeWCOJJoinScanState *state,
                                         graphid terminal);
 static void append_age_wcoj_batch_payload(
@@ -446,9 +470,20 @@ static TupleTableSlot *access_age_wcoj_exists_scan(ScanState *node);
 static TupleTableSlot *store_age_wcoj_exists_result(ScanState *node);
 static void reset_age_wcoj_sum_value(AgeWCOJJoinScanState *state);
 static void reset_age_wcoj_sum_state(AgeWCOJJoinScanState *state);
+static bool age_wcoj_property_aggregate_consumer(
+    AgeWCOJConsumerKind consumer);
+static bool age_wcoj_property_minmax_consumer(AgeWCOJConsumerKind consumer);
+static bool age_wcoj_property_avg_consumer(AgeWCOJConsumerKind consumer);
+static bool age_wcoj_group_property_aggregate_consumer(
+    AgeWCOJConsumerKind consumer);
 static void add_age_wcoj_sum_value(AgeWCOJJoinScanState *state,
                                    agtype_value *value,
                                    int64 multiplicity);
+static void add_age_wcoj_avg_value(AgeWCOJJoinScanState *state,
+                                   agtype_value *value,
+                                   int64 multiplicity);
+static void add_age_wcoj_minmax_value(AgeWCOJJoinScanState *state,
+                                      agtype_value *value);
 static void add_age_wcoj_sum_payload(AgeWCOJJoinScanState *state,
                                      AgeWCOJPostingProvider *provider,
                                      AgeWCOJBatchPayload *entry,
@@ -466,6 +501,7 @@ static void free_age_wcoj_detoasted_agtype(Datum original, agtype *value);
 static Datum age_wcoj_numeric_from_value(agtype_value *value);
 static Datum age_wcoj_numeric_mul_int64(Datum value, int64 multiplier);
 static Datum age_wcoj_numeric_add(Datum left, Datum right);
+static float8 age_wcoj_float8_from_value(agtype_value *value);
 static void age_wcoj_sum_promote_to_numeric(AgeWCOJJoinScanState *state);
 static void age_wcoj_sum_promote_to_float(AgeWCOJJoinScanState *state);
 static int64 age_wcoj_checked_int64_product(int64 left, int64 right);
@@ -521,7 +557,7 @@ static bool
 valid_wcoj_consumer(int consumer)
 {
     return consumer >= AGE_WCOJ_CONSUMER_ROWS &&
-        consumer <= AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY;
+        consumer <= AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY;
 }
 
 static int
@@ -539,14 +575,58 @@ wcoj_consumer_output_offset(AgeWCOJConsumerKind consumer)
     case AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY:
         return 3;
     case AGE_WCOJ_CONSUMER_SUM_PROPERTY:
+    case AGE_WCOJ_CONSUMER_MIN_PROPERTY:
+    case AGE_WCOJ_CONSUMER_MAX_PROPERTY:
+    case AGE_WCOJ_CONSUMER_AVG_PROPERTY:
         return 2;
     case AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY:
+    case AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY:
+    case AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY:
+    case AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY:
         return 3;
     case AGE_WCOJ_CONSUMER_EXISTS:
         return 2;
     }
     elog(ERROR, "invalid AGE WCOJ consumer kind %d", consumer);
     return 1;
+}
+
+static bool
+age_wcoj_property_aggregate_consumer(AgeWCOJConsumerKind consumer)
+{
+    return consumer == AGE_WCOJ_CONSUMER_SUM_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_MIN_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_MAX_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_AVG_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY;
+}
+
+static bool
+age_wcoj_property_minmax_consumer(AgeWCOJConsumerKind consumer)
+{
+    return consumer == AGE_WCOJ_CONSUMER_MIN_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_MAX_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY;
+}
+
+static bool
+age_wcoj_property_avg_consumer(AgeWCOJConsumerKind consumer)
+{
+    return consumer == AGE_WCOJ_CONSUMER_AVG_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY;
+}
+
+static bool
+age_wcoj_group_property_aggregate_consumer(AgeWCOJConsumerKind consumer)
+{
+    return consumer == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY ||
+        consumer == AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY;
 }
 
 static Node *
@@ -635,16 +715,20 @@ create_age_wcoj_join_scan_state(CustomScan *cscan)
         elog(ERROR, "invalid AGE WCOJ distinct-key output type %u",
              output_type);
     }
-    if (consumer_kind == AGE_WCOJ_CONSUMER_SUM_PROPERTY ||
-        consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY)
+    if (age_wcoj_property_aggregate_consumer(
+            (AgeWCOJConsumerKind)consumer_kind))
     {
         int provider_index;
         Const *key_const;
+        bool avg_consumer = age_wcoj_property_avg_consumer(
+            (AgeWCOJConsumerKind)consumer_kind);
 
-        if (output_type != AGTYPEOID ||
+        if ((!avg_consumer && output_type != AGTYPEOID) ||
+            (avg_consumer &&
+             output_type != AGTYPEOID && output_type != FLOAT8OID) ||
             list_length(consumer_desc) != AGE_WCOJ_SUM_PROPERTY_COUNT)
         {
-            elog(ERROR, "invalid AGE WCOJ sum-property descriptor");
+            elog(ERROR, "invalid AGE WCOJ property aggregate descriptor");
         }
         provider_index = intVal(list_nth(
             consumer_desc, AGE_WCOJ_SUM_PROPERTY_PROVIDER_INDEX));
@@ -653,7 +737,7 @@ create_age_wcoj_join_scan_state(CustomScan *cscan)
         if (provider_index < 0 || provider_index >= arity ||
             key_const->constisnull || key_const->consttype != AGTYPEOID)
         {
-            elog(ERROR, "invalid AGE WCOJ sum-property key descriptor");
+            elog(ERROR, "invalid AGE WCOJ property aggregate key descriptor");
         }
     }
     if (consumer_kind == AGE_WCOJ_CONSUMER_EXISTS &&
@@ -731,8 +815,8 @@ create_age_wcoj_join_scan_state(CustomScan *cscan)
     }
     state->seed_index = state->source_order[0];
 
-    if (consumer_kind == AGE_WCOJ_CONSUMER_SUM_PROPERTY ||
-        consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY)
+    if (age_wcoj_property_aggregate_consumer(
+            (AgeWCOJConsumerKind)consumer_kind))
     {
         Const *key_const = list_nth_node(
             Const, consumer_desc, AGE_WCOJ_SUM_PROPERTY_KEY);
@@ -1008,21 +1092,20 @@ begin_age_wcoj_join_scan(CustomScanState *node, EState *estate, int eflags)
      */
     state->batch_payload_enabled = adjacency_provider_count > 0;
 
-    if (state->consumer_kind == AGE_WCOJ_CONSUMER_SUM_PROPERTY ||
-        state->consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY)
+    if (age_wcoj_property_aggregate_consumer(state->consumer_kind))
     {
         AgeWCOJPostingProvider *sum_provider;
 
         if (state->sum_property_provider_index < 0 ||
             state->sum_property_provider_index >= state->arity)
         {
-            elog(ERROR, "invalid AGE WCOJ sum-property provider index");
+            elog(ERROR, "invalid AGE WCOJ property aggregate provider index");
         }
         sum_provider = &state->providers[state->sum_property_provider_index];
         if (sum_provider->kind != AGE_WCOJ_PROVIDER_ADJACENCY ||
             !sum_provider->fetch_properties)
         {
-            elog(ERROR, "AGE WCOJ sum-property provider is not direct");
+            elog(ERROR, "AGE WCOJ property aggregate provider is not direct");
         }
     }
 
@@ -1334,6 +1417,7 @@ reset_age_wcoj_survivor_block(AgeWCOJJoinScanState *state)
         provider->batch_groups = NULL;
         provider->batch_payloads = NULL;
         provider->batch_payload_ranges = NULL;
+        provider->batch_payload_bucket_spills = NULL;
         provider->batch_payload_count = 0;
         provider->batch_payload_capacity = 0;
     }
@@ -1438,6 +1522,8 @@ allocate_age_wcoj_survivor_block(AgeWCOJJoinScanState *state, int capacity)
         {
             provider->batch_payload_ranges = palloc0(
                 sizeof(AgeEdgeBag) * capacity);
+            provider->batch_payload_bucket_spills = palloc0(
+                sizeof(AgeWCOJPayloadBucketSpill) * capacity);
         }
     }
     MemoryContextSwitchTo(oldcontext);
@@ -1595,6 +1681,7 @@ prefetch_age_wcoj_adjacency_payloads(AgeWCOJPostingProvider *provider)
         entry->first_tuple =
             age_binding_edge_bag_record_payload(range, bag);
     }
+    spill_age_wcoj_payload_buckets(provider);
     MemoryContextSwitchTo(oldcontext);
 }
 
@@ -2063,10 +2150,12 @@ should_spill_age_wcoj_payload_property(AgeWCOJPostingProvider *provider,
 }
 
 static void
-spill_age_wcoj_payload_property(AgeWCOJPostingProvider *provider,
-                                AgeWCOJBatchPayload *entry)
+spill_age_wcoj_payload_property_internal(AgeWCOJPostingProvider *provider,
+                                         AgeWCOJBatchPayload *entry,
+                                         bool free_existing_property)
 {
     AgeWCOJJoinScanState *state = provider->owner;
+    Pointer original_property;
     struct varlena *value;
     Size raw_value_size;
     int32 value_size;
@@ -2077,6 +2166,7 @@ spill_age_wcoj_payload_property(AgeWCOJPostingProvider *provider,
     if (provider->payload_spill_file == NULL)
         provider->payload_spill_file = BufFileCreateTemp(false);
 
+    original_property = DatumGetPointer(entry->payload.properties);
     BufFileTell(provider->payload_spill_file,
                 &entry->properties_spill_fileno,
                 &entry->properties_spill_offset);
@@ -2096,7 +2186,23 @@ spill_age_wcoj_payload_property(AgeWCOJPostingProvider *provider,
     add_wcoj_counter(&state->spill_bytes,
                      sizeof(value_size) + value_size);
     increment_wcoj_counter(&state->payload_rows_spilled);
+    if (free_existing_property)
+        pfree(original_property);
     pfree(value);
+}
+
+static void
+spill_age_wcoj_payload_property(AgeWCOJPostingProvider *provider,
+                                AgeWCOJBatchPayload *entry)
+{
+    spill_age_wcoj_payload_property_internal(provider, entry, false);
+}
+
+static void
+spill_age_wcoj_copied_payload_property(AgeWCOJPostingProvider *provider,
+                                       AgeWCOJBatchPayload *entry)
+{
+    spill_age_wcoj_payload_property_internal(provider, entry, true);
 }
 
 static void
@@ -2129,6 +2235,187 @@ restore_age_wcoj_payload_property(AgeWCOJPostingProvider *provider,
     BufFileReadExact(provider->payload_spill_file, value, value_size);
     entry->payload.properties = PointerGetDatum(value);
     entry->properties_spilled = false;
+}
+
+static bool
+should_spill_age_wcoj_payload_buckets(AgeWCOJPostingProvider *provider)
+{
+    AgeWCOJJoinScanState *state = provider->owner;
+    Size current_memory;
+
+    if (provider->batch_payload_count <= 0 ||
+        provider->batch_payloads == NULL ||
+        provider->batch_payload_bucket_spills == NULL)
+    {
+        return false;
+    }
+
+    current_memory = MemoryContextMemAllocated(state->batch_context, true);
+    return current_memory > state->batch_memory_budget;
+}
+
+static void
+spill_age_wcoj_payload_bucket(AgeWCOJPostingProvider *provider,
+                              int survivor_index, AgeEdgeBag *range)
+{
+    AgeWCOJJoinScanState *state = provider->owner;
+    AgeWCOJPayloadBucketSpill *spill;
+    AgeWCOJBatchPayload *payloads;
+    Size raw_payload_bytes;
+    int32 payload_bytes;
+    int32 record_size;
+    int payload_index;
+
+    if (range->payload_count <= 0)
+        return;
+    if (provider->batch_payload_bucket_spills == NULL)
+        elog(ERROR, "missing AGE WCOJ payload bucket spill descriptors");
+
+    spill = &provider->batch_payload_bucket_spills[survivor_index];
+    if (spill->spilled)
+        return;
+
+    payloads = &provider->batch_payloads[range->first_payload];
+    if ((Size)range->payload_count >
+        (MaxAllocSize / sizeof(AgeWCOJBatchPayload)))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("AGE WCOJ payload bucket is too large to spill")));
+    }
+    raw_payload_bytes = sizeof(AgeWCOJBatchPayload) *
+        (Size)range->payload_count;
+    if (raw_payload_bytes == 0 ||
+        raw_payload_bytes > (Size)(PG_INT32_MAX - (int32)sizeof(int32)))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("AGE WCOJ payload bucket spill record is too large")));
+    }
+    payload_bytes = (int32)raw_payload_bytes;
+    record_size = payload_bytes + (int32)sizeof(int32);
+
+    for (payload_index = 0;
+         payload_index < range->payload_count;
+         payload_index++)
+    {
+        AgeWCOJBatchPayload *entry = &payloads[payload_index];
+
+        if (provider->fetch_properties &&
+            !entry->payload.properties_isnull &&
+            !entry->properties_spilled)
+        {
+            spill_age_wcoj_copied_payload_property(provider, entry);
+        }
+    }
+
+    if (provider->payload_spill_file == NULL)
+        provider->payload_spill_file = BufFileCreateTemp(false);
+
+    BufFileTell(provider->payload_spill_file, &spill->spill_fileno,
+                &spill->spill_offset);
+    BufFileWrite(provider->payload_spill_file, &range->payload_count,
+                 sizeof(range->payload_count));
+    BufFileWrite(provider->payload_spill_file, payloads, payload_bytes);
+
+    spill->spilled = true;
+    spill->spill_size = record_size;
+    spill->payload_count = range->payload_count;
+    spill->logical_count = range->logical_count;
+    increment_wcoj_counter(&state->payload_bucket_blocks_spilled);
+    add_wcoj_counter(&state->payload_bucket_rows_spilled,
+                     range->payload_count);
+    add_wcoj_counter(&state->payload_bucket_bytes_spilled, record_size);
+    add_wcoj_counter(&state->spill_bytes, record_size);
+}
+
+static void
+spill_age_wcoj_payload_buckets(AgeWCOJPostingProvider *provider)
+{
+    AgeWCOJJoinScanState *state = provider->owner;
+    int survivor_index;
+
+    if (!should_spill_age_wcoj_payload_buckets(provider))
+        return;
+
+    for (survivor_index = 0;
+         survivor_index < state->survivor_block_count;
+         survivor_index++)
+    {
+        AgeEdgeBag *range = &provider->batch_payload_ranges[survivor_index];
+
+        spill_age_wcoj_payload_bucket(provider, survivor_index, range);
+    }
+
+    pfree(provider->batch_payloads);
+    provider->batch_payloads = NULL;
+    provider->batch_payload_capacity = 0;
+}
+
+static AgeWCOJBatchPayload *
+load_age_wcoj_payload_bucket(AgeWCOJPostingProvider *provider,
+                             int survivor_index, const AgeEdgeBag *range,
+                             MemoryContext context)
+{
+    AgeWCOJPayloadBucketSpill *spill;
+    AgeWCOJBatchPayload *payloads;
+    int payload_count;
+    Size raw_payload_bytes;
+    int32 payload_bytes;
+    MemoryContext oldcontext;
+
+    if (provider->batch_payload_bucket_spills == NULL ||
+        survivor_index < 0 ||
+        survivor_index >= provider->owner->survivor_block_count)
+    {
+        elog(ERROR, "invalid AGE WCOJ payload bucket spill lookup");
+    }
+
+    spill = &provider->batch_payload_bucket_spills[survivor_index];
+    if (!spill->spilled)
+    {
+        if (provider->batch_payloads == NULL)
+            elog(ERROR, "AGE WCOJ payload bucket is neither memory nor spill");
+        return &provider->batch_payloads[range->first_payload];
+    }
+    if (provider->payload_spill_file == NULL)
+        elog(ERROR, "AGE WCOJ payload bucket spill file is not available");
+    if (spill->payload_count != range->payload_count ||
+        spill->logical_count != range->logical_count)
+    {
+        elog(ERROR, "invalid AGE WCOJ payload bucket spill descriptor");
+    }
+    if (BufFileSeek(provider->payload_spill_file, spill->spill_fileno,
+                    spill->spill_offset, SEEK_SET) != 0)
+    {
+        elog(ERROR, "could not seek AGE WCOJ payload bucket spill file");
+    }
+    BufFileReadExact(provider->payload_spill_file, &payload_count,
+                     sizeof(payload_count));
+    if (payload_count <= 0 || payload_count != spill->payload_count)
+        elog(ERROR, "invalid AGE WCOJ payload bucket spill record");
+    if ((Size)payload_count > MaxAllocSize / sizeof(AgeWCOJBatchPayload))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("AGE WCOJ payload bucket spill record is too large")));
+    }
+    raw_payload_bytes = sizeof(AgeWCOJBatchPayload) * (Size)payload_count;
+    if (raw_payload_bytes == 0 || raw_payload_bytes > (Size)PG_INT32_MAX)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("AGE WCOJ payload bucket spill record is too large")));
+    }
+    payload_bytes = (int32)raw_payload_bytes;
+    if (spill->spill_size != payload_bytes + (int32)sizeof(int32))
+        elog(ERROR, "invalid AGE WCOJ payload bucket spill size");
+
+    oldcontext = MemoryContextSwitchTo(context);
+    payloads = palloc((Size)payload_bytes);
+    MemoryContextSwitchTo(oldcontext);
+    BufFileReadExact(provider->payload_spill_file, payloads, payload_bytes);
+    return payloads;
 }
 
 static int
@@ -2955,14 +3242,15 @@ adjacency_materialize_group(AgeWCOJPostingProvider *provider,
             state->active_survivor_index];
         if (range->payload_count <= 0)
             return false;
-        if (provider->batch_payloads == NULL ||
-            range->logical_count <= 0)
+        if (range->logical_count <= 0)
         {
             elog(ERROR, "invalid AGE WCOJ buffered adjacency group");
         }
         set_age_wcoj_adjacency_group(
             &state->groups[source_index], provider,
-            &provider->batch_payloads[range->first_payload],
+            load_age_wcoj_payload_bucket(
+                provider, state->active_survivor_index, range,
+                state->group_context),
             range->payload_count, range->logical_count);
         return state->groups[source_index].count > 0;
     }
@@ -3599,6 +3887,28 @@ age_wcoj_numeric_add(Datum left, Datum right)
     return DirectFunctionCall2(numeric_add, left, right);
 }
 
+static float8
+age_wcoj_float8_from_value(agtype_value *value)
+{
+    switch (value->type)
+    {
+    case AGTV_INTEGER:
+        return (float8)value->val.int_value;
+    case AGTV_FLOAT:
+        return value->val.float_value;
+    case AGTV_NUMERIC:
+        return DatumGetFloat8(DirectFunctionCall1(
+            numeric_float8, NumericGetDatum(value->val.numeric)));
+    default:
+        break;
+    }
+
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("arguments must resolve to a number")));
+    return 0.0;
+}
+
 static void
 age_wcoj_sum_promote_to_numeric(AgeWCOJJoinScanState *state)
 {
@@ -3638,6 +3948,30 @@ age_wcoj_sum_promote_to_float(AgeWCOJJoinScanState *state)
     state->sum_value.type = AGTV_FLOAT;
     state->sum_value.val.float_value =
         (float8)state->sum_value.val.int_value;
+}
+
+static void
+add_age_wcoj_avg_value(AgeWCOJJoinScanState *state, agtype_value *value,
+                       int64 multiplicity)
+{
+    float8 addend;
+
+    if (multiplicity <= 0)
+        return;
+    addend = DatumGetFloat8(DirectFunctionCall2(
+        float8mul, Float8GetDatum(age_wcoj_float8_from_value(value)),
+        Float8GetDatum((float8)multiplicity)));
+    if (!state->sum_has_value)
+    {
+        state->avg_sum = addend;
+        state->sum_has_value = true;
+    }
+    else
+    {
+        state->avg_sum = DatumGetFloat8(DirectFunctionCall2(
+            float8pl, Float8GetDatum(state->avg_sum),
+            Float8GetDatum(addend)));
+    }
 }
 
 static void
@@ -3753,6 +4087,43 @@ add_age_wcoj_sum_value(AgeWCOJJoinScanState *state, agtype_value *value,
     MemoryContextSwitchTo(oldcontext);
 }
 
+static void
+add_age_wcoj_minmax_value(AgeWCOJJoinScanState *state, agtype_value *value)
+{
+    agtype *candidate;
+    bool replace_value;
+
+    candidate = agtype_value_to_agtype(value);
+    if (!state->sum_has_value)
+    {
+        replace_value = true;
+    }
+    else
+    {
+        int cmp = compare_agtype_containers_orderability(
+            &candidate->root, &state->property_aggregate_value->root);
+
+        replace_value =
+            (state->consumer_kind == AGE_WCOJ_CONSUMER_MAX_PROPERTY ||
+             state->consumer_kind == AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY) ?
+            cmp > 0 : cmp < 0;
+    }
+
+    if (replace_value)
+    {
+        MemoryContext oldcontext;
+
+        oldcontext = MemoryContextSwitchTo(
+            state->css.ss.ps.state->es_query_cxt);
+        pfree_if_not_null(state->property_aggregate_value);
+        state->property_aggregate_value = (agtype *)DatumGetPointer(
+            datumCopy(PointerGetDatum(candidate), false, -1));
+        state->sum_has_value = true;
+        MemoryContextSwitchTo(oldcontext);
+    }
+    pfree(candidate);
+}
+
 static bool
 age_wcoj_payload_property_value(AgeWCOJJoinScanState *state,
                                 const AgeAdjacencyPayload *payload,
@@ -3823,8 +4194,14 @@ add_age_wcoj_sum_payload(AgeWCOJJoinScanState *state,
     }
     else
     {
-        add_wcoj_counter(&state->sum_input_rows, multiplicity);
-        add_age_wcoj_sum_value(state, &value, multiplicity);
+        state->sum_input_rows = add_age_wcoj_count(state->sum_input_rows,
+                                                   multiplicity);
+        if (age_wcoj_property_avg_consumer(state->consumer_kind))
+            add_age_wcoj_avg_value(state, &value, multiplicity);
+        else if (age_wcoj_property_minmax_consumer(state->consumer_kind))
+            add_age_wcoj_minmax_value(state, &value);
+        else
+            add_age_wcoj_sum_value(state, &value, multiplicity);
         free_age_wcoj_agtype_value(&value, needs_free);
     }
 
@@ -3924,6 +4301,9 @@ reset_age_wcoj_sum_value(AgeWCOJJoinScanState *state)
 {
     state->sum_has_value = false;
     state->sum_value.type = AGTV_NULL;
+    state->avg_sum = 0.0;
+    pfree_if_not_null(state->property_aggregate_value);
+    state->property_aggregate_value = NULL;
 }
 
 static void
@@ -4338,6 +4718,43 @@ store_age_wcoj_sum_property_result(ScanState *node)
     memset(slot->tts_isnull, true,
            sizeof(bool) * slot->tts_tupleDescriptor->natts);
 
+    if (age_wcoj_property_avg_consumer(state->consumer_kind))
+    {
+        float8 avg_value;
+
+        if (state->consumer_output_type != AGTYPEOID &&
+            state->consumer_output_type != FLOAT8OID)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATATYPE_MISMATCH),
+                     errmsg("AGE WCOJ sum-property scan cannot produce type %s",
+                            format_type_be(state->consumer_output_type))));
+        }
+        if (!state->sum_has_value)
+        {
+            ExecStoreVirtualTuple(slot);
+            return slot;
+        }
+
+        avg_value = DatumGetFloat8(DirectFunctionCall2(
+            float8div, Float8GetDatum(state->avg_sum),
+            Float8GetDatum((float8)state->sum_input_rows)));
+        if (state->consumer_output_type == FLOAT8OID)
+            slot->tts_values[0] = Float8GetDatum(avg_value);
+        else
+        {
+            agtype_value value;
+
+            value.type = AGTV_FLOAT;
+            value.val.float_value = avg_value;
+            slot->tts_values[0] = PointerGetDatum(
+                agtype_value_to_agtype(&value));
+        }
+        slot->tts_isnull[0] = false;
+        ExecStoreVirtualTuple(slot);
+        return slot;
+    }
+
     if (state->consumer_output_type != AGTYPEOID)
     {
         ereport(ERROR,
@@ -4346,7 +4763,14 @@ store_age_wcoj_sum_property_result(ScanState *node)
                         format_type_be(state->consumer_output_type))));
     }
 
-    if (state->sum_has_value)
+    if (state->sum_has_value && age_wcoj_property_minmax_consumer(
+            state->consumer_kind))
+    {
+        slot->tts_values[0] = PointerGetDatum(
+            state->property_aggregate_value);
+        slot->tts_isnull[0] = false;
+    }
+    else if (state->sum_has_value)
     {
         slot->tts_values[0] =
             PointerGetDatum(agtype_value_to_agtype(&state->sum_value));
@@ -4392,6 +4816,42 @@ store_age_wcoj_group_sum_property_result(ScanState *node, graphid key)
     slot->tts_isnull[0] = false;
 
     sum_type = TupleDescAttr(tupdesc, 1)->atttypid;
+    if (age_wcoj_property_avg_consumer(state->consumer_kind))
+    {
+        float8 avg_value;
+
+        if (sum_type != AGTYPEOID && sum_type != FLOAT8OID)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATATYPE_MISMATCH),
+                     errmsg("AGE WCOJ group sum-property scan cannot produce sum type %s",
+                            format_type_be(sum_type))));
+        }
+        if (!state->sum_has_value)
+        {
+            ExecStoreVirtualTuple(slot);
+            return slot;
+        }
+
+        avg_value = DatumGetFloat8(DirectFunctionCall2(
+            float8div, Float8GetDatum(state->avg_sum),
+            Float8GetDatum((float8)state->sum_input_rows)));
+        if (sum_type == FLOAT8OID)
+            slot->tts_values[1] = Float8GetDatum(avg_value);
+        else
+        {
+            agtype_value value;
+
+            value.type = AGTV_FLOAT;
+            value.val.float_value = avg_value;
+            slot->tts_values[1] = PointerGetDatum(
+                agtype_value_to_agtype(&value));
+        }
+        slot->tts_isnull[1] = false;
+        ExecStoreVirtualTuple(slot);
+        return slot;
+    }
+
     if (sum_type != AGTYPEOID)
     {
         ereport(ERROR,
@@ -4399,7 +4859,14 @@ store_age_wcoj_group_sum_property_result(ScanState *node, graphid key)
                  errmsg("AGE WCOJ group sum-property scan cannot produce sum type %s",
                         format_type_be(sum_type))));
     }
-    if (state->sum_has_value)
+    if (state->sum_has_value && age_wcoj_property_minmax_consumer(
+            state->consumer_kind))
+    {
+        slot->tts_values[1] = PointerGetDatum(
+            state->property_aggregate_value);
+        slot->tts_isnull[1] = false;
+    }
+    else if (state->sum_has_value)
     {
         slot->tts_values[1] =
             PointerGetDatum(agtype_value_to_agtype(&state->sum_value));
@@ -4515,9 +4982,12 @@ access_age_wcoj_join_scan(ScanState *node)
         return access_age_wcoj_group_count_scan(node);
     if (state->consumer_kind == AGE_WCOJ_CONSUMER_GROUP_COUNT_DISTINCT_KEY)
         return access_age_wcoj_group_count_distinct_key_scan(node);
-    if (state->consumer_kind == AGE_WCOJ_CONSUMER_SUM_PROPERTY)
+    if (state->consumer_kind == AGE_WCOJ_CONSUMER_SUM_PROPERTY ||
+        state->consumer_kind == AGE_WCOJ_CONSUMER_MIN_PROPERTY ||
+        state->consumer_kind == AGE_WCOJ_CONSUMER_MAX_PROPERTY ||
+        state->consumer_kind == AGE_WCOJ_CONSUMER_AVG_PROPERTY)
         return access_age_wcoj_sum_property_scan(node);
-    if (state->consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY)
+    if (age_wcoj_group_property_aggregate_consumer(state->consumer_kind))
         return access_age_wcoj_group_sum_property_scan(node);
     if (state->row_goal > 0 && state->row_goal_emitted >= state->row_goal)
         return ExecClearTuple(node->ss_ScanTupleSlot);
@@ -4680,6 +5150,18 @@ age_wcoj_consumer_name(AgeWCOJConsumerKind consumer)
         return "sum(property)";
     case AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY:
         return "group sum(property)";
+    case AGE_WCOJ_CONSUMER_MIN_PROPERTY:
+        return "min(property)";
+    case AGE_WCOJ_CONSUMER_MAX_PROPERTY:
+        return "max(property)";
+    case AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY:
+        return "group min(property)";
+    case AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY:
+        return "group max(property)";
+    case AGE_WCOJ_CONSUMER_AVG_PROPERTY:
+        return "avg(property)";
+    case AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY:
+        return "group avg(property)";
     case AGE_WCOJ_CONSUMER_EXISTS:
         return "exists";
     }
@@ -4855,17 +5337,39 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
             ExplainPropertyInteger("Count Result", NULL,
                                    state->count_result, es);
         }
-        if ((state->consumer_kind == AGE_WCOJ_CONSUMER_SUM_PROPERTY ||
-             state->consumer_kind == AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY) &&
+        if (age_wcoj_property_aggregate_consumer(state->consumer_kind) &&
             state->sum_executed)
         {
-            ExplainPropertyInteger("Sum Property Provider", NULL,
+            const char *prefix = "Sum";
+            char *provider_label;
+            char *input_label;
+            char *null_label;
+
+            if (state->consumer_kind == AGE_WCOJ_CONSUMER_MIN_PROPERTY ||
+                state->consumer_kind == AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY)
+                prefix = "Min";
+            else if (state->consumer_kind == AGE_WCOJ_CONSUMER_MAX_PROPERTY ||
+                     state->consumer_kind ==
+                     AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY)
+                prefix = "Max";
+            else if (state->consumer_kind == AGE_WCOJ_CONSUMER_AVG_PROPERTY ||
+                     state->consumer_kind ==
+                     AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY)
+                prefix = "Avg";
+
+            provider_label = psprintf("%s Property Provider", prefix);
+            input_label = psprintf("%s Property Input Rows", prefix);
+            null_label = psprintf("%s Property Null Rows", prefix);
+            ExplainPropertyInteger(provider_label, NULL,
                                    state->sum_property_provider_index + 1,
                                    es);
-            ExplainPropertyInteger("Sum Property Input Rows", NULL,
+            ExplainPropertyInteger(input_label, NULL,
                                    state->sum_input_rows, es);
-            ExplainPropertyInteger("Sum Property Null Rows", NULL,
+            ExplainPropertyInteger(null_label, NULL,
                                    state->sum_null_rows, es);
+            pfree(provider_label);
+            pfree(input_label);
+            pfree(null_label);
         }
         if (state->consumer_kind == AGE_WCOJ_CONSUMER_EXISTS &&
             state->exists_executed)
@@ -4885,6 +5389,12 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
                                state->peak_factor_memory, es);
         ExplainPropertyInteger("Payload Rows Spilled", NULL,
                                state->payload_rows_spilled, es);
+        ExplainPropertyInteger("Payload Bucket Blocks Spilled", NULL,
+                               state->payload_bucket_blocks_spilled, es);
+        ExplainPropertyInteger("Payload Bucket Rows Spilled", NULL,
+                               state->payload_bucket_rows_spilled, es);
+        ExplainPropertyInteger("Payload Bucket Bytes Spilled", "bytes",
+                               state->payload_bucket_bytes_spilled, es);
         ExplainPropertyInteger("Spill Bytes", "bytes",
                                state->spill_bytes, es);
         pfree(observed_postings);

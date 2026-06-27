@@ -217,12 +217,14 @@ typedef struct AgeGraphJoinMatchComponent
     int core_variable_count;
     int tail_separator_count;
     int reduction_order_edge_count;
+    int semijoin_step_count;
     int ghd_bag_count;
     int ghd_separator_count;
     AgeGraphJoinMatchComponentShape shape;
     AgeGraphJoinMatchDescriptorSource descriptor_source;
     AgeGraphJoinMatchReductionOrderKind reduction_order_kind;
     List *reduction_order_edges;
+    List *semijoin_steps;
     List *ghd_bags;
     List *ghd_separators;
     bool connected;

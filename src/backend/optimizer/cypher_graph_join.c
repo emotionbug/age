@@ -1895,6 +1895,7 @@ static AgeGraphJoinMatchComponent *graph_join_copy_match_component(
         source->component_ids);
     component->reduction_order_edges = graph_join_copy_int_list(
         source->reduction_order_edges);
+    component->semijoin_steps = copyObject(source->semijoin_steps);
     component->ghd_bags = copyObject(source->ghd_bags);
     component->ghd_separators = copyObject(source->ghd_separators);
     MemoryContextSwitchTo(oldcontext);

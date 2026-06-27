@@ -26,6 +26,16 @@ FROM cypher('wcoj_bench_semiring', $$
     RETURN count(*) AS total
 $$) AS (total agtype);
 
+\echo 'semiring count key: fanout^3 non-null terminal keys'
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_bench_semiring', $$
+    MATCH (s1:S {id:1})-[e1:E1]->(t:T),
+          (s2:S {id:2})-[e2:E2]->(t),
+          (s3:S {id:3})-[e3:E3]->(t)
+    RETURN count(id(t)) AS total
+$$) AS (total agtype);
+
 \echo 'semiring count distinct key: one terminal'
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
 SELECT *
@@ -57,6 +67,16 @@ FROM cypher('wcoj_bench_semiring', $$
     LIMIT 1
 $$) AS (key agtype);
 
+\echo 'semiring group count key: terminal key'
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_bench_semiring', $$
+    MATCH (s1:S {id:1})-[e1:E1]->(t:T),
+          (s2:S {id:2})-[e2:E2]->(t),
+          (s3:S {id:3})-[e3:E3]->(t)
+    RETURN id(t) AS key, count(id(t)) AS total
+$$) AS (key agtype, total agtype);
+
 \echo 'semiring group count distinct key: terminal key'
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
 SELECT *
@@ -77,6 +97,36 @@ FROM cypher('wcoj_bench_semiring', $$
     RETURN sum(e1.score) AS total
 $$) AS (total agtype);
 
+\echo 'semiring avg property: first edge score'
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_bench_semiring', $$
+    MATCH (s1:S {id:1})-[e1:E1]->(t:T),
+          (s2:S {id:2})-[e2:E2]->(t),
+          (s3:S {id:3})-[e3:E3]->(t)
+    RETURN avg(e1.score) AS average
+$$) AS (average agtype);
+
+\echo 'semiring min property: first edge score'
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_bench_semiring', $$
+    MATCH (s1:S {id:1})-[e1:E1]->(t:T),
+          (s2:S {id:2})-[e2:E2]->(t),
+          (s3:S {id:3})-[e3:E3]->(t)
+    RETURN min(e1.score) AS low
+$$) AS (low agtype);
+
+\echo 'semiring max property: first edge score'
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_bench_semiring', $$
+    MATCH (s1:S {id:1})-[e1:E1]->(t:T),
+          (s2:S {id:2})-[e2:E2]->(t),
+          (s3:S {id:3})-[e3:E3]->(t)
+    RETURN max(e1.score) AS high
+$$) AS (high agtype);
+
 \echo 'semiring group sum property: terminal key'
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
 SELECT *
@@ -86,6 +136,36 @@ FROM cypher('wcoj_bench_semiring', $$
           (s3:S {id:3})-[e3:E3]->(t)
     RETURN id(t) AS key, sum(e1.score) AS total
 $$) AS (key agtype, total agtype);
+
+\echo 'semiring group avg property: terminal key'
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_bench_semiring', $$
+    MATCH (s1:S {id:1})-[e1:E1]->(t:T),
+          (s2:S {id:2})-[e2:E2]->(t),
+          (s3:S {id:3})-[e3:E3]->(t)
+    RETURN id(t) AS key, avg(e1.score) AS average
+$$) AS (key agtype, average agtype);
+
+\echo 'semiring group min property: terminal key'
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_bench_semiring', $$
+    MATCH (s1:S {id:1})-[e1:E1]->(t:T),
+          (s2:S {id:2})-[e2:E2]->(t),
+          (s3:S {id:3})-[e3:E3]->(t)
+    RETURN id(t) AS key, min(e1.score) AS low
+$$) AS (key agtype, low agtype);
+
+\echo 'semiring group max property: terminal key'
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)
+SELECT *
+FROM cypher('wcoj_bench_semiring', $$
+    MATCH (s1:S {id:1})-[e1:E1]->(t:T),
+          (s2:S {id:2})-[e2:E2]->(t),
+          (s3:S {id:3})-[e3:E3]->(t)
+    RETURN id(t) AS key, max(e1.score) AS high
+$$) AS (key agtype, high agtype);
 
 \echo 'semiring limit: one demanded row'
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS OFF)

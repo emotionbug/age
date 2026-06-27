@@ -153,12 +153,14 @@ builds.  Discard the first sample and compare the median of the next five.
 `wcoj_survivor_batch_results.md` records the reference environment, raw
 samples, telemetry, and correctness checks.
 
-The raw plans include soft budget telemetry for batched payload blocks:
-`Payload Block Budget Overruns`, `Payload Block Capacity Clamps`, and
-`Peak Payload Block Rows`.  These counters show when a completed block exceeded
-the in-memory payload budget and whether later survivor blocks were reduced
-from observed payload fanout.  They are not a substitute for true payload-bucket
-spill.
+The raw plans include budget and spill telemetry for batched payload blocks:
+`Payload Block Budget Overruns`, `Payload Block Capacity Clamps`,
+`Peak Payload Block Rows`, `Payload Bucket Blocks Spilled`,
+`Payload Bucket Rows Spilled`, and `Payload Bucket Bytes Spilled`.
+The budget counters show when a completed block exceeded the in-memory payload
+budget and whether later survivor blocks were reduced from observed payload
+fanout.  The bucket-spill counters show compact survivor payload buckets written
+to temp storage and loaded back on demand.
 
 ## Query-wide semijoin reduction for acyclic multiway joins
 
@@ -178,7 +180,10 @@ psql --set=ON_ERROR_STOP=1 --set=runs=5 \
 The benchmark fixes `join_collapse_limit` and `from_collapse_limit` to one so
 that the binary control retains the written chain order; `age.enable_wcoj` is
 the only path switch.  See `wcoj_semijoin_results.md` for raw samples,
-telemetry, and the multiset correctness contract.
+telemetry, and the multiset correctness contract.  The regression and release
+plans print the full Generic Join plan first; the Yannakakis step count, bottom-
+up/top-down step plan, filter mode, applied-step counters, and retained provider
+rows are visible in that plan, with grep checks kept as secondary guards.
 
 ## WCOJ roadmap release gates
 
@@ -207,6 +212,9 @@ pre-batching baseline from `wcoj_survivor_batch_results.md`.  Override
 `WCOJ_ROADMAP_DENSE_BASELINE_MS` when measuring a fresh baseline on the same
 hardware.  Use `WCOJ_ROADMAP_SKIP_COMPLETION_SETUP=1` or
 `WCOJ_ROADMAP_SKIP_SEMIJOIN_SETUP=1` to reuse existing benchmark graphs.
+Set `WCOJ_ROADMAP_COMPLETION_RAW_PLAN_LOG=/path/to/completion-plans.log` and
+`WCOJ_ROADMAP_SEMIJOIN_RAW_PLAN_LOG=/path/to/semijoin-plans.log` when the
+threshold gate should also preserve named full raw plan artifacts.
 
 ## WCOJ/Generic Join roadmap gate umbrella
 
@@ -246,14 +254,20 @@ PGHOST=/tmp PGPORT=55432 PGDATABASE=agebench \
 
 ## Roadmap raw plan report with secondary telemetry checks
 
-`verify_roadmap_telemetry_report.sh` runs the same bounded WCOJ/Generic Join
-workloads, retains the full `EXPLAIN ANALYZE` output, writes the raw-plan
-Markdown artifact, and prints that full artifact before extracting compact
-telemetry checks.  The raw plan text is the default review target.  The
+`verify_roadmap_telemetry_report.sh` first delegates to
+`capture_roadmap_plans.sh`, retains the full `EXPLAIN ANALYZE` output, writes
+the raw-plan Markdown artifact, and prints that full artifact before any grep
+or threshold checks run.  The raw plan text is the default review target.  The
 PASS/FAIL telemetry summary is secondary and only checks that the logs include
 survivor batching, alpha-acyclic semijoin reduction, factorized source bags and
-shared enumerators, Generic Join trie ops, WCOJ row goals, semiring consumers,
-and GHD separator pruning counters.
+shared enumerators, Generic Join provider materialization and trie/cache ops,
+WCOJ row goals, semiring consumers, and explicit 2-core leaf-tail GHD separator
+pruning counters.
+
+Regression coverage should follow the same plan-first ordering: standalone
+`EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)`
+blocks expose the full direct payload, source-bag factorization, semiring
+consumer, and row-goal plans before any grep-style telemetry assertions run.
 
 ```sh
 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
@@ -271,7 +285,20 @@ retains a temporary log directory and prints its path.  If
 `ROADMAP_TELEMETRY_PLAN_REPORT` is omitted, the full-plan Markdown report is
 written to `ROADMAP_TELEMETRY_LOG_DIR/roadmap-full-plans.md`.  Set
 `ROADMAP_TELEMETRY_PRINT_PLAN_REPORT=0` only when the report should be written
-without also being printed.
+without also being printed.  Set `ROADMAP_TELEMETRY_SECONDARY_CHECKS=0` to stop
+after the raw plan capture and skip the secondary evidence gates.
+
+When secondary checks are enabled, the wrapper also writes named full-output
+logs beside the Markdown report:
+
+- `raw-wcoj-completion-plans.log` for WCOJ payload batching, dense star, and
+  cycle plans;
+- `raw-wcoj-semijoin-plans.log` for the acyclic semijoin/Yannakakis plans;
+- `raw-wcoj-semiring-plans.log` for semiring consumers and row goals;
+- `raw-generic-join-preservation-plans.log` for Generic Join GHD/count
+  preservation;
+- `raw-generic-reduction-plans.log` for the reduction matrix and Yannakakis
+  step disclosure.
 
 ## Roadmap full plan capture
 
@@ -279,7 +306,10 @@ without also being printed.
 full raw `EXPLAIN ANALYZE` output for each workload to individual logs plus a
 single Markdown report.  The report opens with complete raw plan sections and
 is printed to stdout by default for direct inspection rather than grep-based
-evidence gating.  Set `ROADMAP_PLAN_PRINT_REPORT=0` to retain only the file.
+evidence gating.  It also includes an artifact index for the representative
+WCOJ payload, semiring consumer, Generic Join GHD/count, and Yannakakis
+reduction plan logs.  Set `ROADMAP_PLAN_PRINT_REPORT=0` to retain only the
+file.
 
 ```sh
 ROADMAP_PLAN_LOG_DIR=/tmp/hidden-age-roadmap-plans \
@@ -296,11 +326,12 @@ plan-shape inspection, not for performance evidence.
 `verify_wcoj_semiring_gates.sh` builds a compact direct-WCOJ graph whose three
 edge bags imply `fanout^3` flat rows.  The default `fanout=500` creates
 125,000,000 candidate combinations from only 1,500 edge rows, then verifies
-that count, count-distinct, standalone distinct-key, grouped count-distinct,
-sum, grouped sum, LIMIT, and EXISTS use consumer arithmetic or row goals
+that count, non-null key count, count-distinct, standalone distinct-key,
+grouped key count, grouped count-distinct, sum/avg/min/max property consumers,
+their grouped variants, LIMIT, and EXISTS use consumer arithmetic or row goals
 instead of materializing the flat product.  The gate checks both the avoided
-flat product and the actual `Flat Rows Materialized` count, plus source-bag and
-factor-memory telemetry.
+flat product and the actual
+`Flat Rows Materialized` count, plus source-bag and factor-memory telemetry.
 
 ```sh
 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
@@ -310,13 +341,19 @@ PGHOST=/tmp PGPORT=55432 PGDATABASE=agebench \
 
 Override `WCOJ_SEMIRING_FANOUT` to scale the implied flat cardinality, and use
 `WCOJ_SEMIRING_SKIP_SETUP=1` to reuse an existing `wcoj_bench_semiring` graph.
+Set `WCOJ_SEMIRING_RAW_PLAN_LOG=/path/to/semiring-plans.log` to preserve the
+complete raw plan output as a named artifact while keeping the existing grep
+guards operational.
 
 ## Generic Join preservation gates
 
 `verify_generic_join_preservation.sh` builds a four-cycle plus two independent
 leaf tails and verifies that cyclic components still choose Generic Join,
-preserve key-only output materialization, reuse prefix ranges, and apply
-multi-tail separator pruning.
+preserve key-only output materialization, expose the current eager sorted-array
+physical provider in the raw plan, reuse prefix ranges, and apply multi-tail
+separator pruning.  The raw plan reports `GHD Mode: 2-core leaf-tail`,
+`GHD General Decomposition: false`, and the fallback reason so this gate does
+not imply a general GHD decomposition.
 
 ```sh
 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
@@ -326,7 +363,9 @@ PGHOST=/tmp PGPORT=55432 PGDATABASE=agebench \
 
 Set `GENERIC_JOIN_PRESERVE_CYCLE_SIZE` to scale the cyclic core, or
 `GENERIC_JOIN_PRESERVE_SKIP_SETUP=1` to reuse an existing
-`generic_join_preserve` graph.
+`generic_join_preserve` graph.  Set
+`GENERIC_JOIN_PRESERVE_RAW_PLAN_LOG=/path/to/generic-preserve-plans.log` to
+preserve the full raw plan output for review before the secondary gate summary.
 
 ## Generic reduction matrix gate
 
@@ -334,7 +373,9 @@ Set `GENERIC_JOIN_PRESERVE_CYCLE_SIZE` to scale the cyclic core, or
 leaf on the A side.  The B endpoint remains a one-row separator, so the planner
 admits Generic Join for the high-pressure chain, and the leaf-peel semijoin
 order should reduce retained provider rows to at most 1% of the original
-provider rows before enumeration.
+provider rows before enumeration.  The script tees the full raw plan before
+checking secondary telemetry guards, including the Yannakakis step plan and
+applied-step counters.
 
 ```sh
 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
@@ -344,4 +385,6 @@ PGHOST=/tmp PGPORT=55432 PGDATABASE=agebench \
 
 Set `GENERIC_REDUCTION_FANOUT` to scale the rejected domains, or
 `GENERIC_REDUCTION_SKIP_SETUP=1` to reuse an existing
-`generic_reduction_matrix` graph.
+`generic_reduction_matrix` graph.  Set
+`GENERIC_REDUCTION_RAW_PLAN_LOG=/path/to/generic-reduction-plans.log` to retain
+the complete Yannakakis/GHD disclosure as a raw plan artifact.

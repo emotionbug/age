@@ -23,10 +23,24 @@ max_dense_overhead=${WCOJ_ROADMAP_MAX_DENSE_OVERHEAD:-1.25}
 # comparing against a freshly measured pre-batch build on the same hardware.
 dense_baseline_ms=${WCOJ_ROADMAP_DENSE_BASELINE_MS:-2738.042}
 
-completion_out="$tmpdir/completion.out"
+completion_raw_plan_log=${WCOJ_ROADMAP_COMPLETION_RAW_PLAN_LOG:-}
+semijoin_raw_plan_log=${WCOJ_ROADMAP_SEMIJOIN_RAW_PLAN_LOG:-}
+if [[ -n "$completion_raw_plan_log" ]]; then
+    mkdir -p "$(dirname -- "$completion_raw_plan_log")"
+    completion_out=$completion_raw_plan_log
+else
+    completion_out="$tmpdir/completion.out"
+fi
 completion_times="$tmpdir/completion-times.tsv"
-semijoin_out="$tmpdir/semijoin.out"
+if [[ -n "$semijoin_raw_plan_log" ]]; then
+    mkdir -p "$(dirname -- "$semijoin_raw_plan_log")"
+    semijoin_out=$semijoin_raw_plan_log
+else
+    semijoin_out="$tmpdir/semijoin.out"
+fi
 semijoin_times="$tmpdir/semijoin-times.tsv"
+: > "$completion_out"
+: > "$semijoin_out"
 
 if [[ ! -x "$pg_config" ]]; then
     echo "PG_CONFIG is not executable: $pg_config" >&2
@@ -168,5 +182,6 @@ semijoin_speedup=$(ratio "$semijoin_binary_ms" "$semijoin_generic_ms")
 assert_at_least "acyclic chain semijoin speedup" \
     "$semijoin_speedup" "$min_semijoin_speedup"
 
-printf 'dense_star_speedup=%sx dense_auto_overhead=%sx cycle_speedup=%sx semijoin_speedup=%sx\n' \
-       "$dense_speedup" "$dense_overhead" "$cycle_speedup" "$semijoin_speedup"
+printf 'dense_star_speedup=%sx dense_auto_overhead=%sx cycle_speedup=%sx semijoin_speedup=%sx completion_raw_plan_log=%s semijoin_raw_plan_log=%s\n' \
+       "$dense_speedup" "$dense_overhead" "$cycle_speedup" "$semijoin_speedup" \
+       "$completion_out" "$semijoin_out"

@@ -83,6 +83,125 @@ ANALYZE generic_ghd."E3";
 ANALYZE generic_ghd."E4";
 ANALYZE generic_ghd."TX";
 
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a),
+          (c)-[t:TX]->(x:X)
+    RETURN id(a), id(b), id(c), id(d), id(x),
+           id(e1), id(e2), id(e3), id(e4), id(t)
+$$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
+        e1 agtype, e2 agtype, e3 agtype, e4 agtype, t agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a),
+          (c)-[t:TX]->(x:X)
+    RETURN count(*) AS total
+$$) AS (total agtype);
+ROLLBACK;
+
+DO $generic_ghd_count_consumer_plan$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_count_consumer boolean := false;
+    has_count_result boolean := false;
+    has_no_flat_rows boolean := false;
+    has_consumer_avoids boolean := false;
+    has_rows_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+        SELECT *
+        FROM cypher('generic_ghd', $cypher$
+            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+                  -[e3:E3]->(d:D)-[e4:E4]->(a),
+                  (c)-[t:TX]->(x:X)
+            RETURN count(*) AS total
+        $cypher$) AS (total agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_count_consumer := has_count_consumer OR
+            plan_text LIKE '%Generic Join Consumer: count(*)%';
+        has_count_result := has_count_result OR
+            plan_text LIKE '%Count Result: 1%';
+        has_no_flat_rows := has_no_flat_rows OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_consumer_avoids := has_consumer_avoids OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 1%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_count_consumer OR
+       NOT has_count_result OR NOT has_no_flat_rows OR
+       NOT has_consumer_avoids OR NOT has_rows_emitted THEN
+        RAISE EXCEPTION
+            'Generic Join count consumer was not observed';
+    END IF;
+    RAISE NOTICE 'generic join count consumer verified';
+END
+$generic_ghd_count_consumer_plan$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_count ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a),
+          (c)-[t:TX]->(x:X)
+    RETURN count(*) AS total
+$$) AS (total agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE generic_ghd_join_count ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a),
+          (c)-[t:TX]->(x:X)
+    RETURN count(*) AS total
+$$) AS (total agtype);
+
+SELECT (SELECT total FROM generic_ghd_binary_count) AS binary_total,
+       (SELECT total FROM generic_ghd_join_count) AS generic_total,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_count
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_count)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_count
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_count)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
 DO $generic_ghd_separator_plan$
 DECLARE
     plan_text text;
@@ -91,6 +210,9 @@ DECLARE
     has_component_ids boolean := false;
     has_reduction_shape boolean := false;
     has_descriptor_source boolean := false;
+    has_ghd_mode boolean := false;
+    has_ghd_general boolean := false;
+    has_ghd_fallback boolean := false;
     has_ghd_bag_count boolean := false;
     has_ghd_separator_count boolean := false;
     has_ghd_separator_details boolean := false;
@@ -135,6 +257,13 @@ BEGIN
             plan_text LIKE '%Component IDs: 1, 1, 1, 1, 1%';
         has_reduction_shape := has_reduction_shape OR
             plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
+        has_ghd_mode := has_ghd_mode OR
+            plan_text LIKE '%GHD Mode: 2-core leaf-tail%';
+        has_ghd_general := has_ghd_general OR
+            plan_text LIKE '%GHD General Decomposition: false%';
+        has_ghd_fallback := has_ghd_fallback OR
+            plan_text LIKE
+            '%GHD Fallback Reason: general GHD decomposition is not implemented%';
         has_descriptor_source := has_descriptor_source OR
             plan_text LIKE
             '%Reduction Descriptor Source: graph-join-match-ir%';
@@ -175,6 +304,8 @@ BEGIN
 
     IF NOT has_generic OR NOT has_component_count OR
        NOT has_component_ids OR NOT has_reduction_shape OR
+       NOT has_ghd_mode OR NOT has_ghd_general OR
+       NOT has_ghd_fallback OR
        NOT has_descriptor_source OR NOT has_reduction_core OR
        NOT has_ghd_bag_count OR NOT has_ghd_separator_count OR
        NOT has_ghd_separator_details OR NOT has_ghd_descriptor_source OR
@@ -251,6 +382,25 @@ ON generic_ghd."TY" USING age_adjacency(start_id, id, end_id);
 ANALYZE generic_ghd."Y";
 ANALYZE generic_ghd."TY";
 
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a),
+          (c)-[tx:TX]->(x:X),
+          (a)-[ty:TY]->(y:Y)
+    RETURN id(a), id(b), id(c), id(d), id(x), id(y),
+           id(e1), id(e2), id(e3), id(e4), id(tx), id(ty)
+$$) AS (a agtype, b agtype, c agtype, d agtype,
+        x agtype, y agtype, e1 agtype, e2 agtype,
+        e3 agtype, e4 agtype, tx agtype, ty agtype);
+ROLLBACK;
+
 DO $generic_ghd_multi_tail_plan$
 DECLARE
     plan_text text;
@@ -259,6 +409,9 @@ DECLARE
     has_component_ids boolean := false;
     has_reduction_shape boolean := false;
     has_descriptor_source boolean := false;
+    has_ghd_mode boolean := false;
+    has_ghd_general boolean := false;
+    has_ghd_fallback boolean := false;
     has_ghd_bag_count boolean := false;
     has_ghd_separator_count boolean := false;
     has_ghd_separator_details boolean := false;
@@ -300,6 +453,13 @@ BEGIN
             plan_text LIKE '%Component IDs: 1, 1, 1, 1, 1, 1%';
         has_reduction_shape := has_reduction_shape OR
             plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
+        has_ghd_mode := has_ghd_mode OR
+            plan_text LIKE '%GHD Mode: 2-core leaf-tail%';
+        has_ghd_general := has_ghd_general OR
+            plan_text LIKE '%GHD General Decomposition: false%';
+        has_ghd_fallback := has_ghd_fallback OR
+            plan_text LIKE
+            '%GHD Fallback Reason: general GHD decomposition is not implemented%';
         has_descriptor_source := has_descriptor_source OR
             plan_text LIKE
             '%Reduction Descriptor Source: graph-join-match-ir%';
@@ -331,6 +491,8 @@ BEGIN
 
     IF NOT has_generic OR NOT has_component_count OR
        NOT has_component_ids OR NOT has_reduction_shape OR
+       NOT has_ghd_mode OR NOT has_ghd_general OR
+       NOT has_ghd_fallback OR
        NOT has_descriptor_source OR NOT has_ghd_bag_count OR
        NOT has_ghd_separator_count OR NOT has_ghd_separator_details OR
        NOT has_ghd_descriptor_source OR
@@ -657,7 +819,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('generic_ghd', $$
     MATCH (a:A {missing: true})-[e1:E1]->(b:B)-[e2:E2]->(c:C)
@@ -719,11 +881,33 @@ ANALYZE generic_ghd."TU";
 ANALYZE generic_ghd."TV";
 ANALYZE generic_ghd."TW";
 
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a),
+          (c)-[tu:TU]->(u:U)-[tv:TV]->(v:V)-[tw:TW]->(w:W)
+    RETURN id(a), id(b), id(c), id(d), id(u), id(v), id(w),
+           id(e1), id(e2), id(e3), id(e4), id(tu), id(tv), id(tw)
+$$) AS (a agtype, b agtype, c agtype, d agtype,
+        u agtype, v agtype, w agtype, e1 agtype,
+        e2 agtype, e3 agtype, e4 agtype, tu agtype,
+        tv agtype, tw agtype);
+ROLLBACK;
+
 DO $generic_ghd_deep_tail_plan$
 DECLARE
     plan_text text;
     has_generic boolean := false;
     has_reduction_shape boolean := false;
+    has_ghd_mode boolean := false;
+    has_ghd_general boolean := false;
+    has_ghd_fallback boolean := false;
     has_ghd_separator_count boolean := false;
     has_tail_domain_pass boolean := false;
     has_tail_domain_rows boolean := false;
@@ -755,6 +939,13 @@ BEGIN
             plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
         has_reduction_shape := has_reduction_shape OR
             plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
+        has_ghd_mode := has_ghd_mode OR
+            plan_text LIKE '%GHD Mode: 2-core leaf-tail%';
+        has_ghd_general := has_ghd_general OR
+            plan_text LIKE '%GHD General Decomposition: false%';
+        has_ghd_fallback := has_ghd_fallback OR
+            plan_text LIKE
+            '%GHD Fallback Reason: general GHD decomposition is not implemented%';
         has_ghd_separator_count := has_ghd_separator_count OR
             plan_text LIKE '%GHD Separator Count: 1%';
         has_tail_domain_pass := has_tail_domain_pass OR
@@ -770,6 +961,8 @@ BEGIN
     END LOOP;
 
     IF NOT has_generic OR NOT has_reduction_shape OR
+       NOT has_ghd_mode OR NOT has_ghd_general OR
+       NOT has_ghd_fallback OR
        NOT has_ghd_separator_count OR NOT has_tail_domain_pass OR
        NOT has_tail_domain_rows OR NOT has_separator_domain OR
        NOT has_core_pruning OR NOT has_one_row THEN

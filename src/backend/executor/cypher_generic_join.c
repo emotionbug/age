@@ -19,12 +19,16 @@
 
 #include "postgres.h"
 
+#include "catalog/pg_type_d.h"
 #include "commands/explain_format.h"
 #include "commands/explain_state.h"
+#include "common/int.h"
 #include "executor/cypher_generic_join.h"
 #include "executor/executor.h"
 #include "lib/stringinfo.h"
 #include "nodes/pg_list.h"
+#include "utils/agtype.h"
+#include "utils/builtins.h"
 #include "utils/graphid.h"
 #include "utils/memutils.h"
 
@@ -165,6 +169,16 @@ typedef struct AgeGenericGHDSeparatorPlan
     bool separator_is_key1;
 } AgeGenericGHDSeparatorPlan;
 
+typedef struct AgeGenericSemijoinStepPlan
+{
+    AgeGenericSemijoinStepPhase phase;
+    int provider_index;
+    int from_variable;
+    int to_variable;
+    int key_variable;
+    bool key_is_key1;
+} AgeGenericSemijoinStepPlan;
+
 typedef enum AgeGenericGHDSeparatorDescField
 {
     AGE_GENERIC_GHD_SEPARATOR_DESC_ID = 0,
@@ -183,6 +197,8 @@ struct AgeGenericJoinState
     int variable_count;
     Index *variable_rtis;
     int provider_count;
+    AgeGenericConsumerKind consumer_kind;
+    Oid consumer_output_type;
     AgeGenericProvider *providers;
     AgeGenericLevel *levels;
     graphid *bindings;
@@ -205,6 +221,10 @@ struct AgeGenericJoinState
     int reduction_ghd_bag_count;
     int reduction_ghd_separator_count;
     AgeGenericGHDSeparatorPlan *reduction_ghd_separators;
+    int reduction_semijoin_step_count;
+    int reduction_semijoin_bottom_up_step_count;
+    int reduction_semijoin_top_down_step_count;
+    AgeGenericSemijoinStepPlan *reduction_semijoin_steps;
     int component_count;
     int *variable_component_ids;
     bool reduction_order_applied;
@@ -216,10 +236,16 @@ struct AgeGenericJoinState
     bool exhausted;
     int64 rows_materialized;
     int64 tuples_materialized;
+    int64 provider_rows_read;
+    int64 provider_row_bytes_allocated;
+    int64 provider_tuple_bytes_copied;
     int64 providers_skipped_after_empty;
     int64 semijoin_passes;
     int64 semijoin_bottom_up_passes;
     int64 semijoin_top_down_passes;
+    int64 semijoin_steps_applied;
+    int64 semijoin_bottom_up_steps_applied;
+    int64 semijoin_top_down_steps_applied;
     int64 semijoin_rows_removed;
     int64 semijoin_bottom_up_rows_removed;
     int64 semijoin_top_down_rows_removed;
@@ -233,9 +259,19 @@ struct AgeGenericJoinState
     int64 separator_domain_keys;
     int64 separator_leaf_tail_rows_removed;
     int64 separator_cyclic_core_rows_removed;
+    int64 reduction_domain_builds;
+    int64 reduction_domain_rows_scanned;
+    int64 reduction_domain_keys_produced;
+    int64 reduction_domain_sorts;
+    int64 reduction_domain_sort_rows;
     int64 bindings_completed;
     int64 candidate_flat_rows;
     int64 candidate_combinations;
+    int64 flat_rows_materialized;
+    int64 consumer_flat_rows_avoided;
+    bool count_executed;
+    bool count_emitted;
+    int64 count_result;
     int64 uniqueness_rejects;
     int64 rows_emitted;
     int64 rescans;
@@ -244,10 +280,16 @@ struct AgeGenericJoinState
     int64 lazy_domain_keys_scanned;
     int64 lazy_domain_scratch_allocations;
     int64 lazy_domain_scratch_reuses;
+    int64 runtime_domain_builds;
+    int64 runtime_domain_rows_scanned;
     int64 lazy_prefix_range_builds;
     int64 lazy_prefix_range_reuses;
     int64 lazy_prefix_range_directory_searches;
     int64 lazy_prefix_range_cursor_reuses;
+    int64 prefix_range_cache_hits;
+    int64 prefix_range_cache_misses;
+    int64 child_range_cache_hits;
+    int64 child_range_cache_misses;
     int64 trie_child_range_reuses;
     int64 trie_child_range_opens;
     int64 trie_prefix_range_seeks;
@@ -278,11 +320,28 @@ add_generic_counter(int64 *counter, int64 amount)
         *counter += amount;
 }
 
+static int64
+add_generic_count_result(int64 count, int64 increment)
+{
+    int64 result;
+
+    if (increment <= 0)
+        return count;
+    if (pg_add_s64_overflow(count, increment, &result))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                 errmsg("bigint out of range")));
+    }
+    return result;
+}
+
 static Node *create_age_generic_join_state(CustomScan *cscan);
 static void begin_age_generic_join(CustomScanState *node, EState *estate,
                                    int eflags);
 static TupleTableSlot *exec_age_generic_join(CustomScanState *node);
 static TupleTableSlot *access_age_generic_join(ScanState *node);
+static TupleTableSlot *access_age_generic_count_scan(ScanState *node);
 static bool recheck_age_generic_join(ScanState *node, TupleTableSlot *slot);
 static void end_age_generic_join(CustomScanState *node);
 static void rescan_age_generic_join(CustomScanState *node);
@@ -293,6 +352,9 @@ static void initialize_generic_reduction_order(AgeGenericJoinState *state,
                                                List *reduction_desc);
 static void initialize_generic_ghd_separators(AgeGenericJoinState *state,
                                               List *reduction_desc);
+static void initialize_generic_semijoin_steps(AgeGenericJoinState *state,
+                                              List *provider_descs,
+                                              List *reduction_desc);
 static void build_generic_provider_prefix_range_directory(
     AgeGenericJoinState *state, AgeGenericProvider *provider);
 static void reduce_generic_providers(AgeGenericJoinState *state);
@@ -300,6 +362,7 @@ static void reduce_generic_leaf_tail_separators(
     AgeGenericJoinState *state, MemoryContext reduction_context);
 static void initialize_generic_provider_output(
     AgeGenericProvider *provider, TupleDesc tuple_desc, EState *estate);
+static const char *generic_consumer_name(AgeGenericConsumerKind consumer);
 
 const CustomScanMethods age_generic_join_scan_methods = {
     AGE_GENERIC_JOIN_SCAN_NAME,
@@ -500,6 +563,106 @@ initialize_generic_ghd_separators(AgeGenericJoinState *state,
 }
 
 static void
+initialize_generic_semijoin_steps(AgeGenericJoinState *state,
+                                  List *provider_descs,
+                                  List *reduction_desc)
+{
+    Node *steps_node;
+    List *step_descs;
+    ListCell *lc;
+    int index = 0;
+
+    steps_node = list_nth(
+        reduction_desc, AGE_GENERIC_REDUCTION_DESC_SEMIJOIN_STEPS);
+    if (steps_node != NULL && !IsA(steps_node, List))
+        elog(ERROR, "invalid AGE Generic Join semijoin step descriptor");
+
+    step_descs = (List *)steps_node;
+    state->reduction_semijoin_step_count = list_length(step_descs);
+    if (state->reduction_semijoin_step_count <= 0)
+        return;
+
+    state->reduction_semijoin_steps =
+        palloc0(sizeof(AgeGenericSemijoinStepPlan) *
+                state->reduction_semijoin_step_count);
+    foreach(lc, step_descs)
+    {
+        List *desc = lfirst(lc);
+        List *provider_desc;
+        AgeGenericSemijoinStepPlan *step;
+        int provider_kind;
+        int provider_var1;
+        int provider_var2;
+        int step_id;
+
+        if (desc == NIL || !IsA(desc, List) ||
+            list_length(desc) != AGE_GENERIC_SEMIJOIN_STEP_DESC_COUNT)
+        {
+            elog(ERROR, "invalid AGE Generic Join semijoin step descriptor");
+        }
+
+        step_id = intVal(list_nth(desc, AGE_GENERIC_SEMIJOIN_STEP_DESC_ID));
+        if (step_id != index)
+            elog(ERROR, "invalid AGE Generic Join semijoin step id");
+
+        step = &state->reduction_semijoin_steps[index++];
+        step->phase = (AgeGenericSemijoinStepPhase)intVal(list_nth(
+            desc, AGE_GENERIC_SEMIJOIN_STEP_DESC_PHASE));
+        step->provider_index = intVal(list_nth(
+            desc, AGE_GENERIC_SEMIJOIN_STEP_DESC_PROVIDER_INDEX));
+        step->from_variable = intVal(list_nth(
+            desc, AGE_GENERIC_SEMIJOIN_STEP_DESC_FROM_VARIABLE));
+        step->to_variable = intVal(list_nth(
+            desc, AGE_GENERIC_SEMIJOIN_STEP_DESC_TO_VARIABLE));
+        step->key_variable = intVal(list_nth(
+            desc, AGE_GENERIC_SEMIJOIN_STEP_DESC_KEY_VARIABLE));
+        step->key_is_key1 = intVal(list_nth(
+            desc, AGE_GENERIC_SEMIJOIN_STEP_DESC_KEY_IS_KEY1)) != 0;
+
+        if (step->phase < AGE_GENERIC_SEMIJOIN_STEP_BOTTOM_UP ||
+            step->phase > AGE_GENERIC_SEMIJOIN_STEP_TOP_DOWN ||
+            step->provider_index < 0 ||
+            step->provider_index >= state->provider_count ||
+            step->from_variable < 0 ||
+            step->from_variable >= state->variable_count ||
+            step->to_variable < 0 ||
+            step->to_variable >= state->variable_count ||
+            step->key_variable < 0 ||
+            step->key_variable >= state->variable_count ||
+            step->from_variable == step->to_variable)
+        {
+            elog(ERROR, "invalid AGE Generic Join semijoin step descriptor");
+        }
+
+        provider_desc = list_nth_node(List, provider_descs,
+                                      step->provider_index);
+        provider_kind = generic_provider_desc_int(
+            provider_desc, AGE_GENERIC_PROVIDER_DESC_KIND);
+        provider_var1 = generic_provider_desc_int(
+            provider_desc, AGE_GENERIC_PROVIDER_DESC_VAR1);
+        provider_var2 = generic_provider_desc_int(
+            provider_desc, AGE_GENERIC_PROVIDER_DESC_VAR2);
+        if (provider_kind != AGE_GENERIC_PROVIDER_EDGE ||
+            (provider_var1 != step->from_variable &&
+             provider_var2 != step->from_variable) ||
+            (provider_var1 != step->to_variable &&
+             provider_var2 != step->to_variable) ||
+            (provider_var1 != step->key_variable &&
+             provider_var2 != step->key_variable) ||
+            (step->key_is_key1 && provider_var1 != step->key_variable) ||
+            (!step->key_is_key1 && provider_var2 != step->key_variable))
+        {
+            elog(ERROR, "invalid AGE Generic Join semijoin step provider");
+        }
+
+        if (step->phase == AGE_GENERIC_SEMIJOIN_STEP_BOTTOM_UP)
+            state->reduction_semijoin_bottom_up_step_count++;
+        else
+            state->reduction_semijoin_top_down_step_count++;
+    }
+}
+
+static void
 initialize_generic_reduction_order(AgeGenericJoinState *state,
                                    List *provider_descs,
                                    List *reduction_desc)
@@ -528,6 +691,7 @@ initialize_generic_reduction_order(AgeGenericJoinState *state,
     state->reduction_ghd_separator_count = intVal(list_nth(
         reduction_desc, AGE_GENERIC_REDUCTION_DESC_GHD_SEPARATOR_COUNT));
     initialize_generic_ghd_separators(state, reduction_desc);
+    initialize_generic_semijoin_steps(state, provider_descs, reduction_desc);
 
     reduction_order_node = list_nth(
         reduction_desc, AGE_GENERIC_REDUCTION_DESC_ORDER_EDGES);
@@ -599,7 +763,13 @@ initialize_generic_reduction_order(AgeGenericJoinState *state,
     {
         if (state->reduction_tail_separators != 0 ||
             state->reduction_order_kind !=
-            AGE_GENERIC_REDUCTION_ORDER_LEAF_PEEL)
+            AGE_GENERIC_REDUCTION_ORDER_LEAF_PEEL ||
+            state->reduction_semijoin_step_count !=
+            state->reduction_order_edge_count * 2 ||
+            state->reduction_semijoin_bottom_up_step_count !=
+            state->reduction_order_edge_count ||
+            state->reduction_semijoin_top_down_step_count !=
+            state->reduction_order_edge_count)
         {
             elog(ERROR,
                  "invalid AGE Generic Join alpha-acyclic reduction order");
@@ -607,7 +777,8 @@ initialize_generic_reduction_order(AgeGenericJoinState *state,
         validate_generic_leaf_peel_order(state, provider_descs);
     }
     else if (state->reduction_order_kind != AGE_GENERIC_REDUCTION_ORDER_NONE ||
-             state->reduction_order_edge_count != 0)
+             state->reduction_order_edge_count != 0 ||
+             state->reduction_semijoin_step_count != 0)
     {
         elog(ERROR, "invalid AGE Generic Join cyclic reduction order");
     }
@@ -621,6 +792,8 @@ create_age_generic_join_state(CustomScan *cscan)
     List *provider_descs;
     List *uniqueness_group_descs;
     List *reduction_desc;
+    Const *output_type_const;
+    int consumer_kind;
     ListCell *lc;
     int index = 0;
 
@@ -646,13 +819,36 @@ create_age_generic_join_state(CustomScan *cscan)
     reduction_desc = list_nth(
         cscan->custom_private,
         AGE_GENERIC_JOIN_PRIVATE_REDUCTION_DESC);
+    consumer_kind = intVal(list_nth(
+        cscan->custom_private, AGE_GENERIC_JOIN_PRIVATE_CONSUMER));
+    output_type_const = list_nth_node(
+        Const, cscan->custom_private,
+        AGE_GENERIC_JOIN_PRIVATE_OUTPUT_TYPE);
     if (state->variable_count < 2 ||
         list_length(variable_rtis) != state->variable_count ||
         provider_descs == NIL ||
         list_length(uniqueness_group_descs) != list_length(provider_descs) ||
-        list_length(reduction_desc) != AGE_GENERIC_REDUCTION_DESC_COUNT)
+        list_length(reduction_desc) != AGE_GENERIC_REDUCTION_DESC_COUNT ||
+        (consumer_kind != AGE_GENERIC_CONSUMER_ROWS &&
+         consumer_kind != AGE_GENERIC_CONSUMER_COUNT) ||
+        output_type_const->constisnull ||
+        output_type_const->consttype != OIDOID)
     {
         elog(ERROR, "invalid AGE Generic Join arity");
+    }
+    state->consumer_kind = (AgeGenericConsumerKind)consumer_kind;
+    state->consumer_output_type =
+        DatumGetObjectId(output_type_const->constvalue);
+    if (state->consumer_kind == AGE_GENERIC_CONSUMER_ROWS)
+    {
+        if (OidIsValid(state->consumer_output_type))
+            elog(ERROR, "invalid AGE Generic Join rows consumer descriptor");
+    }
+    else if (state->consumer_output_type != INT8OID &&
+             state->consumer_output_type != AGTYPEOID)
+    {
+        elog(ERROR, "invalid AGE Generic Join count output type %u",
+             state->consumer_output_type);
     }
 
     state->variable_rtis = palloc0(sizeof(Index) * state->variable_count);
@@ -699,6 +895,7 @@ append_generic_row(AgeGenericJoinState *state, AgeGenericProvider *provider,
     oldcontext = MemoryContextSwitchTo(state->data_context);
     if (provider->row_count == provider->row_capacity)
     {
+        int old_capacity = provider->row_capacity;
         int new_capacity = provider->row_capacity == 0 ? 128 :
             provider->row_capacity * 2;
 
@@ -719,6 +916,9 @@ append_generic_row(AgeGenericJoinState *state, AgeGenericProvider *provider,
                                       sizeof(AgeGenericRow) * new_capacity);
         }
         provider->row_capacity = new_capacity;
+        add_generic_counter(&state->provider_row_bytes_allocated,
+                            (int64)(new_capacity - old_capacity) *
+                            sizeof(AgeGenericRow));
     }
     provider->rows[provider->row_count].key1 = key1;
     provider->rows[provider->row_count].key2 = key2;
@@ -730,13 +930,17 @@ append_generic_row(AgeGenericJoinState *state, AgeGenericProvider *provider,
     }
     else
     {
-        provider->rows[provider->row_count].tuple =
-            ExecCopySlotMinimalTuple(slot);
+        MinimalTuple tuple = ExecCopySlotMinimalTuple(slot);
+
+        provider->rows[provider->row_count].tuple = tuple;
+        add_generic_counter(&state->provider_tuple_bytes_copied,
+                            tuple->t_len);
         increment_generic_counter(&state->tuples_materialized);
     }
     provider->row_count++;
     MemoryContextSwitchTo(oldcontext);
 
+    increment_generic_counter(&state->provider_rows_read);
     increment_generic_counter(&state->rows_materialized);
 }
 
@@ -1064,15 +1268,18 @@ sorted_array_provider_key1_range(AgeGenericJoinState *state,
     if (generic_provider_prefix_directory_lookup(state, provider, key, start,
                                                  end))
     {
+        increment_generic_counter(&state->prefix_range_cache_hits);
         return;
     }
 
     if (generic_provider_prefix_cache_lookup(provider, key, start, end))
     {
+        increment_generic_counter(&state->prefix_range_cache_hits);
         increment_generic_counter(&state->lazy_prefix_range_reuses);
         return;
     }
 
+    increment_generic_counter(&state->prefix_range_cache_misses);
     provider->prefix_range_misses++;
     if (provider->prefix_range_misses >=
         AGE_GENERIC_PREFIX_RANGE_DIRECTORY_MIN_MISSES &&
@@ -1140,9 +1347,11 @@ generic_provider_open_child_range(AgeGenericJoinState *state,
     if (generic_provider_child_range_cache_lookup(
             state, provider, prefix_keys, prefix_count, range))
     {
+        increment_generic_counter(&state->child_range_cache_hits);
         return;
     }
 
+    increment_generic_counter(&state->child_range_cache_misses);
     provider->trie_ops->open_child_range(state, provider, prefix_keys,
                                          prefix_count, range);
     generic_provider_child_range_cache_store(provider, prefix_keys,
@@ -1402,6 +1611,7 @@ build_generic_domain_view(AgeGenericJoinState *state,
     view->start = start;
     view->end = end;
     view->use_key2 = use_key2;
+    increment_generic_counter(&state->runtime_domain_builds);
     increment_generic_counter(&state->lazy_domain_views);
     return true;
 }
@@ -1429,6 +1639,8 @@ copy_generic_domain_view(AgeGenericJoinState *state, AgeGenericLevel *level,
     }
     add_generic_counter(&state->lazy_domain_keys_scanned,
                         view->end - view->start);
+    add_generic_counter(&state->runtime_domain_rows_scanned,
+                        view->end - view->start);
     return count;
 }
 
@@ -1450,6 +1662,8 @@ generic_domain_view_next_distinct(AgeGenericJoinState *state,
     } while (*row_index < view->end &&
              generic_domain_view_key(view, *row_index) == value);
     add_generic_counter(&state->lazy_domain_keys_scanned,
+                        *row_index - start);
+    add_generic_counter(&state->runtime_domain_rows_scanned,
                         *row_index - start);
     *key = value;
     return true;
@@ -1778,10 +1992,16 @@ generic_provider_unbound_domain(AgeGenericJoinState *state,
         domain[row_index] = use_key2 ? provider->rows[row_index].key2 :
             provider->rows[row_index].key1;
     }
+    increment_generic_counter(&state->reduction_domain_builds);
+    add_generic_counter(&state->reduction_domain_rows_scanned,
+                        provider->row_count);
     if (use_key2 && provider->row_count > 1)
     {
         qsort(domain, provider->row_count, sizeof(graphid),
               compare_generic_graphids);
+        increment_generic_counter(&state->reduction_domain_sorts);
+        add_generic_counter(&state->reduction_domain_sort_rows,
+                            provider->row_count);
     }
     for (row_index = 0; row_index < provider->row_count; row_index++)
     {
@@ -1789,6 +2009,7 @@ generic_provider_unbound_domain(AgeGenericJoinState *state,
             domain[count++] = domain[row_index];
     }
     *domain_count = count;
+    add_generic_counter(&state->reduction_domain_keys_produced, count);
     return domain;
 }
 
@@ -2054,6 +2275,16 @@ filter_generic_providers_in_reduction_order(AgeGenericJoinState *state,
             state->reduction_order_provider_indexes[ordered_index];
         rows_removed += filter_generic_provider_for_reduction(
             state, provider_index, domains);
+        if (state->reduction_semijoin_step_count > 0)
+        {
+            increment_generic_counter(&state->semijoin_steps_applied);
+            if (reverse)
+                increment_generic_counter(
+                    &state->semijoin_bottom_up_steps_applied);
+            else
+                increment_generic_counter(
+                    &state->semijoin_top_down_steps_applied);
+        }
         if (state->exhausted)
             return rows_removed;
     }
@@ -3057,7 +3288,44 @@ materialize_generic_combination(AgeGenericJoinState *state)
              raw_index, raw_slot->tts_tupleDescriptor->natts);
     }
     ExecStoreVirtualTuple(raw_slot);
+    increment_generic_counter(&state->flat_rows_materialized);
     return raw_slot;
+}
+
+static TupleTableSlot *
+store_age_generic_count_result(ScanState *node, int64 count)
+{
+    AgeGenericJoinState *state = (AgeGenericJoinState *)node;
+    TupleTableSlot *slot = node->ss_ScanTupleSlot;
+
+    ExecClearTuple(slot);
+    if (slot->tts_tupleDescriptor->natts < 1)
+        elog(ERROR, "AGE Generic Join count scan expected an output column");
+    memset(slot->tts_values, 0,
+           sizeof(Datum) * slot->tts_tupleDescriptor->natts);
+    memset(slot->tts_isnull, true,
+           sizeof(bool) * slot->tts_tupleDescriptor->natts);
+
+    if (state->consumer_output_type == INT8OID)
+    {
+        slot->tts_values[0] = Int64GetDatum(count);
+    }
+    else if (state->consumer_output_type == AGTYPEOID)
+    {
+        slot->tts_values[0] =
+            PointerGetDatum(agtype_integer_to_agtype(count));
+    }
+    else
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("AGE Generic Join count scan cannot produce type %s",
+                        format_type_be(state->consumer_output_type))));
+    }
+    slot->tts_isnull[0] = false;
+
+    ExecStoreVirtualTuple(slot);
+    return slot;
 }
 
 static TupleTableSlot *
@@ -3075,13 +3343,46 @@ access_age_generic_join(ScanState *node)
 }
 
 static TupleTableSlot *
+access_age_generic_count_scan(ScanState *node)
+{
+    AgeGenericJoinState *state = (AgeGenericJoinState *)node;
+
+    if (state->count_emitted)
+        return ExecClearTuple(node->ss_ScanTupleSlot);
+
+    state->count_executed = true;
+    for (;;)
+    {
+        if (!state->binding_ready && !next_generic_binding(state))
+            break;
+        while (next_generic_combination(state))
+        {
+            state->count_result =
+                add_generic_count_result(state->count_result, 1);
+            increment_generic_counter(&state->consumer_flat_rows_avoided);
+        }
+    }
+
+    state->count_emitted = true;
+    return store_age_generic_count_result(node, state->count_result);
+}
+
+static TupleTableSlot *
 exec_age_generic_join(CustomScanState *node)
 {
     AgeGenericJoinState *state = (AgeGenericJoinState *)node;
     TupleTableSlot *slot;
 
-    slot = ExecScan(&node->ss, access_age_generic_join,
-                    recheck_age_generic_join);
+    if (state->consumer_kind == AGE_GENERIC_CONSUMER_COUNT)
+    {
+        slot = ExecScan(&node->ss, access_age_generic_count_scan,
+                        recheck_age_generic_join);
+    }
+    else
+    {
+        slot = ExecScan(&node->ss, access_age_generic_join,
+                        recheck_age_generic_join);
+    }
     if (!TupIsNull(slot))
         increment_generic_counter(&state->rows_emitted);
     return slot;
@@ -3341,6 +3642,9 @@ reset_age_generic_join_state(AgeGenericJoinState *state)
     state->search_started = false;
     state->binding_ready = false;
     state->combination_started = false;
+    state->count_emitted = false;
+    state->count_executed = false;
+    state->count_result = 0;
     state->materialized = false;
     state->exhausted = false;
 }
@@ -3447,6 +3751,86 @@ format_generic_ghd_separators(AgeGenericJoinState *state)
 }
 
 static const char *
+generic_semijoin_step_phase_name(AgeGenericSemijoinStepPhase phase)
+{
+    switch (phase)
+    {
+    case AGE_GENERIC_SEMIJOIN_STEP_BOTTOM_UP:
+        return "bottom-up";
+    case AGE_GENERIC_SEMIJOIN_STEP_TOP_DOWN:
+        return "top-down";
+    }
+    return "unknown";
+}
+
+static char *
+format_generic_semijoin_steps(AgeGenericJoinState *state)
+{
+    StringInfoData buffer;
+    int phase;
+    bool printed_any = false;
+
+    initStringInfo(&buffer);
+    if (state->reduction_semijoin_steps == NULL ||
+        state->reduction_semijoin_step_count <= 0)
+    {
+        appendStringInfoString(&buffer, "none");
+        return buffer.data;
+    }
+
+    for (phase = AGE_GENERIC_SEMIJOIN_STEP_BOTTOM_UP;
+         phase <= AGE_GENERIC_SEMIJOIN_STEP_TOP_DOWN;
+         phase++)
+    {
+        int step_index;
+        bool printed_phase = false;
+
+        if (printed_any)
+            appendStringInfoString(&buffer, "; ");
+        appendStringInfo(&buffer, "%s:",
+                         generic_semijoin_step_phase_name(phase));
+        printed_any = true;
+
+        for (step_index = 0;
+             step_index < state->reduction_semijoin_step_count;
+             step_index++)
+        {
+            AgeGenericSemijoinStepPlan *step =
+                &state->reduction_semijoin_steps[step_index];
+
+            if (step->phase != phase)
+                continue;
+            appendStringInfo(
+                &buffer, "%s provider %d v%d->v%d on v%d(%s)",
+                printed_phase ? "," : "",
+                step->provider_index + 1,
+                step->from_variable + 1,
+                step->to_variable + 1,
+                step->key_variable + 1,
+                step->key_is_key1 ? "key1" : "key2");
+            printed_phase = true;
+        }
+        if (!printed_phase)
+            appendStringInfoString(&buffer, " none");
+    }
+
+    return buffer.data;
+}
+
+static const char *
+generic_consumer_name(AgeGenericConsumerKind consumer)
+{
+    switch (consumer)
+    {
+    case AGE_GENERIC_CONSUMER_ROWS:
+        return "rows";
+    case AGE_GENERIC_CONSUMER_COUNT:
+        return "count(*)";
+    }
+    return "unknown";
+}
+
+static const char *
 generic_reduction_shape_name(AgeGenericReductionShape shape)
 {
     switch (shape)
@@ -3475,6 +3859,36 @@ generic_reduction_order_name(AgeGenericReductionOrderKind kind)
 }
 
 static const char *
+generic_ghd_mode_name(AgeGenericJoinState *state)
+{
+    switch (state->reduction_shape)
+    {
+    case AGE_GENERIC_REDUCTION_ALPHA_ACYCLIC:
+        return "none";
+    case AGE_GENERIC_REDUCTION_CYCLIC_CORE:
+        return "cyclic core only";
+    case AGE_GENERIC_REDUCTION_CYCLIC_WITH_TAIL:
+        return "2-core leaf-tail";
+    }
+    return "unknown";
+}
+
+static const char *
+generic_ghd_fallback_reason(AgeGenericJoinState *state)
+{
+    switch (state->reduction_shape)
+    {
+    case AGE_GENERIC_REDUCTION_ALPHA_ACYCLIC:
+        return "alpha-acyclic leaf-peel reduction";
+    case AGE_GENERIC_REDUCTION_CYCLIC_CORE:
+        return "no leaf-tail separators";
+    case AGE_GENERIC_REDUCTION_CYCLIC_WITH_TAIL:
+        return "general GHD decomposition is not implemented";
+    }
+    return "unknown";
+}
+
+static const char *
 generic_reduction_descriptor_source_name(
     AgeGenericReductionDescriptorSource source)
 {
@@ -3496,11 +3910,17 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
     char *variable_order = format_generic_variable_order(state);
     char *component_ids = format_generic_component_ids(state);
     char *ghd_separators = format_generic_ghd_separators(state);
+    char *semijoin_steps = format_generic_semijoin_steps(state);
 
     (void)ancestors;
     ExplainPropertyText("Generic Join Algorithm",
                         "lazy domain views with vectorized intersections and delayed edge bags",
                         es);
+    ExplainPropertyText("Generic Join Consumer",
+                        generic_consumer_name(state->consumer_kind), es);
+    ExplainPropertyText("Generic Join Provider Mode", "eager sorted array",
+                        es);
+    ExplainPropertyBool("Lazy Physical Provider", false, es);
     ExplainPropertyText("Provider Trie Ops", sorted_array_trie_ops.name, es);
     ExplainPropertyText("Variable Order", variable_order, es);
     ExplainPropertyInteger("Component Count", NULL, state->component_count,
@@ -3509,6 +3929,10 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
     ExplainPropertyText("Reduction Shape",
                         generic_reduction_shape_name(state->reduction_shape),
                         es);
+    ExplainPropertyText("GHD Mode", generic_ghd_mode_name(state), es);
+    ExplainPropertyBool("GHD General Decomposition", false, es);
+    ExplainPropertyText("GHD Fallback Reason",
+                        generic_ghd_fallback_reason(state), es);
     ExplainPropertyText(
         "Reduction Descriptor Source",
         generic_reduction_descriptor_source_name(
@@ -3518,6 +3942,16 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
         generic_reduction_order_name(state->reduction_order_kind), es);
     ExplainPropertyInteger("Reduction Order Edges", NULL,
                            state->reduction_order_edge_count, es);
+    ExplainPropertyInteger("Yannakakis Step Count", NULL,
+                           state->reduction_semijoin_step_count, es);
+    ExplainPropertyInteger("Yannakakis Bottom-Up Steps", NULL,
+                           state->reduction_semijoin_bottom_up_step_count,
+                           es);
+    ExplainPropertyInteger("Yannakakis Top-Down Steps", NULL,
+                           state->reduction_semijoin_top_down_step_count, es);
+    ExplainPropertyText("Yannakakis Step Plan", semijoin_steps, es);
+    ExplainPropertyText("Yannakakis Step Filter Mode",
+                        "global-domain provider filter", es);
     ExplainPropertyInteger("Reduction Core Variables", NULL,
                            state->reduction_core_variables, es);
     ExplainPropertyInteger("Reduction Tail Separators", NULL,
@@ -3545,6 +3979,14 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                                state->rows_materialized, es);
         ExplainPropertyInteger("Provider Tuples Materialized", NULL,
                                state->tuples_materialized, es);
+        ExplainPropertyBool("Provider Full Materialization",
+                            state->materialized, es);
+        ExplainPropertyInteger("Provider Rows Read", NULL,
+                               state->provider_rows_read, es);
+        ExplainPropertyInteger("Provider Row Bytes Allocated", "bytes",
+                               state->provider_row_bytes_allocated, es);
+        ExplainPropertyInteger("Provider Tuple Bytes Copied", "bytes",
+                               state->provider_tuple_bytes_copied, es);
         if (state->providers_skipped_after_empty > 0)
         {
             ExplainPropertyInteger("Providers Skipped After Empty", NULL,
@@ -3556,6 +3998,12 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                                state->semijoin_bottom_up_passes, es);
         ExplainPropertyInteger("Yannakakis Top-Down Passes", NULL,
                                state->semijoin_top_down_passes, es);
+        ExplainPropertyInteger("Yannakakis Steps Applied", NULL,
+                               state->semijoin_steps_applied, es);
+        ExplainPropertyInteger("Yannakakis Bottom-Up Steps Applied", NULL,
+                               state->semijoin_bottom_up_steps_applied, es);
+        ExplainPropertyInteger("Yannakakis Top-Down Steps Applied", NULL,
+                               state->semijoin_top_down_steps_applied, es);
         ExplainPropertyBool("Reduction Order Applied",
                             state->reduction_order_applied, es);
         ExplainPropertyInteger("Semijoin Rows Removed", NULL,
@@ -3584,14 +4032,34 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                                state->separator_leaf_tail_rows_removed, es);
         ExplainPropertyInteger("GHD Cyclic Core Rows Removed", NULL,
                                state->separator_cyclic_core_rows_removed, es);
+        ExplainPropertyInteger("Reduction Domain Builds", NULL,
+                               state->reduction_domain_builds, es);
+        ExplainPropertyInteger("Reduction Domain Rows Scanned", NULL,
+                               state->reduction_domain_rows_scanned, es);
+        ExplainPropertyInteger("Reduction Domain Keys Produced", NULL,
+                               state->reduction_domain_keys_produced, es);
+        ExplainPropertyInteger("Reduction Domain Sorts", NULL,
+                               state->reduction_domain_sorts, es);
+        ExplainPropertyInteger("Reduction Domain Sort Rows", NULL,
+                               state->reduction_domain_sort_rows, es);
         ExplainPropertyInteger("Complete Bindings", NULL,
                                state->bindings_completed, es);
         ExplainPropertyInteger("Candidate Flat Rows", NULL,
                                state->candidate_flat_rows, es);
         ExplainPropertyInteger("Candidate Bag Combinations", NULL,
                                state->candidate_combinations, es);
+        ExplainPropertyInteger("Flat Rows Materialized", NULL,
+                               state->flat_rows_materialized, es);
         ExplainPropertyInteger("Flat Rows Avoided", NULL,
                                flat_rows_avoided, es);
+        ExplainPropertyInteger("Consumer Flat Rows Avoided", NULL,
+                               state->consumer_flat_rows_avoided, es);
+        if (state->consumer_kind == AGE_GENERIC_CONSUMER_COUNT &&
+            state->count_executed)
+        {
+            ExplainPropertyInteger("Count Result", NULL,
+                                   state->count_result, es);
+        }
         ExplainPropertyInteger("Lazy Domain Views", NULL,
                                state->lazy_domain_views, es);
         ExplainPropertyInteger("Lazy Domain Keys Scanned", NULL,
@@ -3600,6 +4068,10 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                                state->lazy_domain_scratch_allocations, es);
         ExplainPropertyInteger("Domain Scratch Reuses", NULL,
                                state->lazy_domain_scratch_reuses, es);
+        ExplainPropertyInteger("Runtime Domain Builds", NULL,
+                               state->runtime_domain_builds, es);
+        ExplainPropertyInteger("Runtime Domain Rows Scanned", NULL,
+                               state->runtime_domain_rows_scanned, es);
         ExplainPropertyInteger("Prefix Range Builds", NULL,
                                state->lazy_prefix_range_builds, es);
         ExplainPropertyInteger("Prefix Range Reuses", NULL,
@@ -3608,6 +4080,14 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                                state->lazy_prefix_range_directory_searches, es);
         ExplainPropertyInteger("Prefix Range Cursor Reuses", NULL,
                                state->lazy_prefix_range_cursor_reuses, es);
+        ExplainPropertyInteger("Prefix Range Cache Hits", NULL,
+                               state->prefix_range_cache_hits, es);
+        ExplainPropertyInteger("Prefix Range Cache Misses", NULL,
+                               state->prefix_range_cache_misses, es);
+        ExplainPropertyInteger("Child Range Cache Hits", NULL,
+                               state->child_range_cache_hits, es);
+        ExplainPropertyInteger("Child Range Cache Misses", NULL,
+                               state->child_range_cache_misses, es);
         ExplainPropertyInteger("Trie Child Range Reuses", NULL,
                                state->trie_child_range_reuses, es);
         ExplainPropertyInteger("Trie Child Range Opens", NULL,
@@ -3642,4 +4122,5 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
     pfree(variable_order);
     pfree(component_ids);
     pfree(ghd_separators);
+    pfree(semijoin_steps);
 }

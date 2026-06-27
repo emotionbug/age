@@ -2,10 +2,10 @@
 set -Eeuo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd -- "$script_dir/../.." && pwd)
 current_step="initialization"
 plan_report=${ROADMAP_TELEMETRY_PLAN_REPORT:-}
 print_plan_report=${ROADMAP_TELEMETRY_PRINT_PLAN_REPORT:-1}
+secondary_checks=${ROADMAP_TELEMETRY_SECONDARY_CHECKS:-1}
 
 if [[ -n "${ROADMAP_TELEMETRY_LOG_DIR:-}" ]]; then
     log_dir=$ROADMAP_TELEMETRY_LOG_DIR
@@ -34,6 +34,7 @@ run_plan_check()
     local label=$1
     local script_name=$2
     local log_name=$3
+    shift 3
     local script_path="$script_dir/$script_name"
     local log_path="$log_dir/$log_name"
     local status
@@ -46,7 +47,7 @@ run_plan_check()
     fi
 
     printf '%s: start\n' "$label"
-    if "$script_path" >"$log_path" 2>&1; then
+    if env "$@" "$script_path" >"$log_path" 2>&1; then
         printf '%s: ok\n' "$label"
     else
         status=$?
@@ -98,49 +99,35 @@ emit_category()
     printf '\n%s\n' "$1"
 }
 
-emit_plan_section()
+capture_plan_report()
 {
-    local label=$1
-    local file=$2
+    local capture_script="$script_dir/capture_roadmap_plans.sh"
+    local capture_log="$log_dir/capture-roadmap-plans.log"
+    local raw_plan_log_dir="$log_dir/raw-plan-logs"
+    local status
 
-    printf '### Full Raw Plans: %s\n\n' "$label"
-    printf -- '- source_log: `%s`\n\n' "$file"
-    printf '```text\n'
-    cat "$file"
-    printf '```\n\n'
-}
-
-write_plan_report()
-{
-    current_step="raw plan report"
+    current_step="primary raw plan capture"
     mkdir -p "$(dirname "$plan_report")"
 
-    {
-        printf '# Roadmap Raw EXPLAIN Plan Artifact\n\n'
-        printf 'This artifact is intentionally plan-first: the complete captured '
-        printf 'EXPLAIN ANALYZE output is preserved below before any secondary '
-        printf 'telemetry checks are considered.\n\n'
-        printf -- '- generated_at: `%s`\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-        printf -- '- repository: `%s`\n' "$repo_root"
-        printf -- '- git_commit: `%s`\n' \
-               "$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || printf unknown)"
-        printf -- '- PG_CONFIG: `%s`\n' "${PG_CONFIG:-<script default>}"
-        printf -- '- PGDATABASE: `%s`\n' "${PGDATABASE:-agebench}"
-        printf -- '- PGHOST: `%s`\n' "${PGHOST:-<libpq default>}"
-        printf -- '- PGPORT: `%s`\n' "${PGPORT:-<libpq default>}"
-        printf -- '- log_dir: `%s`\n\n' "$log_dir"
-        printf '## Complete Raw EXPLAIN Plan Sections\n\n'
-        printf 'Each section is copied verbatim from its source log, including '
-        printf 'the full plan text and surrounding benchmark output.\n\n'
-        emit_plan_section "WCOJ completion, cycle, and semijoin" "$wcoj_log"
-        emit_plan_section "WCOJ semiring consumers and row goals" "$semiring_log"
-        emit_plan_section "Generic Join GHD preservation" "$preserve_log"
-        emit_plan_section "Generic Join reduction matrix" "$reduction_log"
-        printf '## Secondary Telemetry Checks\n\n'
-        printf 'The shell workflow prints compact PASS/FAIL telemetry checks after '
-        printf 'writing this artifact. Those checks are secondary to the raw plan '
-        printf 'sections above.\n'
-    } > "$plan_report"
+    if [[ ! -x "$capture_script" ]]; then
+        printf 'roadmap raw plan capture script is not executable: %s\n' \
+               "$capture_script" >&2
+        exit 1
+    fi
+
+    printf 'primary raw plan capture: start\n'
+    if ROADMAP_PLAN_PRINT_REPORT=0 \
+        ROADMAP_PLAN_LOG_DIR="$raw_plan_log_dir" \
+        ROADMAP_PLAN_REPORT="$plan_report" \
+        "$capture_script" >"$capture_log" 2>&1; then
+        printf 'primary raw plan capture: ok\n'
+    else
+        status=$?
+        printf 'primary raw plan capture: failed (exit %s)\n' "$status" >&2
+        printf 'log: %s\n' "$capture_log" >&2
+        tail -n 60 "$capture_log" >&2 || true
+        exit "$status"
+    fi
 
     printf '\nprimary raw plan artifact=%s\n' "$plan_report"
     if [[ "$print_plan_report" == 1 ]]; then
@@ -161,26 +148,48 @@ printf 'roadmap raw-plan workflow: PG_CONFIG=%s PGDATABASE=%s PGHOST=%s PGPORT=%
        "${PGPORT:-<libpq default>}"
 printf 'roadmap telemetry logs: %s\n' "$log_dir"
 
+capture_plan_report
+
+if [[ "$secondary_checks" != 1 ]]; then
+    current_step="complete"
+    printf '\nsecondary roadmap telemetry checks skipped\n'
+    printf 'primary_raw_plan_artifact=%s\n' "$plan_report"
+    exit 0
+fi
+
 run_plan_check "WCOJ completion/cycle/semijoin plan run" \
                "verify_wcoj_roadmap_gates.sh" \
-               "$(basename "$wcoj_log")"
+               "$(basename "$wcoj_log")" \
+               "WCOJ_ROADMAP_COMPLETION_RAW_PLAN_LOG=$log_dir/raw-wcoj-completion-plans.log" \
+               "WCOJ_ROADMAP_SEMIJOIN_RAW_PLAN_LOG=$log_dir/raw-wcoj-semijoin-plans.log"
 run_plan_check "WCOJ semiring consumer plan run" \
                "verify_wcoj_semiring_gates.sh" \
-               "$(basename "$semiring_log")"
+               "$(basename "$semiring_log")" \
+               "WCOJ_SEMIRING_RAW_PLAN_LOG=$log_dir/raw-wcoj-semiring-plans.log"
 run_plan_check "Generic Join preservation plan run" \
                "verify_generic_join_preservation.sh" \
-               "$(basename "$preserve_log")"
+               "$(basename "$preserve_log")" \
+               "GENERIC_JOIN_PRESERVE_RAW_PLAN_LOG=$log_dir/raw-generic-join-preservation-plans.log"
 run_plan_check "Generic reduction matrix plan run" \
                "verify_generic_reduction_matrix.sh" \
-               "$(basename "$reduction_log")"
-
-write_plan_report
+               "$(basename "$reduction_log")" \
+               "GENERIC_REDUCTION_RAW_PLAN_LOG=$log_dir/raw-generic-reduction-plans.log"
 
 current_step="secondary telemetry extraction"
 
 printf '\nsecondary roadmap telemetry checks\n'
 printf 'logs=%s\n' "$log_dir"
 printf 'primary_raw_plan_artifact=%s\n' "$plan_report"
+printf 'raw_wcoj_completion_plans=%s\n' \
+       "$log_dir/raw-wcoj-completion-plans.log"
+printf 'raw_wcoj_semijoin_plans=%s\n' \
+       "$log_dir/raw-wcoj-semijoin-plans.log"
+printf 'raw_wcoj_semiring_plans=%s\n' \
+       "$log_dir/raw-wcoj-semiring-plans.log"
+printf 'raw_generic_join_preservation_plans=%s\n' \
+       "$log_dir/raw-generic-join-preservation-plans.log"
+printf 'raw_generic_reduction_plans=%s\n' \
+       "$log_dir/raw-generic-reduction-plans.log"
 
 emit_category "survivor batching"
 emit_metric "survivor batching" "batch enabled" \
@@ -197,14 +206,29 @@ emit_metric "survivor batching" "payload block rows" \
             "$wcoj_log" 'Peak Payload Block Rows: [1-9][0-9]*'
 emit_metric "survivor batching" "payload budget overruns" \
             "$wcoj_log" 'Payload Block Budget Overruns: [0-9]+'
+emit_metric "survivor batching" "payload bucket blocks spilled" \
+            "$wcoj_log" 'Payload Bucket Blocks Spilled: [0-9]+'
+emit_metric "survivor batching" "payload bucket rows spilled" \
+            "$wcoj_log" 'Payload Bucket Rows Spilled: [0-9]+'
+emit_metric "survivor batching" "payload bucket bytes spilled" \
+            "$wcoj_log" 'Payload Bucket Bytes Spilled: [0-9]+ bytes'
 
 emit_category "semijoin reduction"
 emit_metric "semijoin reduction" "shape" \
             "$reduction_log" 'Reduction Shape: alpha-acyclic'
 emit_metric "semijoin reduction" "order" \
             "$reduction_log" 'Reduction Order: leaf-peel'
+emit_metric "semijoin reduction" "step count" \
+            "$reduction_log" 'Yannakakis Step Count: [1-9][0-9]*'
+emit_metric "semijoin reduction" "step plan" \
+            "$reduction_log" 'Yannakakis Step Plan: bottom-up:'
+emit_metric "semijoin reduction" "step filter mode" \
+            "$reduction_log" \
+            'Yannakakis Step Filter Mode: global-domain provider filter'
 emit_metric "semijoin reduction" "passes" \
             "$reduction_log" 'Semijoin Reduction Passes: [1-9][0-9]*'
+emit_metric "semijoin reduction" "steps applied" \
+            "$reduction_log" 'Yannakakis Steps Applied: [1-9][0-9]*'
 emit_metric "semijoin reduction" "rows removed" \
             "$reduction_log" 'Semijoin Rows Removed: [1-9][0-9]*'
 emit_metric "semijoin reduction" "provider rows after" \
@@ -229,15 +253,48 @@ emit_metric "factorized binding" "peak factor memory" \
             "$semiring_log" 'Peak Factor Memory: [1-9][0-9]* bytes'
 
 emit_category "trie ops"
+emit_metric "trie ops" "provider mode" \
+            "$preserve_log" \
+            'Generic Join Provider Mode: eager sorted array'
+emit_metric "trie ops" "lazy physical provider" \
+            "$preserve_log" 'Lazy Physical Provider: false'
+emit_metric "trie ops" "full materialization" \
+            "$preserve_log" 'Provider Full Materialization: true'
+emit_metric "trie ops" "provider rows read" \
+            "$preserve_log" 'Provider Rows Read: [1-9][0-9]*'
+emit_metric "trie ops" "provider row bytes" \
+            "$preserve_log" 'Provider Row Bytes Allocated: [1-9][0-9]* bytes'
+emit_metric "trie ops" "provider tuple bytes" \
+            "$preserve_log" 'Provider Tuple Bytes Copied: [0-9]+ bytes'
 emit_metric "trie ops" "provider ops" \
             "$preserve_log" \
             'Provider Trie Ops: lazy sorted arrays with on-demand prefix directories'
+emit_metric "trie ops" "reduction domain builds" \
+            "$preserve_log" 'Reduction Domain Builds: [0-9]+'
+emit_metric "trie ops" "reduction domain rows" \
+            "$preserve_log" 'Reduction Domain Rows Scanned: [0-9]+'
+emit_metric "trie ops" "reduction domain keys" \
+            "$preserve_log" 'Reduction Domain Keys Produced: [0-9]+'
+emit_metric "trie ops" "reduction domain sorts" \
+            "$preserve_log" 'Reduction Domain Sorts: [0-9]+'
+emit_metric "trie ops" "runtime domain builds" \
+            "$preserve_log" 'Runtime Domain Builds: [0-9]+'
+emit_metric "trie ops" "runtime domain rows" \
+            "$preserve_log" 'Runtime Domain Rows Scanned: [0-9]+'
 emit_metric "trie ops" "prefix builds" \
             "$preserve_log" 'Prefix Range Builds: [1-9][0-9]*'
 emit_metric "trie ops" "prefix reuses" \
             "$preserve_log" 'Prefix Range Reuses: [1-9][0-9]*'
 emit_metric "trie ops" "cursor reuses" \
             "$preserve_log" 'Prefix Range Cursor Reuses: [1-9][0-9]*'
+emit_metric "trie ops" "prefix cache hits" \
+            "$preserve_log" 'Prefix Range Cache Hits: [0-9]+'
+emit_metric "trie ops" "prefix cache misses" \
+            "$preserve_log" 'Prefix Range Cache Misses: [0-9]+'
+emit_metric "trie ops" "child cache hits" \
+            "$preserve_log" 'Child Range Cache Hits: [0-9]+'
+emit_metric "trie ops" "child cache misses" \
+            "$preserve_log" 'Child Range Cache Misses: [0-9]+'
 emit_metric "trie ops" "child range opens" \
             "$preserve_log" 'Trie Child Range Opens: [1-9][0-9]*'
 emit_metric "trie ops" "prefix seeks" \
@@ -260,12 +317,26 @@ emit_metric "semiring consumers" "count" \
             "$semiring_log" 'WCOJ Consumer: count\(\*\)'
 emit_metric "semiring consumers" "count distinct" \
             "$semiring_log" 'WCOJ Consumer: count\(distinct key\)'
+emit_metric "semiring consumers" "group count" \
+            "$semiring_log" 'WCOJ Consumer: group count\(key\)'
 emit_metric "semiring consumers" "group count distinct" \
             "$semiring_log" 'WCOJ Consumer: group count\(distinct key\)'
 emit_metric "semiring consumers" "sum property" \
             "$semiring_log" 'WCOJ Consumer: sum\(property\)'
+emit_metric "semiring consumers" "avg property" \
+            "$semiring_log" 'WCOJ Consumer: avg\(property\)'
+emit_metric "semiring consumers" "min property" \
+            "$semiring_log" 'WCOJ Consumer: min\(property\)'
+emit_metric "semiring consumers" "max property" \
+            "$semiring_log" 'WCOJ Consumer: max\(property\)'
 emit_metric "semiring consumers" "group sum" \
             "$semiring_log" 'WCOJ Consumer: group sum\(property\)'
+emit_metric "semiring consumers" "group avg" \
+            "$semiring_log" 'WCOJ Consumer: group avg\(property\)'
+emit_metric "semiring consumers" "group min" \
+            "$semiring_log" 'WCOJ Consumer: group min\(property\)'
+emit_metric "semiring consumers" "group max" \
+            "$semiring_log" 'WCOJ Consumer: group max\(property\)'
 emit_metric "semiring consumers" "exists" \
             "$semiring_log" 'WCOJ Consumer: exists'
 emit_metric "semiring consumers" "consumer avoids" \
@@ -274,12 +345,25 @@ emit_metric "semiring consumers" "count result" \
             "$semiring_log" 'Count Result: [1-9][0-9]*'
 emit_metric "semiring consumers" "sum input rows" \
             "$semiring_log" 'Sum Property Input Rows: [1-9][0-9]*'
+emit_metric "semiring consumers" "avg input rows" \
+            "$semiring_log" 'Avg Property Input Rows: [1-9][0-9]*'
+emit_metric "semiring consumers" "min input rows" \
+            "$semiring_log" 'Min Property Input Rows: [1-9][0-9]*'
+emit_metric "semiring consumers" "max input rows" \
+            "$semiring_log" 'Max Property Input Rows: [1-9][0-9]*'
 emit_metric "semiring consumers" "exists result" \
             "$semiring_log" 'Exists Result: true'
 
 emit_category "ghd separator"
 emit_metric "ghd separator" "shape" \
             "$preserve_log" 'Reduction Shape: cyclic-with-tail'
+emit_metric "ghd separator" "mode" \
+            "$preserve_log" 'GHD Mode: 2-core leaf-tail'
+emit_metric "ghd separator" "general decomposition" \
+            "$preserve_log" 'GHD General Decomposition: false'
+emit_metric "ghd separator" "fallback reason" \
+            "$preserve_log" \
+            'GHD Fallback Reason: general GHD decomposition is not implemented'
 emit_metric "ghd separator" "passes" \
             "$preserve_log" 'GHD Separator Reduction Passes: [1-9][0-9]*'
 emit_metric "ghd separator" "leaf tail providers" \
