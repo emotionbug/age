@@ -281,12 +281,15 @@ DECLARE
     factorized_keys boolean := false;
     factorized_source_bag_rows boolean := false;
     factorized_source_bag_keys boolean := false;
+    factorized_binding_source_bags boolean := false;
     factorized_source_bag_bytes boolean := false;
     factorized_source_bag_reserve boolean := false;
     factorized_builds boolean := false;
     factorized_peak_factor_memory boolean := false;
     factorized_candidate_flat_rows boolean := false;
     factorized_combinations boolean := false;
+    factorized_shared_enumerators boolean := false;
+    factorized_shared_steps boolean := false;
     factorized_flat_rows_avoided boolean := false;
 BEGIN
     PERFORM set_config('age.enable_wcoj', 'on', true);
@@ -349,6 +352,9 @@ BEGIN
             plan_text LIKE '%Source Bag Rows: 5%';
         factorized_source_bag_keys := factorized_source_bag_keys OR
             plan_text LIKE '%Source Bag Keys: 3%';
+        factorized_binding_source_bags :=
+            factorized_binding_source_bags OR
+            plan_text LIKE '%Factorized Binding Source Bags: 3%';
         factorized_source_bag_bytes := factorized_source_bag_bytes OR
             plan_text ~ 'Source Bag Bytes: [1-9][0-9]* bytes';
         factorized_source_bag_reserve := factorized_source_bag_reserve OR
@@ -361,6 +367,10 @@ BEGIN
             plan_text LIKE '%Candidate Flat Rows: 72%';
         factorized_combinations := factorized_combinations OR
             plan_text LIKE '%Candidate Bag Combinations: 72%';
+        factorized_shared_enumerators := factorized_shared_enumerators OR
+            plan_text ~ 'Factorized Binding Enumerators: [1-9][0-9]*';
+        factorized_shared_steps := factorized_shared_steps OR
+            plan_text ~ 'Shared Factor Enumerator Steps: [1-9][0-9]*';
         factorized_flat_rows_avoided := factorized_flat_rows_avoided OR
             plan_text LIKE '%Flat Rows Avoided: 0%';
     END LOOP;
@@ -374,11 +384,12 @@ BEGIN
     END IF;
     IF NOT factorized_source_rows OR NOT factorized_keys OR
        NOT factorized_source_bag_rows OR NOT factorized_source_bag_keys OR
-       NOT factorized_source_bag_bytes OR
+       NOT factorized_binding_source_bags OR NOT factorized_source_bag_bytes OR
        NOT factorized_source_bag_reserve OR NOT factorized_builds OR
        NOT factorized_peak_factor_memory OR
        NOT factorized_candidate_flat_rows OR
-       NOT factorized_combinations OR NOT factorized_flat_rows_avoided THEN
+       NOT factorized_combinations OR NOT factorized_shared_enumerators OR
+       NOT factorized_shared_steps OR NOT factorized_flat_rows_avoided THEN
         RAISE EXCEPTION 'duplicate source-key factorization was not observed';
     END IF;
 
@@ -937,6 +948,79 @@ BEGIN
 END
 $wcoj_count_distinct_key_consumer_telemetry$;
 
+DO $wcoj_exists_factorized_row_goal_telemetry$
+DECLARE
+    plan_text text;
+    has_result boolean := false;
+    has_initplan boolean := false;
+    has_wcoj boolean := false;
+    has_exists_consumer boolean := false;
+    has_row_goal boolean := false;
+    has_row_goal_source boolean := false;
+    has_candidate_flat_rows boolean := false;
+    has_candidate_combinations boolean := false;
+    has_row_goal_rows_emitted boolean := false;
+    has_row_goal_flat_rows_avoided boolean := false;
+    has_exists_result boolean := false;
+    has_goal_reached boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('wcoj_lowering', $cypher$
+            RETURN EXISTS {
+                MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+                      (s2:S {id: 2})-[e2:E]->(t),
+                      (s3:S {id: 3})-[e3:E]->(t)
+                RETURN t
+            } AS ok
+        $cypher$) AS (ok agtype)
+    $plan$
+    LOOP
+        has_result := has_result OR plan_text LIKE '%Result%';
+        has_initplan := has_initplan OR plan_text LIKE '%InitPlan%';
+        has_wcoj := has_wcoj OR
+            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
+        has_exists_consumer := has_exists_consumer OR
+            plan_text LIKE '%WCOJ Consumer: exists%';
+        has_row_goal := has_row_goal OR
+            plan_text LIKE '%WCOJ Row Goal: 1%';
+        has_row_goal_source := has_row_goal_source OR
+            plan_text LIKE '%WCOJ Row Goal Source: exists%';
+        has_candidate_flat_rows := has_candidate_flat_rows OR
+            plan_text LIKE '%Candidate Flat Rows: 24%';
+        has_candidate_combinations := has_candidate_combinations OR
+            plan_text LIKE '%Candidate Bag Combinations: 1%';
+        has_row_goal_rows_emitted := has_row_goal_rows_emitted OR
+            plan_text LIKE '%Row Goal Rows Emitted: 1%';
+        has_row_goal_flat_rows_avoided :=
+            has_row_goal_flat_rows_avoided OR
+            plan_text LIKE '%Row Goal Flat Rows Avoided: 23%';
+        has_exists_result := has_exists_result OR
+            plan_text LIKE '%Exists Result: true%';
+        has_goal_reached := has_goal_reached OR
+            plan_text LIKE '%Row Goal Reached: true%';
+    END LOOP;
+
+    IF NOT has_result OR NOT has_initplan OR NOT has_wcoj OR
+       NOT has_exists_consumer OR NOT has_row_goal OR
+       NOT has_row_goal_source OR NOT has_candidate_flat_rows OR
+       NOT has_candidate_combinations OR NOT has_row_goal_rows_emitted OR
+       NOT has_row_goal_flat_rows_avoided OR NOT has_exists_result OR
+       NOT has_goal_reached THEN
+        RAISE EXCEPTION
+            'WCOJ factorized exists row-goal telemetry was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj factorized exists row-goal telemetry verified';
+END
+$wcoj_exists_factorized_row_goal_telemetry$;
+
 -- Add a second star after the automatic-plan assertion.  Its first two
 -- branches meet at one terminal while the third reaches another.
 SELECT * FROM cypher('wcoj_lowering', $$
@@ -1066,7 +1150,10 @@ DECLARE
     has_limit boolean := false;
     has_wcoj boolean := false;
     has_row_goal boolean := false;
+    has_row_goal_source boolean := false;
     has_rows_emitted boolean := false;
+    has_row_goal_rows_emitted boolean := false;
+    has_row_goal_flat_rows_avoided boolean := false;
     has_block_clamp boolean := false;
     has_goal_reached boolean := false;
     has_spill_bytes boolean := false;
@@ -1094,8 +1181,15 @@ BEGIN
             plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
         has_row_goal := has_row_goal OR
             plan_text LIKE '%WCOJ Row Goal: 1%';
+        has_row_goal_source := has_row_goal_source OR
+            plan_text LIKE '%WCOJ Row Goal Source: limit%';
         has_rows_emitted := has_rows_emitted OR
             plan_text LIKE '%Rows Emitted: 1%';
+        has_row_goal_rows_emitted := has_row_goal_rows_emitted OR
+            plan_text LIKE '%Row Goal Rows Emitted: 1%';
+        has_row_goal_flat_rows_avoided :=
+            has_row_goal_flat_rows_avoided OR
+            plan_text LIKE '%Row Goal Flat Rows Avoided: 0%';
         has_block_clamp := has_block_clamp OR
             plan_text LIKE '%Row Goal Survivor Blocks Clamped: 1%';
         has_goal_reached := has_goal_reached OR
@@ -1105,7 +1199,9 @@ BEGIN
     END LOOP;
 
     IF NOT has_limit OR NOT has_wcoj OR NOT has_row_goal OR
-       NOT has_rows_emitted OR NOT has_block_clamp OR
+       NOT has_row_goal_source OR
+       NOT has_rows_emitted OR NOT has_row_goal_rows_emitted OR
+       NOT has_row_goal_flat_rows_avoided OR NOT has_block_clamp OR
        NOT has_goal_reached OR NOT has_spill_bytes THEN
         RAISE EXCEPTION 'WCOJ limit row-goal telemetry was not observed';
     END IF;
@@ -1128,9 +1224,14 @@ DECLARE
     has_result boolean := false;
     has_initplan boolean := false;
     has_wcoj boolean := false;
+    has_exists_consumer boolean := false;
     has_row_goal boolean := false;
+    has_row_goal_source boolean := false;
     has_rows_emitted boolean := false;
+    has_row_goal_rows_emitted boolean := false;
+    has_row_goal_flat_rows_avoided boolean := false;
     has_block_clamp boolean := false;
+    has_exists_result boolean := false;
     has_goal_reached boolean := false;
 BEGIN
     PERFORM set_config('age.enable_wcoj', 'on', true);
@@ -1156,18 +1257,33 @@ BEGIN
         has_initplan := has_initplan OR plan_text LIKE '%InitPlan%';
         has_wcoj := has_wcoj OR
             plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
+        has_exists_consumer := has_exists_consumer OR
+            plan_text LIKE '%WCOJ Consumer: exists%';
         has_row_goal := has_row_goal OR
             plan_text LIKE '%WCOJ Row Goal: 1%';
+        has_row_goal_source := has_row_goal_source OR
+            plan_text LIKE '%WCOJ Row Goal Source: exists%';
         has_rows_emitted := has_rows_emitted OR
             plan_text LIKE '%Rows Emitted: 1%';
+        has_row_goal_rows_emitted := has_row_goal_rows_emitted OR
+            plan_text LIKE '%Row Goal Rows Emitted: 1%';
+        has_row_goal_flat_rows_avoided :=
+            has_row_goal_flat_rows_avoided OR
+            plan_text LIKE '%Row Goal Flat Rows Avoided: 0%';
         has_block_clamp := has_block_clamp OR
             plan_text LIKE '%Row Goal Survivor Blocks Clamped: 1%';
+        has_exists_result := has_exists_result OR
+            plan_text LIKE '%Exists Result: true%';
         has_goal_reached := has_goal_reached OR
             plan_text LIKE '%Row Goal Reached: true%';
     END LOOP;
 
     IF NOT has_result OR NOT has_initplan OR NOT has_wcoj OR
-       NOT has_row_goal OR NOT has_rows_emitted OR NOT has_block_clamp OR
+       NOT has_exists_consumer OR NOT has_row_goal OR
+       NOT has_row_goal_source OR NOT has_rows_emitted OR
+       NOT has_row_goal_rows_emitted OR
+       NOT has_row_goal_flat_rows_avoided OR NOT has_block_clamp OR
+       NOT has_exists_result OR
        NOT has_goal_reached THEN
         RAISE EXCEPTION 'WCOJ exists row-goal telemetry was not observed';
     END IF;
@@ -2126,6 +2242,8 @@ DECLARE
     has_reduction_order boolean := false;
     has_reduction_order_edges boolean := false;
     has_semijoin_passes boolean := false;
+    has_bottom_up_pass boolean := false;
+    has_top_down_pass boolean := false;
     has_reduction_order_applied boolean := false;
     has_rows_removed boolean := false;
     has_provider_rows_after boolean := false;
@@ -2158,6 +2276,10 @@ BEGIN
             plan_text LIKE '%Reduction Order Edges: 3%';
         has_semijoin_passes := has_semijoin_passes OR
             plan_text LIKE '%Semijoin Reduction Passes: 2%';
+        has_bottom_up_pass := has_bottom_up_pass OR
+            plan_text LIKE '%Yannakakis Bottom-Up Passes: 1%';
+        has_top_down_pass := has_top_down_pass OR
+            plan_text LIKE '%Yannakakis Top-Down Passes: 1%';
         has_reduction_order_applied := has_reduction_order_applied OR
             plan_text LIKE '%Reduction Order Applied: true%';
         has_rows_removed := has_rows_removed OR
@@ -2174,7 +2296,8 @@ BEGIN
 
     IF NOT has_generic OR NOT has_reduction_shape OR
        NOT has_reduction_order OR NOT has_reduction_order_edges OR
-       NOT has_semijoin_passes OR NOT has_reduction_order_applied OR
+       NOT has_semijoin_passes OR NOT has_bottom_up_pass OR
+       NOT has_top_down_pass OR NOT has_reduction_order_applied OR
        NOT has_rows_removed OR NOT has_provider_rows_after OR
        NOT has_final_domain_keys OR NOT has_rows_emitted OR
        NOT has_spill_bytes THEN
@@ -2270,6 +2393,8 @@ DECLARE
     has_reduction_order boolean := false;
     has_reduction_order_edges boolean := false;
     has_semijoin_passes boolean := false;
+    has_bottom_up_pass boolean := false;
+    has_top_down_pass boolean := false;
     has_reduction_order_applied boolean := false;
     has_rows_removed boolean := false;
     has_provider_rows_after boolean := false;
@@ -2303,6 +2428,10 @@ BEGIN
             plan_text LIKE '%Reduction Order Edges: 4%';
         has_semijoin_passes := has_semijoin_passes OR
             plan_text LIKE '%Semijoin Reduction Passes: 2%';
+        has_bottom_up_pass := has_bottom_up_pass OR
+            plan_text LIKE '%Yannakakis Bottom-Up Passes: 1%';
+        has_top_down_pass := has_top_down_pass OR
+            plan_text LIKE '%Yannakakis Top-Down Passes: 1%';
         has_reduction_order_applied := has_reduction_order_applied OR
             plan_text LIKE '%Reduction Order Applied: true%';
         has_rows_removed := has_rows_removed OR
@@ -2317,7 +2446,8 @@ BEGIN
 
     IF NOT has_generic OR NOT has_reduction_shape OR
        NOT has_reduction_order OR NOT has_reduction_order_edges OR
-       NOT has_semijoin_passes OR NOT has_reduction_order_applied OR
+       NOT has_semijoin_passes OR NOT has_bottom_up_pass OR
+       NOT has_top_down_pass OR NOT has_reduction_order_applied OR
        NOT has_rows_removed OR NOT has_provider_rows_after OR
        NOT has_final_domain_keys OR NOT has_rows_emitted THEN
         RAISE EXCEPTION 'branching Generic Join semijoin reduction was not observed';
@@ -2438,6 +2568,8 @@ DECLARE
     has_reduction_order boolean := false;
     has_reduction_order_edges boolean := false;
     has_semijoin_passes boolean := false;
+    has_bottom_up_pass boolean := false;
+    has_top_down_pass boolean := false;
     has_reduction_order_applied boolean := false;
     has_rows_removed boolean := false;
     has_provider_rows_after boolean := false;
@@ -2474,6 +2606,10 @@ BEGIN
             plan_text LIKE '%Reduction Order Edges: 6%';
         has_semijoin_passes := has_semijoin_passes OR
             plan_text LIKE '%Semijoin Reduction Passes: 2%';
+        has_bottom_up_pass := has_bottom_up_pass OR
+            plan_text LIKE '%Yannakakis Bottom-Up Passes: 1%';
+        has_top_down_pass := has_top_down_pass OR
+            plan_text LIKE '%Yannakakis Top-Down Passes: 1%';
         has_reduction_order_applied := has_reduction_order_applied OR
             plan_text LIKE '%Reduction Order Applied: true%';
         has_rows_removed := has_rows_removed OR
@@ -2488,7 +2624,8 @@ BEGIN
 
     IF NOT has_generic OR NOT has_reduction_shape OR
        NOT has_reduction_order OR NOT has_reduction_order_edges OR
-       NOT has_semijoin_passes OR NOT has_reduction_order_applied OR
+       NOT has_semijoin_passes OR NOT has_bottom_up_pass OR
+       NOT has_top_down_pass OR NOT has_reduction_order_applied OR
        NOT has_rows_removed OR NOT has_provider_rows_after OR
        NOT has_final_domain_keys OR NOT has_rows_emitted THEN
         RAISE EXCEPTION 'snowflake Generic Join semijoin reduction was not observed';

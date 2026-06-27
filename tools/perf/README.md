@@ -223,6 +223,45 @@ flags, and debug-PG allow flags such as `WCOJ_ROADMAP_ALLOW_DEBUG_PG=1`,
 `ROADMAP_GATES_LOG_DIR` when set; otherwise the temporary log directory is
 cleaned up after success and retained on failure.
 
+## Roadmap telemetry report gate
+
+`verify_roadmap_telemetry_report.sh` runs the same bounded WCOJ/Generic Join
+gate set, retains each gate's `EXPLAIN ANALYZE` output, and extracts a compact
+roadmap telemetry report.  The report fails if the logs do not show survivor
+batching, alpha-acyclic semijoin reduction, factorized source bags and shared
+enumerators, Generic Join trie ops, WCOJ row goals, semiring consumers, and GHD
+separator pruning counters.
+
+```sh
+PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
+PGHOST=/tmp PGPORT=55432 PGDATABASE=agebench \
+ROADMAP_TELEMETRY_LOG_DIR=/tmp/hidden-age-roadmap-telemetry \
+  tools/perf/verify_roadmap_telemetry_report.sh
+```
+
+The script delegates data setup, timing thresholds, and debug-build rejection
+to the individual gate scripts.  Use the existing per-gate environment
+overrides for dimensions, skip-setup flags, baseline medians, and debug-PG
+allow flags.  If `ROADMAP_TELEMETRY_LOG_DIR` is omitted, the script creates and
+retains a temporary log directory and prints its path.
+
+## Roadmap full plan capture
+
+`capture_roadmap_plans.sh` runs the roadmap benchmark SQL files and writes the
+full raw `EXPLAIN ANALYZE` output for each workload to individual logs plus a
+single Markdown report.  It is intended for plan inspection and artifact
+retention rather than grep-based evidence gating.
+
+```sh
+ROADMAP_PLAN_LOG_DIR=/tmp/hidden-age-roadmap-plans \
+  tools/perf/capture_roadmap_plans.sh \
+  --report /tmp/hidden-age-roadmap-plans.md
+```
+
+The script refuses debug/cassert/O0 PostgreSQL builds by default, matching the
+release benchmark policy.  Use `ROADMAP_PLAN_ALLOW_DEBUG_PG=1` only for local
+plan-shape inspection, not for performance evidence.
+
 ## WCOJ semiring consumer gates
 
 `verify_wcoj_semiring_gates.sh` builds a compact direct-WCOJ graph whose three

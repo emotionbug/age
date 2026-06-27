@@ -48,6 +48,24 @@ typedef struct AgeGenericPrefixRange
     bool valid;
 } AgeGenericPrefixRange;
 
+typedef struct AgeGenericJoinState AgeGenericJoinState;
+typedef struct AgeGenericProvider AgeGenericProvider;
+
+typedef struct AgeGenericTrieRange
+{
+    int start;
+    int end;
+} AgeGenericTrieRange;
+
+typedef struct AgeGenericTrieOps
+{
+    const char *name;
+    bool (*open_child_range)(AgeGenericJoinState *state,
+                             AgeGenericProvider *provider,
+                             const graphid *prefix_keys, int prefix_count,
+                             AgeGenericTrieRange *range);
+} AgeGenericTrieOps;
+
 typedef enum AgeGenericOutputSource
 {
     AGE_GENERIC_OUTPUT_SOURCE_NONE = 0,
@@ -56,9 +74,10 @@ typedef enum AgeGenericOutputSource
     AGE_GENERIC_OUTPUT_SOURCE_EDGE_ID
 } AgeGenericOutputSource;
 
-typedef struct AgeGenericProvider
+struct AgeGenericProvider
 {
     AgeGenericProviderKind kind;
+    const AgeGenericTrieOps *trie_ops;
     int var1;
     int var2;
     AttrNumber key1_attno;
@@ -80,7 +99,11 @@ typedef struct AgeGenericProvider
     AgeGenericPrefixRange prefix_range_cache[
         AGE_GENERIC_PREFIX_RANGE_CACHE_SIZE];
     int prefix_range_cache_count;
-} AgeGenericProvider;
+    graphid prefix_range_cursor_key;
+    int prefix_range_cursor_start;
+    int prefix_range_cursor_end;
+    bool prefix_range_cursor_valid;
+};
 
 typedef struct AgeGenericLevel
 {
@@ -121,7 +144,27 @@ typedef struct AgeGenericSeparatorDomain
     bool initialized;
 } AgeGenericSeparatorDomain;
 
-typedef struct AgeGenericJoinState
+typedef struct AgeGenericGHDSeparatorPlan
+{
+    int provider_index;
+    int separator_variable;
+    int tail_variable;
+    bool separator_is_key1;
+} AgeGenericGHDSeparatorPlan;
+
+typedef enum AgeGenericGHDSeparatorDescField
+{
+    AGE_GENERIC_GHD_SEPARATOR_DESC_ID = 0,
+    AGE_GENERIC_GHD_SEPARATOR_DESC_PARENT_BAG,
+    AGE_GENERIC_GHD_SEPARATOR_DESC_CHILD_BAG,
+    AGE_GENERIC_GHD_SEPARATOR_DESC_SEPARATOR_VARIABLE,
+    AGE_GENERIC_GHD_SEPARATOR_DESC_TAIL_VARIABLE,
+    AGE_GENERIC_GHD_SEPARATOR_DESC_PROVIDER_INDEX,
+    AGE_GENERIC_GHD_SEPARATOR_DESC_SEPARATOR_IS_KEY1,
+    AGE_GENERIC_GHD_SEPARATOR_DESC_COUNT
+} AgeGenericGHDSeparatorDescField;
+
+struct AgeGenericJoinState
 {
     CustomScanState css;
     int variable_count;
@@ -143,8 +186,12 @@ typedef struct AgeGenericJoinState
     int reduction_core_variables;
     int reduction_tail_separators;
     AgeGenericReductionOrderKind reduction_order_kind;
+    AgeGenericReductionDescriptorSource reduction_descriptor_source;
     int *reduction_order_provider_indexes;
     int reduction_order_edge_count;
+    int reduction_ghd_bag_count;
+    int reduction_ghd_separator_count;
+    AgeGenericGHDSeparatorPlan *reduction_ghd_separators;
     int component_count;
     int *variable_component_ids;
     bool reduction_order_applied;
@@ -157,10 +204,15 @@ typedef struct AgeGenericJoinState
     int64 rows_materialized;
     int64 tuples_materialized;
     int64 semijoin_passes;
+    int64 semijoin_bottom_up_passes;
+    int64 semijoin_top_down_passes;
     int64 semijoin_rows_removed;
+    int64 semijoin_bottom_up_rows_removed;
+    int64 semijoin_top_down_rows_removed;
     int64 semijoin_provider_rows_after;
     int64 semijoin_final_domain_keys;
     int64 separator_reduction_passes;
+    int64 separator_descriptor_applications;
     int64 separator_leaf_tail_providers;
     int64 separator_domain_keys;
     int64 separator_leaf_tail_rows_removed;
@@ -178,13 +230,18 @@ typedef struct AgeGenericJoinState
     int64 lazy_domain_scratch_reuses;
     int64 lazy_prefix_range_builds;
     int64 lazy_prefix_range_reuses;
+    int64 lazy_prefix_range_directory_searches;
+    int64 lazy_prefix_range_cursor_reuses;
+    int64 trie_child_range_opens;
+    int64 trie_prefix_range_seeks;
+    int64 trie_pair_range_opens;
     int64 reduction_scratch_allocations;
     int64 reduction_scratch_reuses;
     int64 vector_intersection_merge_calls;
     int64 vector_intersection_galloping_calls;
     int64 vector_intersection_galloping_steps;
     Size peak_memory;
-} AgeGenericJoinState;
+};
 
 static inline void
 increment_generic_counter(int64 *counter)
@@ -217,6 +274,8 @@ static void explain_age_generic_join(CustomScanState *node, List *ancestors,
 static void initialize_generic_reduction_order(AgeGenericJoinState *state,
                                                List *provider_descs,
                                                List *reduction_desc);
+static void initialize_generic_ghd_separators(AgeGenericJoinState *state,
+                                              List *reduction_desc);
 static void build_generic_provider_prefix_ranges(AgeGenericJoinState *state);
 static void reduce_generic_providers(AgeGenericJoinState *state);
 static void reduce_generic_leaf_tail_separators(
@@ -351,6 +410,70 @@ validate_generic_leaf_peel_order(AgeGenericJoinState *state,
 }
 
 static void
+initialize_generic_ghd_separators(AgeGenericJoinState *state,
+                                  List *reduction_desc)
+{
+    Node *separators_node;
+    List *separator_descs;
+    ListCell *lc;
+    int index = 0;
+
+    if (state->reduction_ghd_separator_count <= 0)
+        return;
+
+    separators_node = list_nth(
+        reduction_desc, AGE_GENERIC_REDUCTION_DESC_GHD_SEPARATORS);
+    if (separators_node == NULL || !IsA(separators_node, List))
+        elog(ERROR, "invalid AGE Generic Join GHD separator descriptor");
+
+    separator_descs = (List *)separators_node;
+    if (list_length(separator_descs) != state->reduction_ghd_separator_count)
+        elog(ERROR, "invalid AGE Generic Join GHD separator count");
+
+    state->reduction_ghd_separators =
+        palloc0(sizeof(AgeGenericGHDSeparatorPlan) *
+                state->reduction_ghd_separator_count);
+    foreach(lc, separator_descs)
+    {
+        List *desc = lfirst(lc);
+        AgeGenericGHDSeparatorPlan *plan;
+        int separator_id;
+
+        if (desc == NIL || !IsA(desc, List) ||
+            list_length(desc) != AGE_GENERIC_GHD_SEPARATOR_DESC_COUNT)
+        {
+            elog(ERROR, "invalid AGE Generic Join GHD separator descriptor");
+        }
+
+        separator_id = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_ID));
+        if (separator_id != index)
+            elog(ERROR, "invalid AGE Generic Join GHD separator id");
+
+        plan = &state->reduction_ghd_separators[index++];
+        plan->separator_variable = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_SEPARATOR_VARIABLE));
+        plan->tail_variable = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_TAIL_VARIABLE));
+        plan->provider_index = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_PROVIDER_INDEX));
+        plan->separator_is_key1 = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_SEPARATOR_IS_KEY1)) != 0;
+
+        if (plan->provider_index < 0 ||
+            plan->provider_index >= state->provider_count ||
+            plan->separator_variable < 0 ||
+            plan->separator_variable >= state->variable_count ||
+            plan->tail_variable < 0 ||
+            plan->tail_variable >= state->variable_count ||
+            plan->separator_variable == plan->tail_variable)
+        {
+            elog(ERROR, "invalid AGE Generic Join GHD separator descriptor");
+        }
+    }
+}
+
+static void
 initialize_generic_reduction_order(AgeGenericJoinState *state,
                                    List *provider_descs,
                                    List *reduction_desc)
@@ -371,6 +494,14 @@ initialize_generic_reduction_order(AgeGenericJoinState *state,
     state->reduction_order_kind =
         (AgeGenericReductionOrderKind)intVal(list_nth(
             reduction_desc, AGE_GENERIC_REDUCTION_DESC_ORDER_KIND));
+    state->reduction_descriptor_source =
+        (AgeGenericReductionDescriptorSource)intVal(list_nth(
+            reduction_desc, AGE_GENERIC_REDUCTION_DESC_SOURCE));
+    state->reduction_ghd_bag_count = intVal(list_nth(
+        reduction_desc, AGE_GENERIC_REDUCTION_DESC_GHD_BAG_COUNT));
+    state->reduction_ghd_separator_count = intVal(list_nth(
+        reduction_desc, AGE_GENERIC_REDUCTION_DESC_GHD_SEPARATOR_COUNT));
+    initialize_generic_ghd_separators(state, reduction_desc);
 
     reduction_order_node = list_nth(
         reduction_desc, AGE_GENERIC_REDUCTION_DESC_ORDER_EDGES);
@@ -420,7 +551,13 @@ initialize_generic_reduction_order(AgeGenericJoinState *state,
         state->reduction_core_variables < 0 ||
         state->reduction_tail_separators < 0 ||
         state->reduction_order_kind < AGE_GENERIC_REDUCTION_ORDER_NONE ||
-        state->reduction_order_kind > AGE_GENERIC_REDUCTION_ORDER_LEAF_PEEL)
+        state->reduction_order_kind > AGE_GENERIC_REDUCTION_ORDER_LEAF_PEEL ||
+        state->reduction_descriptor_source <
+        AGE_GENERIC_REDUCTION_SOURCE_LOCAL ||
+        state->reduction_descriptor_source >
+        AGE_GENERIC_REDUCTION_SOURCE_GRAPH_JOIN_MATCH_IR ||
+        state->reduction_ghd_bag_count < 0 ||
+        state->reduction_ghd_separator_count < 0)
     {
         elog(ERROR, "invalid AGE Generic Join reduction descriptor");
     }
@@ -688,6 +825,7 @@ invalidate_generic_provider_prefix_ranges(AgeGenericProvider *provider)
         provider->prefix_range_cache[cache_index].valid = false;
     }
     provider->prefix_range_cache_count = 0;
+    provider->prefix_range_cursor_valid = false;
 }
 
 static bool
@@ -701,6 +839,17 @@ generic_provider_prefix_directory_lookup(AgeGenericJoinState *state,
     if (!provider->prefix_ranges_valid)
         return false;
 
+    if (provider->prefix_range_cursor_valid &&
+        provider->prefix_range_cursor_key == key)
+    {
+        *start = provider->prefix_range_cursor_start;
+        *end = provider->prefix_range_cursor_end;
+        increment_generic_counter(&state->lazy_prefix_range_reuses);
+        increment_generic_counter(&state->lazy_prefix_range_cursor_reuses);
+        return true;
+    }
+
+    increment_generic_counter(&state->lazy_prefix_range_directory_searches);
     while (low < high)
     {
         int middle = low + (high - low) / 2;
@@ -728,6 +877,10 @@ generic_provider_prefix_directory_lookup(AgeGenericJoinState *state,
         *start = provider->row_count;
         *end = provider->row_count;
     }
+    provider->prefix_range_cursor_key = key;
+    provider->prefix_range_cursor_start = *start;
+    provider->prefix_range_cursor_end = *end;
+    provider->prefix_range_cursor_valid = true;
     return true;
 }
 
@@ -787,9 +940,9 @@ generic_provider_prefix_cache_store(AgeGenericProvider *provider, graphid key,
 }
 
 static void
-generic_provider_key1_range(AgeGenericJoinState *state,
-                            AgeGenericProvider *provider, graphid key,
-                            int *start, int *end)
+sorted_array_provider_key1_range(AgeGenericJoinState *state,
+                                 AgeGenericProvider *provider, graphid key,
+                                 int *start, int *end)
 {
     if (generic_provider_prefix_directory_lookup(state, provider, key, start,
                                                  end))
@@ -807,6 +960,69 @@ generic_provider_key1_range(AgeGenericJoinState *state,
     *end = upper_bound_key1(provider, key);
     generic_provider_prefix_cache_store(provider, key, *start, *end);
     increment_generic_counter(&state->lazy_prefix_range_builds);
+}
+
+static bool
+sorted_array_trie_open_child_range(AgeGenericJoinState *state,
+                                   AgeGenericProvider *provider,
+                                   const graphid *prefix_keys,
+                                   int prefix_count,
+                                   AgeGenericTrieRange *range)
+{
+    if (prefix_count < 0 || prefix_count > 1)
+        elog(ERROR, "invalid AGE Generic Join trie prefix depth %d",
+             prefix_count);
+    if (prefix_count > 0 && prefix_keys == NULL)
+        elog(ERROR, "invalid AGE Generic Join trie prefix keys");
+
+    increment_generic_counter(&state->trie_child_range_opens);
+    if (prefix_count == 0)
+    {
+        range->start = 0;
+        range->end = provider->row_count;
+        return true;
+    }
+
+    increment_generic_counter(&state->trie_prefix_range_seeks);
+    sorted_array_provider_key1_range(state, provider, prefix_keys[0],
+                                     &range->start, &range->end);
+    return true;
+}
+
+static const AgeGenericTrieOps sorted_array_trie_ops = {
+    "sorted materialized arrays",
+    sorted_array_trie_open_child_range
+};
+
+static void
+generic_provider_open_child_range(AgeGenericJoinState *state,
+                                  AgeGenericProvider *provider,
+                                  const graphid *prefix_keys,
+                                  int prefix_count,
+                                  AgeGenericTrieRange *range)
+{
+    if (provider->trie_ops == NULL ||
+        provider->trie_ops->open_child_range == NULL)
+    {
+        elog(ERROR, "AGE Generic Join provider has no trie ops");
+    }
+
+    provider->trie_ops->open_child_range(state, provider, prefix_keys,
+                                         prefix_count, range);
+}
+
+static void
+generic_provider_key1_range(AgeGenericJoinState *state,
+                            AgeGenericProvider *provider, graphid key,
+                            int *start, int *end)
+{
+    AgeGenericTrieRange range;
+    graphid prefix_key = key;
+
+    generic_provider_open_child_range(state, provider, &prefix_key, 1,
+                                      &range);
+    *start = range.start;
+    *end = range.end;
 }
 
 static void
@@ -877,14 +1093,9 @@ build_generic_provider_prefix_ranges(AgeGenericJoinState *state)
 }
 
 static int
-lower_bound_pair(AgeGenericJoinState *state, AgeGenericProvider *provider,
-                 graphid key1, graphid key2)
+lower_bound_key2(AgeGenericProvider *provider, int low, int high,
+                 graphid key2)
 {
-    int low;
-    int high;
-
-    generic_provider_key1_range(state, provider, key1, &low, &high);
-
     while (low < high)
     {
         int middle = low + (high - low) / 2;
@@ -898,14 +1109,9 @@ lower_bound_pair(AgeGenericJoinState *state, AgeGenericProvider *provider,
 }
 
 static int
-upper_bound_pair(AgeGenericJoinState *state, AgeGenericProvider *provider,
-                 graphid key1, graphid key2)
+upper_bound_key2(AgeGenericProvider *provider, int low, int high,
+                 graphid key2)
 {
-    int low;
-    int high;
-
-    generic_provider_key1_range(state, provider, key1, &low, &high);
-
     while (low < high)
     {
         int middle = low + (high - low) / 2;
@@ -916,6 +1122,22 @@ upper_bound_pair(AgeGenericJoinState *state, AgeGenericProvider *provider,
             high = middle;
     }
     return low;
+}
+
+static void
+generic_provider_pair_range(AgeGenericJoinState *state,
+                            AgeGenericProvider *provider,
+                            graphid key1, graphid key2,
+                            int *start, int *end)
+{
+    AgeGenericTrieRange range;
+    graphid prefix_key = key1;
+
+    generic_provider_open_child_range(state, provider, &prefix_key, 1,
+                                      &range);
+    *start = lower_bound_key2(provider, range.start, range.end, key2);
+    *end = upper_bound_key2(provider, *start, range.end, key2);
+    increment_generic_counter(&state->trie_pair_range_opens);
 }
 
 static void
@@ -1789,6 +2011,31 @@ generic_leaf_tail_edge_info(AgeGenericProvider *provider,
 }
 
 static bool
+generic_provider_is_planned_leaf_tail(AgeGenericJoinState *state,
+                                      int provider_index)
+{
+    int separator_index;
+
+    if (state->reduction_ghd_separators == NULL ||
+        state->reduction_ghd_separator_count <= 0)
+    {
+        return false;
+    }
+
+    for (separator_index = 0;
+         separator_index < state->reduction_ghd_separator_count;
+         separator_index++)
+    {
+        if (state->reduction_ghd_separators[separator_index].provider_index ==
+            provider_index)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool
 generic_provider_is_cyclic_core(AgeGenericProvider *provider,
                                 const bool *core_variables)
 {
@@ -1883,58 +2130,140 @@ reduce_generic_leaf_tail_separators(AgeGenericJoinState *state,
     separator_domains = MemoryContextAllocZero(
         reduction_context,
         sizeof(AgeGenericSeparatorDomain) * state->variable_count);
-    for (provider_index = 0;
-         provider_index < state->provider_count;
-         provider_index++)
+    if (state->reduction_ghd_separators != NULL &&
+        state->reduction_ghd_separator_count > 0)
     {
-        AgeGenericProvider *provider = &state->providers[provider_index];
-        graphid *separator_domain;
-        int separator_domain_count;
-        int separator_variable;
-        int tail_variable;
-        bool separator_is_key1;
+        int separator_index;
 
-        if (!generic_leaf_tail_edge_info(provider, core_variables,
-                                         &separator_variable,
-                                         &tail_variable,
-                                         &separator_is_key1))
+        for (separator_index = 0;
+             separator_index < state->reduction_ghd_separator_count;
+             separator_index++)
         {
-            continue;
-        }
+            AgeGenericGHDSeparatorPlan *plan =
+                &state->reduction_ghd_separators[separator_index];
+            AgeGenericProvider *provider;
+            graphid *separator_domain;
+            int separator_domain_count;
 
-        found_leaf_tail = true;
-        increment_generic_counter(&state->separator_leaf_tail_providers);
-        separator_domain = build_generic_tail_separator_domain(
-            state, provider, tail_variable, separator_is_key1, local_domains,
-            reduction_context,
-            separator_domains[separator_variable].initialized,
-            &separator_domain_count);
-        if (separator_domain_count <= 0)
-        {
-            state->exhausted = true;
-            break;
-        }
+            provider = &state->providers[plan->provider_index];
+            if (provider->kind != AGE_GENERIC_PROVIDER_EDGE ||
+                !generic_provider_has_variable(provider,
+                                               plan->separator_variable) ||
+                !generic_provider_has_variable(provider,
+                                               plan->tail_variable) ||
+                (plan->separator_is_key1 &&
+                 (provider->var1 != plan->separator_variable ||
+                  provider->var2 != plan->tail_variable)) ||
+                (!plan->separator_is_key1 &&
+                 (provider->var2 != plan->separator_variable ||
+                  provider->var1 != plan->tail_variable)))
+            {
+                elog(ERROR,
+                     "invalid AGE Generic Join GHD separator provider");
+            }
 
-        if (!separator_domains[separator_variable].initialized)
-        {
-            separator_domains[separator_variable].keys = separator_domain;
-            separator_domains[separator_variable].count =
-                separator_domain_count;
-            separator_domains[separator_variable].initialized = true;
-        }
-        else
-        {
-            separator_domains[separator_variable].count =
-                intersect_generic_domains(
-                    separator_domains[separator_variable].keys,
-                    separator_domains[separator_variable].count,
-                    separator_domain, separator_domain_count);
-            if (separator_domains[separator_variable].count <= 0)
+            found_leaf_tail = true;
+            increment_generic_counter(
+                &state->separator_leaf_tail_providers);
+            increment_generic_counter(
+                &state->separator_descriptor_applications);
+            separator_domain = build_generic_tail_separator_domain(
+                state, provider, plan->tail_variable,
+                plan->separator_is_key1, local_domains, reduction_context,
+                separator_domains[plan->separator_variable].initialized,
+                &separator_domain_count);
+            if (separator_domain_count <= 0)
             {
                 state->exhausted = true;
                 break;
             }
+
+            if (!separator_domains[plan->separator_variable].initialized)
+            {
+                separator_domains[plan->separator_variable].keys =
+                    separator_domain;
+                separator_domains[plan->separator_variable].count =
+                    separator_domain_count;
+                separator_domains[plan->separator_variable].initialized =
+                    true;
+            }
+            else
+            {
+                separator_domains[plan->separator_variable].count =
+                    intersect_generic_domains(
+                        separator_domains[plan->separator_variable].keys,
+                        separator_domains[plan->separator_variable].count,
+                        separator_domain, separator_domain_count);
+                if (separator_domains[plan->separator_variable].count <= 0)
+                {
+                    state->exhausted = true;
+                    break;
+                }
+            }
         }
+    }
+    else
+    {
+        for (provider_index = 0;
+             provider_index < state->provider_count;
+             provider_index++)
+        {
+            AgeGenericProvider *provider = &state->providers[provider_index];
+            graphid *separator_domain;
+            int separator_domain_count;
+            int separator_variable;
+            int tail_variable;
+            bool separator_is_key1;
+
+            if (!generic_leaf_tail_edge_info(provider, core_variables,
+                                             &separator_variable,
+                                             &tail_variable,
+                                             &separator_is_key1))
+            {
+                continue;
+            }
+
+            found_leaf_tail = true;
+            increment_generic_counter(
+                &state->separator_leaf_tail_providers);
+            separator_domain = build_generic_tail_separator_domain(
+                state, provider, tail_variable, separator_is_key1,
+                local_domains, reduction_context,
+                separator_domains[separator_variable].initialized,
+                &separator_domain_count);
+            if (separator_domain_count <= 0)
+            {
+                state->exhausted = true;
+                break;
+            }
+
+            if (!separator_domains[separator_variable].initialized)
+            {
+                separator_domains[separator_variable].keys = separator_domain;
+                separator_domains[separator_variable].count =
+                    separator_domain_count;
+                separator_domains[separator_variable].initialized = true;
+            }
+            else
+            {
+                separator_domains[separator_variable].count =
+                    intersect_generic_domains(
+                        separator_domains[separator_variable].keys,
+                        separator_domains[separator_variable].count,
+                        separator_domain, separator_domain_count);
+                if (separator_domains[separator_variable].count <= 0)
+                {
+                    state->exhausted = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (state->exhausted)
+    {
+        if (!found_leaf_tail)
+            return;
     }
 
     if (!found_leaf_tail)
@@ -1976,7 +2305,9 @@ reduce_generic_leaf_tail_separators(AgeGenericJoinState *state,
                     &state->separator_cyclic_core_rows_removed,
                     rows_removed);
             }
-            else if (generic_leaf_tail_edge_info(provider, core_variables,
+            else if (generic_provider_is_planned_leaf_tail(
+                         state, provider_index) ||
+                     generic_leaf_tail_edge_info(provider, core_variables,
                                                  &separator_variable,
                                                  &tail_variable,
                                                  &separator_is_key1))
@@ -1997,11 +2328,10 @@ reduce_generic_leaf_tail_separators(AgeGenericJoinState *state,
 }
 
 /*
- * Enforce query-wide endpoint consistency before variable DFS.  Repeated
- * semijoin passes are complete for tree-shaped binary relations after at
- * most the component diameter, and remain a safe pruning step for cycles.
- * Stopping after a bounded number of passes affects only pruning strength,
- * never result correctness.
+ * Enforce query-wide endpoint consistency before variable DFS.  Acyclic
+ * leaf-peel metadata gives a Yannakakis-style bottom-up pass followed by a
+ * top-down pass.  Other shapes keep bounded fixed-point pruning; stopping
+ * after the budget affects only pruning strength, never result correctness.
  */
 static int
 generic_semijoin_pass_budget(AgeGenericJoinState *state)
@@ -2009,7 +2339,7 @@ generic_semijoin_pass_budget(AgeGenericJoinState *state)
     if (state->reduction_order_kind == AGE_GENERIC_REDUCTION_ORDER_LEAF_PEEL &&
         state->reduction_order_edge_count > 0)
     {
-        return state->reduction_order_edge_count;
+        return 2;
     }
     return Max(state->variable_count * 2, 1);
 }
@@ -2043,6 +2373,7 @@ reduce_generic_providers(AgeGenericJoinState *state)
     {
         AgeGenericDomain *domains;
         int64 rows_removed = 0;
+        bool ordered_reduction_applicable;
 
         MemoryContextReset(reduction_context);
         domains = MemoryContextAllocZero(
@@ -2068,10 +2399,30 @@ reduce_generic_providers(AgeGenericJoinState *state)
             MemoryContextMemAllocated(state->data_context, true) +
             MemoryContextMemAllocated(reduction_context, true));
 
-        if (generic_reduction_order_applicable(state))
+        ordered_reduction_applicable = generic_reduction_order_applicable(
+            state);
+        if (ordered_reduction_applicable)
         {
+            bool bottom_up = pass == 0;
+
             rows_removed = filter_generic_providers_in_reduction_order(
-                state, domains, pass % 2 == 1);
+                state, domains, bottom_up);
+            if (bottom_up)
+            {
+                increment_generic_counter(
+                    &state->semijoin_bottom_up_passes);
+                add_generic_counter(
+                    &state->semijoin_bottom_up_rows_removed,
+                    rows_removed);
+            }
+            else
+            {
+                increment_generic_counter(
+                    &state->semijoin_top_down_passes);
+                add_generic_counter(
+                    &state->semijoin_top_down_rows_removed,
+                    rows_removed);
+            }
         }
         else
         {
@@ -2084,7 +2435,8 @@ reduce_generic_providers(AgeGenericJoinState *state)
             generic_provider_row_total(state);
         state->semijoin_final_domain_keys =
             state->exhausted ? 0 : generic_domain_key_total(state, domains);
-        if (state->exhausted || rows_removed == 0)
+        if (state->exhausted ||
+            (!ordered_reduction_applicable && rows_removed == 0))
             break;
     }
     MemoryContextDelete(reduction_context);
@@ -2171,8 +2523,8 @@ prepare_generic_bags(AgeGenericJoinState *state)
         {
             graphid key2 = state->bindings[provider->var2];
 
-            start = lower_bound_pair(state, provider, key1, key2);
-            end = upper_bound_pair(state, provider, key1, key2);
+            generic_provider_pair_range(state, provider, key1, key2, &start,
+                                        &end);
         }
         provider->bag_start = start;
         provider->bag_count = end - start;
@@ -2574,6 +2926,7 @@ initialize_generic_provider(AgeGenericJoinState *state,
     provider->edge_id_attno = (AttrNumber)intVal(list_nth(
         desc, AGE_GENERIC_PROVIDER_DESC_EDGE_ID_ATTNO));
     provider->plan_state = plan_state;
+    provider->trie_ops = &sorted_array_trie_ops;
 
     if ((provider->kind != AGE_GENERIC_PROVIDER_VERTEX &&
          provider->kind != AGE_GENERIC_PROVIDER_EDGE) ||
@@ -2796,6 +3149,20 @@ generic_reduction_order_name(AgeGenericReductionOrderKind kind)
     return "unknown";
 }
 
+static const char *
+generic_reduction_descriptor_source_name(
+    AgeGenericReductionDescriptorSource source)
+{
+    switch (source)
+    {
+    case AGE_GENERIC_REDUCTION_SOURCE_LOCAL:
+        return "local-hypergraph";
+    case AGE_GENERIC_REDUCTION_SOURCE_GRAPH_JOIN_MATCH_IR:
+        return "graph-join-match-ir";
+    }
+    return "unknown";
+}
+
 static void
 explain_age_generic_join(CustomScanState *node, List *ancestors,
                          ExplainState *es)
@@ -2808,6 +3175,7 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
     ExplainPropertyText("Generic Join Algorithm",
                         "lazy domain views with vectorized intersections and delayed edge bags",
                         es);
+    ExplainPropertyText("Provider Trie Ops", sorted_array_trie_ops.name, es);
     ExplainPropertyText("Variable Order", variable_order, es);
     ExplainPropertyInteger("Component Count", NULL, state->component_count,
                            es);
@@ -2815,6 +3183,10 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
     ExplainPropertyText("Reduction Shape",
                         generic_reduction_shape_name(state->reduction_shape),
                         es);
+    ExplainPropertyText(
+        "Reduction Descriptor Source",
+        generic_reduction_descriptor_source_name(
+            state->reduction_descriptor_source), es);
     ExplainPropertyText(
         "Reduction Order",
         generic_reduction_order_name(state->reduction_order_kind), es);
@@ -2824,6 +3196,14 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                            state->reduction_core_variables, es);
     ExplainPropertyInteger("Reduction Tail Separators", NULL,
                            state->reduction_tail_separators, es);
+    ExplainPropertyInteger("GHD Bag Count", NULL,
+                           state->reduction_ghd_bag_count, es);
+    ExplainPropertyInteger("GHD Separator Count", NULL,
+                           state->reduction_ghd_separator_count, es);
+    ExplainPropertyText(
+        "GHD Descriptor Source",
+        generic_reduction_descriptor_source_name(
+            state->reduction_descriptor_source), es);
     ExplainPropertyInteger("Variable Count", NULL, state->variable_count, es);
     ExplainPropertyInteger("Provider Count", NULL, state->provider_count, es);
     if (es->analyze)
@@ -2840,10 +3220,18 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                                state->tuples_materialized, es);
         ExplainPropertyInteger("Semijoin Reduction Passes", NULL,
                                state->semijoin_passes, es);
+        ExplainPropertyInteger("Yannakakis Bottom-Up Passes", NULL,
+                               state->semijoin_bottom_up_passes, es);
+        ExplainPropertyInteger("Yannakakis Top-Down Passes", NULL,
+                               state->semijoin_top_down_passes, es);
         ExplainPropertyBool("Reduction Order Applied",
                             state->reduction_order_applied, es);
         ExplainPropertyInteger("Semijoin Rows Removed", NULL,
                                state->semijoin_rows_removed, es);
+        ExplainPropertyInteger("Yannakakis Bottom-Up Rows Removed", NULL,
+                               state->semijoin_bottom_up_rows_removed, es);
+        ExplainPropertyInteger("Yannakakis Top-Down Rows Removed", NULL,
+                               state->semijoin_top_down_rows_removed, es);
         ExplainPropertyInteger("Semijoin Provider Rows After", NULL,
                                state->semijoin_provider_rows_after, es);
         ExplainPropertyInteger("Semijoin Final Domain Keys", NULL,
@@ -2852,6 +3240,8 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                                state->separator_reduction_passes, es);
         ExplainPropertyInteger("GHD Leaf Tail Providers", NULL,
                                state->separator_leaf_tail_providers, es);
+        ExplainPropertyInteger("GHD Descriptor Separators Applied", NULL,
+                               state->separator_descriptor_applications, es);
         ExplainPropertyInteger("GHD Separator Domain Keys", NULL,
                                state->separator_domain_keys, es);
         ExplainPropertyInteger("GHD Leaf Tail Rows Removed", NULL,
@@ -2878,6 +3268,16 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                                state->lazy_prefix_range_builds, es);
         ExplainPropertyInteger("Prefix Range Reuses", NULL,
                                state->lazy_prefix_range_reuses, es);
+        ExplainPropertyInteger("Prefix Range Directory Searches", NULL,
+                               state->lazy_prefix_range_directory_searches, es);
+        ExplainPropertyInteger("Prefix Range Cursor Reuses", NULL,
+                               state->lazy_prefix_range_cursor_reuses, es);
+        ExplainPropertyInteger("Trie Child Range Opens", NULL,
+                               state->trie_child_range_opens, es);
+        ExplainPropertyInteger("Trie Prefix Range Seeks", NULL,
+                               state->trie_prefix_range_seeks, es);
+        ExplainPropertyInteger("Trie Pair Range Opens", NULL,
+                               state->trie_pair_range_opens, es);
         ExplainPropertyInteger("Reduction Scratch Allocations", NULL,
                                state->reduction_scratch_allocations, es);
         ExplainPropertyInteger("Reduction Scratch Reuses", NULL,

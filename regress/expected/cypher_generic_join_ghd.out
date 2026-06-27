@@ -150,10 +150,15 @@ DECLARE
     has_component_count boolean := false;
     has_component_ids boolean := false;
     has_reduction_shape boolean := false;
+    has_descriptor_source boolean := false;
+    has_ghd_bag_count boolean := false;
+    has_ghd_separator_count boolean := false;
+    has_ghd_descriptor_source boolean := false;
     has_reduction_core boolean := false;
     has_reduction_tail boolean := false;
     has_separator_pass boolean := false;
     has_leaf_tail_provider boolean := false;
+    has_descriptor_separators boolean := false;
     has_separator_domain boolean := false;
     has_core_pruning boolean := false;
     has_provider_rows boolean := false;
@@ -189,6 +194,15 @@ BEGIN
             plan_text LIKE '%Component IDs: 1, 1, 1, 1, 1%';
         has_reduction_shape := has_reduction_shape OR
             plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
+        has_descriptor_source := has_descriptor_source OR
+            plan_text LIKE
+            '%Reduction Descriptor Source: graph-join-match-ir%';
+        has_ghd_bag_count := has_ghd_bag_count OR
+            plan_text LIKE '%GHD Bag Count: 2%';
+        has_ghd_separator_count := has_ghd_separator_count OR
+            plan_text LIKE '%GHD Separator Count: 1%';
+        has_ghd_descriptor_source := has_ghd_descriptor_source OR
+            plan_text LIKE '%GHD Descriptor Source: graph-join-match-ir%';
         has_reduction_core := has_reduction_core OR
             plan_text LIKE '%Reduction Core Variables: 4%';
         has_reduction_tail := has_reduction_tail OR
@@ -197,6 +211,8 @@ BEGIN
             plan_text LIKE '%GHD Separator Reduction Passes: 1%';
         has_leaf_tail_provider := has_leaf_tail_provider OR
             plan_text LIKE '%GHD Leaf Tail Providers: 1%';
+        has_descriptor_separators := has_descriptor_separators OR
+            plan_text LIKE '%GHD Descriptor Separators Applied: 1%';
         has_separator_domain := has_separator_domain OR
             plan_text LIKE '%GHD Separator Domain Keys: 1%';
         has_core_pruning := has_core_pruning OR
@@ -216,9 +232,13 @@ BEGIN
 
     IF NOT has_generic OR NOT has_component_count OR
        NOT has_component_ids OR NOT has_reduction_shape OR
-       NOT has_reduction_core OR NOT has_reduction_tail OR
+       NOT has_descriptor_source OR NOT has_reduction_core OR
+       NOT has_ghd_bag_count OR NOT has_ghd_separator_count OR
+       NOT has_ghd_descriptor_source OR
+       NOT has_reduction_tail OR
        NOT has_separator_pass OR
-       NOT has_leaf_tail_provider OR NOT has_separator_domain OR
+       NOT has_leaf_tail_provider OR
+       NOT has_descriptor_separators OR NOT has_separator_domain OR
        NOT has_core_pruning OR NOT has_provider_rows OR
        NOT has_key_only_tuple_skip OR
        NOT has_reduction_scratch_allocation OR
@@ -305,10 +325,15 @@ DECLARE
     has_component_count boolean := false;
     has_component_ids boolean := false;
     has_reduction_shape boolean := false;
+    has_descriptor_source boolean := false;
+    has_ghd_bag_count boolean := false;
+    has_ghd_separator_count boolean := false;
+    has_ghd_descriptor_source boolean := false;
     has_reduction_core boolean := false;
     has_reduction_tail boolean := false;
     has_separator_pass boolean := false;
     has_leaf_tail_providers boolean := false;
+    has_descriptor_separators boolean := false;
     has_separator_domain boolean := false;
     has_core_pruning boolean := false;
     has_one_row boolean := false;
@@ -341,6 +366,15 @@ BEGIN
             plan_text LIKE '%Component IDs: 1, 1, 1, 1, 1, 1%';
         has_reduction_shape := has_reduction_shape OR
             plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
+        has_descriptor_source := has_descriptor_source OR
+            plan_text LIKE
+            '%Reduction Descriptor Source: graph-join-match-ir%';
+        has_ghd_bag_count := has_ghd_bag_count OR
+            plan_text LIKE '%GHD Bag Count: 3%';
+        has_ghd_separator_count := has_ghd_separator_count OR
+            plan_text LIKE '%GHD Separator Count: 2%';
+        has_ghd_descriptor_source := has_ghd_descriptor_source OR
+            plan_text LIKE '%GHD Descriptor Source: graph-join-match-ir%';
         has_reduction_core := has_reduction_core OR
             plan_text LIKE '%Reduction Core Variables: 4%';
         has_reduction_tail := has_reduction_tail OR
@@ -349,6 +383,8 @@ BEGIN
             plan_text LIKE '%GHD Separator Reduction Passes: 1%';
         has_leaf_tail_providers := has_leaf_tail_providers OR
             plan_text LIKE '%GHD Leaf Tail Providers: 2%';
+        has_descriptor_separators := has_descriptor_separators OR
+            plan_text LIKE '%GHD Descriptor Separators Applied: 2%';
         has_separator_domain := has_separator_domain OR
             plan_text LIKE '%GHD Separator Domain Keys: 2%';
         has_core_pruning := has_core_pruning OR
@@ -359,9 +395,12 @@ BEGIN
 
     IF NOT has_generic OR NOT has_component_count OR
        NOT has_component_ids OR NOT has_reduction_shape OR
+       NOT has_descriptor_source OR NOT has_ghd_bag_count OR
+       NOT has_ghd_separator_count OR NOT has_ghd_descriptor_source OR
        NOT has_reduction_core OR NOT has_reduction_tail OR
        NOT has_separator_pass OR NOT has_leaf_tail_providers OR
-       NOT has_separator_domain OR NOT has_core_pruning OR
+       NOT has_descriptor_separators OR NOT has_separator_domain OR
+       NOT has_core_pruning OR
        NOT has_one_row THEN
         RAISE EXCEPTION
             'Generic Join multi-tail GHD separator reduction was not observed';
@@ -416,9 +455,175 @@ SELECT (SELECT count(*) FROM generic_ghd_multi_tail_binary) AS binary_rows,
 
 ROLLBACK;
 /*
+ * Dense acyclic chains pass through the planner-owned graph-join match IR
+ * summary before the Generic Join reduction descriptor reaches the executor.
+ */
+SELECT create_graph('generic_ir');
+NOTICE:  graph "generic_ir" has been created
+ create_graph 
+--------------
+ 
+(1 row)
+
+SELECT create_vlabel('generic_ir', 'T_A');
+NOTICE:  VLabel "T_A" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_vlabel('generic_ir', 'T_B');
+NOTICE:  VLabel "T_B" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_vlabel('generic_ir', 'T_C');
+NOTICE:  VLabel "T_C" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_vlabel('generic_ir', 'T_D');
+NOTICE:  VLabel "T_D" has been created
+ create_vlabel 
+---------------
+ 
+(1 row)
+
+SELECT create_elabel('generic_ir', 'T_AB');
+NOTICE:  ELabel "T_AB" has been created
+ create_elabel 
+---------------
+ 
+(1 row)
+
+SELECT create_elabel('generic_ir', 'T_BC');
+NOTICE:  ELabel "T_BC" has been created
+ create_elabel 
+---------------
+ 
+(1 row)
+
+SELECT create_elabel('generic_ir', 'T_CD');
+NOTICE:  ELabel "T_CD" has been created
+ create_elabel 
+---------------
+ 
+(1 row)
+
+INSERT INTO generic_ir."T_A" (id, properties)
+VALUES (_graphid(_label_id('generic_ir', 'T_A'), 1), '{}'::agtype);
+INSERT INTO generic_ir."T_B" (id, properties)
+SELECT _graphid(_label_id('generic_ir', 'T_B'), i), '{}'::agtype
+FROM generate_series(1, 80) i;
+INSERT INTO generic_ir."T_C" (id, properties)
+SELECT _graphid(_label_id('generic_ir', 'T_C'), i), '{}'::agtype
+FROM generate_series(1, 80) i;
+INSERT INTO generic_ir."T_D" (id, properties)
+SELECT _graphid(_label_id('generic_ir', 'T_D'), i), '{}'::agtype
+FROM generate_series(1, 80) i;
+INSERT INTO generic_ir."T_AB" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('generic_ir', 'T_AB'), i),
+       _graphid(_label_id('generic_ir', 'T_A'), 1),
+       _graphid(_label_id('generic_ir', 'T_B'), i),
+       '{}'::agtype
+FROM generate_series(1, 80) i;
+INSERT INTO generic_ir."T_BC" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('generic_ir', 'T_BC'), (i - 1) * 80 + j),
+       _graphid(_label_id('generic_ir', 'T_B'), i),
+       _graphid(_label_id('generic_ir', 'T_C'), j),
+       '{}'::agtype
+FROM generate_series(1, 80) i,
+     generate_series(1, 80) j;
+INSERT INTO generic_ir."T_CD" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('generic_ir', 'T_CD'), (i - 1) * 80 + j),
+       _graphid(_label_id('generic_ir', 'T_C'), i),
+       _graphid(_label_id('generic_ir', 'T_D'), j),
+       '{}'::agtype
+FROM generate_series(1, 80) i,
+     generate_series(1, 80) j;
+CREATE INDEX generic_ir_tab_out
+ON generic_ir."T_AB" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX generic_ir_tbc_out
+ON generic_ir."T_BC" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX generic_ir_tcd_out
+ON generic_ir."T_CD" USING age_adjacency(start_id, id, end_id);
+ANALYZE generic_ir."T_A";
+ANALYZE generic_ir."T_B";
+ANALYZE generic_ir."T_C";
+ANALYZE generic_ir."T_D";
+ANALYZE generic_ir."T_AB";
+ANALYZE generic_ir."T_BC";
+ANALYZE generic_ir."T_CD";
+DO $generic_ghd_acyclic_match_ir_plan$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_reduction_shape boolean := false;
+    has_reduction_order boolean := false;
+    has_descriptor_source boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (VERBOSE, COSTS OFF)
+        SELECT *
+        FROM cypher('generic_ir', $cypher$
+            MATCH (a:T_A)-[ab:T_AB]->(b:T_B)-[bc:T_BC]->(c:T_C)
+                  -[cd:T_CD]->(d:T_D)
+            RETURN id(a), id(b), id(c), id(d), id(ab), id(bc), id(cd)
+        $cypher$) AS (a agtype, b agtype, c agtype, d agtype,
+                      ab agtype, bc agtype, cd agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_reduction_shape := has_reduction_shape OR
+            plan_text LIKE '%Reduction Shape: alpha-acyclic%';
+        has_reduction_order := has_reduction_order OR
+            plan_text LIKE '%Reduction Order: leaf-peel%';
+        has_descriptor_source := has_descriptor_source OR
+            plan_text LIKE
+            '%Reduction Descriptor Source: graph-join-match-ir%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_reduction_shape OR
+       NOT has_reduction_order OR NOT has_descriptor_source THEN
+        RAISE EXCEPTION
+            'Generic Join acyclic graph-join match IR descriptor source was not observed';
+    END IF;
+    RAISE NOTICE 'generic join acyclic graph-join match IR descriptor source verified';
+END
+$generic_ghd_acyclic_match_ir_plan$;
+NOTICE:  generic join acyclic graph-join match IR descriptor source verified
+SELECT drop_graph('generic_ir', true);
+NOTICE:  drop cascades to 9 other objects
+DETAIL:  drop cascades to table generic_ir._ag_label_vertex
+drop cascades to table generic_ir._ag_label_edge
+drop cascades to table generic_ir."T_A"
+drop cascades to table generic_ir."T_B"
+drop cascades to table generic_ir."T_C"
+drop cascades to table generic_ir."T_D"
+drop cascades to table generic_ir."T_AB"
+drop cascades to table generic_ir."T_BC"
+drop cascades to table generic_ir."T_CD"
+NOTICE:  graph "generic_ir" has been dropped
+ drop_graph 
+------------
+ 
+(1 row)
+
+/*
  * Repeated middle prefixes keep returning to the same P_C -> P_D ranges for
  * each P_B branch.  The executor should reuse the post-reduction prefix range
- * directory instead of rebuilding raw row ranges for those recursive lookups.
+ * directory and provider cursor instead of rebuilding raw row ranges for those
+ * recursive lookups.
  */
 SELECT create_vlabel('generic_ghd', 'P_A');
 NOTICE:  VLabel "P_A" has been created
@@ -534,6 +739,10 @@ DECLARE
     matches text[];
     prefix_builds integer := NULL;
     prefix_reuses integer := NULL;
+    prefix_cursor_reuses integer := NULL;
+    trie_child_range_opens integer := NULL;
+    trie_prefix_range_seeks integer := NULL;
+    trie_pair_range_opens integer := NULL;
     has_generic boolean := false;
     has_rows boolean := false;
 BEGIN
@@ -566,19 +775,45 @@ BEGIN
         IF matches IS NOT NULL THEN
             prefix_reuses := matches[1]::integer;
         END IF;
+        matches := regexp_match(plan_text,
+                                'Prefix Range Cursor Reuses: ([0-9]+)');
+        IF matches IS NOT NULL THEN
+            prefix_cursor_reuses := matches[1]::integer;
+        END IF;
+        matches := regexp_match(plan_text,
+                                'Trie Child Range Opens: ([0-9]+)');
+        IF matches IS NOT NULL THEN
+            trie_child_range_opens := matches[1]::integer;
+        END IF;
+        matches := regexp_match(plan_text,
+                                'Trie Prefix Range Seeks: ([0-9]+)');
+        IF matches IS NOT NULL THEN
+            trie_prefix_range_seeks := matches[1]::integer;
+        END IF;
+        matches := regexp_match(plan_text,
+                                'Trie Pair Range Opens: ([0-9]+)');
+        IF matches IS NOT NULL THEN
+            trie_pair_range_opens := matches[1]::integer;
+        END IF;
     END LOOP;
 
     IF NOT has_generic OR NOT has_rows OR
        prefix_builds IS NULL OR prefix_reuses IS NULL OR
-       prefix_builds > 40 OR prefix_reuses < 500 THEN
+       prefix_cursor_reuses IS NULL OR prefix_builds > 40 OR
+       prefix_reuses < 300 OR prefix_cursor_reuses <= 0 OR
+       trie_child_range_opens IS NULL OR trie_prefix_range_seeks IS NULL OR
+       trie_pair_range_opens IS NULL OR trie_child_range_opens <= 0 OR
+       trie_prefix_range_seeks <= 0 OR trie_pair_range_opens <= 0 THEN
         RAISE EXCEPTION
-            'Generic Join prefix range directory reuse was not observed (builds %, reuses %)',
-            prefix_builds, prefix_reuses;
+            'Generic Join prefix range trie ops/directory/cursor/direct pair reuse was not observed (builds %, reuses %, cursor reuses %, child opens %, prefix seeks %, pair opens %)',
+            prefix_builds, prefix_reuses, prefix_cursor_reuses,
+            trie_child_range_opens, trie_prefix_range_seeks,
+            trie_pair_range_opens;
     END IF;
-    RAISE NOTICE 'generic join prefix range directory reuse verified';
+    RAISE NOTICE 'generic join prefix range trie ops, directory, cursor, and direct pair reuse verified';
 END
 $generic_ghd_prefix_range_plan$;
-NOTICE:  generic join prefix range directory reuse verified
+NOTICE:  generic join prefix range trie ops, directory, cursor, and direct pair reuse verified
 SELECT drop_graph('generic_ghd', true);
 NOTICE:  drop cascades to 22 other objects
 DETAIL:  drop cascades to table generic_ghd._ag_label_vertex

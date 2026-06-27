@@ -153,6 +153,7 @@ typedef enum AgeWCOJPathPrivateField
     AGE_WCOJ_PATH_PRIVATE_CONSUMER,
     AGE_WCOJ_PATH_PRIVATE_OUTPUT_TYPE,
     AGE_WCOJ_PATH_PRIVATE_ROW_GOAL,
+    AGE_WCOJ_PATH_PRIVATE_ROW_GOAL_SOURCE,
     AGE_WCOJ_PATH_PRIVATE_CONSUMER_DESC,
     AGE_WCOJ_PATH_PRIVATE_COUNT
 } AgeWCOJPathPrivateField;
@@ -307,10 +308,33 @@ static int assign_generic_component_metadata(
     AgeGenericHypergraph *hypergraph);
 static bool generic_component_is_star(
     const AgeGenericHypergraph *hypergraph);
+static AgeGraphJoinMatchComponent *make_generic_match_component(
+    const AgeGenericHypergraph *hypergraph, Relids relids);
+static bool generic_match_component_matches_hypergraph(
+    const AgeGraphJoinMatchComponent *component,
+    const AgeGenericHypergraph *hypergraph);
+static AgeGenericReductionDescriptorSource
+generic_reduction_source_from_match_component(
+    const AgeGraphJoinMatchComponent *component);
+static bool *make_generic_2core_variables(
+    const AgeGenericHypergraph *hypergraph, int *core_variable_count,
+    bool *has_core);
+static List *make_generic_ghd_bag_desc(int id, AgeGraphJoinGHDBagKind kind,
+                                       List *variable_ids,
+                                       List *provider_indexes);
+static List *make_generic_ghd_separator_desc(
+    int id, int parent_bag_id, int child_bag_id, int separator_variable,
+    int tail_variable, int provider_index, bool separator_is_key1);
+static bool make_generic_ghd_metadata(
+    const AgeGenericHypergraph *hypergraph, const bool *core_variables,
+    List **ghd_bags, List **ghd_separators);
 static List *make_generic_leaf_peel_order(
     const AgeGenericHypergraph *hypergraph);
 static List *make_generic_reduction_desc(
-    const AgeGenericHypergraph *hypergraph);
+    const AgeGenericHypergraph *hypergraph,
+    const AgeGraphJoinMatchComponent *component);
+static void set_generic_reduction_desc_source(
+    List *reduction_desc, AgeGenericReductionDescriptorSource source);
 static List *generic_variable_order(PlannerInfo *root, List *entries);
 static List *collect_generic_restrictinfos(PlannerInfo *root,
                                            Relids component_relids,
@@ -425,6 +449,7 @@ static List *build_wcoj_sum_property_custom_scan_tlist(
     PathTarget *target, List *provider_tlist);
 static List *build_wcoj_group_sum_property_custom_scan_tlist(
     PathTarget *target, List *provider_tlist);
+static List *build_wcoj_exists_custom_scan_tlist(List *provider_tlist);
 static Expr *wcoj_count_scan_expr(PathTarget *target);
 static Expr *wcoj_sum_property_scan_expr(PathTarget *target);
 static Aggref *wcoj_count_expr_aggref(Node *expr, Oid *output_type);
@@ -465,7 +490,9 @@ static Path *make_wcoj_fractional_row_goal_path(PlannerInfo *root,
                                                 Path *path,
                                                 int64 row_goal);
 static CustomPath *copy_wcoj_path_with_row_goal(CustomPath *wcoj_path,
-                                                int64 row_goal);
+                                                int64 row_goal,
+                                                int consumer_kind,
+                                                int row_goal_source);
 static int64 wcoj_tuple_fraction_row_goal(PlannerInfo *root,
                                           FinalPathExtraData *extra);
 static bool wcoj_limit_const_int64(Node *node, int64 *value);
@@ -3127,6 +3154,358 @@ generic_component_is_star(const AgeGenericHypergraph *hypergraph)
     return false;
 }
 
+static AgeGraphJoinMatchComponent *
+make_generic_match_component(const AgeGenericHypergraph *hypergraph,
+                             Relids relids)
+{
+    AgeGraphJoinMatchComponent *component;
+    List *component_ids = NIL;
+    List *reduction_order_edges = NIL;
+    List *ghd_bags = NIL;
+    List *ghd_separators = NIL;
+    bool *core_variable_flags = NULL;
+    bool has_core = false;
+    int core_variables = 0;
+    int tail_separators = 0;
+    int index;
+
+    if (hypergraph == NULL ||
+        hypergraph->variables == NULL ||
+        hypergraph->edges == NULL ||
+        hypergraph->variable_count <= 0 ||
+        hypergraph->edge_count <= 0 ||
+        hypergraph->component_count <= 0)
+    {
+        return NULL;
+    }
+
+    for (index = 0; index < hypergraph->variable_count; index++)
+    {
+        int component_id = hypergraph->variables[index].component_id;
+
+        if (component_id < 0 || component_id >= hypergraph->component_count)
+            return NULL;
+        component_ids = lappend(component_ids, makeInteger(component_id));
+    }
+
+    if (hypergraph->cyclic)
+    {
+        core_variable_flags = make_generic_2core_variables(
+            hypergraph, &core_variables, &has_core);
+        if (core_variable_flags == NULL)
+            return NULL;
+        if (has_core &&
+            !make_generic_ghd_metadata(hypergraph, core_variable_flags,
+                                       &ghd_bags, &ghd_separators))
+        {
+            return NULL;
+        }
+        tail_separators = list_length(ghd_separators);
+    }
+    else
+    {
+        for (index = 0; index < hypergraph->variable_count; index++)
+        {
+            if (hypergraph->variables[index].degree > 1)
+                core_variables++;
+        }
+        reduction_order_edges = make_generic_leaf_peel_order(hypergraph);
+        if (list_length(reduction_order_edges) != hypergraph->edge_count)
+            return NULL;
+    }
+
+    component = palloc0(sizeof(*component));
+    component->relids = bms_copy(relids);
+    component->variable_rtis = copyObject(hypergraph->variable_rtis);
+    component->component_ids = component_ids;
+    component->reduction_order_edges = reduction_order_edges;
+    component->ghd_bags = ghd_bags;
+    component->ghd_separators = ghd_separators;
+    component->variable_count = hypergraph->variable_count;
+    component->edge_count = hypergraph->edge_count;
+    component->component_count = hypergraph->component_count;
+    component->core_variable_count = core_variables;
+    component->tail_separator_count = tail_separators;
+    component->reduction_order_edge_count =
+        list_length(reduction_order_edges);
+    component->ghd_bag_count = list_length(ghd_bags);
+    component->ghd_separator_count = list_length(ghd_separators);
+    if (!hypergraph->cyclic)
+    {
+        component->shape = AGE_GRAPH_JOIN_MATCH_COMPONENT_ALPHA_ACYCLIC;
+        component->reduction_order_kind =
+            AGE_GRAPH_JOIN_MATCH_REDUCTION_ORDER_LEAF_PEEL;
+    }
+    else if (tail_separators > 0)
+        component->shape = AGE_GRAPH_JOIN_MATCH_COMPONENT_CYCLIC_WITH_TAIL;
+    else
+        component->shape = AGE_GRAPH_JOIN_MATCH_COMPONENT_CYCLIC_CORE;
+    component->descriptor_source =
+        AGE_GRAPH_JOIN_MATCH_DESCRIPTOR_SOURCE_GRAPH_JOIN_MATCH_IR;
+    component->connected = hypergraph->connected;
+    component->cyclic = hypergraph->cyclic;
+    component->star = hypergraph->star;
+
+    return component;
+}
+
+static bool
+generic_match_component_matches_hypergraph(
+    const AgeGraphJoinMatchComponent *component,
+    const AgeGenericHypergraph *hypergraph)
+{
+    AgeGraphJoinMatchComponent *expected;
+    bool matches;
+
+    if (component == NULL || hypergraph == NULL)
+        return false;
+
+    expected = make_generic_match_component(hypergraph, component->relids);
+    if (expected == NULL)
+        return false;
+
+    matches =
+        component->variable_count == expected->variable_count &&
+        component->edge_count == expected->edge_count &&
+        component->component_count == expected->component_count &&
+        component->core_variable_count == expected->core_variable_count &&
+        component->tail_separator_count == expected->tail_separator_count &&
+        component->reduction_order_edge_count ==
+        expected->reduction_order_edge_count &&
+        component->ghd_bag_count == expected->ghd_bag_count &&
+        component->ghd_separator_count == expected->ghd_separator_count &&
+        component->shape == expected->shape &&
+        component->reduction_order_kind == expected->reduction_order_kind &&
+        component->connected == expected->connected &&
+        component->cyclic == expected->cyclic &&
+        component->star == expected->star &&
+        equal(component->variable_rtis, expected->variable_rtis) &&
+        equal(component->component_ids, expected->component_ids) &&
+        equal(component->reduction_order_edges,
+              expected->reduction_order_edges) &&
+        equal(component->ghd_bags, expected->ghd_bags) &&
+        equal(component->ghd_separators, expected->ghd_separators);
+
+    return matches;
+}
+
+static AgeGenericReductionDescriptorSource
+generic_reduction_source_from_match_component(
+    const AgeGraphJoinMatchComponent *component)
+{
+    if (component != NULL &&
+        component->descriptor_source ==
+        AGE_GRAPH_JOIN_MATCH_DESCRIPTOR_SOURCE_GRAPH_JOIN_MATCH_IR)
+    {
+        return AGE_GENERIC_REDUCTION_SOURCE_GRAPH_JOIN_MATCH_IR;
+    }
+
+    return AGE_GENERIC_REDUCTION_SOURCE_LOCAL;
+}
+
+static bool *
+make_generic_2core_variables(const AgeGenericHypergraph *hypergraph,
+                             int *core_variable_count, bool *has_core)
+{
+    bool *core_variables;
+    bool *edge_alive;
+    int *degree;
+    bool changed;
+    int index;
+
+    if (core_variable_count != NULL)
+        *core_variable_count = 0;
+    if (has_core != NULL)
+        *has_core = false;
+    if (hypergraph == NULL || hypergraph->variables == NULL ||
+        hypergraph->edges == NULL || hypergraph->variable_count <= 0 ||
+        hypergraph->edge_count <= 0)
+    {
+        return NULL;
+    }
+
+    core_variables = palloc0(sizeof(bool) * hypergraph->variable_count);
+    edge_alive = palloc0(sizeof(bool) * hypergraph->edge_count);
+    degree = palloc0(sizeof(int) * hypergraph->variable_count);
+
+    for (index = 0; index < hypergraph->edge_count; index++)
+    {
+        const AgeGenericHypergraphEdge *edge = &hypergraph->edges[index];
+
+        if (edge->var1 < 0 || edge->var1 >= hypergraph->variable_count ||
+            edge->var2 < 0 || edge->var2 >= hypergraph->variable_count ||
+            edge->var1 == edge->var2)
+        {
+            pfree(edge_alive);
+            pfree(degree);
+            pfree(core_variables);
+            return NULL;
+        }
+        edge_alive[index] = true;
+        degree[edge->var1]++;
+        degree[edge->var2]++;
+    }
+
+    do
+    {
+        changed = false;
+        for (index = 0; index < hypergraph->edge_count; index++)
+        {
+            const AgeGenericHypergraphEdge *edge = &hypergraph->edges[index];
+
+            if (!edge_alive[index])
+                continue;
+            if (degree[edge->var1] > 1 && degree[edge->var2] > 1)
+                continue;
+            edge_alive[index] = false;
+            degree[edge->var1]--;
+            degree[edge->var2]--;
+            changed = true;
+        }
+    } while (changed);
+
+    for (index = 0; index < hypergraph->variable_count; index++)
+    {
+        if (degree[index] >= 2)
+        {
+            core_variables[index] = true;
+            if (core_variable_count != NULL)
+                (*core_variable_count)++;
+            if (has_core != NULL)
+                *has_core = true;
+        }
+    }
+
+    pfree(edge_alive);
+    pfree(degree);
+    return core_variables;
+}
+
+static List *
+make_generic_ghd_bag_desc(int id, AgeGraphJoinGHDBagKind kind,
+                          List *variable_ids, List *provider_indexes)
+{
+    return list_make4(makeInteger(id), makeInteger(kind),
+                      variable_ids, provider_indexes);
+}
+
+static List *
+make_generic_ghd_separator_desc(int id, int parent_bag_id, int child_bag_id,
+                                int separator_variable, int tail_variable,
+                                int provider_index, bool separator_is_key1)
+{
+    List *desc = list_make4(makeInteger(id), makeInteger(parent_bag_id),
+                            makeInteger(child_bag_id),
+                            makeInteger(separator_variable));
+
+    desc = lappend(desc, makeInteger(tail_variable));
+    desc = lappend(desc, makeInteger(provider_index));
+    desc = lappend(desc, makeInteger(separator_is_key1 ? 1 : 0));
+    return desc;
+}
+
+static bool
+make_generic_ghd_metadata(const AgeGenericHypergraph *hypergraph,
+                          const bool *core_variables, List **ghd_bags,
+                          List **ghd_separators)
+{
+    List *core_variable_ids = NIL;
+    List *core_provider_indexes = NIL;
+    int leaf_bag_id = 1;
+    int separator_id = 0;
+    int index;
+
+    Assert(ghd_bags != NULL);
+    Assert(ghd_separators != NULL);
+    *ghd_bags = NIL;
+    *ghd_separators = NIL;
+    if (hypergraph == NULL || core_variables == NULL)
+        return false;
+
+    for (index = 0; index < hypergraph->variable_count; index++)
+    {
+        if (core_variables[index])
+            core_variable_ids = lappend(core_variable_ids,
+                                        makeInteger(index));
+    }
+    for (index = 0; index < hypergraph->edge_count; index++)
+    {
+        const AgeGenericHypergraphEdge *edge = &hypergraph->edges[index];
+        int provider_index = hypergraph->variable_count + index;
+        bool var1_is_core;
+        bool var2_is_core;
+
+        if (edge->var1 < 0 || edge->var1 >= hypergraph->variable_count ||
+            edge->var2 < 0 || edge->var2 >= hypergraph->variable_count)
+        {
+            return false;
+        }
+
+        var1_is_core = core_variables[edge->var1];
+        var2_is_core = core_variables[edge->var2];
+        if (var1_is_core && var2_is_core)
+        {
+            core_provider_indexes = lappend(core_provider_indexes,
+                                            makeInteger(provider_index));
+        }
+    }
+    if (core_variable_ids == NIL || core_provider_indexes == NIL)
+        return true;
+
+    *ghd_bags = lappend(
+        *ghd_bags,
+        make_generic_ghd_bag_desc(0,
+                                  AGE_GRAPH_JOIN_GHD_BAG_CYCLIC_CORE,
+                                  core_variable_ids,
+                                  core_provider_indexes));
+
+    for (index = 0; index < hypergraph->edge_count; index++)
+    {
+        const AgeGenericHypergraphEdge *edge = &hypergraph->edges[index];
+        int provider_index = hypergraph->variable_count + index;
+        bool var1_is_core = core_variables[edge->var1];
+        bool var2_is_core = core_variables[edge->var2];
+        int separator_variable;
+        int tail_variable;
+        bool separator_is_key1;
+        List *leaf_variables;
+        List *leaf_providers;
+
+        if (var1_is_core == var2_is_core)
+            continue;
+        if (var1_is_core)
+        {
+            separator_variable = edge->var1;
+            tail_variable = edge->var2;
+            separator_is_key1 = true;
+        }
+        else
+        {
+            separator_variable = edge->var2;
+            tail_variable = edge->var1;
+            separator_is_key1 = false;
+        }
+
+        leaf_variables = list_make2(makeInteger(separator_variable),
+                                    makeInteger(tail_variable));
+        leaf_providers = list_make1(makeInteger(provider_index));
+        *ghd_bags = lappend(
+            *ghd_bags,
+            make_generic_ghd_bag_desc(leaf_bag_id,
+                                      AGE_GRAPH_JOIN_GHD_BAG_LEAF_TAIL,
+                                      leaf_variables, leaf_providers));
+        *ghd_separators = lappend(
+            *ghd_separators,
+            make_generic_ghd_separator_desc(
+                separator_id, 0, leaf_bag_id, separator_variable,
+                tail_variable, provider_index, separator_is_key1));
+        leaf_bag_id++;
+        separator_id++;
+    }
+
+    return true;
+}
+
 static List *
 make_generic_leaf_peel_order(const AgeGenericHypergraph *hypergraph)
 {
@@ -3203,14 +3582,18 @@ make_generic_leaf_peel_order(const AgeGenericHypergraph *hypergraph)
 }
 
 static List *
-make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph)
+make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph,
+                            const AgeGraphJoinMatchComponent *component)
 {
     int shape;
     int order_kind = AGE_GENERIC_REDUCTION_ORDER_NONE;
     int core_variables = 0;
     int tail_separators = 0;
+    int ghd_bag_count = 0;
+    int ghd_separator_count = 0;
     List *reduction_order_edges = NIL;
     List *component_ids = NIL;
+    List *ghd_separators = NIL;
     List *desc;
     int index;
 
@@ -3220,54 +3603,111 @@ make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph)
         return NIL;
     }
 
-    if (!hypergraph->cyclic)
-        shape = AGE_GENERIC_REDUCTION_ALPHA_ACYCLIC;
-    else
-        shape = AGE_GENERIC_REDUCTION_CYCLIC_CORE;
-
-    for (index = 0; index < hypergraph->variable_count; index++)
+    if (component != NULL)
     {
-        int component_id = hypergraph->variables[index].component_id;
-
-        if (hypergraph->variables[index].degree > 1)
-            core_variables++;
-        if (component_id < 0 || component_id >= hypergraph->component_count)
-            return NIL;
-        component_ids = lappend(component_ids, makeInteger(component_id));
-    }
-
-    if (hypergraph->cyclic)
-    {
-        for (index = 0; index < hypergraph->edge_count; index++)
+        if (component->variable_count != hypergraph->variable_count ||
+            component->edge_count != hypergraph->edge_count ||
+            component->component_count != hypergraph->component_count ||
+            list_length(component->component_ids) !=
+            hypergraph->variable_count)
         {
-            const AgeGenericHypergraphEdge *edge = &hypergraph->edges[index];
-            int left_degree;
-            int right_degree;
-
-            if (edge->var1 < 0 || edge->var1 >= hypergraph->variable_count ||
-                edge->var2 < 0 || edge->var2 >= hypergraph->variable_count)
-            {
-                continue;
-            }
-
-            left_degree = hypergraph->variables[edge->var1].degree;
-            right_degree = hypergraph->variables[edge->var2].degree;
-            if ((left_degree == 1 && right_degree > 1) ||
-                (right_degree == 1 && left_degree > 1))
-            {
-                tail_separators++;
-            }
+            return NIL;
         }
 
-        if (tail_separators > 0)
+        switch (component->shape)
+        {
+        case AGE_GRAPH_JOIN_MATCH_COMPONENT_ALPHA_ACYCLIC:
+            shape = AGE_GENERIC_REDUCTION_ALPHA_ACYCLIC;
+            break;
+        case AGE_GRAPH_JOIN_MATCH_COMPONENT_CYCLIC_CORE:
+            shape = AGE_GENERIC_REDUCTION_CYCLIC_CORE;
+            break;
+        case AGE_GRAPH_JOIN_MATCH_COMPONENT_CYCLIC_WITH_TAIL:
             shape = AGE_GENERIC_REDUCTION_CYCLIC_WITH_TAIL;
+            break;
+        default:
+            return NIL;
+        }
+
+        core_variables = component->core_variable_count;
+        tail_separators = component->tail_separator_count;
+        ghd_bag_count = component->ghd_bag_count;
+        ghd_separator_count = component->ghd_separator_count;
+        component_ids = copyObject(component->component_ids);
+        ghd_separators = copyObject(component->ghd_separators);
+        if (!hypergraph->cyclic)
+        {
+            if (component->reduction_order_kind !=
+                AGE_GRAPH_JOIN_MATCH_REDUCTION_ORDER_LEAF_PEEL ||
+                component->reduction_order_edge_count !=
+                hypergraph->edge_count ||
+                list_length(component->reduction_order_edges) !=
+                hypergraph->edge_count)
+            {
+                return NIL;
+            }
+            order_kind = AGE_GENERIC_REDUCTION_ORDER_LEAF_PEEL;
+            reduction_order_edges =
+                copyObject(component->reduction_order_edges);
+        }
     }
     else
     {
-        reduction_order_edges = make_generic_leaf_peel_order(hypergraph);
-        if (list_length(reduction_order_edges) != hypergraph->edge_count)
-            return NIL;
-        order_kind = AGE_GENERIC_REDUCTION_ORDER_LEAF_PEEL;
+        if (!hypergraph->cyclic)
+            shape = AGE_GENERIC_REDUCTION_ALPHA_ACYCLIC;
+        else
+            shape = AGE_GENERIC_REDUCTION_CYCLIC_CORE;
+
+        for (index = 0; index < hypergraph->variable_count; index++)
+        {
+            int component_id = hypergraph->variables[index].component_id;
+
+            if (hypergraph->variables[index].degree > 1)
+                core_variables++;
+            if (component_id < 0 ||
+                component_id >= hypergraph->component_count)
+            {
+                return NIL;
+            }
+            component_ids = lappend(component_ids, makeInteger(component_id));
+        }
+
+        if (hypergraph->cyclic)
+        {
+            for (index = 0; index < hypergraph->edge_count; index++)
+            {
+                const AgeGenericHypergraphEdge *edge =
+                    &hypergraph->edges[index];
+                int left_degree;
+                int right_degree;
+
+                if (edge->var1 < 0 ||
+                    edge->var1 >= hypergraph->variable_count ||
+                    edge->var2 < 0 ||
+                    edge->var2 >= hypergraph->variable_count)
+                {
+                    continue;
+                }
+
+                left_degree = hypergraph->variables[edge->var1].degree;
+                right_degree = hypergraph->variables[edge->var2].degree;
+                if ((left_degree == 1 && right_degree > 1) ||
+                    (right_degree == 1 && left_degree > 1))
+                {
+                    tail_separators++;
+                }
+            }
+
+            if (tail_separators > 0)
+                shape = AGE_GENERIC_REDUCTION_CYCLIC_WITH_TAIL;
+        }
+        else
+        {
+            reduction_order_edges = make_generic_leaf_peel_order(hypergraph);
+            if (list_length(reduction_order_edges) != hypergraph->edge_count)
+                return NIL;
+            order_kind = AGE_GENERIC_REDUCTION_ORDER_LEAF_PEEL;
+        }
     }
 
     desc = list_make5(makeInteger(shape), makeInteger(core_variables),
@@ -3275,7 +3715,23 @@ make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph)
                       makeInteger(order_kind), reduction_order_edges);
     desc = lappend(desc, makeInteger(hypergraph->component_count));
     desc = lappend(desc, component_ids);
+    desc = lappend(desc, makeInteger(AGE_GENERIC_REDUCTION_SOURCE_LOCAL));
+    desc = lappend(desc, makeInteger(ghd_bag_count));
+    desc = lappend(desc, makeInteger(ghd_separator_count));
+    desc = lappend(desc, ghd_separators);
     return desc;
+}
+
+static void
+set_generic_reduction_desc_source(
+    List *reduction_desc, AgeGenericReductionDescriptorSource source)
+{
+    if (list_length(reduction_desc) != AGE_GENERIC_REDUCTION_DESC_COUNT)
+        return;
+
+    lfirst(list_nth_cell(reduction_desc,
+                         AGE_GENERIC_REDUCTION_DESC_SOURCE)) =
+        makeInteger(source);
 }
 
 static List *
@@ -3577,6 +4033,8 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     CustomPath *existing_path;
     Path *competing_path;
     AgeGenericHypergraph *hypergraph;
+    AgeGraphJoinMatchComponent *match_component;
+    const AgeGraphJoinMatchComponent *registered_match_component = NULL;
     Cost startup_cost = 0;
     Cost total_cost = 0;
     double input_rows = 0;
@@ -3718,9 +4176,28 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
      */
     if (!is_cyclic && !risk_adjusted)
         return;
-    reduction_desc = make_generic_reduction_desc(hypergraph);
+    match_component = make_generic_match_component(hypergraph, covered_relids);
+    if (match_component != NULL)
+    {
+        (void) age_graph_join_register_rel_match_component(
+            root, joinrel, match_component);
+        registered_match_component =
+            age_graph_join_find_rel_match_component(
+                root, joinrel, covered_relids);
+        if (!generic_match_component_matches_hypergraph(
+                registered_match_component, hypergraph))
+        {
+            registered_match_component = NULL;
+        }
+    }
+    reduction_desc = make_generic_reduction_desc(
+        hypergraph, registered_match_component);
     if (list_length(reduction_desc) != AGE_GENERIC_REDUCTION_DESC_COUNT)
         return;
+    set_generic_reduction_desc_source(
+        reduction_desc,
+        generic_reduction_source_from_match_component(
+            registered_match_component));
 
     if (risk_adjusted)
     {
@@ -4033,6 +4510,8 @@ add_wcoj_join_path(PlannerInfo *root, RelOptInfo *joinrel,
         custom_path->custom_private, make_wcoj_oid_const(InvalidOid));
     custom_path->custom_private = lappend(
         custom_path->custom_private, make_int8_const(0));
+    custom_path->custom_private = lappend(
+        custom_path->custom_private, makeInteger(AGE_WCOJ_ROW_GOAL_NONE));
     custom_path->custom_private = lappend(custom_path->custom_private, NIL);
     custom_path->methods = &age_wcoj_join_path_methods;
 
@@ -4286,8 +4765,9 @@ make_wcoj_final_limit_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
     if (wcoj_path->methods != &age_wcoj_join_path_methods)
         return NULL;
 
-    row_goal_subpath = copy_wcoj_path_with_row_goal(wcoj_path,
-                                                    extra->count_est);
+    row_goal_subpath = copy_wcoj_path_with_row_goal(
+        wcoj_path, extra->count_est, AGE_WCOJ_CONSUMER_ROWS,
+        AGE_WCOJ_ROW_GOAL_LIMIT);
     if (row_goal_subpath == NULL)
         return NULL;
     if (projection_target != NULL)
@@ -4318,6 +4798,7 @@ make_wcoj_fractional_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
     CustomPath *wcoj_path;
     CustomPath *row_goal_path;
     PathTarget *projection_target = NULL;
+    int consumer_kind = AGE_WCOJ_CONSUMER_ROWS;
 
     if (root == NULL || output_rel == NULL || path == NULL || row_goal <= 0)
         return NULL;
@@ -4336,7 +4817,19 @@ make_wcoj_fractional_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
     if (wcoj_path->methods != &age_wcoj_join_path_methods)
         return NULL;
 
-    row_goal_path = copy_wcoj_path_with_row_goal(wcoj_path, row_goal);
+    if (row_goal == 1 &&
+        projection_target == NULL &&
+        wcoj_path->path.pathtarget != NULL &&
+        wcoj_path->path.pathtarget->exprs == NIL &&
+        wcoj_count_path_is_direct(wcoj_path) &&
+        wcoj_count_restrictinfos_supported(wcoj_path))
+    {
+        consumer_kind = AGE_WCOJ_CONSUMER_EXISTS;
+    }
+
+    row_goal_path = copy_wcoj_path_with_row_goal(
+        wcoj_path, row_goal, consumer_kind,
+        AGE_WCOJ_ROW_GOAL_EXISTS);
     if (row_goal_path == NULL)
         return NULL;
     row_goal_path->path.parent = output_rel;
@@ -4350,9 +4843,10 @@ make_wcoj_fractional_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
     ereport(DEBUG2,
             (errmsg_internal("AGE WCOJ fractional row-goal path added: "
                              "row_goal=" INT64_FORMAT
-                             " tuple_fraction=%.6f original_cost=%.2f "
-                             "new_cost=%.2f",
+                             " tuple_fraction=%.6f consumer=%d "
+                             "original_cost=%.2f new_cost=%.2f",
                              row_goal, root->tuple_fraction,
+                             consumer_kind,
                              path->total_cost,
                              row_goal_path->path.total_cost)));
 
@@ -4385,7 +4879,9 @@ make_wcoj_limit_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
     if (wcoj_path->methods != &age_wcoj_join_path_methods)
         return NULL;
 
-    row_goal_subpath = copy_wcoj_path_with_row_goal(wcoj_path, row_goal);
+    row_goal_subpath = copy_wcoj_path_with_row_goal(
+        wcoj_path, row_goal, AGE_WCOJ_CONSUMER_ROWS,
+        AGE_WCOJ_ROW_GOAL_LIMIT);
     if (row_goal_subpath == NULL)
         return NULL;
 
@@ -4438,7 +4934,8 @@ wcoj_tuple_fraction_row_goal(PlannerInfo *root, FinalPathExtraData *extra)
 }
 
 static CustomPath *
-copy_wcoj_path_with_row_goal(CustomPath *wcoj_path, int64 row_goal)
+copy_wcoj_path_with_row_goal(CustomPath *wcoj_path, int64 row_goal,
+                             int consumer_kind, int row_goal_source)
 {
     CustomPath *row_goal_path;
     Const *existing_row_goal;
@@ -4456,6 +4953,13 @@ copy_wcoj_path_with_row_goal(CustomPath *wcoj_path, int64 row_goal)
         intVal(list_nth(wcoj_path->custom_private,
                         AGE_WCOJ_PATH_PRIVATE_CONSUMER)) !=
             AGE_WCOJ_CONSUMER_ROWS)
+    {
+        return NULL;
+    }
+    if ((consumer_kind != AGE_WCOJ_CONSUMER_ROWS &&
+         consumer_kind != AGE_WCOJ_CONSUMER_EXISTS) ||
+        (row_goal_source != AGE_WCOJ_ROW_GOAL_LIMIT &&
+         row_goal_source != AGE_WCOJ_ROW_GOAL_EXISTS))
     {
         return NULL;
     }
@@ -4485,8 +4989,9 @@ copy_wcoj_path_with_row_goal(CustomPath *wcoj_path, int64 row_goal)
 
     row_goal_path = makeNode(CustomPath);
     memcpy(row_goal_path, wcoj_path, sizeof(*row_goal_path));
-    row_goal_path->path.rows = clamp_row_est(
-        Min(wcoj_path->path.rows, (double)row_goal));
+    row_goal_path->path.rows =
+        consumer_kind == AGE_WCOJ_CONSUMER_EXISTS ?
+        1.0 : clamp_row_est(Min(wcoj_path->path.rows, (double)row_goal));
     row_fraction = (double)row_goal / Max(wcoj_path->path.rows, 1.0);
     if (row_fraction < 1.0)
     {
@@ -4507,11 +5012,15 @@ copy_wcoj_path_with_row_goal(CustomPath *wcoj_path, int64 row_goal)
         copyObject(key_exprs), copyObject(estimated_postings),
         copyObject(provider_descs));
     row_goal_path->custom_private = lappend(
-        row_goal_path->custom_private, makeInteger(AGE_WCOJ_CONSUMER_ROWS));
+        row_goal_path->custom_private, makeInteger(consumer_kind));
     row_goal_path->custom_private = lappend(
-        row_goal_path->custom_private, copyObject(output_type));
+        row_goal_path->custom_private,
+        consumer_kind == AGE_WCOJ_CONSUMER_EXISTS ?
+        make_wcoj_oid_const(AGTYPEOID) : copyObject(output_type));
     row_goal_path->custom_private = lappend(
         row_goal_path->custom_private, make_int8_const(row_goal));
+    row_goal_path->custom_private = lappend(
+        row_goal_path->custom_private, makeInteger(row_goal_source));
     row_goal_path->custom_private = lappend(row_goal_path->custom_private,
                                             NIL);
 
@@ -4961,6 +5470,8 @@ make_wcoj_count_path(PlannerInfo *root, RelOptInfo *output_rel,
         count_path->custom_private, make_wcoj_oid_const(INT8OID));
     count_path->custom_private = lappend(
         count_path->custom_private, make_int8_const(0));
+    count_path->custom_private = lappend(
+        count_path->custom_private, makeInteger(AGE_WCOJ_ROW_GOAL_NONE));
     count_path->custom_private = lappend(count_path->custom_private, NIL);
     count_path->methods = &age_wcoj_join_path_methods;
 
@@ -5126,6 +5637,8 @@ make_wcoj_sum_property_path(PlannerInfo *root, RelOptInfo *output_rel,
         sum_path->custom_private, make_wcoj_oid_const(AGTYPEOID));
     sum_path->custom_private = lappend(
         sum_path->custom_private, make_int8_const(0));
+    sum_path->custom_private = lappend(
+        sum_path->custom_private, makeInteger(AGE_WCOJ_ROW_GOAL_NONE));
     sum_path->custom_private = lappend(sum_path->custom_private, sum_desc);
     sum_path->methods = &age_wcoj_join_path_methods;
 
@@ -15498,6 +16011,20 @@ build_wcoj_group_sum_property_custom_scan_tlist(PathTarget *target,
     return list_concat(scan_tlist, provider_tlist);
 }
 
+static List *
+build_wcoj_exists_custom_scan_tlist(List *provider_tlist)
+{
+    Const *exists_value;
+    TargetEntry *exists_tle;
+
+    exists_value = makeConst(AGTYPEOID, -1, InvalidOid, -1,
+                             boolean_to_agtype(true), false, false);
+    exists_tle = makeTargetEntry((Expr *)exists_value, 1,
+                                 pstrdup("wcoj_exists"), false);
+
+    return lcons(exists_tle, provider_tlist);
+}
+
 static Expr *
 wcoj_count_scan_expr(PathTarget *target)
 {
@@ -15562,6 +16089,8 @@ wcoj_consumer_first_scan_resno(int consumer_kind)
         return 2;
     case AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY:
         return 3;
+    case AGE_WCOJ_CONSUMER_EXISTS:
+        return 2;
     }
     elog(ERROR, "invalid AGE WCOJ consumer kind %d", consumer_kind);
     return 1;
@@ -15743,6 +16272,7 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
     Const *row_goal_const;
     Oid output_type;
     int64 row_goal;
+    int row_goal_source;
 
     (void)root;
     (void)clauses;
@@ -15770,6 +16300,8 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
     row_goal_const = list_nth_node(
         Const, best_path->custom_private,
         AGE_WCOJ_PATH_PRIVATE_ROW_GOAL);
+    row_goal_source = intVal(list_nth(
+        best_path->custom_private, AGE_WCOJ_PATH_PRIVATE_ROW_GOAL_SOURCE));
     consumer_desc = list_nth(best_path->custom_private,
                              AGE_WCOJ_PATH_PRIVATE_CONSUMER_DESC);
     if (list_length(key_exprs) != list_length(custom_plans))
@@ -15783,7 +16315,8 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
          consumer_kind != AGE_WCOJ_CONSUMER_COUNT_DISTINCT_KEY &&
          consumer_kind != AGE_WCOJ_CONSUMER_GROUP_COUNT &&
          consumer_kind != AGE_WCOJ_CONSUMER_SUM_PROPERTY &&
-         consumer_kind != AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY) ||
+         consumer_kind != AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY &&
+         consumer_kind != AGE_WCOJ_CONSUMER_EXISTS) ||
         output_type_const->constisnull ||
         output_type_const->consttype != OIDOID)
     {
@@ -15804,11 +16337,23 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
     {
         elog(ERROR, "invalid AGE WCOJ sum-property descriptor");
     }
+    if (consumer_kind == AGE_WCOJ_CONSUMER_EXISTS &&
+        output_type != AGTYPEOID)
+    {
+        elog(ERROR, "invalid AGE WCOJ exists output type %u", output_type);
+    }
     if (row_goal_const->constisnull || row_goal_const->consttype != INT8OID)
         elog(ERROR, "invalid AGE WCOJ row goal descriptor");
     row_goal = DatumGetInt64(row_goal_const->constvalue);
     if (row_goal < 0 ||
-        (consumer_kind != AGE_WCOJ_CONSUMER_ROWS && row_goal != 0))
+        (consumer_kind != AGE_WCOJ_CONSUMER_ROWS &&
+         consumer_kind != AGE_WCOJ_CONSUMER_EXISTS && row_goal != 0) ||
+        (consumer_kind == AGE_WCOJ_CONSUMER_EXISTS &&
+         (row_goal <= 0 || row_goal_source != AGE_WCOJ_ROW_GOAL_EXISTS)) ||
+        (row_goal == 0 && row_goal_source != AGE_WCOJ_ROW_GOAL_NONE) ||
+        (row_goal > 0 &&
+         row_goal_source != AGE_WCOJ_ROW_GOAL_LIMIT &&
+         row_goal_source != AGE_WCOJ_ROW_GOAL_EXISTS))
     {
         elog(ERROR, "invalid AGE WCOJ row goal " INT64_FORMAT, row_goal);
     }
@@ -15840,6 +16385,11 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
     {
         custom_scan_tlist = build_wcoj_group_sum_property_custom_scan_tlist(
             best_path->path.pathtarget, custom_scan_tlist);
+    }
+    else if (consumer_kind == AGE_WCOJ_CONSUMER_EXISTS)
+    {
+        custom_scan_tlist = build_wcoj_exists_custom_scan_tlist(
+            custom_scan_tlist);
     }
     plan_tlist = tlist != NIL ? copyObject(tlist) :
         build_wcoj_plan_tlist(best_path->path.pathtarget);
@@ -15879,6 +16429,8 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
                                  make_wcoj_oid_const(output_type));
     cs->custom_private = lappend(cs->custom_private,
                                  copyObject(row_goal_const));
+    cs->custom_private = lappend(cs->custom_private,
+                                 makeInteger(row_goal_source));
     cs->custom_private = lappend(cs->custom_private,
                                  copyObject(consumer_desc));
     cs->custom_scan_tlist = custom_scan_tlist;

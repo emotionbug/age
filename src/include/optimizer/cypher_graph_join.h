@@ -156,6 +156,31 @@ typedef enum AgeGraphJoinSourceKind
     AGE_GRAPH_JOIN_SOURCE_CARTESIAN
 } AgeGraphJoinSourceKind;
 
+typedef enum AgeGraphJoinMatchComponentShape
+{
+    AGE_GRAPH_JOIN_MATCH_COMPONENT_ALPHA_ACYCLIC = 0,
+    AGE_GRAPH_JOIN_MATCH_COMPONENT_CYCLIC_CORE,
+    AGE_GRAPH_JOIN_MATCH_COMPONENT_CYCLIC_WITH_TAIL
+} AgeGraphJoinMatchComponentShape;
+
+typedef enum AgeGraphJoinMatchDescriptorSource
+{
+    AGE_GRAPH_JOIN_MATCH_DESCRIPTOR_SOURCE_UNKNOWN = 0,
+    AGE_GRAPH_JOIN_MATCH_DESCRIPTOR_SOURCE_GRAPH_JOIN_MATCH_IR
+} AgeGraphJoinMatchDescriptorSource;
+
+typedef enum AgeGraphJoinMatchReductionOrderKind
+{
+    AGE_GRAPH_JOIN_MATCH_REDUCTION_ORDER_NONE = 0,
+    AGE_GRAPH_JOIN_MATCH_REDUCTION_ORDER_LEAF_PEEL
+} AgeGraphJoinMatchReductionOrderKind;
+
+typedef enum AgeGraphJoinGHDBagKind
+{
+    AGE_GRAPH_JOIN_GHD_BAG_CYCLIC_CORE = 0,
+    AGE_GRAPH_JOIN_GHD_BAG_LEAF_TAIL
+} AgeGraphJoinGHDBagKind;
+
 typedef struct AgeGraphJoinCandidateRequest
 {
     const char *display_name;
@@ -180,6 +205,30 @@ typedef struct AgeGraphJoinCandidateRequest
     bool order_preserving;
     bool shared_state_required;
 } AgeGraphJoinCandidateRequest;
+
+typedef struct AgeGraphJoinMatchComponent
+{
+    Relids relids;
+    List *variable_rtis;
+    List *component_ids;
+    int variable_count;
+    int edge_count;
+    int component_count;
+    int core_variable_count;
+    int tail_separator_count;
+    int reduction_order_edge_count;
+    int ghd_bag_count;
+    int ghd_separator_count;
+    AgeGraphJoinMatchComponentShape shape;
+    AgeGraphJoinMatchDescriptorSource descriptor_source;
+    AgeGraphJoinMatchReductionOrderKind reduction_order_kind;
+    List *reduction_order_edges;
+    List *ghd_bags;
+    List *ghd_separators;
+    bool connected;
+    bool cyclic;
+    bool star;
+} AgeGraphJoinMatchComponent;
 
 typedef struct AgeGraphJoinLoweringInput
 {
@@ -309,6 +358,7 @@ typedef struct AgeGraphJoinRelMetadata
     List *lowering_candidates;
     List *path_evidence;
     List *component_candidates;
+    List *match_components;
 } AgeGraphJoinRelMetadata;
 
 typedef bool (*AgeGraphJoinPathEvidenceCallback)(
@@ -419,6 +469,11 @@ AgeGraphJoinRelMetadata *age_graph_join_get_rel_metadata(RelOptInfo *rel,
 void age_graph_join_refresh_rel_metadata(
     PlannerInfo *root, RelOptInfo *rel,
     AgeGraphJoinPathEvidenceCallback evidence_callback);
+AgeGraphJoinMatchComponent *age_graph_join_register_rel_match_component(
+    PlannerInfo *root, RelOptInfo *rel,
+    const AgeGraphJoinMatchComponent *component);
+const AgeGraphJoinMatchComponent *age_graph_join_find_rel_match_component(
+    PlannerInfo *root, RelOptInfo *rel, Relids relids);
 void age_graph_join_register_rel_path_evidence(
     PlannerInfo *root, RelOptInfo *rel, Path *path,
     const AgeGraphJoinPathEvidence *evidence);

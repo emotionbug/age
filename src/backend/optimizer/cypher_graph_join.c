@@ -106,6 +106,9 @@ static AgeGraphJoinCandidate *graph_join_copy_candidate(
     const AgeGraphJoinCandidate *source);
 static AgeGraphJoinCandidateTable *graph_join_copy_candidate_table(
     const AgeGraphJoinCandidateTable *source, MemoryContext context);
+static List *graph_join_copy_int_list(List *source);
+static AgeGraphJoinMatchComponent *graph_join_copy_match_component(
+    const AgeGraphJoinMatchComponent *source, MemoryContext context);
 static AgeGraphJoinCandidateTable *graph_join_make_declared_entry_table(
     RelOptInfo *rel, const AgeGraphJoinLoweringArtifact *artifact,
     const AgeGraphJoinLoweringArtifactEntry *entry);
@@ -1191,6 +1194,84 @@ void age_graph_join_refresh_rel_metadata(
     }
 }
 
+AgeGraphJoinMatchComponent *age_graph_join_register_rel_match_component(
+    PlannerInfo *root, RelOptInfo *rel,
+    const AgeGraphJoinMatchComponent *component)
+{
+    AgeGraphJoinRelMetadata *metadata;
+    AgeGraphJoinMatchComponent *component_copy;
+    Relids component_relids;
+    ListCell *lc;
+
+    if (root == NULL ||
+        rel == NULL ||
+        component == NULL ||
+        component->variable_count <= 0 ||
+        component->edge_count <= 0 ||
+        component->component_count <= 0)
+    {
+        return NULL;
+    }
+
+    if (!age_graph_join_metadata_matches_root(root))
+        age_graph_join_metadata_begin(root);
+    metadata = age_graph_join_get_rel_metadata(rel, true);
+    component_relids = component->relids != NULL ?
+        component->relids : rel->relids;
+
+    component_copy = graph_join_copy_match_component(
+        component, GetMemoryChunkContext(metadata));
+    if (component_copy->relids == NULL)
+        component_copy->relids = bms_copy(rel->relids);
+
+    foreach(lc, metadata->match_components)
+    {
+        AgeGraphJoinMatchComponent *existing = lfirst(lc);
+
+        if (existing != NULL &&
+            bms_equal(existing->relids, component_relids))
+        {
+            lfirst(lc) = component_copy;
+            return component_copy;
+        }
+    }
+
+    metadata->match_components = lappend(metadata->match_components,
+                                         component_copy);
+    return component_copy;
+}
+
+const AgeGraphJoinMatchComponent *age_graph_join_find_rel_match_component(
+    PlannerInfo *root, RelOptInfo *rel, Relids relids)
+{
+    AgeGraphJoinRelMetadata *metadata;
+    Relids target_relids;
+    ListCell *lc;
+
+    if (root == NULL || rel == NULL)
+        return NULL;
+
+    if (!age_graph_join_metadata_matches_root(root))
+        age_graph_join_metadata_begin(root);
+    metadata = age_graph_join_get_rel_metadata(rel, false);
+    if (metadata == NULL)
+        return NULL;
+
+    target_relids = relids != NULL ? relids : rel->relids;
+    foreach(lc, metadata->match_components)
+    {
+        AgeGraphJoinMatchComponent *component = lfirst(lc);
+
+        if (component != NULL &&
+            bms_equal(component->relids, target_relids))
+        {
+            return component;
+        }
+    }
+
+    return NULL;
+}
+
 static bool graph_join_metadata_path_is_live(
     const AgeGraphJoinRelMetadata *metadata, const Path *path)
 {
@@ -1782,6 +1863,43 @@ static AgeGraphJoinCandidateTable *graph_join_copy_candidate_table(
     MemoryContextSwitchTo(oldcontext);
 
     return table;
+}
+
+static List *graph_join_copy_int_list(List *source)
+{
+    List *copy = NIL;
+    ListCell *lc;
+
+    foreach(lc, source)
+        copy = lappend(copy, makeInteger(intVal(lfirst(lc))));
+
+    return copy;
+}
+
+static AgeGraphJoinMatchComponent *graph_join_copy_match_component(
+    const AgeGraphJoinMatchComponent *source, MemoryContext context)
+{
+    AgeGraphJoinMatchComponent *component;
+    MemoryContext oldcontext;
+
+    Assert(source != NULL);
+    Assert(context != NULL);
+
+    oldcontext = MemoryContextSwitchTo(context);
+    component = palloc(sizeof(*component));
+    *component = *source;
+    component->relids = bms_copy(source->relids);
+    component->variable_rtis = graph_join_copy_int_list(
+        source->variable_rtis);
+    component->component_ids = graph_join_copy_int_list(
+        source->component_ids);
+    component->reduction_order_edges = graph_join_copy_int_list(
+        source->reduction_order_edges);
+    component->ghd_bags = copyObject(source->ghd_bags);
+    component->ghd_separators = copyObject(source->ghd_separators);
+    MemoryContextSwitchTo(oldcontext);
+
+    return component;
 }
 
 static AgeGraphJoinLoweringArtifactEntry *
