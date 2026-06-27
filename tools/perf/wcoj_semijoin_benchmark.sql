@@ -22,7 +22,7 @@ RESET enable_mergejoin;
 \echo 'acyclic chain: forced binary'
 SET age.enable_wcoj = off;
 SELECT format($sql$
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
 SELECT count(*)
 FROM cypher('wcoj_bench_semijoin', $cypher$
     MATCH (a:A)-[f1:F1]->(b:B)-[f2:F2]->(c:C)-[f3:F3]->(d:D)

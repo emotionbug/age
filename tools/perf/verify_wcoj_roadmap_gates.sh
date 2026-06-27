@@ -13,10 +13,13 @@ star_fanout=${WCOJ_ROADMAP_STAR_FANOUT:-4096}
 cycle_vertices=${WCOJ_ROADMAP_CYCLE_VERTICES:-1024}
 cycle_fanout=${WCOJ_ROADMAP_CYCLE_FANOUT:-64}
 semijoin_fanout=${WCOJ_ROADMAP_SEMIJOIN_FANOUT:-128}
+semiring_speedup_fanout=${WCOJ_ROADMAP_SEMIRING_SPEEDUP_FANOUT:-80}
 
 min_dense_speedup=${WCOJ_ROADMAP_MIN_DENSE_SPEEDUP:-100}
 min_cycle_speedup=${WCOJ_ROADMAP_MIN_CYCLE_SPEEDUP:-20}
 min_semijoin_speedup=${WCOJ_ROADMAP_MIN_SEMIJOIN_SPEEDUP:-100}
+min_semiring_speedup=${WCOJ_ROADMAP_MIN_SEMIRING_SPEEDUP:-100}
+min_100x_geomean=${WCOJ_ROADMAP_MIN_100X_GEOMEAN:-100}
 max_dense_overhead=${WCOJ_ROADMAP_MAX_DENSE_OVERHEAD:-1.25}
 
 # Reference baseline from wcoj_survivor_batch_results.md. Override this when
@@ -25,6 +28,7 @@ dense_baseline_ms=${WCOJ_ROADMAP_DENSE_BASELINE_MS:-2738.042}
 
 completion_raw_plan_log=${WCOJ_ROADMAP_COMPLETION_RAW_PLAN_LOG:-}
 semijoin_raw_plan_log=${WCOJ_ROADMAP_SEMIJOIN_RAW_PLAN_LOG:-}
+semiring_speedup_raw_plan_log=${WCOJ_ROADMAP_SEMIRING_SPEEDUP_RAW_PLAN_LOG:-}
 if [[ -n "$completion_raw_plan_log" ]]; then
     mkdir -p "$(dirname -- "$completion_raw_plan_log")"
     completion_out=$completion_raw_plan_log
@@ -39,8 +43,16 @@ else
     semijoin_out="$tmpdir/semijoin.out"
 fi
 semijoin_times="$tmpdir/semijoin-times.tsv"
+if [[ -n "$semiring_speedup_raw_plan_log" ]]; then
+    mkdir -p "$(dirname -- "$semiring_speedup_raw_plan_log")"
+    semiring_speedup_out=$semiring_speedup_raw_plan_log
+else
+    semiring_speedup_out="$tmpdir/semiring-speedup.out"
+fi
+semiring_speedup_times="$tmpdir/semiring-speedup-times.tsv"
 : > "$completion_out"
 : > "$semijoin_out"
+: > "$semiring_speedup_out"
 
 if [[ ! -x "$pg_config" ]]; then
     echo "PG_CONFIG is not executable: $pg_config" >&2
@@ -105,6 +117,21 @@ ratio()
             exit 2
         printf "%.6f", numerator / denominator
     }'
+}
+
+geomean()
+{
+    awk 'BEGIN {
+        if (ARGC <= 1)
+            exit 2
+        for (i = 1; i < ARGC; i++) {
+            value = ARGV[i] + 0
+            if (value <= 0)
+                exit 2
+            total += log(value)
+        }
+        printf "%.6f", exp(total / (ARGC - 1))
+    }' "$@"
 }
 
 assert_at_least()
@@ -182,6 +209,37 @@ semijoin_speedup=$(ratio "$semijoin_binary_ms" "$semijoin_generic_ms")
 assert_at_least "acyclic chain semijoin speedup" \
     "$semijoin_speedup" "$min_semijoin_speedup"
 
-printf 'dense_star_speedup=%sx dense_auto_overhead=%sx cycle_speedup=%sx semijoin_speedup=%sx completion_raw_plan_log=%s semijoin_raw_plan_log=%s\n' \
-       "$dense_speedup" "$dense_overhead" "$cycle_speedup" "$semijoin_speedup" \
-       "$completion_out" "$semijoin_out"
+if [[ ${WCOJ_ROADMAP_SKIP_SEMIRING_SPEEDUP_SETUP:-0} != 1 ]]; then
+    "${psql_base[@]}" --set=fanout="$semiring_speedup_fanout" \
+        --file="$script_dir/wcoj_semiring_setup.sql" >/dev/null
+fi
+
+"${psql_base[@]}" --set=runs="$runs" \
+    --file="$script_dir/wcoj_semiring_speedup_benchmark.sql" |
+    tee "$semiring_speedup_out"
+extract_times "$semiring_speedup_out" "$semiring_speedup_times"
+
+semiring_binary_ms=$(median_for \
+    'semiring count speedup: forced binary count' \
+    "$semiring_speedup_times")
+semiring_wcoj_ms=$(median_for \
+    'semiring count speedup: WCOJ count' \
+    "$semiring_speedup_times")
+semiring_speedup=$(ratio "$semiring_binary_ms" "$semiring_wcoj_ms")
+
+assert_at_least "semiring count speedup" \
+    "$semiring_speedup" "$min_semiring_speedup"
+
+speedup_100x_geomean=$(geomean "$dense_speedup" "$semijoin_speedup" \
+                               "$semiring_speedup")
+all_speedup_geomean=$(geomean "$dense_speedup" "$cycle_speedup" \
+                              "$semijoin_speedup" "$semiring_speedup")
+
+assert_at_least "three-workload 100x geometric mean" \
+    "$speedup_100x_geomean" "$min_100x_geomean"
+
+printf 'dense_star_speedup=%sx dense_auto_overhead=%sx cycle_speedup=%sx semijoin_speedup=%sx semiring_count_speedup=%sx three_workload_100x_geomean=%sx all_speedup_geomean=%sx completion_raw_plan_log=%s semijoin_raw_plan_log=%s semiring_speedup_raw_plan_log=%s\n' \
+       "$dense_speedup" "$dense_overhead" "$cycle_speedup" \
+       "$semijoin_speedup" "$semiring_speedup" "$speedup_100x_geomean" \
+       "$all_speedup_geomean" "$completion_out" "$semijoin_out" \
+       "$semiring_speedup_out"

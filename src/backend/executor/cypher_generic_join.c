@@ -257,6 +257,10 @@ struct AgeGenericJoinState
     int64 lazy_physical_prefix_loads;
     int64 lazy_physical_rows_read;
     int64 lazy_physical_row_bytes_allocated;
+    int64 lazy_physical_reduction_domain_builds;
+    int64 lazy_physical_reduction_source_keys;
+    int64 lazy_physical_reduction_rows_scanned;
+    int64 lazy_physical_reduction_keys_produced;
     AgeGenericProvider *providers;
     AgeGenericLevel *levels;
     graphid *bindings;
@@ -3446,6 +3450,187 @@ generic_provider_row_key_for_variable(AgeGenericProvider *provider,
     return false;
 }
 
+static void
+append_generic_semijoin_domain_key(MemoryContext context,
+                                   graphid **domain, int *count,
+                                   int *capacity, graphid key)
+{
+    MemoryContext oldcontext;
+    int new_capacity;
+
+    if (*count < *capacity)
+    {
+        (*domain)[(*count)++] = key;
+        return;
+    }
+
+    new_capacity = *capacity == 0 ? 128 : *capacity * 2;
+    if (new_capacity <= *capacity ||
+        (Size)new_capacity > MaxAllocSize / sizeof(graphid))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("AGE Generic Join semijoin domain is too large")));
+    }
+
+    oldcontext = MemoryContextSwitchTo(context);
+    if (*domain == NULL)
+        *domain = palloc(sizeof(graphid) * new_capacity);
+    else
+        *domain = repalloc(*domain, sizeof(graphid) * new_capacity);
+    MemoryContextSwitchTo(oldcontext);
+    *capacity = new_capacity;
+    (*domain)[(*count)++] = key;
+}
+
+static bool
+generic_provider_can_build_semijoin_step_domain(
+    AgeGenericProvider *provider, AgeGenericSemijoinStepPlan *step)
+{
+    if (provider == NULL || step == NULL)
+        return false;
+    if (generic_provider_is_reduction_materialized(provider))
+        return true;
+    if (!generic_provider_is_lazy_physical(provider) ||
+        provider->kind != AGE_GENERIC_PROVIDER_EDGE)
+    {
+        return false;
+    }
+
+    return (step->from_variable == provider->var1 &&
+            step->key_variable == provider->var2) ||
+        (step->from_variable == provider->var2 &&
+         step->key_variable == provider->var1);
+}
+
+static graphid *
+build_generic_lazy_physical_semijoin_step_domain(
+    AgeGenericJoinState *state, AgeGenericProvider *provider,
+    AgeGenericSemijoinStepPlan *step, const AgeGenericDomain *domains,
+    MemoryContext context, int *domain_count)
+{
+    graphid *domain = NULL;
+    int domain_capacity = 0;
+    int count = 0;
+    int output_count = 0;
+    int source_index;
+    int row_index;
+    int64 source_keys = 0;
+    int64 rows_scanned = 0;
+
+    if (!generic_provider_is_lazy_physical(provider) ||
+        provider->kind != AGE_GENERIC_PROVIDER_EDGE ||
+        domains[step->from_variable].count <= 0)
+    {
+        return NULL;
+    }
+
+    if (step->from_variable == provider->var1 &&
+        step->key_variable == provider->var2)
+    {
+        const AgeGenericDomain *source_domain = &domains[provider->var1];
+
+        for (source_index = 0;
+             source_index < source_domain->count;
+             source_index++)
+        {
+            if (!load_generic_physical_prefix(
+                    state, provider, source_domain->keys[source_index]))
+            {
+                continue;
+            }
+            source_keys++;
+            rows_scanned += provider->prefix_row_count;
+            for (row_index = 0;
+                 row_index < provider->prefix_row_count;
+                 row_index++)
+            {
+                append_generic_semijoin_domain_key(
+                    context, &domain, &count, &domain_capacity,
+                    provider->prefix_rows[row_index].key2);
+            }
+        }
+    }
+    else if (step->from_variable == provider->var2 &&
+             step->key_variable == provider->var1)
+    {
+        const AgeGenericDomain *terminal_domain = &domains[provider->var2];
+        const AgeGenericDomain *source_domain = &domains[provider->var1];
+
+        if (source_domain->count <= 0)
+            return NULL;
+        for (source_index = 0;
+             source_index < source_domain->count;
+             source_index++)
+        {
+            bool matched = false;
+
+            if (!load_generic_physical_prefix(
+                    state, provider, source_domain->keys[source_index]))
+            {
+                continue;
+            }
+            source_keys++;
+            rows_scanned += provider->prefix_row_count;
+            for (row_index = 0;
+                 row_index < provider->prefix_row_count;
+                 row_index++)
+            {
+                if (generic_domain_contains(
+                        terminal_domain,
+                        provider->prefix_rows[row_index].key2))
+                {
+                    matched = true;
+                    break;
+                }
+            }
+            if (matched)
+            {
+                append_generic_semijoin_domain_key(
+                    context, &domain, &count, &domain_capacity,
+                    source_domain->keys[source_index]);
+            }
+        }
+    }
+    else
+    {
+        return NULL;
+    }
+
+    increment_generic_counter(
+        &state->lazy_physical_reduction_domain_builds);
+    add_generic_counter(&state->lazy_physical_reduction_source_keys,
+                        source_keys);
+    add_generic_counter(&state->lazy_physical_reduction_rows_scanned,
+                        rows_scanned);
+    increment_generic_counter(&state->reduction_domain_builds);
+    add_generic_counter(&state->reduction_domain_rows_scanned,
+                        rows_scanned);
+
+    if (count <= 0)
+        return NULL;
+    if (count > 1)
+    {
+        qsort(domain, count, sizeof(graphid), compare_generic_graphids);
+        increment_generic_counter(&state->reduction_domain_sorts);
+        add_generic_counter(&state->reduction_domain_sort_rows, count);
+    }
+    for (row_index = 0; row_index < count; row_index++)
+    {
+        if (output_count == 0 ||
+            domain[row_index] != domain[output_count - 1])
+        {
+            domain[output_count++] = domain[row_index];
+        }
+    }
+    *domain_count = output_count;
+    add_generic_counter(&state->lazy_physical_reduction_keys_produced,
+                        output_count);
+    add_generic_counter(&state->reduction_domain_keys_produced,
+                        output_count);
+    return domain;
+}
+
 static graphid *
 build_generic_semijoin_step_domain(AgeGenericJoinState *state,
                                    AgeGenericSemijoinStepPlan *step,
@@ -3470,6 +3655,11 @@ build_generic_semijoin_step_domain(AgeGenericJoinState *state,
     }
 
     provider = &state->providers[step->provider_index];
+    if (generic_provider_is_lazy_physical(provider))
+    {
+        return build_generic_lazy_physical_semijoin_step_domain(
+            state, provider, step, domains, context, domain_count);
+    }
     if (!generic_provider_is_reduction_materialized(provider) ||
         provider->row_count <= 0)
         return NULL;
@@ -3604,8 +3794,8 @@ generic_planned_semijoin_steps_applicable(AgeGenericJoinState *state)
 
         if (step->provider_index < 0 ||
             step->provider_index >= state->provider_count ||
-            !generic_provider_is_reduction_materialized(
-                &state->providers[step->provider_index]))
+            !generic_provider_can_build_semijoin_step_domain(
+                &state->providers[step->provider_index], step))
         {
             return false;
         }
@@ -3650,7 +3840,7 @@ reduce_generic_semijoin_steps(AgeGenericJoinState *state,
             elog(ERROR, "invalid AGE Generic Join semijoin step provider");
         }
         provider = &state->providers[step->provider_index];
-        if (!generic_provider_is_reduction_materialized(provider))
+        if (!generic_provider_can_build_semijoin_step_domain(provider, step))
             continue;
 
         MemoryContextReset(step_context);
@@ -7392,6 +7582,18 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
             ExplainPropertyInteger("Lazy Physical Row Bytes Allocated", "bytes",
                                    state->lazy_physical_row_bytes_allocated,
                                    es);
+            ExplainPropertyInteger(
+                "Lazy Physical Reduction Domain Builds", NULL,
+                state->lazy_physical_reduction_domain_builds, es);
+            ExplainPropertyInteger(
+                "Lazy Physical Reduction Source Keys", NULL,
+                state->lazy_physical_reduction_source_keys, es);
+            ExplainPropertyInteger(
+                "Lazy Physical Reduction Rows Scanned", NULL,
+                state->lazy_physical_reduction_rows_scanned, es);
+            ExplainPropertyInteger(
+                "Lazy Physical Reduction Keys Produced", NULL,
+                state->lazy_physical_reduction_keys_produced, es);
         }
         if (state->providers_skipped_after_empty > 0)
         {

@@ -56,6 +56,23 @@ print_gate_failure_log()
     fi
 }
 
+print_workload_failure_logs()
+{
+    local log_dir=$1
+    local fallback_lines=$2
+    local log_path
+
+    if ! compgen -G "$log_dir/*.log" >/dev/null; then
+        printf 'no raw workload logs found in %s\n' "$log_dir" >&2
+        return
+    fi
+
+    for log_path in "$log_dir"/*.log; do
+        printf '\nraw workload log: %s\n' "$log_path" >&2
+        print_gate_failure_log "$log_path" "$fallback_lines"
+    done
+}
+
 gates=(
     "WCOJ roadmap gates|verify_wcoj_roadmap_gates.sh"
     "WCOJ semiring consumer gates|verify_wcoj_semiring_gates.sh"
@@ -96,6 +113,7 @@ for index in "${!gates[@]}"; do
             gate_env=(
                 "WCOJ_ROADMAP_COMPLETION_RAW_PLAN_LOG=$log_dir/raw-wcoj-completion-plans.log"
                 "WCOJ_ROADMAP_SEMIJOIN_RAW_PLAN_LOG=$log_dir/raw-wcoj-semijoin-plans.log"
+                "WCOJ_ROADMAP_SEMIRING_SPEEDUP_RAW_PLAN_LOG=$log_dir/raw-wcoj-semiring-speedup-plans.log"
             )
             ;;
         verify_wcoj_semiring_gates.sh)
@@ -171,6 +189,8 @@ if [[ "$capture_plans" == 1 ]]; then
         printf 'full plan capture: failed (exit %s)\n' "$status" >&2
         printf 'log: %s\n' "$capture_log" >&2
         print_gate_failure_log "$capture_log" 40
+        printf 'raw workload log dir: %s\n' "$plan_log_dir" >&2
+        print_workload_failure_logs "$plan_log_dir" 40
         exit "$status"
     fi
 fi

@@ -126,7 +126,7 @@ ANALYZE wcoj_lowering."E";
 
 SELECT *
 FROM cypher('wcoj_lowering', $$
-    EXPLAIN (VERBOSE, COSTS OFF)
+    EXPLAIN (COSTS OFF)
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
           (s3:S {id: 3})-[e3:E]->(t)
@@ -137,7 +137,7 @@ BEGIN;
 SET LOCAL age.enable_wcoj = off;
 SELECT *
 FROM cypher('wcoj_lowering', $$
-    EXPLAIN (VERBOSE, COSTS OFF)
+    EXPLAIN (COSTS OFF)
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
           (s3:S {id: 3})-[e3:E]->(t)
@@ -150,7 +150,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL age.wcoj_engine = 'leapfrog';
 SELECT *
 FROM cypher('wcoj_lowering', $$
-    EXPLAIN (VERBOSE, COSTS OFF)
+    EXPLAIN (COSTS OFF)
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
           (s3:S {id: 3})-[e3:E]->(t)
@@ -163,7 +163,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL age.wcoj_engine = 'merge';
 SELECT *
 FROM cypher('wcoj_lowering', $$
-    EXPLAIN (VERBOSE, COSTS OFF)
+    EXPLAIN (COSTS OFF)
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
           (s3:S {id: 3})-[e3:E]->(t)
@@ -176,7 +176,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL age.wcoj_engine = 'progressive';
 SELECT *
 FROM cypher('wcoj_lowering', $$
-    EXPLAIN (VERBOSE, COSTS OFF)
+    EXPLAIN (COSTS OFF)
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
           (s3:S {id: 3})-[e3:E]->(t)
@@ -200,7 +200,7 @@ BEGIN
         FOR plan_text IN
             SELECT plan::text
             FROM cypher('wcoj_lowering', $$
-                EXPLAIN (VERBOSE, COSTS OFF)
+                EXPLAIN (COSTS OFF)
                 MATCH (s1:S {id: 1})-[e1:E]->(t:T),
                       (s2:S {id: 2})-[e2:E]->(t),
                       (s3:S {id: 3})-[e3:E]->(t)
@@ -225,7 +225,7 @@ SET LOCAL age.wcoj_engine = 'leapfrog';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -242,7 +242,7 @@ SET LOCAL age.wcoj_engine = 'leapfrog';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (h:H),
@@ -418,7 +418,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -441,7 +441,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -501,7 +501,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -554,7 +554,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -610,7 +610,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -663,7 +663,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -724,7 +724,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -777,7 +777,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -830,7 +830,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -883,7 +883,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -936,7 +936,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1011,7 +1011,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1036,7 +1036,7 @@ SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
 SET LOCAL enable_hashagg = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1099,7 +1099,7 @@ SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
 SET LOCAL enable_hashagg = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1156,7 +1156,7 @@ SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
 SET LOCAL enable_hashagg = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1173,7 +1173,7 @@ SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
 SET LOCAL enable_hashagg = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1227,7 +1227,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     RETURN EXISTS {
@@ -1300,7 +1300,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s7:S {id: 7})-[e7:E]->(t:T),
@@ -1350,7 +1350,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_payload_budget', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1405,7 +1405,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s7:S {id: 7})-[e7:E]->(t:T),
@@ -1431,7 +1431,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     RETURN EXISTS {
@@ -1483,7 +1483,7 @@ SET LOCAL age.wcoj_engine = 'progressive';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s20:S {id: 20})-[e20:E]->(t:T),
@@ -1565,7 +1565,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
@@ -1582,7 +1582,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
@@ -1599,7 +1599,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
@@ -1616,7 +1616,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
@@ -1802,7 +1802,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_payload_mixed', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1852,7 +1852,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_payload_spill', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1870,7 +1870,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_payload_spill', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1958,7 +1958,7 @@ SET LOCAL age.wcoj_engine = 'leapfrog';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (VERBOSE, COSTS OFF)
+EXPLAIN (COSTS OFF)
 SELECT *
 FROM cypher('wcoj_mixed', $$
     MATCH (s1:S {id: 1})-[e1:E1]->(t:T),
@@ -2112,7 +2112,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (VERBOSE, COSTS OFF)
+EXPLAIN (COSTS OFF)
 SELECT *
 FROM cypher('wcoj_generic', $$
     MATCH (a:N {case:'tri'})-[e1:E {case:'tri'}]->(b:N)
@@ -2128,7 +2128,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_generic', $$
     MATCH (a:N {case:'self'})-[:E {case:'self'}]->(b:N)
@@ -2413,7 +2413,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_generic', $$
     MATCH (a:A)-[f1:F1]->(b:B)-[f2:F2]->(c:C)-[f3:F3]->(d:D)
@@ -2479,7 +2479,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_generic', $$
     MATCH (a:A)-[f1:F1]->(b:B)-[f2:F2]->(c:C)-[f3:F3]->(d:D),
@@ -2577,7 +2577,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_generic', $$
     MATCH (a:A)-[g1:G1]->(b:B)-[g2:G2]->(c:C)-[g3:G3]->(d:D),
@@ -2697,7 +2697,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_generic', $$
     MATCH (a:A)-[h1:H1]->(b:B)-[h2:H2]->(c:C)-[h3:H3]->(d:D),
@@ -2779,7 +2779,7 @@ SET LOCAL age.wcoj_engine = 'auto';
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
 SET LOCAL enable_memoize = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_parameterized', $$
     MATCH (s:S)-[e1:E]->(t:T), (s)-[e2:E]->(t)

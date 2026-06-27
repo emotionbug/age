@@ -15,10 +15,19 @@ SET enable_mergejoin = off;
 
 \echo 'generic reduction matrix: acyclic leaf-pruned chain'
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
-SELECT count(*)
+SELECT *
 FROM cypher('generic_reduction_matrix', $$
     MATCH (a:A)-[h:H]->(p:P),
           (a)-[f1:F1]->(b:B)-[f2:F2]->(c:C)-[f3:F3]->(d:D)
     RETURN id(a), id(b), id(c), id(d), id(p), id(h), id(f1), id(f2), id(f3)
 $$) AS (a agtype, b agtype, c agtype, d agtype, p agtype,
         h agtype, f1 agtype, f2 agtype, f3 agtype);
+
+\echo 'generic reduction matrix: lazy physical acyclic count'
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
+SELECT *
+FROM cypher('generic_reduction_matrix', $$
+    MATCH (a:A)-[h:H]->(p:P),
+          (a)-[f1:F1]->(b:B)-[f2:F2]->(c:C)-[f3:F3]->(d:D)
+    RETURN count(*) AS total
+$$) AS (total agtype);

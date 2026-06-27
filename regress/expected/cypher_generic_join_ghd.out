@@ -739,6 +739,10 @@ $$) AS (total agtype);
    Lazy Physical Prefix Loads: 16
    Lazy Physical Rows Read: 32
    Lazy Physical Row Bytes Allocated: 2560 bytes
+   Lazy Physical Reduction Domain Builds: 0
+   Lazy Physical Reduction Source Keys: 0
+   Lazy Physical Reduction Rows Scanned: 0
+   Lazy Physical Reduction Keys Produced: 0
    Semijoin Reduction Passes: 1
    Yannakakis Bottom-Up Passes: 0
    Yannakakis Top-Down Passes: 0
@@ -828,7 +832,7 @@ $$) AS (total agtype);
          Output: _age_default_alias_1.end_id, _age_default_alias_1.start_id, _age_default_alias_1.id
    ->  Seq Scan on generic_ghd."GPE4" _age_default_alias_2 (actual rows=4.00 loops=1)
          Output: _age_default_alias_2.end_id, _age_default_alias_2.start_id, _age_default_alias_2.id
-(132 rows)
+(136 rows)
 
 ROLLBACK;
 BEGIN;
@@ -893,6 +897,10 @@ $$) AS (key agtype, total agtype);
    Lazy Physical Prefix Loads: 16
    Lazy Physical Rows Read: 32
    Lazy Physical Row Bytes Allocated: 2560 bytes
+   Lazy Physical Reduction Domain Builds: 0
+   Lazy Physical Reduction Source Keys: 0
+   Lazy Physical Reduction Rows Scanned: 0
+   Lazy Physical Reduction Keys Produced: 0
    Semijoin Reduction Passes: 1
    Yannakakis Bottom-Up Passes: 0
    Yannakakis Top-Down Passes: 0
@@ -982,7 +990,7 @@ $$) AS (key agtype, total agtype);
          Output: _age_default_alias_1.end_id, _age_default_alias_1.start_id, _age_default_alias_1.id
    ->  Seq Scan on generic_ghd."GPE4" _age_default_alias_2 (actual rows=4.00 loops=1)
          Output: _age_default_alias_2.end_id, _age_default_alias_2.start_id, _age_default_alias_2.id
-(132 rows)
+(136 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4555,6 +4563,150 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    ->  Seq Scan on generic_ir."T_CD" cd (actual rows=1.00 loops=1)
          Output: cd.id, cd.end_id, cd.start_id
 (115 rows)
+
+ROLLBACK;
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ir', $$
+    MATCH (a:T_A)-[ab:T_AB]->(b:T_B)-[bc:T_BC]->(c:T_C)
+          -[cd:T_CD]->(d:T_D)
+    RETURN count(*) AS total
+$$) AS (total agtype);
+                                                                                                              QUERY PLAN                                                                                                               
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE Generic Multiway Join) (actual rows=1.00 loops=1)
+   Output: ((count(*)))::agtype
+   Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
+   Generic Join Consumer: count(*)
+   Generic Join Row Goal: 0
+   Generic Join Row Goal Source: none
+   Generic Join Provider Mode: lazy adjacency edge provider + eager sorted array
+   Lazy Physical Provider: true
+   Provider Trie Ops: adjacency prefix scratch with sorted-array fallback
+   Variable Order: 1(rti=2), 2(rti=4), 3(rti=6), 4(rti=8)
+   Component Count: 1
+   Component IDs: 1, 1, 1, 1
+   Reduction Shape: alpha-acyclic
+   GHD Mode: none
+   GHD General Decomposition: false
+   GHD Fallback Reason: alpha-acyclic leaf-peel reduction
+   Reduction Descriptor Source: graph-join-match-ir
+   Reduction Order: leaf-peel
+   Reduction Order Edges: 3
+   Yannakakis Step Count: 6
+   Yannakakis Bottom-Up Steps: 3
+   Yannakakis Top-Down Steps: 3
+   Yannakakis Step Plan: bottom-up: provider 7 v3->v4 on v4(key2), provider 6 v2->v3 on v3(key2), provider 5 v1->v2 on v2(key2); top-down: provider 5 v2->v1 on v1(key1), provider 6 v3->v2 on v2(key1), provider 7 v4->v3 on v3(key1)
+   Yannakakis Step Filter Mode: planned step-domain provider filter
+   Reduction Core Variables: 2
+   Reduction Tail Separators: 0
+   GHD Bag Count: 0
+   GHD Bags: none
+   GHD Separator Count: 0
+   GHD Separators: none
+   GHD Descriptor Source: graph-join-match-ir
+   Variable Count: 4
+   Provider Count: 7
+   Provider Rows Materialized: 241
+   Provider Tuples Materialized: 0
+   Provider Full Materialization: false
+   Provider Rows Read: 19524
+   Provider Row Bytes Allocated: 20480 bytes
+   Provider Tuple Bytes Copied: 0 bytes
+   Lazy Physical Providers: 3
+   Lazy Physical Prefix Loads: 402
+   Lazy Physical Rows Read: 19283
+   Lazy Physical Row Bytes Allocated: 10880 bytes
+   Lazy Physical Reduction Domain Builds: 6
+   Lazy Physical Reduction Source Keys: 164
+   Lazy Physical Reduction Rows Scanned: 12962
+   Lazy Physical Reduction Keys Produced: 243
+   Semijoin Reduction Passes: 2
+   Yannakakis Bottom-Up Passes: 1
+   Yannakakis Top-Down Passes: 1
+   Yannakakis Steps Applied: 6
+   Yannakakis Bottom-Up Steps Applied: 3
+   Yannakakis Top-Down Steps Applied: 3
+   Reduction Order Applied: true
+   Semijoin Rows Removed: 158
+   Yannakakis Bottom-Up Rows Removed: 79
+   Yannakakis Top-Down Rows Removed: 79
+   Semijoin Provider Rows After: 83
+   Semijoin Final Domain Keys: 83
+   GHD Separator Reduction Passes: 0
+   GHD Leaf Tail Providers: 0
+   GHD Descriptor Separators Applied: 0
+   GHD Tail Domain Propagation Passes: 0
+   GHD Tail Domain Rows Removed: 0
+   GHD Separator Domain Keys: 0
+   GHD Leaf Tail Rows Removed: 0
+   GHD Cyclic Core Rows Removed: 0
+   Reduction Domain Builds: 34
+   Reduction Domain Rows Scanned: 14096
+   Reduction Domain Keys Produced: 1377
+   Reduction Domain Sorts: 3
+   Reduction Domain Sort Rows: 6560
+   Complete Bindings: 80
+   Candidate Flat Rows: 80
+   Candidate Bag Combinations: 80
+   Flat Rows Materialized: 0
+   Flat Rows Avoided: 0
+   Consumer Flat Rows Avoided: 80
+   Row Goal Reached: false
+   Generic Count Multiplicity Mode: exact-bag-product
+   Generic Count Multiplicity Reason: active edge bags cannot collide
+   Generic Count Multiplicity Bindings: 80
+   Generic Count Multiplicity Rows: 80
+   Count Result: 80
+   Lazy Domain Views: 323
+   Lazy Domain Keys Scanned: 401
+   Domain Scratch Allocations: 4
+   Domain Scratch Reuses: 158
+   Runtime Domain Builds: 323
+   Runtime Domain Rows Scanned: 401
+   Prefix Range Builds: 90
+   Prefix Range Reuses: 73
+   Prefix Range Directory Searches: 73
+   Prefix Range Cursor Reuses: 0
+   Prefix Range Cache Hits: 72
+   Prefix Range Cache Misses: 11
+   Child Range Cache Hits: 237
+   Child Range Cache Misses: 83
+   Trie Child Range Reuses: 237
+   Trie Child Range Opens: 83
+   Trie Prefix Range Seeks: 83
+   Trie Pair Range Opens: 240
+   Reduction Scratch Allocations: 0
+   Reduction Scratch Reuses: 0
+   Vector Intersection Merge Calls: 81
+   Vector Intersection Galloping Calls: 80
+   Vector Intersection Galloping Steps: 80
+   Uniqueness Constraint Groups: 1
+   Uniqueness Rejects: 0
+   Rows Emitted: 1
+   Rescans: 0
+   Peak Generic Join Memory: 142336 bytes
+   Spill Bytes: 0 bytes
+   ->  Seq Scan on generic_ir."T_A" a (actual rows=1.00 loops=1)
+         Output: a.id
+   ->  Seq Scan on generic_ir."T_B" b (actual rows=80.00 loops=1)
+         Output: b.id
+   ->  Seq Scan on generic_ir."T_C" c (actual rows=80.00 loops=1)
+         Output: c.id
+   ->  Seq Scan on generic_ir."T_D" d (actual rows=80.00 loops=1)
+         Output: d.id
+   ->  Seq Scan on generic_ir."T_AB" ab (never executed)
+         Output: ab.id, ab.start_id, ab.end_id
+   ->  Seq Scan on generic_ir."T_BC" bc (never executed)
+         Output: bc.id, bc.start_id, bc.end_id
+   ->  Seq Scan on generic_ir."T_CD" cd (never executed)
+         Output: cd.end_id, cd.id, cd.start_id
+(127 rows)
 
 ROLLBACK;
 SELECT drop_graph('generic_ir', true);

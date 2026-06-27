@@ -18,7 +18,7 @@ RESET enable_nestloop;
 RESET enable_hashjoin;
 RESET enable_mergejoin;
 SELECT format($sql$
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
 SELECT count(*)
 FROM cypher('wcoj_bench_sparse', $cypher$
     MATCH (s1:S {id:1})-[:E]->(t:T),
@@ -58,7 +58,7 @@ SET enable_nestloop = off;
 SET enable_hashjoin = off;
 SET enable_mergejoin = off;
 SELECT format($sql$
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
 SELECT count(*)
 FROM cypher('wcoj_bench_dense', $cypher$
     MATCH (s1:S {id:1})-[:E]->(t:T),
@@ -97,7 +97,7 @@ RESET enable_nestloop;
 RESET enable_hashjoin;
 RESET enable_mergejoin;
 SELECT format($sql$
-EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON, BUFFERS ON)
 SELECT count(*)
 FROM cypher('wcoj_bench_cycle', $cypher$
     MATCH (a:A)-[:E1]->(b:B)-[:E2]->(c:C)-[:E3]->(a)

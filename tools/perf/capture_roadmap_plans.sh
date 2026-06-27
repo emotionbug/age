@@ -18,6 +18,7 @@ cycle_vertices=${ROADMAP_PLAN_CYCLE_VERTICES:-${WCOJ_ROADMAP_CYCLE_VERTICES:-102
 cycle_fanout=${ROADMAP_PLAN_CYCLE_FANOUT:-${WCOJ_ROADMAP_CYCLE_FANOUT:-64}}
 semijoin_fanout=${ROADMAP_PLAN_SEMIJOIN_FANOUT:-${WCOJ_ROADMAP_SEMIJOIN_FANOUT:-128}}
 semiring_fanout=${ROADMAP_PLAN_SEMIRING_FANOUT:-${WCOJ_SEMIRING_FANOUT:-500}}
+semiring_speedup_fanout=${ROADMAP_PLAN_SEMIRING_SPEEDUP_FANOUT:-${WCOJ_ROADMAP_SEMIRING_SPEEDUP_FANOUT:-80}}
 reduction_fanout=${ROADMAP_PLAN_REDUCTION_FANOUT:-${GENERIC_REDUCTION_FANOUT:-1024}}
 preserve_cycle_size=${ROADMAP_PLAN_PRESERVE_CYCLE_SIZE:-${GENERIC_JOIN_PRESERVE_CYCLE_SIZE:-128}}
 
@@ -45,6 +46,7 @@ Environment:
   ROADMAP_PLAN_STAR_SOURCES, ROADMAP_PLAN_STAR_FANOUT
   ROADMAP_PLAN_CYCLE_VERTICES, ROADMAP_PLAN_CYCLE_FANOUT
   ROADMAP_PLAN_SEMIJOIN_FANOUT, ROADMAP_PLAN_SEMIRING_FANOUT
+  ROADMAP_PLAN_SEMIRING_SPEEDUP_FANOUT
   ROADMAP_PLAN_REDUCTION_FANOUT, ROADMAP_PLAN_PRESERVE_CYCLE_SIZE
   ROADMAP_PLAN_ALLOW_DEBUG_PG=1
 EOF
@@ -154,6 +156,12 @@ capture_workload()
         run_psql_file "$log_path" "$@" --file="$script_dir/$setup_sql" >/dev/null
     fi
     run_psql_file "$log_path" "$@" --file="$script_dir/$benchmark_sql" >/dev/null
+    if ! grep -q 'Execution Time:' "$log_path"; then
+        printf '%s: missing raw EXPLAIN ANALYZE output in %s\n' \
+               "$label" "$log_path" >&2
+        cat "$log_path" >&2
+        exit 1
+    fi
     printf '%s: capture ok (%s)\n' "$label" "$log_path"
 }
 
@@ -184,6 +192,14 @@ capture_workload \
     --set=fanout="$semiring_fanout"
 
 capture_workload \
+    "Semiring count speedup plans" \
+    "wcoj-semiring-speedup-plans.log" \
+    "wcoj_semiring_setup.sql" \
+    "wcoj_semiring_speedup_benchmark.sql" \
+    --set=runs="$runs" \
+    --set=fanout="$semiring_speedup_fanout"
+
+capture_workload \
     "Generic Join GHD preservation plans" \
     "generic-join-preservation-plans.log" \
     "generic_join_preservation_setup.sql" \
@@ -191,7 +207,7 @@ capture_workload \
     --set=cycle_size="$preserve_cycle_size"
 
 capture_workload \
-    "Generic Join reduction matrix plans" \
+    "Generic Join reduction matrix and lazy physical provider plans" \
     "generic-reduction-matrix-plans.log" \
     "generic_reduction_matrix_setup.sql" \
     "generic_reduction_matrix_benchmark.sql" \
@@ -216,9 +232,11 @@ capture_workload \
            "$log_dir/wcoj-semijoin-plans.log"
     printf -- '- WCOJ semiring consumer disclosure: `%s`\n' \
            "$log_dir/wcoj-semiring-plans.log"
+    printf -- '- WCOJ semiring count speedup disclosure: `%s`\n' \
+           "$log_dir/wcoj-semiring-speedup-plans.log"
     printf -- '- Generic Join GHD/count disclosure: `%s`\n' \
            "$log_dir/generic-join-preservation-plans.log"
-    printf -- '- Generic reduction matrix/Yannakakis disclosure: `%s`\n\n' \
+    printf -- '- Generic reduction matrix/Yannakakis/lazy physical disclosure: `%s`\n\n' \
            "$log_dir/generic-reduction-matrix-plans.log"
     printf '## Parameters\n\n'
     printf -- '- runs: `%s`\n' "$runs"
@@ -228,6 +246,7 @@ capture_workload \
     printf -- '- cycle_fanout: `%s`\n' "$cycle_fanout"
     printf -- '- semijoin_fanout: `%s`\n' "$semijoin_fanout"
     printf -- '- semiring_fanout: `%s`\n' "$semiring_fanout"
+    printf -- '- semiring_speedup_fanout: `%s`\n' "$semiring_speedup_fanout"
     printf -- '- reduction_fanout: `%s`\n' "$reduction_fanout"
     printf -- '- preserve_cycle_size: `%s`\n\n' "$preserve_cycle_size"
     printf '## Complete Raw EXPLAIN Plan Sections\n\n'

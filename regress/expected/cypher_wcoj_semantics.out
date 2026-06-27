@@ -262,17 +262,16 @@ ANALYZE wcoj_lowering."H";
 ANALYZE wcoj_lowering."E";
 SELECT *
 FROM cypher('wcoj_lowering', $$
-    EXPLAIN (VERBOSE, COSTS OFF)
+    EXPLAIN (COSTS OFF)
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN t
 $$) AS (plan agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join)
-   Output: _agtype_build_vertex_label('17338'::oid, t.id, t.properties)
-   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND (e2.end_id = e3.end_id))
+   Filter: ((end_id = id) AND (end_id = end_id) AND (end_id = end_id))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -286,27 +285,22 @@ $$) AS (plan agtype);
    WCOJ Arity: 4
    Seed Source: 4
    Estimated Postings: 1=1, 2=3, 3=3, 4=1
-   ->  Seq Scan on wcoj_lowering."S" s1
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
-   ->  Seq Scan on wcoj_lowering."S" s2
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
-   ->  Seq Scan on wcoj_lowering."S" s3
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s1
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s2
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s3
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
    ->  Sort
-         Output: t.id, t.properties
          Sort Key: t.id
-         ->  Seq Scan on wcoj_lowering."T" t
-               Output: t.id, t.properties
-(30 rows)
+         ->  Seq Scan on "T" t
+(24 rows)
 
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
 SELECT *
 FROM cypher('wcoj_lowering', $$
-    EXPLAIN (VERBOSE, COSTS OFF)
+    EXPLAIN (COSTS OFF)
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
           (s3:S {id: 3})-[e3:E]->(t)
@@ -315,19 +309,14 @@ $$) AS (plan agtype);
                                                                                                                                                                                           QUERY PLAN                                                                                                                                                                                          
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Nested Loop
-   Output: _agtype_build_vertex_label('17338'::oid, t.id, t.properties)
    Join Filter: (e1.end_id = t.id)
    ->  Nested Loop
-         Output: t.id, t.properties, e2.end_id, e3.end_id
          Join Filter: (t.id = e2.end_id)
          ->  Nested Loop
-               Output: e2.end_id
-               ->  Seq Scan on wcoj_lowering."S" s2
-                     Output: s2.id, s2.properties
-                     Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
-               ->  Custom Scan (AGE Adjacency Match) on wcoj_lowering."E" e2
-                     Output: e2.start_id, e2.end_id
-                     Filter: (s2.id = e2.start_id)
+               ->  Seq Scan on "S" s2
+                     Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
+               ->  Custom Scan (AGE Adjacency Match) on "E" e2
+                     Filter: (s2.id = start_id)
                      Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=3 composite-fanout=3 label-groups=0 main-blocks=0 fanout-source=statistics source=relcache-scan payload=id-only
                      Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=out properties=0 metadata=no
                      Adjacency Pruning: required=start_id,end_id terminal-source=none right-prune=label:no/props:none index-solved=0 residual-count=0 residual=edge:no/right-label:no/right-props:no edge-var:yes
@@ -338,20 +327,14 @@ $$) AS (plan agtype);
                      Adjacency Terminal Property: none
                      Adjacency Payload Columns: mode=id-only columns=start_id,end_id
          ->  Materialize
-               Output: t.id, t.properties, e3.end_id
                ->  Nested Loop
-                     Output: t.id, t.properties, e3.end_id
                      Join Filter: (t.id = e3.end_id)
-                     ->  Seq Scan on wcoj_lowering."T" t
-                           Output: t.id, t.properties
+                     ->  Seq Scan on "T" t
                      ->  Nested Loop
-                           Output: e3.end_id
-                           ->  Seq Scan on wcoj_lowering."S" s3
-                                 Output: s3.id, s3.properties
-                                 Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
-                           ->  Custom Scan (AGE Adjacency Match) on wcoj_lowering."E" e3
-                                 Output: e3.start_id, e3.end_id
-                                 Filter: (s3.id = e3.start_id)
+                           ->  Seq Scan on "S" s3
+                                 Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
+                           ->  Custom Scan (AGE Adjacency Match) on "E" e3
+                                 Filter: (s3.id = start_id)
                                  Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=3 composite-fanout=3 label-groups=0 main-blocks=0 fanout-source=statistics source=relcache-scan payload=id-only
                                  Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=out properties=0 metadata=no
                                  Adjacency Pruning: required=start_id,end_id terminal-source=none right-prune=label:no/props:none index-solved=0 residual-count=0 residual=edge:no/right-label:no/right-props:no edge-var:yes
@@ -362,15 +345,11 @@ $$) AS (plan agtype);
                                  Adjacency Terminal Property: none
                                  Adjacency Payload Columns: mode=id-only columns=start_id,end_id
    ->  Materialize
-         Output: e1.end_id
          ->  Nested Loop
-               Output: e1.end_id
-               ->  Seq Scan on wcoj_lowering."S" s1
-                     Output: s1.id, s1.properties
-                     Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
-               ->  Custom Scan (AGE Adjacency Match) on wcoj_lowering."E" e1
-                     Output: e1.start_id, e1.end_id
-                     Filter: (s1.id = e1.start_id)
+               ->  Seq Scan on "S" s1
+                     Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
+               ->  Custom Scan (AGE Adjacency Match) on "E" e1
+                     Filter: (s1.id = start_id)
                      Adjacency Index: direction=outgoing endpoint=start_id fanout=3 terminal-fanout=1 composite-fanout=1 label-groups=0 main-blocks=0 fanout-source=statistics source=relcache-scan payload=id-only
                      Adjacency Index Descriptor: kind=ADJACENCY provider=relcache direction=out properties=0 metadata=no
                      Adjacency Pruning: required=start_id,end_id terminal-source=label-block right-prune=label:yes/props:none index-solved=1 residual-count=1 residual=edge:no/right-label:yes/right-props:no edge-var:yes
@@ -381,7 +360,7 @@ $$) AS (plan agtype);
                      Adjacency Composite Source: strategy=label-block handoff=label-slice label=yes property=none value=none candidate-fanout=1 composite-fanout=1 value-posting=none planned=none threshold=0 reason=not-indexable
                      Adjacency Terminal Property: none
                      Adjacency Payload Columns: mode=id-only columns=start_id,end_id
-(67 rows)
+(52 rows)
 
 ROLLBACK;
 BEGIN;
@@ -389,17 +368,16 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL age.wcoj_engine = 'leapfrog';
 SELECT *
 FROM cypher('wcoj_lowering', $$
-    EXPLAIN (VERBOSE, COSTS OFF)
+    EXPLAIN (COSTS OFF)
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN t
 $$) AS (plan agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join)
-   Output: _agtype_build_vertex_label('17338'::oid, t.id, t.properties)
-   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND (e2.end_id = e3.end_id))
+   Filter: ((end_id = id) AND (end_id = end_id) AND (end_id = end_id))
    WCOJ Algorithm: provider leapfrog intersection with delayed bag product
    Planned Engine: leapfrog
    Actual Engine: leapfrog
@@ -413,21 +391,16 @@ $$) AS (plan agtype);
    WCOJ Arity: 4
    Seed Source: 4
    Estimated Postings: 1=1, 2=3, 3=3, 4=1
-   ->  Seq Scan on wcoj_lowering."S" s1
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
-   ->  Seq Scan on wcoj_lowering."S" s2
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
-   ->  Seq Scan on wcoj_lowering."S" s3
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s1
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s2
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s3
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
    ->  Sort
-         Output: t.id, t.properties
          Sort Key: t.id
-         ->  Seq Scan on wcoj_lowering."T" t
-               Output: t.id, t.properties
-(30 rows)
+         ->  Seq Scan on "T" t
+(24 rows)
 
 ROLLBACK;
 BEGIN;
@@ -435,17 +408,16 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL age.wcoj_engine = 'merge';
 SELECT *
 FROM cypher('wcoj_lowering', $$
-    EXPLAIN (VERBOSE, COSTS OFF)
+    EXPLAIN (COSTS OFF)
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN t
 $$) AS (plan agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join)
-   Output: _agtype_build_vertex_label('17338'::oid, t.id, t.properties)
-   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND (e2.end_id = e3.end_id))
+   Filter: ((end_id = id) AND (end_id = end_id) AND (end_id = end_id))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -459,21 +431,16 @@ $$) AS (plan agtype);
    WCOJ Arity: 4
    Seed Source: 4
    Estimated Postings: 1=1, 2=3, 3=3, 4=1
-   ->  Seq Scan on wcoj_lowering."S" s1
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
-   ->  Seq Scan on wcoj_lowering."S" s2
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
-   ->  Seq Scan on wcoj_lowering."S" s3
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s1
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s2
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s3
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
    ->  Sort
-         Output: t.id, t.properties
          Sort Key: t.id
-         ->  Seq Scan on wcoj_lowering."T" t
-               Output: t.id, t.properties
-(30 rows)
+         ->  Seq Scan on "T" t
+(24 rows)
 
 ROLLBACK;
 BEGIN;
@@ -481,17 +448,16 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL age.wcoj_engine = 'progressive';
 SELECT *
 FROM cypher('wcoj_lowering', $$
-    EXPLAIN (VERBOSE, COSTS OFF)
+    EXPLAIN (COSTS OFF)
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
           (s2:S {id: 2})-[e2:E]->(t),
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN t
 $$) AS (plan agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join)
-   Output: _agtype_build_vertex_label('17338'::oid, t.id, t.properties)
-   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND (e2.end_id = e3.end_id))
+   Filter: ((end_id = id) AND (end_id = end_id) AND (end_id = end_id))
    WCOJ Algorithm: progressive seed filtering with delayed bag product
    Planned Engine: progressive
    Actual Engine: progressive
@@ -505,21 +471,16 @@ $$) AS (plan agtype);
    WCOJ Arity: 4
    Seed Source: 4
    Estimated Postings: 1=1, 2=3, 3=3, 4=1
-   ->  Seq Scan on wcoj_lowering."S" s1
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
-   ->  Seq Scan on wcoj_lowering."S" s2
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
-   ->  Seq Scan on wcoj_lowering."S" s3
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s1
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s2
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s3
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
    ->  Sort
-         Output: t.id, t.properties
          Sort Key: t.id
-         ->  Seq Scan on wcoj_lowering."T" t
-               Output: t.id, t.properties
-(30 rows)
+         ->  Seq Scan on "T" t
+(24 rows)
 
 ROLLBACK;
 -- Re-enter the same analyzed Cypher EXPLAIN through separate SPI portals.  The
@@ -538,7 +499,7 @@ BEGIN
         FOR plan_text IN
             SELECT plan::text
             FROM cypher('wcoj_lowering', $$
-                EXPLAIN (VERBOSE, COSTS OFF)
+                EXPLAIN (COSTS OFF)
                 MATCH (s1:S {id: 1})-[e1:E]->(t:T),
                       (s2:S {id: 2})-[e2:E]->(t),
                       (s3:S {id: 3})-[e3:E]->(t)
@@ -563,7 +524,7 @@ SET LOCAL age.wcoj_engine = 'leapfrog';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -572,11 +533,10 @@ FROM cypher('wcoj_lowering', $$
     WHERE e1.keep = true AND e2.keep = true AND e3.keep = true
     RETURN id(e1), id(e2), id(e3), id(t)
 $$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
-                                                                                                                                                               QUERY PLAN                                                                                                                                                               
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                  QUERY PLAN                                                                                                                                                  
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=6.00 loops=1)
-   Output: (e1.id)::agtype, (e2.id)::agtype, (e3.id)::agtype, (t.id)::agtype
-   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND agtype_object_field_equals(e1.properties, '"keep"'::agtype, 'true'::agtype) AND (e2.end_id = e3.end_id) AND agtype_object_field_equals(e2.properties, '"keep"'::agtype, 'true'::agtype) AND agtype_object_field_equals(e3.properties, '"keep"'::agtype, 'true'::agtype))
+   Filter: ((end_id = id) AND (end_id = end_id) AND agtype_object_field_equals(properties, '"keep"'::agtype, 'true'::agtype) AND (end_id = end_id) AND agtype_object_field_equals(properties, '"keep"'::agtype, 'true'::agtype) AND agtype_object_field_equals(properties, '"keep"'::agtype, 'true'::agtype))
    WCOJ Algorithm: provider leapfrog intersection with delayed bag product
    Planned Engine: leapfrog
    Actual Engine: leapfrog
@@ -653,25 +613,20 @@ $$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-(97 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(91 rows)
 
 ROLLBACK;
 BEGIN;
@@ -680,7 +635,7 @@ SET LOCAL age.wcoj_engine = 'leapfrog';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (h:H),
@@ -693,8 +648,7 @@ $$) AS (tag agtype, eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
                                                                                  QUERY PLAN                                                                                 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=72.00 loops=1)
-   Output: agtype_object_field_agtype(h.properties, '"tag"'::agtype), (e1.id)::agtype, (e2.id)::agtype, (e3.id)::agtype, (t.id)::agtype
-   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND (e1.end_id = e3.end_id))
+   Filter: ((end_id = id) AND (end_id = end_id) AND (end_id = end_id))
    WCOJ Algorithm: provider leapfrog intersection with delayed bag product
    Planned Engine: leapfrog
    Actual Engine: leapfrog
@@ -771,33 +725,25 @@ $$) AS (tag agtype, eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
    ->  Nested Loop (actual rows=3.00 loops=1)
          Disabled: true
-         Output: h.properties, s1.id
          Join Filter: (agtype_access_operator(VARIADIC ARRAY[h.properties, '"source_id"'::agtype]) = agtype_access_operator(VARIADIC ARRAY[s1.properties, '"id"'::agtype]))
          Rows Removed by Join Filter: 6
-         ->  Seq Scan on wcoj_lowering."H" h (actual rows=3.00 loops=1)
-               Output: h.id, h.properties
+         ->  Seq Scan on "H" h (actual rows=3.00 loops=1)
          ->  Materialize (actual rows=3.00 loops=3)
-               Output: s1.id, s1.properties
                Storage: Memory  Maximum Storage: 17kB
-               ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=3.00 loops=1)
-                     Output: s1.id, s1.properties
+               ->  Seq Scan on "S" s1 (actual rows=3.00 loops=1)
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-(105 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(96 rows)
 
 ROLLBACK;
 BEGIN;
@@ -974,7 +920,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -982,10 +928,9 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN count(*) AS total
 $$) AS (total agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((count(*)))::agtype
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -1063,25 +1008,20 @@ $$) AS (total agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-(97 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(91 rows)
 
 ROLLBACK;
 SELECT total FROM cypher('wcoj_lowering', $$
@@ -1101,7 +1041,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1109,10 +1049,9 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN count(id(t)) AS total
 $$) AS (total agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((count((t.id)::agtype)))::agtype
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -1190,33 +1129,20 @@ $$) AS (total agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   Buffers: shared hit=37
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         Buffers: shared hit=1
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-               Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=3
-(105 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(91 rows)
 
 ROLLBACK;
 BEGIN;
@@ -1275,7 +1201,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1283,10 +1209,9 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN sum(e1.score) AS total
 $$) AS (total agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: (age_sum(agtype_access_operator(VARIADIC ARRAY[properties, '"score"'::agtype])))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -1366,25 +1291,20 @@ $$) AS (total agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-(99 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(93 rows)
 
 ROLLBACK;
 BEGIN;
@@ -1432,7 +1352,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1440,12 +1360,10 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN avg(e1.score) AS value
 $$) AS (value agtype);
-                                                                QUERY PLAN                                                                 
--------------------------------------------------------------------------------------------------------------------------------------------
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
  Subquery Scan on _ (actual rows=1.00 loops=1)
-   Output: (_.value)::agtype
    ->  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-         Output: (age_avg(agtype_access_operator(VARIADIC ARRAY[properties, '"score"'::agtype])))
          WCOJ Algorithm: streaming merge intersection with delayed bag product
          Planned Engine: merge
          Actual Engine: merge
@@ -1525,25 +1443,20 @@ $$) AS (value agtype);
          Payload Bucket Rows Spilled: 0
          Payload Bucket Bytes Spilled: 0 bytes
          Spill Bytes: 0 bytes
-         ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-               Output: s1.id
-               Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+         ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
                Rows Removed by Filter: 2
-         ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-               Output: s2.id
-               Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+         ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
                Rows Removed by Filter: 2
-         ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-               Output: s3.id
-               Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+         ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
                Rows Removed by Filter: 2
          ->  Sort (actual rows=1.00 loops=1)
-               Output: t.id
                Sort Key: t.id
                Sort Method: quicksort  Memory: 25kB
-               ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-                     Output: t.id
-(101 rows)
+               ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(94 rows)
 
 ROLLBACK;
 BEGIN;
@@ -1594,7 +1507,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1602,10 +1515,9 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN min(e1.score) AS value
 $$) AS (value agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: (age_min(agtype_access_operator(VARIADIC ARRAY[properties, '"score"'::agtype])))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -1685,33 +1597,20 @@ $$) AS (value agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   Buffers: shared hit=37
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         Buffers: shared hit=1
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-               Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=6
-(107 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(93 rows)
 
 ROLLBACK;
 BEGIN;
@@ -1759,7 +1658,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1767,10 +1666,9 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN max(e1.score) AS value
 $$) AS (value agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: (age_max(agtype_access_operator(VARIADIC ARRAY[properties, '"score"'::agtype])))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -1850,33 +1748,20 @@ $$) AS (value agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   Buffers: shared hit=37
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         Buffers: shared hit=1
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-               Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=6
-(107 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(93 rows)
 
 ROLLBACK;
 BEGIN;
@@ -1936,7 +1821,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1944,10 +1829,9 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN id(t) AS key, sum(e1.score) AS total
 $$) AS (key agtype, total agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((t.id)::agtype), (age_sum(agtype_access_operator(VARIADIC ARRAY[properties, '"score"'::agtype])))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -2027,25 +1911,20 @@ $$) AS (key agtype, total agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-(99 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(93 rows)
 
 ROLLBACK;
 BEGIN;
@@ -2093,7 +1972,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -2101,12 +1980,10 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN id(t) AS key, avg(e1.score) AS value
 $$) AS (key agtype, value agtype);
-                                                                QUERY PLAN                                                                 
--------------------------------------------------------------------------------------------------------------------------------------------
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
  Subquery Scan on _ (actual rows=1.00 loops=1)
-   Output: _.key, (_.value)::agtype
    ->  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-         Output: ((t.id)::agtype), (age_avg(agtype_access_operator(VARIADIC ARRAY[properties, '"score"'::agtype])))
          WCOJ Algorithm: streaming merge intersection with delayed bag product
          Planned Engine: merge
          Actual Engine: merge
@@ -2186,25 +2063,20 @@ $$) AS (key agtype, value agtype);
          Payload Bucket Rows Spilled: 0
          Payload Bucket Bytes Spilled: 0 bytes
          Spill Bytes: 0 bytes
-         ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-               Output: s1.id
-               Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+         ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
                Rows Removed by Filter: 2
-         ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-               Output: s2.id
-               Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+         ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
                Rows Removed by Filter: 2
-         ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-               Output: s3.id
-               Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+         ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
                Rows Removed by Filter: 2
          ->  Sort (actual rows=1.00 loops=1)
-               Output: t.id
                Sort Key: t.id
                Sort Method: quicksort  Memory: 25kB
-               ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-                     Output: t.id
-(101 rows)
+               ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(94 rows)
 
 ROLLBACK;
 BEGIN;
@@ -2252,7 +2124,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -2260,10 +2132,9 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN id(t) AS key, min(e1.score) AS value
 $$) AS (key agtype, value agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((t.id)::agtype), (age_min(agtype_access_operator(VARIADIC ARRAY[properties, '"score"'::agtype])))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -2343,33 +2214,20 @@ $$) AS (key agtype, value agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   Buffers: shared hit=37
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         Buffers: shared hit=1
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-               Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=3
-(107 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(93 rows)
 
 ROLLBACK;
 BEGIN;
@@ -2417,7 +2275,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -2425,10 +2283,9 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN id(t) AS key, max(e1.score) AS value
 $$) AS (key agtype, value agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((t.id)::agtype), (age_max(agtype_access_operator(VARIADIC ARRAY[properties, '"score"'::agtype])))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -2508,33 +2365,20 @@ $$) AS (key agtype, value agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   Buffers: shared hit=37
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         Buffers: shared hit=1
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-               Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=3
-(107 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(93 rows)
 
 ROLLBACK;
 BEGIN;
@@ -2582,7 +2426,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -2591,10 +2435,9 @@ FROM cypher('wcoj_lowering', $$
     WHERE e1.keep = true
     RETURN id(t) AS key, sum(e1.score) AS total
 $$) AS (key agtype, total agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((t.id)::agtype), (age_sum(agtype_access_operator(VARIADIC ARRAY[properties, '"score"'::agtype])))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -2674,25 +2517,20 @@ $$) AS (key agtype, total agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-(99 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(93 rows)
 
 ROLLBACK;
 BEGIN;
@@ -2769,7 +2607,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -2777,10 +2615,9 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN id(t) AS key, count(*) AS total
 $$) AS (key agtype, total agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((t.id)::agtype), ((count(*)))::agtype
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -2858,25 +2695,20 @@ $$) AS (key agtype, total agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-(97 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(91 rows)
 
 ROLLBACK;
 SELECT key, total FROM cypher('wcoj_lowering', $$
@@ -2898,7 +2730,7 @@ SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
 SET LOCAL enable_hashagg = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -2906,10 +2738,9 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN id(t) AS key, count(id(t)) AS total
 $$) AS (key agtype, total agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((t.id)::agtype), ((count((t.id)::agtype)))::agtype
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -2987,33 +2818,20 @@ $$) AS (key agtype, total agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   Buffers: shared hit=37
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         Buffers: shared hit=1
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-               Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=3
-(105 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(91 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3075,7 +2893,7 @@ SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
 SET LOCAL enable_hashagg = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -3083,10 +2901,9 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN id(t) AS key, count(DISTINCT id(t)) AS total
 $$) AS (key agtype, total agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((t.id)::agtype), ((count(DISTINCT (t.id)::agtype)))::agtype
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -3164,33 +2981,20 @@ $$) AS (key agtype, total agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   Buffers: shared hit=37
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         Buffers: shared hit=1
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-               Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=3
-(105 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(91 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3242,7 +3046,7 @@ SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
 SET LOCAL enable_hashagg = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -3250,10 +3054,9 @@ FROM cypher('wcoj_lowering', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN DISTINCT id(t) AS key
 $$) AS (key agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((t.id)::agtype)
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -3330,33 +3133,20 @@ $$) AS (key agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   Buffers: shared hit=37
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         Buffers: shared hit=1
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-               Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=3
-(104 rows)
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(90 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3366,7 +3156,7 @@ SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
 SET LOCAL enable_hashagg = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -3375,13 +3165,10 @@ FROM cypher('wcoj_lowering', $$
     RETURN DISTINCT id(t) AS key
     LIMIT 1
 $$) AS (key agtype);
-                                                                QUERY PLAN                                                                 
--------------------------------------------------------------------------------------------------------------------------------------------
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
  Limit (actual rows=1.00 loops=1)
-   Output: ((t.id)::agtype)
-   Buffers: shared hit=37
    ->  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-         Output: ((t.id)::agtype)
          WCOJ Algorithm: streaming merge intersection with delayed bag product
          Planned Engine: merge
          Actual Engine: merge
@@ -3460,33 +3247,20 @@ $$) AS (key agtype);
          Payload Bucket Rows Spilled: 0
          Payload Bucket Bytes Spilled: 0 bytes
          Spill Bytes: 0 bytes
-         Buffers: shared hit=37
-         ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-               Output: s1.id
-               Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+         ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
                Rows Removed by Filter: 2
-               Buffers: shared hit=1
-         ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-               Output: s2.id
-               Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+         ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
                Rows Removed by Filter: 2
-               Buffers: shared hit=1
-         ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-               Output: s3.id
-               Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+         ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
                Rows Removed by Filter: 2
-               Buffers: shared hit=1
          ->  Sort (actual rows=1.00 loops=1)
-               Output: t.id
                Sort Key: t.id
                Sort Method: quicksort  Memory: 25kB
-               Buffers: shared hit=1
-               ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-                     Output: t.id
-                     Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=3
-(109 rows)
+               ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(93 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3534,7 +3308,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     RETURN EXISTS {
@@ -3544,10 +3318,9 @@ FROM cypher('wcoj_lowering', $$
         RETURN t
     } AS ok
 $$) AS (ok agtype);
-                                                                 QUERY PLAN                                                                  
----------------------------------------------------------------------------------------------------------------------------------------------
+                                                              QUERY PLAN                                                               
+---------------------------------------------------------------------------------------------------------------------------------------
  Result (actual rows=1.00 loops=1)
-   Output: ((InitPlan 1).col1)::agtype
    InitPlan 1
      ->  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
            WCOJ Algorithm: streaming merge intersection with delayed bag product
@@ -3629,25 +3402,20 @@ $$) AS (ok agtype);
            Payload Bucket Rows Spilled: 0
            Payload Bucket Bytes Spilled: 0 bytes
            Spill Bytes: 0 bytes
-           ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-                 Output: s1.id
-                 Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+           ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+                 Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
                  Rows Removed by Filter: 2
-           ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-                 Output: s2.id
-                 Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+           ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+                 Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
                  Rows Removed by Filter: 2
-           ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-                 Output: s3.id
-                 Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+           ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+                 Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
                  Rows Removed by Filter: 2
            ->  Sort (actual rows=1.00 loops=1)
-                 Output: t.id
                  Sort Key: t.id
                  Sort Method: quicksort  Memory: 25kB
-                 ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-                       Output: t.id
-(101 rows)
+                 ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+(95 rows)
 
 ROLLBACK;
 -- Add a second star after the automatic-plan assertion.  Its first two
@@ -3737,7 +3505,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s7:S {id: 7})-[e7:E]->(t:T),
@@ -3745,11 +3513,10 @@ FROM cypher('wcoj_lowering', $$
           (s9:S {id: 9})-[e9:E]->(t)
     RETURN id(e7), id(e8), id(e9), id(t)
 $$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=17.00 loops=1)
-   Output: (e7.id)::agtype, (e8.id)::agtype, (e9.id)::agtype, (t.id)::agtype
-   Filter: ((e7.end_id = t.id) AND (e7.end_id = e8.end_id) AND (e8.end_id = e9.end_id))
+   Filter: ((end_id = id) AND (end_id = end_id) AND (end_id = end_id))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -3826,33 +3593,20 @@ $$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   Buffers: shared hit=221
-   ->  Seq Scan on wcoj_lowering."S" s7 (actual rows=1.00 loops=1)
-         Output: s7.id
-         Filter: ((s7.properties @> '{"id": 7}'::agtype) AND agtype_object_field_equals(s7.properties, '"id"'::agtype, '7'::agtype))
+   ->  Seq Scan on "S" s7 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 7}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '7'::agtype))
          Rows Removed by Filter: 8
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s8 (actual rows=1.00 loops=1)
-         Output: s8.id
-         Filter: ((s8.properties @> '{"id": 8}'::agtype) AND agtype_object_field_equals(s8.properties, '"id"'::agtype, '8'::agtype))
+   ->  Seq Scan on "S" s8 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 8}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '8'::agtype))
          Rows Removed by Filter: 8
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_lowering."S" s9 (actual rows=1.00 loops=1)
-         Output: s9.id
-         Filter: ((s9.properties @> '{"id": 9}'::agtype) AND agtype_object_field_equals(s9.properties, '"id"'::agtype, '9'::agtype))
+   ->  Seq Scan on "S" s9 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 9}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '9'::agtype))
          Rows Removed by Filter: 8
-         Buffers: shared hit=1
    ->  Sort (actual rows=20.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         Buffers: shared hit=1
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=20.00 loops=1)
-               Output: t.id
-               Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=6
-(105 rows)
+         ->  Seq Scan on "T" t (actual rows=20.00 loops=1)
+(91 rows)
 
 ROLLBACK;
 /*
@@ -3918,7 +3672,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_payload_budget', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -3926,10 +3680,9 @@ FROM cypher('wcoj_payload_budget', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN count(*) AS total
 $$) AS (total agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((count(*)))::agtype
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -4007,33 +3760,20 @@ $$) AS (total agtype);
    Payload Bucket Rows Spilled: 768
    Payload Bucket Bytes Spilled: 61632 bytes
    Spill Bytes: 61632 bytes
-   Buffers: shared hit=1948, temp read=9 written=9
-   ->  Seq Scan on wcoj_payload_budget."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_payload_budget."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_payload_budget."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
    ->  Sort (actual rows=20.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         Buffers: shared hit=1
-         ->  Seq Scan on wcoj_payload_budget."T" t (actual rows=20.00 loops=1)
-               Output: t.id
-               Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=38
-(105 rows)
+         ->  Seq Scan on "T" t (actual rows=20.00 loops=1)
+(91 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4095,7 +3835,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s7:S {id: 7})-[e7:E]->(t:T),
@@ -4104,13 +3844,11 @@ FROM cypher('wcoj_lowering', $$
     RETURN id(e7), id(e8), id(e9), id(t)
     LIMIT 1
 $$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype);
-                                                                QUERY PLAN                                                                 
--------------------------------------------------------------------------------------------------------------------------------------------
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
  Limit (actual rows=1.00 loops=1)
-   Output: ((e7.id)::agtype), ((e8.id)::agtype), ((e9.id)::agtype), ((t.id)::agtype)
    ->  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-         Output: (e7.id)::agtype, (e8.id)::agtype, (e9.id)::agtype, (t.id)::agtype
-         Filter: ((e7.end_id = t.id) AND (e7.end_id = e8.end_id) AND (e8.end_id = e9.end_id))
+         Filter: ((end_id = id) AND (end_id = end_id) AND (end_id = end_id))
          WCOJ Algorithm: streaming merge intersection with delayed bag product
          Planned Engine: merge
          Actual Engine: merge
@@ -4189,25 +3927,20 @@ $$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype);
          Payload Bucket Rows Spilled: 0
          Payload Bucket Bytes Spilled: 0 bytes
          Spill Bytes: 0 bytes
-         ->  Seq Scan on wcoj_lowering."S" s7 (actual rows=1.00 loops=1)
-               Output: s7.id
-               Filter: ((s7.properties @> '{"id": 7}'::agtype) AND agtype_object_field_equals(s7.properties, '"id"'::agtype, '7'::agtype))
+         ->  Seq Scan on "S" s7 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 7}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '7'::agtype))
                Rows Removed by Filter: 8
-         ->  Seq Scan on wcoj_lowering."S" s8 (actual rows=1.00 loops=1)
-               Output: s8.id
-               Filter: ((s8.properties @> '{"id": 8}'::agtype) AND agtype_object_field_equals(s8.properties, '"id"'::agtype, '8'::agtype))
+         ->  Seq Scan on "S" s8 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 8}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '8'::agtype))
                Rows Removed by Filter: 8
-         ->  Seq Scan on wcoj_lowering."S" s9 (actual rows=1.00 loops=1)
-               Output: s9.id
-               Filter: ((s9.properties @> '{"id": 9}'::agtype) AND agtype_object_field_equals(s9.properties, '"id"'::agtype, '9'::agtype))
+         ->  Seq Scan on "S" s9 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 9}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '9'::agtype))
                Rows Removed by Filter: 8
          ->  Sort (actual rows=5.00 loops=1)
-               Output: t.id
                Sort Key: t.id
                Sort Method: quicksort  Memory: 25kB
-               ->  Seq Scan on wcoj_lowering."T" t (actual rows=20.00 loops=1)
-                     Output: t.id
-(101 rows)
+               ->  Seq Scan on "T" t (actual rows=20.00 loops=1)
+(94 rows)
 
 ROLLBACK;
 SELECT ok FROM cypher('wcoj_lowering', $$
@@ -4229,7 +3962,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     RETURN EXISTS {
@@ -4239,10 +3972,9 @@ FROM cypher('wcoj_lowering', $$
         RETURN t
     } AS ok
 $$) AS (ok agtype);
-                                                                 QUERY PLAN                                                                  
----------------------------------------------------------------------------------------------------------------------------------------------
+                                                              QUERY PLAN                                                               
+---------------------------------------------------------------------------------------------------------------------------------------
  Result (actual rows=1.00 loops=1)
-   Output: ((InitPlan 1).col1)::agtype
    InitPlan 1
      ->  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
            WCOJ Algorithm: streaming merge intersection with delayed bag product
@@ -4324,25 +4056,20 @@ $$) AS (ok agtype);
            Payload Bucket Rows Spilled: 0
            Payload Bucket Bytes Spilled: 0 bytes
            Spill Bytes: 0 bytes
-           ->  Seq Scan on wcoj_lowering."S" s7 (actual rows=1.00 loops=1)
-                 Output: s7.id
-                 Filter: ((s7.properties @> '{"id": 7}'::agtype) AND agtype_object_field_equals(s7.properties, '"id"'::agtype, '7'::agtype))
+           ->  Seq Scan on "S" s7 (actual rows=1.00 loops=1)
+                 Filter: ((properties @> '{"id": 7}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '7'::agtype))
                  Rows Removed by Filter: 8
-           ->  Seq Scan on wcoj_lowering."S" s8 (actual rows=1.00 loops=1)
-                 Output: s8.id
-                 Filter: ((s8.properties @> '{"id": 8}'::agtype) AND agtype_object_field_equals(s8.properties, '"id"'::agtype, '8'::agtype))
+           ->  Seq Scan on "S" s8 (actual rows=1.00 loops=1)
+                 Filter: ((properties @> '{"id": 8}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '8'::agtype))
                  Rows Removed by Filter: 8
-           ->  Seq Scan on wcoj_lowering."S" s9 (actual rows=1.00 loops=1)
-                 Output: s9.id
-                 Filter: ((s9.properties @> '{"id": 9}'::agtype) AND agtype_object_field_equals(s9.properties, '"id"'::agtype, '9'::agtype))
+           ->  Seq Scan on "S" s9 (actual rows=1.00 loops=1)
+                 Filter: ((properties @> '{"id": 9}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '9'::agtype))
                  Rows Removed by Filter: 8
            ->  Sort (actual rows=5.00 loops=1)
-                 Output: t.id
                  Sort Key: t.id
                  Sort Method: quicksort  Memory: 25kB
-                 ->  Seq Scan on wcoj_lowering."T" t (actual rows=20.00 loops=1)
-                       Output: t.id
-(101 rows)
+                 ->  Seq Scan on "T" t (actual rows=20.00 loops=1)
+(95 rows)
 
 ROLLBACK;
 -- Sparse overlap in progressive exact-set filtering should skip long runs in
@@ -4384,7 +4111,7 @@ SET LOCAL age.wcoj_engine = 'progressive';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s20:S {id: 20})-[e20:E]->(t:T),
@@ -4392,11 +4119,10 @@ FROM cypher('wcoj_lowering', $$
           (s22:S {id: 22})-[e22:E]->(t)
     RETURN id(e20), id(e21), id(e22), id(t)
 $$) AS (eid20 agtype, eid21 agtype, eid22 agtype, tid agtype);
-                                                               QUERY PLAN                                                                
------------------------------------------------------------------------------------------------------------------------------------------
+                                                           QUERY PLAN                                                            
+---------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=3.00 loops=1)
-   Output: (e20.id)::agtype, (e21.id)::agtype, (e22.id)::agtype, (t.id)::agtype
-   Filter: ((e20.end_id = t.id) AND (e20.end_id = e21.end_id) AND (e21.end_id = e22.end_id))
+   Filter: ((end_id = id) AND (end_id = end_id) AND (end_id = end_id))
    WCOJ Algorithm: progressive seed filtering with delayed bag product
    Planned Engine: progressive
    Actual Engine: progressive
@@ -4473,25 +4199,20 @@ $$) AS (eid20 agtype, eid21 agtype, eid22 agtype, tid agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_lowering."S" s20 (actual rows=1.00 loops=1)
-         Output: s20.id
-         Filter: ((s20.properties @> '{"id": 20}'::agtype) AND agtype_object_field_equals(s20.properties, '"id"'::agtype, '20'::agtype))
+   ->  Seq Scan on "S" s20 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 20}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '20'::agtype))
          Rows Removed by Filter: 11
-   ->  Seq Scan on wcoj_lowering."S" s21 (actual rows=1.00 loops=1)
-         Output: s21.id
-         Filter: ((s21.properties @> '{"id": 21}'::agtype) AND agtype_object_field_equals(s21.properties, '"id"'::agtype, '21'::agtype))
+   ->  Seq Scan on "S" s21 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 21}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '21'::agtype))
          Rows Removed by Filter: 11
-   ->  Seq Scan on wcoj_lowering."S" s22 (actual rows=1.00 loops=1)
-         Output: s22.id
-         Filter: ((s22.properties @> '{"id": 22}'::agtype) AND agtype_object_field_equals(s22.properties, '"id"'::agtype, '22'::agtype))
+   ->  Seq Scan on "S" s22 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 22}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '22'::agtype))
          Rows Removed by Filter: 11
    ->  Sort (actual rows=100.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=100.00 loops=1)
-               Output: t.id
-(97 rows)
+         ->  Seq Scan on "T" t (actual rows=100.00 loops=1)
+(91 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4567,7 +4288,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
@@ -4576,10 +4297,9 @@ FROM cypher('wcoj_lowering', $$
     WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
     RETURN count(*) AS total
 $$) AS (total agtype);
-                                                                  QUERY PLAN                                                                   
------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                QUERY PLAN                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((count(*)))::agtype
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -4657,27 +4377,22 @@ $$) AS (total agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '900'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '900'::agtype))
          Rows Removed by Filter: 13
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '900'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '900'::agtype))
          Rows Removed by Filter: 13
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 901}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '901'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 901}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '901'::agtype))
          Rows Removed by Filter: 13
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-               Filter: ((t.properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(t.properties, '"id"'::agtype, '1900'::agtype))
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1900'::agtype))
                Rows Removed by Filter: 100
-(99 rows)
+(93 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4686,7 +4401,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
@@ -4695,10 +4410,9 @@ FROM cypher('wcoj_lowering', $$
     WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
     RETURN sum(e1.score) AS total
 $$) AS (total agtype);
-                                                                  QUERY PLAN                                                                   
------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                QUERY PLAN                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: (age_sum(agtype_access_operator(VARIADIC ARRAY[properties, '"score"'::agtype])))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -4778,27 +4492,22 @@ $$) AS (total agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '900'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '900'::agtype))
          Rows Removed by Filter: 13
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '900'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '900'::agtype))
          Rows Removed by Filter: 13
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 901}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '901'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 901}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '901'::agtype))
          Rows Removed by Filter: 13
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-               Filter: ((t.properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(t.properties, '"id"'::agtype, '1900'::agtype))
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1900'::agtype))
                Rows Removed by Filter: 100
-(101 rows)
+(95 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4807,7 +4516,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
@@ -4816,10 +4525,9 @@ FROM cypher('wcoj_lowering', $$
     WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
     RETURN id(t) AS key, count(*) AS total
 $$) AS (key agtype, total agtype);
-                                                                  QUERY PLAN                                                                   
------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                QUERY PLAN                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((t.id)::agtype), ((count(*)))::agtype
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -4897,27 +4605,22 @@ $$) AS (key agtype, total agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '900'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '900'::agtype))
          Rows Removed by Filter: 13
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '900'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '900'::agtype))
          Rows Removed by Filter: 13
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 901}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '901'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 901}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '901'::agtype))
          Rows Removed by Filter: 13
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-               Filter: ((t.properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(t.properties, '"id"'::agtype, '1900'::agtype))
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1900'::agtype))
                Rows Removed by Filter: 100
-(99 rows)
+(93 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4926,7 +4629,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 900})-[e1:E]->(t:T {id: 1900}),
@@ -4935,10 +4638,9 @@ FROM cypher('wcoj_lowering', $$
     WHERE _ag_enforce_edge_uniqueness3(id(e1), id(e2), id(e3))
     RETURN id(t) AS key, sum(e1.score) AS total
 $$) AS (key agtype, total agtype);
-                                                                  QUERY PLAN                                                                   
------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                QUERY PLAN                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((t.id)::agtype), (age_sum(agtype_access_operator(VARIADIC ARRAY[properties, '"score"'::agtype])))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -5018,27 +4720,22 @@ $$) AS (key agtype, total agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_lowering."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '900'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '900'::agtype))
          Rows Removed by Filter: 13
-   ->  Seq Scan on wcoj_lowering."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '900'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 900}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '900'::agtype))
          Rows Removed by Filter: 13
-   ->  Seq Scan on wcoj_lowering."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 901}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '901'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 901}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '901'::agtype))
          Rows Removed by Filter: 13
    ->  Sort (actual rows=1.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
-               Output: t.id
-               Filter: ((t.properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(t.properties, '"id"'::agtype, '1900'::agtype))
+         ->  Seq Scan on "T" t (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1900'::agtype))
                Rows Removed by Filter: 100
-(101 rows)
+(95 rows)
 
 ROLLBACK;
 BEGIN;
@@ -5268,7 +4965,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_payload_mixed', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -5276,11 +4973,10 @@ FROM cypher('wcoj_payload_mixed', $$
           (s3:S {id: 3})-[e3:E]->(t)
     RETURN id(e1), id(e2), id(e3), id(t)
 $$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=3.00 loops=1)
-   Output: (e1.id)::agtype, (e2.id)::agtype, (e3.id)::agtype, (t.id)::agtype
-   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND (e2.end_id = e3.end_id))
+   Filter: ((end_id = id) AND (end_id = end_id) AND (end_id = end_id))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -5357,33 +5053,20 @@ $$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   Buffers: shared hit=47
-   ->  Seq Scan on wcoj_payload_mixed."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_payload_mixed."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_payload_mixed."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
-         Buffers: shared hit=1
    ->  Sort (actual rows=3.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         Buffers: shared hit=1
-         ->  Seq Scan on wcoj_payload_mixed."T" t (actual rows=3.00 loops=1)
-               Output: t.id
-               Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=40
-(105 rows)
+         ->  Seq Scan on "T" t (actual rows=3.00 loops=1)
+(91 rows)
 
 ROLLBACK;
 SELECT drop_graph('wcoj_payload_mixed', true);
@@ -5460,7 +5143,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_payload_spill', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -5469,10 +5152,9 @@ FROM cypher('wcoj_payload_spill', $$
     WHERE e1.keep = true AND e2.keep = true AND e3.keep = true
     RETURN count(*) AS total
 $$) AS (total agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-   Output: ((count(*)))::agtype
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -5550,25 +5232,20 @@ $$) AS (total agtype);
    Payload Bucket Rows Spilled: 24
    Payload Bucket Bytes Spilled: 2016 bytes
    Spill Bytes: 483360 bytes
-   ->  Seq Scan on wcoj_payload_spill."S" s1 (actual rows=1.00 loops=1)
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_payload_spill."S" s2 (actual rows=1.00 loops=1)
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
          Rows Removed by Filter: 2
-   ->  Seq Scan on wcoj_payload_spill."S" s3 (actual rows=1.00 loops=1)
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
          Rows Removed by Filter: 2
    ->  Sort (actual rows=8.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_payload_spill."T" t (actual rows=8.00 loops=1)
-               Output: t.id
-(97 rows)
+         ->  Seq Scan on "T" t (actual rows=8.00 loops=1)
+(91 rows)
 
 ROLLBACK;
 BEGIN;
@@ -5578,7 +5255,7 @@ SET LOCAL age.wcoj_engine = 'merge';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_payload_spill', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -5588,13 +5265,11 @@ FROM cypher('wcoj_payload_spill', $$
     RETURN e1, id(t)
     LIMIT 1
 $$) AS (e1 agtype, tid agtype);
-                                                                                                                                                                  QUERY PLAN                                                                                                                                                                  
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                     QUERY PLAN                                                                                                                                                     
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Limit (actual rows=1.00 loops=1)
-   Output: (CASE WHEN (e1.id IS NOT NULL) THEN _agtype_build_edge_label('17852'::oid, e1.id, e1.start_id, e1.end_id, e1.properties) ELSE NULL::agtype END), ((t.id)::agtype)
    ->  Custom Scan (AGE WCOJ Multiway Join) (actual rows=1.00 loops=1)
-         Output: CASE WHEN (e1.id IS NOT NULL) THEN _agtype_build_edge_label('17852'::oid, e1.id, e1.start_id, e1.end_id, e1.properties) ELSE NULL::agtype END, (t.id)::agtype
-         Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND agtype_object_field_equals(e1.properties, '"keep"'::agtype, 'true'::agtype) AND (e2.end_id = e3.end_id) AND agtype_object_field_equals(e2.properties, '"keep"'::agtype, 'true'::agtype) AND agtype_object_field_equals(e3.properties, '"keep"'::agtype, 'true'::agtype))
+         Filter: ((end_id = id) AND (end_id = end_id) AND agtype_object_field_equals(properties, '"keep"'::agtype, 'true'::agtype) AND (end_id = end_id) AND agtype_object_field_equals(properties, '"keep"'::agtype, 'true'::agtype) AND agtype_object_field_equals(properties, '"keep"'::agtype, 'true'::agtype))
          WCOJ Algorithm: streaming merge intersection with delayed bag product
          Planned Engine: merge
          Actual Engine: merge
@@ -5673,25 +5348,20 @@ $$) AS (e1 agtype, tid agtype);
          Payload Bucket Rows Spilled: 1
          Payload Bucket Bytes Spilled: 84 bytes
          Spill Bytes: 60252 bytes
-         ->  Seq Scan on wcoj_payload_spill."S" s1 (actual rows=1.00 loops=1)
-               Output: s1.id
-               Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+         ->  Seq Scan on "S" s1 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
                Rows Removed by Filter: 2
-         ->  Seq Scan on wcoj_payload_spill."S" s2 (actual rows=1.00 loops=1)
-               Output: s2.id
-               Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+         ->  Seq Scan on "S" s2 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
                Rows Removed by Filter: 2
-         ->  Seq Scan on wcoj_payload_spill."S" s3 (actual rows=1.00 loops=1)
-               Output: s3.id
-               Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+         ->  Seq Scan on "S" s3 (actual rows=1.00 loops=1)
+               Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
                Rows Removed by Filter: 2
          ->  Sort (actual rows=2.00 loops=1)
-               Output: t.id
                Sort Key: t.id
                Sort Method: quicksort  Memory: 25kB
-               ->  Seq Scan on wcoj_payload_spill."T" t (actual rows=8.00 loops=1)
-                     Output: t.id
-(101 rows)
+               ->  Seq Scan on "T" t (actual rows=8.00 loops=1)
+(94 rows)
 
 ROLLBACK;
 BEGIN;
@@ -5822,7 +5492,7 @@ SET LOCAL age.wcoj_engine = 'leapfrog';
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (VERBOSE, COSTS OFF)
+EXPLAIN (COSTS OFF)
 SELECT *
 FROM cypher('wcoj_mixed', $$
     MATCH (s1:S {id: 1})-[e1:E1]->(t:T),
@@ -5830,11 +5500,10 @@ FROM cypher('wcoj_mixed', $$
           (s3:S {id: 3})-[e3:E3]->(t)
     RETURN id(e1), id(e2), id(e3), id(t)
 $$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
-                                                             QUERY PLAN                                                              
--------------------------------------------------------------------------------------------------------------------------------------
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join)
-   Output: (e1.id)::agtype, (e2.id)::agtype, (e3.id)::agtype, (t.id)::agtype
-   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.start_id) AND (e2.start_id = e3.end_id))
+   Filter: ((end_id = id) AND (end_id = start_id) AND (start_id = end_id))
    WCOJ Algorithm: provider leapfrog intersection with delayed bag product
    Planned Engine: leapfrog
    Actual Engine: leapfrog
@@ -5848,21 +5517,16 @@ $$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
    WCOJ Arity: 4
    Seed Source: 1
    Estimated Postings: 1=1, 2=3, 3=4, 4=1
-   ->  Seq Scan on wcoj_mixed."S" s1
-         Output: s1.id
-         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
-   ->  Seq Scan on wcoj_mixed."S" s2
-         Output: s2.id
-         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
-   ->  Seq Scan on wcoj_mixed."S" s3
-         Output: s3.id
-         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+   ->  Seq Scan on "S" s1
+         Filter: ((properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '1'::agtype))
+   ->  Seq Scan on "S" s2
+         Filter: ((properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '2'::agtype))
+   ->  Seq Scan on "S" s3
+         Filter: ((properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(properties, '"id"'::agtype, '3'::agtype))
    ->  Sort
-         Output: t.id
          Sort Key: t.id
-         ->  Seq Scan on wcoj_mixed."T" t
-               Output: t.id
-(30 rows)
+         ->  Seq Scan on "T" t
+(24 rows)
 
 ROLLBACK;
 BEGIN;
@@ -6064,7 +5728,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (VERBOSE, COSTS OFF)
+EXPLAIN (COSTS OFF)
 SELECT *
 FROM cypher('wcoj_generic', $$
     MATCH (a:N {case:'tri'})-[e1:E {case:'tri'}]->(b:N)
@@ -6073,11 +5737,10 @@ FROM cypher('wcoj_generic', $$
     RETURN id(a), id(b), id(c), id(e1), id(e2), id(e3)
 $$) AS (a agtype, b agtype, c agtype,
         e1 agtype, e2 agtype, e3 agtype);
-                                                                  QUERY PLAN                                                                   
------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                QUERY PLAN                                                                 
+-------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE Generic Multiway Join)
-   Output: (a.id)::agtype, (b.id)::agtype, (c.id)::agtype, (e1.id)::agtype, (e2.id)::agtype, (e3.id)::agtype
-   Filter: (_ag_enforce_edge_uniqueness3(e1.id, e2.id, e3.id) AND (e1.start_id = e3.end_id) AND (e2.end_id = e3.start_id))
+   Filter: (_ag_enforce_edge_uniqueness3(id, id, id) AND (start_id = end_id) AND (end_id = start_id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
    Generic Join Row Goal: 0
@@ -6109,23 +5772,17 @@ $$) AS (a agtype, b agtype, c agtype,
    GHD Descriptor Source: graph-join-match-ir
    Variable Count: 3
    Provider Count: 6
-   ->  Seq Scan on wcoj_generic."N" a
-         Output: a.id
-         Filter: ((a.properties @> '{"case": "tri"}'::agtype) AND agtype_object_field_equals(a.properties, '"case"'::agtype, '"tri"'::agtype))
-   ->  Seq Scan on wcoj_generic."N" b
-         Output: b.id
-   ->  Seq Scan on wcoj_generic."N" c
-         Output: c.id
-   ->  Seq Scan on wcoj_generic."E" e1
-         Output: e1.id, e1.start_id, e1.end_id
-         Filter: agtype_object_field_equals(e1.properties, '"case"'::agtype, '"tri"'::agtype)
-   ->  Seq Scan on wcoj_generic."E" e2
-         Output: e2.id, e2.end_id, e2.start_id
-         Filter: agtype_object_field_equals(e2.properties, '"case"'::agtype, '"tri"'::agtype)
-   ->  Seq Scan on wcoj_generic."E" e3
-         Output: e3.id, e3.end_id, e3.start_id
-         Filter: agtype_object_field_equals(e3.properties, '"case"'::agtype, '"tri"'::agtype)
-(50 rows)
+   ->  Seq Scan on "N" a
+         Filter: ((properties @> '{"case": "tri"}'::agtype) AND agtype_object_field_equals(properties, '"case"'::agtype, '"tri"'::agtype))
+   ->  Seq Scan on "N" b
+   ->  Seq Scan on "N" c
+   ->  Seq Scan on "E" e1
+         Filter: agtype_object_field_equals(properties, '"case"'::agtype, '"tri"'::agtype)
+   ->  Seq Scan on "E" e2
+         Filter: agtype_object_field_equals(properties, '"case"'::agtype, '"tri"'::agtype)
+   ->  Seq Scan on "E" e3
+         Filter: agtype_object_field_equals(properties, '"case"'::agtype, '"tri"'::agtype)
+(43 rows)
 
 ROLLBACK;
 BEGIN;
@@ -6133,7 +5790,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_generic', $$
     MATCH (a:N {case:'self'})-[:E {case:'self'}]->(b:N)
@@ -6141,11 +5798,10 @@ FROM cypher('wcoj_generic', $$
           -[:E {case:'self'}]->(a)
     RETURN id(a), id(b), id(c)
 $$) AS (a agtype, b agtype, c agtype);
-                                                                                                                       QUERY PLAN                                                                                                                        
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                 QUERY PLAN                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE Generic Multiway Join) (actual rows=0.00 loops=1)
-   Output: (a.id)::agtype, (b.id)::agtype, (c.id)::agtype
-   Filter: (_ag_enforce_edge_uniqueness3(_age_default_alias_0.id, _age_default_alias_1.id, _age_default_alias_2.id) AND (_age_default_alias_0.start_id = _age_default_alias_2.end_id) AND (_age_default_alias_1.end_id = _age_default_alias_2.start_id))
+   Filter: (_ag_enforce_edge_uniqueness3(id, id, id) AND (start_id = end_id) AND (end_id = start_id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
    Generic Join Row Goal: 0
@@ -6244,27 +5900,21 @@ $$) AS (a agtype, b agtype, c agtype);
    Rescans: 0
    Peak Generic Join Memory: 140288 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_generic."N" a (actual rows=1.00 loops=1)
-         Output: a.id
-         Filter: ((a.properties @> '{"case": "self"}'::agtype) AND agtype_object_field_equals(a.properties, '"case"'::agtype, '"self"'::agtype))
+   ->  Seq Scan on "N" a (actual rows=1.00 loops=1)
+         Filter: ((properties @> '{"case": "self"}'::agtype) AND agtype_object_field_equals(properties, '"case"'::agtype, '"self"'::agtype))
          Rows Removed by Filter: 20
-   ->  Seq Scan on wcoj_generic."N" b (actual rows=21.00 loops=1)
-         Output: b.id
-   ->  Seq Scan on wcoj_generic."N" c (actual rows=21.00 loops=1)
-         Output: c.id
-   ->  Seq Scan on wcoj_generic."E" _age_default_alias_0 (actual rows=1.00 loops=1)
-         Output: _age_default_alias_0.id, _age_default_alias_0.start_id, _age_default_alias_0.end_id
-         Filter: agtype_object_field_equals(_age_default_alias_0.properties, '"case"'::agtype, '"self"'::agtype)
+   ->  Seq Scan on "N" b (actual rows=21.00 loops=1)
+   ->  Seq Scan on "N" c (actual rows=21.00 loops=1)
+   ->  Seq Scan on "E" _age_default_alias_0 (actual rows=1.00 loops=1)
+         Filter: agtype_object_field_equals(properties, '"case"'::agtype, '"self"'::agtype)
          Rows Removed by Filter: 24
-   ->  Seq Scan on wcoj_generic."E" _age_default_alias_1 (actual rows=1.00 loops=1)
-         Output: _age_default_alias_1.id, _age_default_alias_1.end_id, _age_default_alias_1.start_id
-         Filter: agtype_object_field_equals(_age_default_alias_1.properties, '"case"'::agtype, '"self"'::agtype)
+   ->  Seq Scan on "E" _age_default_alias_1 (actual rows=1.00 loops=1)
+         Filter: agtype_object_field_equals(properties, '"case"'::agtype, '"self"'::agtype)
          Rows Removed by Filter: 24
-   ->  Seq Scan on wcoj_generic."E" _age_default_alias_2 (actual rows=1.00 loops=1)
-         Output: _age_default_alias_2.id, _age_default_alias_2.end_id, _age_default_alias_2.start_id
-         Filter: agtype_object_field_equals(_age_default_alias_2.properties, '"case"'::agtype, '"self"'::agtype)
+   ->  Seq Scan on "E" _age_default_alias_2 (actual rows=1.00 loops=1)
+         Filter: agtype_object_field_equals(properties, '"case"'::agtype, '"self"'::agtype)
          Rows Removed by Filter: 24
-(121 rows)
+(114 rows)
 
 ROLLBACK;
 BEGIN;
@@ -6585,7 +6235,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_generic', $$
     MATCH (a:A)-[f1:F1]->(b:B)-[f2:F2]->(c:C)-[f3:F3]->(d:D)
@@ -6595,8 +6245,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
                                                                                                               QUERY PLAN                                                                                                               
 ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE Generic Multiway Join) (actual rows=128.00 loops=1)
-   Output: (a.id)::agtype, (b.id)::agtype, (c.id)::agtype, (d.id)::agtype, (f1.id)::agtype, (f2.id)::agtype, (f3.id)::agtype
-   Filter: ((f3.end_id = d.id) AND _ag_enforce_edge_uniqueness3(f1.id, f2.id, f3.id))
+   Filter: ((end_id = id) AND _ag_enforce_edge_uniqueness3(id, id, id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
    Generic Join Row Goal: 0
@@ -6695,21 +6344,14 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Rescans: 0
    Peak Generic Join Memory: 152640 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_generic."B" b (actual rows=1.00 loops=1)
-         Output: b.id
-   ->  Seq Scan on wcoj_generic."D" d (actual rows=1.00 loops=1)
-         Output: d.id
-   ->  Seq Scan on wcoj_generic."A" a (actual rows=128.00 loops=1)
-         Output: a.id
-   ->  Seq Scan on wcoj_generic."C" c (actual rows=255.00 loops=1)
-         Output: c.id
-   ->  Seq Scan on wcoj_generic."F1" f1 (actual rows=128.00 loops=1)
-         Output: f1.id, f1.end_id, f1.start_id
-   ->  Seq Scan on wcoj_generic."F2" f2 (actual rows=128.00 loops=1)
-         Output: f2.id, f2.start_id, f2.end_id
-   ->  Seq Scan on wcoj_generic."F3" f3 (actual rows=128.00 loops=1)
-         Output: f3.id, f3.end_id, f3.start_id
-(115 rows)
+   ->  Seq Scan on "B" b (actual rows=1.00 loops=1)
+   ->  Seq Scan on "D" d (actual rows=1.00 loops=1)
+   ->  Seq Scan on "A" a (actual rows=128.00 loops=1)
+   ->  Seq Scan on "C" c (actual rows=255.00 loops=1)
+   ->  Seq Scan on "F1" f1 (actual rows=128.00 loops=1)
+   ->  Seq Scan on "F2" f2 (actual rows=128.00 loops=1)
+   ->  Seq Scan on "F3" f3 (actual rows=128.00 loops=1)
+(107 rows)
 
 ROLLBACK;
 BEGIN;
@@ -6788,7 +6430,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_generic', $$
     MATCH (a:A)-[f1:F1]->(b:B)-[f2:F2]->(c:C)-[f3:F3]->(d:D),
@@ -6800,8 +6442,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, u agtype, v agtype,
                                                                                                                                               QUERY PLAN                                                                                                                                               
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE Generic Multiway Join) (actual rows=128.00 loops=1)
-   Output: (a.id)::agtype, (b.id)::agtype, (c.id)::agtype, (d.id)::agtype, (u.id)::agtype, (v.id)::agtype, (f1.id)::agtype, (f2.id)::agtype, (f3.id)::agtype, (f4.id)::agtype
-   Filter: ((f4.end_id = v.id) AND _ag_enforce_edge_uniqueness3(f1.id, f2.id, f3.id))
+   Filter: ((end_id = id) AND _ag_enforce_edge_uniqueness3(id, id, id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
    Generic Join Row Goal: 0
@@ -6900,40 +6541,17 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, u agtype, v agtype,
    Rescans: 0
    Peak Generic Join Memory: 152640 bytes
    Spill Bytes: 0 bytes
-   Buffers: shared hit=11
-   ->  Seq Scan on wcoj_generic."B" b (actual rows=1.00 loops=1)
-         Output: b.id
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_generic."D" d (actual rows=1.00 loops=1)
-         Output: d.id
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_generic."U" u (actual rows=1.00 loops=1)
-         Output: u.id
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_generic."V" v (actual rows=1.00 loops=1)
-         Output: v.id
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_generic."A" a (actual rows=128.00 loops=1)
-         Output: a.id
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_generic."C" c (actual rows=255.00 loops=1)
-         Output: c.id
-         Buffers: shared hit=2
-   ->  Seq Scan on wcoj_generic."F1" f1 (actual rows=128.00 loops=1)
-         Output: f1.id, f1.end_id, f1.start_id
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_generic."F2" f2 (actual rows=128.00 loops=1)
-         Output: f2.id, f2.start_id, f2.end_id
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_generic."F3" f3 (actual rows=128.00 loops=1)
-         Output: f3.id, f3.end_id, f3.start_id
-         Buffers: shared hit=1
-   ->  Seq Scan on wcoj_generic."F4" f4 (actual rows=1.00 loops=1)
-         Output: f4.id, f4.end_id, f4.start_id
-         Buffers: shared hit=1
- Planning:
-   Buffers: shared hit=40
-(134 rows)
+   ->  Seq Scan on "B" b (actual rows=1.00 loops=1)
+   ->  Seq Scan on "D" d (actual rows=1.00 loops=1)
+   ->  Seq Scan on "U" u (actual rows=1.00 loops=1)
+   ->  Seq Scan on "V" v (actual rows=1.00 loops=1)
+   ->  Seq Scan on "A" a (actual rows=128.00 loops=1)
+   ->  Seq Scan on "C" c (actual rows=255.00 loops=1)
+   ->  Seq Scan on "F1" f1 (actual rows=128.00 loops=1)
+   ->  Seq Scan on "F2" f2 (actual rows=128.00 loops=1)
+   ->  Seq Scan on "F3" f3 (actual rows=128.00 loops=1)
+   ->  Seq Scan on "F4" f4 (actual rows=1.00 loops=1)
+(110 rows)
 
 ROLLBACK;
 BEGIN;
@@ -7054,7 +6672,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_generic', $$
     MATCH (a:A)-[g1:G1]->(b:B)-[g2:G2]->(c:C)-[g3:G3]->(d:D),
@@ -7066,8 +6684,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
                                                                                                                                              QUERY PLAN                                                                                                                                              
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE Generic Multiway Join) (actual rows=128.00 loops=1)
-   Output: (a.id)::agtype, (b.id)::agtype, (c.id)::agtype, (d.id)::agtype, (q.id)::agtype, (g1.id)::agtype, (g2.id)::agtype, (g3.id)::agtype, (g4.id)::agtype
-   Filter: ((g4.end_id = q.id) AND _ag_enforce_edge_uniqueness3(g1.id, g2.id, g3.id))
+   Filter: ((end_id = id) AND _ag_enforce_edge_uniqueness3(id, id, id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
    Generic Join Row Goal: 0
@@ -7166,25 +6783,16 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    Rescans: 0
    Peak Generic Join Memory: 152640 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_generic."B" b (actual rows=1.00 loops=1)
-         Output: b.id
-   ->  Seq Scan on wcoj_generic."D" d (actual rows=1.00 loops=1)
-         Output: d.id
-   ->  Seq Scan on wcoj_generic."Q" q (actual rows=1.00 loops=1)
-         Output: q.id
-   ->  Seq Scan on wcoj_generic."A" a (actual rows=128.00 loops=1)
-         Output: a.id
-   ->  Seq Scan on wcoj_generic."C" c (actual rows=255.00 loops=1)
-         Output: c.id
-   ->  Seq Scan on wcoj_generic."G1" g1 (actual rows=128.00 loops=1)
-         Output: g1.id, g1.end_id, g1.start_id
-   ->  Seq Scan on wcoj_generic."G2" g2 (actual rows=128.00 loops=1)
-         Output: g2.id, g2.start_id, g2.end_id
-   ->  Seq Scan on wcoj_generic."G3" g3 (actual rows=128.00 loops=1)
-         Output: g3.id, g3.end_id, g3.start_id
-   ->  Seq Scan on wcoj_generic."G4" g4 (actual rows=1.00 loops=1)
-         Output: g4.id, g4.end_id, g4.start_id
-(119 rows)
+   ->  Seq Scan on "B" b (actual rows=1.00 loops=1)
+   ->  Seq Scan on "D" d (actual rows=1.00 loops=1)
+   ->  Seq Scan on "Q" q (actual rows=1.00 loops=1)
+   ->  Seq Scan on "A" a (actual rows=128.00 loops=1)
+   ->  Seq Scan on "C" c (actual rows=255.00 loops=1)
+   ->  Seq Scan on "G1" g1 (actual rows=128.00 loops=1)
+   ->  Seq Scan on "G2" g2 (actual rows=128.00 loops=1)
+   ->  Seq Scan on "G3" g3 (actual rows=128.00 loops=1)
+   ->  Seq Scan on "G4" g4 (actual rows=1.00 loops=1)
+(109 rows)
 
 ROLLBACK;
 BEGIN;
@@ -7345,7 +6953,7 @@ SET LOCAL age.enable_wcoj = on;
 SET LOCAL enable_nestloop = off;
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_generic', $$
     MATCH (a:A)-[h1:H1]->(b:B)-[h2:H2]->(c:C)-[h3:H3]->(d:D),
@@ -7360,8 +6968,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
                                                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                                                
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (AGE Generic Multiway Join) (actual rows=128.00 loops=1)
-   Output: (a.id)::agtype, (b.id)::agtype, (c.id)::agtype, (d.id)::agtype, (q.id)::agtype, (r.id)::agtype, (s.id)::agtype, (h1.id)::agtype, (h2.id)::agtype, (h3.id)::agtype, (h4.id)::agtype, (h5.id)::agtype, (h6.id)::agtype
-   Filter: ((r.id = h5.start_id) AND _ag_enforce_edge_uniqueness3(h1.id, h2.id, h3.id))
+   Filter: ((id = start_id) AND _ag_enforce_edge_uniqueness3(id, id, id))
    Generic Join Algorithm: lazy domain views with vectorized intersections and delayed edge bags
    Generic Join Consumer: rows
    Generic Join Row Goal: 0
@@ -7460,33 +7067,20 @@ $$) AS (a agtype, b agtype, c agtype, d agtype, q agtype,
    Rescans: 0
    Peak Generic Join Memory: 152640 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_generic."B" b (actual rows=1.00 loops=1)
-         Output: b.id
-   ->  Seq Scan on wcoj_generic."D" d (actual rows=1.00 loops=1)
-         Output: d.id
-   ->  Seq Scan on wcoj_generic."Q" q (actual rows=1.00 loops=1)
-         Output: q.id
-   ->  Seq Scan on wcoj_generic."R" r (actual rows=1.00 loops=1)
-         Output: r.id
-   ->  Seq Scan on wcoj_generic."S" s (actual rows=1.00 loops=1)
-         Output: s.id
-   ->  Seq Scan on wcoj_generic."A" a (actual rows=128.00 loops=1)
-         Output: a.id
-   ->  Seq Scan on wcoj_generic."C" c (actual rows=255.00 loops=1)
-         Output: c.id
-   ->  Seq Scan on wcoj_generic."H1" h1 (actual rows=128.00 loops=1)
-         Output: h1.id, h1.end_id, h1.start_id
-   ->  Seq Scan on wcoj_generic."H2" h2 (actual rows=128.00 loops=1)
-         Output: h2.id, h2.start_id, h2.end_id
-   ->  Seq Scan on wcoj_generic."H3" h3 (actual rows=128.00 loops=1)
-         Output: h3.id, h3.end_id, h3.start_id
-   ->  Seq Scan on wcoj_generic."H4" h4 (actual rows=1.00 loops=1)
-         Output: h4.id, h4.end_id, h4.start_id
-   ->  Seq Scan on wcoj_generic."H5" h5 (actual rows=1.00 loops=1)
-         Output: h5.id, h5.start_id, h5.end_id
-   ->  Seq Scan on wcoj_generic."H6" h6 (actual rows=1.00 loops=1)
-         Output: h6.id, h6.end_id, h6.start_id
-(127 rows)
+   ->  Seq Scan on "B" b (actual rows=1.00 loops=1)
+   ->  Seq Scan on "D" d (actual rows=1.00 loops=1)
+   ->  Seq Scan on "Q" q (actual rows=1.00 loops=1)
+   ->  Seq Scan on "R" r (actual rows=1.00 loops=1)
+   ->  Seq Scan on "S" s (actual rows=1.00 loops=1)
+   ->  Seq Scan on "A" a (actual rows=128.00 loops=1)
+   ->  Seq Scan on "C" c (actual rows=255.00 loops=1)
+   ->  Seq Scan on "H1" h1 (actual rows=128.00 loops=1)
+   ->  Seq Scan on "H2" h2 (actual rows=128.00 loops=1)
+   ->  Seq Scan on "H3" h3 (actual rows=128.00 loops=1)
+   ->  Seq Scan on "H4" h4 (actual rows=1.00 loops=1)
+   ->  Seq Scan on "H5" h5 (actual rows=1.00 loops=1)
+   ->  Seq Scan on "H6" h6 (actual rows=1.00 loops=1)
+(113 rows)
 
 ROLLBACK;
 BEGIN;
@@ -7622,17 +7216,16 @@ SET LOCAL age.wcoj_engine = 'auto';
 SET LOCAL enable_hashjoin = off;
 SET LOCAL enable_mergejoin = off;
 SET LOCAL enable_memoize = off;
-EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
 SELECT *
 FROM cypher('wcoj_parameterized', $$
     MATCH (s:S)-[e1:E]->(t:T), (s)-[e2:E]->(t)
     RETURN id(s), id(t), id(e1), id(e2)
 $$) AS (sid agtype, tid agtype, e1 agtype, e2 agtype);
-                                                     QUERY PLAN                                                      
----------------------------------------------------------------------------------------------------------------------
+                                          QUERY PLAN                                           
+-----------------------------------------------------------------------------------------------
  Custom Scan (AGE WCOJ Multiway Join) (actual rows=5.00 loops=1)
-   Output: (s.id)::agtype, (t.id)::agtype, (e1.id)::agtype, (e2.id)::agtype
-   Filter: ((e1.end_id = t.id) AND (s.id = e1.start_id) AND (e1.start_id = e2.start_id) AND (e1.end_id = e2.end_id))
+   Filter: ((end_id = id) AND (id = start_id) AND (start_id = start_id) AND (end_id = end_id))
    WCOJ Algorithm: streaming merge intersection with delayed bag product
    Planned Engine: merge
    Actual Engine: merge
@@ -7713,17 +7306,13 @@ $$) AS (sid agtype, tid agtype, e1 agtype, e2 agtype);
    Payload Bucket Rows Spilled: 0
    Payload Bucket Bytes Spilled: 0 bytes
    Spill Bytes: 0 bytes
-   ->  Seq Scan on wcoj_parameterized."S" s (actual rows=3.00 loops=1)
-         Output: s.id
-   ->  Seq Scan on wcoj_parameterized."S" s (actual rows=3.00 loops=1)
-         Output: s.id
+   ->  Seq Scan on "S" s (actual rows=3.00 loops=1)
+   ->  Seq Scan on "S" s (actual rows=3.00 loops=1)
    ->  Sort (actual rows=2.00 loops=1)
-         Output: t.id
          Sort Key: t.id
          Sort Method: quicksort  Memory: 25kB
-         ->  Seq Scan on wcoj_parameterized."T" t (actual rows=2.00 loops=1)
-               Output: t.id
-(93 rows)
+         ->  Seq Scan on "T" t (actual rows=2.00 loops=1)
+(88 rows)
 
 ROLLBACK;
 BEGIN;

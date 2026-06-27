@@ -812,7 +812,8 @@ SELECT * FROM cypher('issue_1446', $$
     MATCH (n)
     RETURN labels(n) AS label, count(*) AS cnt
     ORDER BY label
-$$) AS (label agtype, cnt agtype);
+$$) AS (label agtype, cnt agtype)
+ORDER BY label::text COLLATE "C";
 SELECT * FROM cypher('issue_1446', $$
     MATCH ()-[e]->()
     RETURN count(*) AS edge_count
@@ -834,7 +835,8 @@ SELECT * FROM cypher('issue_1446', $$
     MATCH (n)
     RETURN labels(n) AS label, count(*) AS cnt
     ORDER BY label
-$$) AS (label agtype, cnt agtype);
+$$) AS (label agtype, cnt agtype)
+ORDER BY label::text COLLATE "C";
 SELECT * FROM cypher('issue_1446', $$
     MATCH ()-[e]->()
     RETURN count(*) AS edge_count

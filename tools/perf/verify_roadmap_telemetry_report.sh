@@ -42,6 +42,23 @@ print_check_failure_log()
     fi
 }
 
+print_workload_failure_logs()
+{
+    local log_dir=$1
+    local fallback_lines=$2
+    local log_path
+
+    if ! compgen -G "$log_dir/*.log" >/dev/null; then
+        printf 'no raw workload logs found in %s\n' "$log_dir" >&2
+        return
+    fi
+
+    for log_path in "$log_dir"/*.log; do
+        printf '\nraw workload log: %s\n' "$log_path" >&2
+        print_check_failure_log "$log_path" "$fallback_lines"
+    done
+}
+
 run_plan_check()
 {
     local label=$1
@@ -139,6 +156,8 @@ capture_plan_report()
         printf 'primary raw plan capture: failed (exit %s)\n' "$status" >&2
         printf 'log: %s\n' "$capture_log" >&2
         print_check_failure_log "$capture_log" 60
+        printf 'raw workload log dir: %s\n' "$raw_plan_log_dir" >&2
+        print_workload_failure_logs "$raw_plan_log_dir" 60
         exit "$status"
     fi
 
@@ -174,7 +193,8 @@ run_plan_check "WCOJ completion/cycle/semijoin plan run" \
                "verify_wcoj_roadmap_gates.sh" \
                "$(basename "$wcoj_log")" \
                "WCOJ_ROADMAP_COMPLETION_RAW_PLAN_LOG=$log_dir/raw-wcoj-completion-plans.log" \
-               "WCOJ_ROADMAP_SEMIJOIN_RAW_PLAN_LOG=$log_dir/raw-wcoj-semijoin-plans.log"
+               "WCOJ_ROADMAP_SEMIJOIN_RAW_PLAN_LOG=$log_dir/raw-wcoj-semijoin-plans.log" \
+               "WCOJ_ROADMAP_SEMIRING_SPEEDUP_RAW_PLAN_LOG=$log_dir/raw-wcoj-semiring-speedup-plans.log"
 run_plan_check "WCOJ semiring consumer plan run" \
                "verify_wcoj_semiring_gates.sh" \
                "$(basename "$semiring_log")" \
@@ -197,12 +217,26 @@ printf 'raw_wcoj_completion_plans=%s\n' \
        "$log_dir/raw-wcoj-completion-plans.log"
 printf 'raw_wcoj_semijoin_plans=%s\n' \
        "$log_dir/raw-wcoj-semijoin-plans.log"
+printf 'raw_wcoj_semiring_speedup_plans=%s\n' \
+       "$log_dir/raw-wcoj-semiring-speedup-plans.log"
 printf 'raw_wcoj_semiring_plans=%s\n' \
        "$log_dir/raw-wcoj-semiring-plans.log"
 printf 'raw_generic_join_preservation_plans=%s\n' \
        "$log_dir/raw-generic-join-preservation-plans.log"
 printf 'raw_generic_reduction_plans=%s\n' \
        "$log_dir/raw-generic-reduction-plans.log"
+
+emit_category "speedup summary"
+emit_metric "speedup summary" "dense star" \
+            "$wcoj_log" 'dense_star_speedup=[0-9.]+x'
+emit_metric "speedup summary" "acyclic semijoin" \
+            "$wcoj_log" 'semijoin_speedup=[0-9.]+x'
+emit_metric "speedup summary" "semiring count" \
+            "$wcoj_log" 'semiring_count_speedup=[0-9.]+x'
+emit_metric "speedup summary" "three workload geomean" \
+            "$wcoj_log" 'three_workload_100x_geomean=[0-9.]+x'
+emit_metric "speedup summary" "all speedup geomean" \
+            "$wcoj_log" 'all_speedup_geomean=[0-9.]+x'
 
 emit_category "survivor batching"
 emit_metric "survivor batching" "batch enabled" \
@@ -312,6 +346,21 @@ emit_metric "trie ops" "child range opens" \
             "$preserve_log" 'Trie Child Range Opens: [1-9][0-9]*'
 emit_metric "trie ops" "prefix seeks" \
             "$preserve_log" 'Trie Prefix Range Seeks: [1-9][0-9]*'
+emit_metric "trie ops" "lazy physical provider mode" \
+            "$reduction_log" \
+            'Generic Join Provider Mode: lazy adjacency edge provider .* eager sorted array'
+emit_metric "trie ops" "lazy physical provider" \
+            "$reduction_log" 'Lazy Physical Provider: true'
+emit_metric "trie ops" "lazy physical materialization" \
+            "$reduction_log" 'Provider Full Materialization: false'
+emit_metric "trie ops" "lazy physical reduction builds" \
+            "$reduction_log" 'Lazy Physical Reduction Domain Builds: [1-9][0-9]*'
+emit_metric "trie ops" "lazy physical source keys" \
+            "$reduction_log" 'Lazy Physical Reduction Source Keys: [1-9][0-9]*'
+emit_metric "trie ops" "lazy physical rows scanned" \
+            "$reduction_log" 'Lazy Physical Reduction Rows Scanned: [1-9][0-9]*'
+emit_metric "trie ops" "lazy physical keys produced" \
+            "$reduction_log" 'Lazy Physical Reduction Keys Produced: [1-9][0-9]*'
 
 emit_category "row goals"
 emit_metric "row goals" "limit row goal" \

@@ -189,7 +189,8 @@ rows are visible in that plan, with grep checks kept as secondary guards.
 
 `verify_wcoj_roadmap_gates.sh` runs the release-server gates for the current
 WCOJ roadmap: dense 4-way survivor batching, dense auto-overhead, late-rejection
-cycle Generic Join, and acyclic-chain semijoin reduction.  It rejects
+cycle Generic Join, acyclic-chain semijoin reduction, and semiring count
+execution.  It rejects
 debug/cassert/O0 PostgreSQL builds by default, runs the existing setup and
 benchmark SQL, discards the first sample, computes medians, and fails when a
 threshold is missed.
@@ -206,15 +207,24 @@ Default thresholds are:
 - dense auto overhead: `WCOJ_ROADMAP_MAX_DENSE_OVERHEAD=1.25`
 - late-rejection cycle speedup: `WCOJ_ROADMAP_MIN_CYCLE_SPEEDUP=20`
 - acyclic-chain semijoin speedup: `WCOJ_ROADMAP_MIN_SEMIJOIN_SPEEDUP=100`
+- semiring count speedup: `WCOJ_ROADMAP_MIN_SEMIRING_SPEEDUP=100`
+- dense/semijoin/semiring 100x geometric mean:
+  `WCOJ_ROADMAP_MIN_100X_GEOMEAN=100`
 
 The dense-star speedup compares the current median with the recorded
 pre-batching baseline from `wcoj_survivor_batch_results.md`.  Override
 `WCOJ_ROADMAP_DENSE_BASELINE_MS` when measuring a fresh baseline on the same
 hardware.  Use `WCOJ_ROADMAP_SKIP_COMPLETION_SETUP=1` or
-`WCOJ_ROADMAP_SKIP_SEMIJOIN_SETUP=1` to reuse existing benchmark graphs.
+`WCOJ_ROADMAP_SKIP_SEMIJOIN_SETUP=1` to reuse existing benchmark graphs.  Use
+`WCOJ_ROADMAP_SKIP_SEMIRING_SPEEDUP_SETUP=1` to reuse an existing
+`wcoj_bench_semiring` graph for the speedup check.  Use
+`WCOJ_ROADMAP_SEMIRING_SPEEDUP_FANOUT` to scale the semiring count speedup
+fixture independently from the larger semiring consumer evidence fixture.
 Set `WCOJ_ROADMAP_COMPLETION_RAW_PLAN_LOG=/path/to/completion-plans.log` and
 `WCOJ_ROADMAP_SEMIJOIN_RAW_PLAN_LOG=/path/to/semijoin-plans.log` when the
-threshold gate should also preserve named full raw plan artifacts.
+threshold gate should also preserve named full raw plan artifacts.  Set
+`WCOJ_ROADMAP_SEMIRING_SPEEDUP_RAW_PLAN_LOG=/path/to/semiring-speedup.log` to
+preserve the forced-binary and WCOJ semiring count plans as a separate artifact.
 
 ## WCOJ/Generic Join roadmap gate umbrella
 
@@ -295,11 +305,13 @@ logs beside the Markdown report:
 - `raw-wcoj-completion-plans.log` for WCOJ payload batching, dense star, and
   cycle plans;
 - `raw-wcoj-semijoin-plans.log` for the acyclic semijoin/Yannakakis plans;
+- `raw-wcoj-semiring-speedup-plans.log` for the forced-binary versus WCOJ
+  semiring count speedup plans;
 - `raw-wcoj-semiring-plans.log` for semiring consumers and row goals;
 - `raw-generic-join-preservation-plans.log` for Generic Join GHD/count
   preservation;
-- `raw-generic-reduction-plans.log` for the reduction matrix and Yannakakis
-  step disclosure.
+- `raw-generic-reduction-plans.log` for the reduction matrix, Yannakakis step
+  disclosure, and lazy physical provider reduction plan.
 
 ## Roadmap full plan capture
 
@@ -309,8 +321,8 @@ single Markdown report.  The report opens with complete raw plan sections and
 is printed to stdout by default for direct inspection rather than grep-based
 evidence gating.  It also includes an artifact index for the representative
 WCOJ payload, semiring consumer, Generic Join GHD/count, and Yannakakis
-reduction plan logs.  Set `ROADMAP_PLAN_PRINT_REPORT=0` to retain only the
-file.
+reduction plan logs, including the semiring count speedup comparison.  Set
+`ROADMAP_PLAN_PRINT_REPORT=0` to retain only the file.
 
 ```sh
 ROADMAP_PLAN_LOG_DIR=/tmp/hidden-age-roadmap-plans \
@@ -377,7 +389,11 @@ admits Generic Join for the high-pressure chain, and the leaf-peel semijoin
 order should reduce retained provider rows to at most 1% of the original
 provider rows before enumeration.  The script tees the full raw plan before
 checking secondary telemetry guards, including the Yannakakis step plan and
-applied-step counters.
+applied-step counters.  The same benchmark log also includes a `count(*)`
+consumer plan for the acyclic chain; that full plan locks in lazy physical
+adjacency providers participating in the planned Yannakakis step-domain filter
+without flipping `Provider Full Materialization` back to true, and exposes the
+`Lazy Physical Reduction ...` counters as secondary summary checks.
 
 ```sh
 PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
