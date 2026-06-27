@@ -421,6 +421,7 @@ typedef struct AgeAdjacencyVisiblePayloadKeyCursor
     OffsetNumber delta_offnum;
     AgeAdjacencyPayload payload;
     bool payload_valid;
+    bool payload_from_main;
     bool seen;
 } AgeAdjacencyVisiblePayloadKeyCursor;
 
@@ -6545,6 +6546,7 @@ age_adjacency_visible_payload_run_scan_seed_run_block_payloads(
                 &posting, &scan->scan->target, &cursor->payload))
         {
             cursor->payload_valid = true;
+            cursor->payload_from_main = true;
             direct_seeded++;
         }
         if (cursor->main_remaining == 0)
@@ -6927,6 +6929,7 @@ static bool age_adjacency_visible_payload_run_scan_next_item(
     memset(item, 0, sizeof(*item));
     item->payload = selected->payload;
     item->tag = selected->tag;
+    item->batch.payload_from_main = selected->payload_from_main;
     item->batch.blkno = InvalidBlockNumber;
     item->batch.offnum = InvalidOffsetNumber;
     if (selected->main_shared_run_block_stream != NULL)
@@ -7159,6 +7162,7 @@ age_adjacency_visible_payload_run_scan_fill_shared_stream_root_items(
             item->payload = selected->payload;
             item->tag = selected->tag;
             item->batch.shared_run_block_stream = true;
+            item->batch.payload_from_main = true;
             item->batch.blkno = stream->blkno;
             item->batch.offnum = stream->offnum;
             item->batch.position_count = stream->position_count;
@@ -7255,6 +7259,7 @@ age_adjacency_visible_payload_run_scan_fill_shared_stream_root_items(
             memset(&item->batch, 0, sizeof(item->batch));
             item->tag = selected->tag;
             item->batch.shared_run_block_stream = true;
+            item->batch.payload_from_main = true;
             item->batch.blkno = stream->blkno;
             item->batch.offnum = stream->offnum;
             item->batch.position_count = stream->position_count;
@@ -8020,11 +8025,17 @@ age_adjacency_visible_payload_key_cursor_next(
 
     if (age_adjacency_visible_payload_key_cursor_next_main(scan, cursor,
                                                            payload))
+    {
+        cursor->payload_from_main = true;
         return true;
+    }
 
     if (age_adjacency_visible_payload_key_cursor_next_delta(scan, cursor,
                                                             payload))
+    {
+        cursor->payload_from_main = false;
         return true;
+    }
 
     cursor->key_active = false;
     return false;
@@ -8076,7 +8087,10 @@ age_adjacency_visible_payload_key_cursor_next_main(
             if (age_adjacency_posting_visible_payload(&posting,
                                                       &scan->target,
                                                       payload))
+            {
+                cursor->payload_from_main = true;
                 return true;
+            }
         }
 
         cursor->main_blkno = scan->main_cache.next_blkno;
@@ -8289,7 +8303,10 @@ age_adjacency_visible_payload_key_cursor_next_main_from_locked_page(
             if (age_adjacency_posting_visible_payload(&posting,
                                                       &scan->target,
                                                       payload))
+            {
+                cursor->payload_from_main = true;
                 return true;
+            }
         }
 
         cursor->main_blkno = scan->main_cache.next_blkno;
@@ -8408,6 +8425,7 @@ age_adjacency_visible_payload_key_cursor_next_delta(
                                                       &scan->target,
                                                       payload))
             {
+                cursor->payload_from_main = false;
                 UnlockReleaseBuffer(buf);
                 return true;
             }

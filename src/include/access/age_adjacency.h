@@ -130,6 +130,7 @@ typedef struct AgeAdjacencyVisiblePayloadRunNextBatch
     uint16 position_count;
     int64 source_count;
     bool shared_run_block_stream;
+    bool payload_from_main;
 } AgeAdjacencyVisiblePayloadRunNextBatch;
 
 typedef struct AgeAdjacencyVisiblePayloadRunNextItem

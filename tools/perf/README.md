@@ -172,3 +172,31 @@ The benchmark fixes `join_collapse_limit` and `from_collapse_limit` to one so
 that the binary control retains the written chain order; `age.enable_wcoj` is
 the only path switch.  See `wcoj_semijoin_results.md` for raw samples,
 telemetry, and the multiset correctness contract.
+
+## WCOJ roadmap release gates
+
+`verify_wcoj_roadmap_gates.sh` runs the release-server gates for the current
+WCOJ roadmap: dense 4-way survivor batching, dense auto-overhead, late-rejection
+cycle Generic Join, and acyclic-chain semijoin reduction.  It rejects
+debug/cassert/O0 PostgreSQL builds by default, runs the existing setup and
+benchmark SQL, discards the first sample, computes medians, and fails when a
+threshold is missed.
+
+```sh
+PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
+PGHOST=/tmp PGPORT=55432 PGDATABASE=agebench \
+  tools/perf/verify_wcoj_roadmap_gates.sh
+```
+
+Default thresholds are:
+
+- dense survivor batching speedup: `WCOJ_ROADMAP_MIN_DENSE_SPEEDUP=100`
+- dense auto overhead: `WCOJ_ROADMAP_MAX_DENSE_OVERHEAD=1.25`
+- late-rejection cycle speedup: `WCOJ_ROADMAP_MIN_CYCLE_SPEEDUP=20`
+- acyclic-chain semijoin speedup: `WCOJ_ROADMAP_MIN_SEMIJOIN_SPEEDUP=100`
+
+The dense-star speedup compares the current median with the recorded
+pre-batching baseline from `wcoj_survivor_batch_results.md`.  Override
+`WCOJ_ROADMAP_DENSE_BASELINE_MS` when measuring a fresh baseline on the same
+hardware.  Use `WCOJ_ROADMAP_SKIP_COMPLETION_SETUP=1` or
+`WCOJ_ROADMAP_SKIP_SEMIJOIN_SETUP=1` to reuse existing benchmark graphs.

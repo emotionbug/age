@@ -93,7 +93,10 @@ typedef struct AgeGenericJoinState
     int64 rows_materialized;
     int64 semijoin_passes;
     int64 semijoin_rows_removed;
+    int64 semijoin_provider_rows_after;
+    int64 semijoin_final_domain_keys;
     int64 bindings_completed;
+    int64 candidate_flat_rows;
     int64 candidate_combinations;
     int64 uniqueness_rejects;
     int64 rows_emitted;
@@ -611,6 +614,33 @@ generic_domain_contains(const AgeGenericDomain *domain, graphid key)
 }
 
 static int64
+generic_provider_row_total(AgeGenericJoinState *state)
+{
+    int64 total = 0;
+    int provider_index;
+
+    for (provider_index = 0;
+         provider_index < state->provider_count;
+         provider_index++)
+    {
+        add_generic_counter(&total, state->providers[provider_index].row_count);
+    }
+    return total;
+}
+
+static int64
+generic_domain_key_total(AgeGenericJoinState *state,
+                         const AgeGenericDomain *domains)
+{
+    int64 total = 0;
+    int variable;
+
+    for (variable = 0; variable < state->variable_count; variable++)
+        add_generic_counter(&total, domains[variable].count);
+    return total;
+}
+
+static int64
 filter_generic_provider(AgeGenericProvider *provider,
                         const AgeGenericDomain *domains)
 {
@@ -654,6 +684,8 @@ reduce_generic_providers(AgeGenericJoinState *state)
     reduction_context = AllocSetContextCreate(
         state->css.ss.ps.state->es_query_cxt,
         "AGE Generic Join semijoin reduction", ALLOCSET_SMALL_SIZES);
+    state->semijoin_provider_rows_after = 0;
+    state->semijoin_final_domain_keys = 0;
     for (pass = 0; pass < max_passes; pass++)
     {
         AgeGenericDomain *domains;
@@ -672,6 +704,9 @@ reduce_generic_providers(AgeGenericJoinState *state)
                 state->peak_memory,
                 MemoryContextMemAllocated(state->data_context, true) +
                 MemoryContextMemAllocated(reduction_context, true));
+            state->semijoin_provider_rows_after =
+                generic_provider_row_total(state);
+            state->semijoin_final_domain_keys = 0;
             state->exhausted = true;
             break;
         }
@@ -695,6 +730,10 @@ reduce_generic_providers(AgeGenericJoinState *state)
             }
         }
         add_generic_counter(&state->semijoin_rows_removed, rows_removed);
+        state->semijoin_provider_rows_after =
+            generic_provider_row_total(state);
+        state->semijoin_final_domain_keys =
+            state->exhausted ? 0 : generic_domain_key_total(state, domains);
         if (state->exhausted || rows_removed == 0)
             break;
     }
@@ -766,6 +805,7 @@ static bool
 prepare_generic_bags(AgeGenericJoinState *state)
 {
     int provider_index;
+    int64 flat_rows = 1;
 
     for (provider_index = 0;
          provider_index < state->provider_count;
@@ -792,6 +832,10 @@ prepare_generic_bags(AgeGenericJoinState *state)
         provider->bag_count = end - start;
         if (provider->bag_count <= 0)
             return false;
+        if (flat_rows > PG_INT64_MAX / provider->bag_count)
+            flat_rows = PG_INT64_MAX;
+        else
+            flat_rows *= provider->bag_count;
         state->enumeration_order[provider_index] = provider_index;
         state->combination_indexes[provider_index] = -1;
         state->selected_edge_id_valid[provider_index] = false;
@@ -817,6 +861,7 @@ prepare_generic_bags(AgeGenericJoinState *state)
     state->combination_started = false;
     state->binding_ready = true;
     increment_generic_counter(&state->bindings_completed);
+    add_generic_counter(&state->candidate_flat_rows, flat_rows);
     return true;
 }
 
@@ -1255,16 +1300,30 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
     ExplainPropertyInteger("Provider Count", NULL, state->provider_count, es);
     if (es->analyze)
     {
+        int64 flat_rows_avoided;
+
+        flat_rows_avoided =
+            state->candidate_flat_rows > state->candidate_combinations ?
+            state->candidate_flat_rows - state->candidate_combinations : 0;
+
         ExplainPropertyInteger("Provider Rows Materialized", NULL,
                                state->rows_materialized, es);
         ExplainPropertyInteger("Semijoin Reduction Passes", NULL,
                                state->semijoin_passes, es);
         ExplainPropertyInteger("Semijoin Rows Removed", NULL,
                                state->semijoin_rows_removed, es);
+        ExplainPropertyInteger("Semijoin Provider Rows After", NULL,
+                               state->semijoin_provider_rows_after, es);
+        ExplainPropertyInteger("Semijoin Final Domain Keys", NULL,
+                               state->semijoin_final_domain_keys, es);
         ExplainPropertyInteger("Complete Bindings", NULL,
                                state->bindings_completed, es);
+        ExplainPropertyInteger("Candidate Flat Rows", NULL,
+                               state->candidate_flat_rows, es);
         ExplainPropertyInteger("Candidate Bag Combinations", NULL,
                                state->candidate_combinations, es);
+        ExplainPropertyInteger("Flat Rows Avoided", NULL,
+                               flat_rows_avoided, es);
         ExplainPropertyInteger("Uniqueness Constraint Groups", NULL,
                                state->uniqueness_group_count, es);
         ExplainPropertyInteger("Uniqueness Rejects", NULL,

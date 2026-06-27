@@ -150,6 +150,9 @@ typedef enum AgeWCOJPathPrivateField
     AGE_WCOJ_PATH_PRIVATE_KEY_EXPRS = 0,
     AGE_WCOJ_PATH_PRIVATE_ESTIMATED_POSTINGS,
     AGE_WCOJ_PATH_PRIVATE_PROVIDER_DESCS,
+    AGE_WCOJ_PATH_PRIVATE_CONSUMER,
+    AGE_WCOJ_PATH_PRIVATE_OUTPUT_TYPE,
+    AGE_WCOJ_PATH_PRIVATE_ROW_GOAL,
     AGE_WCOJ_PATH_PRIVATE_COUNT
 } AgeWCOJPathPrivateField;
 
@@ -378,9 +381,13 @@ static Plan *plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
 static List *build_wcoj_custom_scan_tlist(List *custom_plans,
                                           List *key_exprs,
                                           List *provider_descs,
+                                          int first_scan_resno,
                                           List **key_attnos,
                                           List **exec_provider_descs,
                                           List **provider_local_quals);
+static List *build_wcoj_count_custom_scan_tlist(PathTarget *target,
+                                                List *provider_tlist);
+static Expr *wcoj_count_scan_expr(PathTarget *target);
 static List *build_wcoj_plan_tlist(PathTarget *target);
 static List *build_edge_uniqueness_groups(List *restrictinfos,
                                           List *provider_descs,
@@ -390,13 +397,42 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
                                RelOptInfo *output_rel, void *extra);
 static void add_adjacency_count_paths(PlannerInfo *root,
                                       RelOptInfo *output_rel);
+static void add_wcoj_count_paths(PlannerInfo *root,
+                                 RelOptInfo *output_rel);
+static void add_wcoj_limit_row_goal_paths(PlannerInfo *root,
+                                          RelOptInfo *input_rel,
+                                          RelOptInfo *output_rel,
+                                          FinalPathExtraData *extra);
 static CustomPath *make_adjacency_count_path(PlannerInfo *root,
                                               RelOptInfo *output_rel,
                                               AggPath *agg_path);
+static CustomPath *make_wcoj_count_path(PlannerInfo *root,
+                                        RelOptInfo *output_rel,
+                                        AggPath *agg_path);
+static Path *make_wcoj_limit_row_goal_path(PlannerInfo *root,
+                                           RelOptInfo *output_rel,
+                                           LimitPath *limit_path);
+static Path *make_wcoj_final_limit_row_goal_path(
+    PlannerInfo *root, RelOptInfo *output_rel, Path *path,
+    FinalPathExtraData *extra);
+static CustomPath *copy_wcoj_path_with_row_goal(CustomPath *wcoj_path,
+                                                int64 row_goal);
+static bool wcoj_limit_const_int64(Node *node, int64 *value);
+static bool wcoj_limit_offset_is_zero(Node *node);
 static bool extract_adjacency_count_input(AggPath *agg_path,
                                           Path **source_path,
                                           Const **index_oid,
                                           Const **key);
+static bool wcoj_count_path_is_direct(CustomPath *wcoj_path);
+static bool wcoj_count_restrictinfos_supported(CustomPath *wcoj_path);
+static bool wcoj_count_restrictinfo_supported(CustomPath *wcoj_path,
+                                              List *provider_descs,
+                                              RestrictInfo *rinfo);
+static bool wcoj_count_clause_is_key_equality(CustomPath *wcoj_path,
+                                              Node *clause);
+static bool wcoj_count_clause_is_edge_uniqueness(Node *clause);
+static bool wcoj_count_clause_is_provider_local(List *provider_descs,
+                                                Node *clause);
 static Oid adjacency_count_output_type(PathTarget *target);
 static bool is_plain_count_star_aggref(Aggref *aggref);
 static Plan *plan_age_adjacency_count_path(PlannerInfo *root,
@@ -2114,6 +2150,14 @@ find_wcoj_path(RelOptInfo *rel, Relids forbidden_required_outer)
         custom_path = (CustomPath *)path;
         if (custom_path->methods != &age_wcoj_join_path_methods)
             continue;
+        if (list_length(custom_path->custom_private) !=
+            AGE_WCOJ_PATH_PRIVATE_COUNT ||
+            intVal(list_nth(custom_path->custom_private,
+                            AGE_WCOJ_PATH_PRIVATE_CONSUMER)) !=
+                AGE_WCOJ_CONSUMER_ROWS)
+        {
+            continue;
+        }
         if (best == NULL || path->total_cost < best->path.total_cost)
             best = custom_path;
     }
@@ -2404,6 +2448,12 @@ collect_wcoj_side(PlannerInfo *root, RelOptInfo *rel,
     {
         if (list_length(wcoj_path->custom_private) !=
             AGE_WCOJ_PATH_PRIVATE_COUNT)
+        {
+            return false;
+        }
+        if (intVal(list_nth(wcoj_path->custom_private,
+                            AGE_WCOJ_PATH_PRIVATE_CONSUMER)) !=
+            AGE_WCOJ_CONSUMER_ROWS)
         {
             return false;
         }
@@ -3668,6 +3718,12 @@ add_wcoj_join_path(PlannerInfo *root, RelOptInfo *joinrel,
     custom_path->custom_private = list_make3(
         copyObject(key_exprs), copyObject(build.estimated_postings),
         copyObject(build.provider_descs));
+    custom_path->custom_private = lappend(
+        custom_path->custom_private, makeInteger(AGE_WCOJ_CONSUMER_ROWS));
+    custom_path->custom_private = lappend(
+        custom_path->custom_private, make_wcoj_oid_const(InvalidOid));
+    custom_path->custom_private = lappend(
+        custom_path->custom_private, make_int8_const(0));
     custom_path->methods = &age_wcoj_join_path_methods;
 
     add_path(joinrel, (Path *)custom_path);
@@ -3692,6 +3748,7 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
                     (errmsg_internal("AGE property access aggregate rewritten")));
         }
         add_adjacency_count_paths(root, output_rel);
+        add_wcoj_count_paths(root, output_rel);
         add_narrow_typed_collect_paths(root, output_rel);
         add_narrow_array_agg_property_paths(root, output_rel);
         return;
@@ -3704,6 +3761,8 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
                                              (FinalPathExtraData *)extra);
     add_deferred_ordered_property_projection_path(root, input_rel, output_rel,
                                                  (FinalPathExtraData *)extra);
+    add_wcoj_limit_row_goal_paths(root, input_rel, output_rel,
+                                  (FinalPathExtraData *)extra);
 
     if (cypher_detect_simple_property_projection(root, input_rel, output_rel,
                                                  &property_slots,
@@ -3760,6 +3819,586 @@ add_adjacency_count_paths(PlannerInfo *root, RelOptInfo *output_rel)
 
     foreach(lc, new_paths)
         add_path(output_rel, lfirst(lc));
+}
+
+static void
+add_wcoj_count_paths(PlannerInfo *root, RelOptInfo *output_rel)
+{
+    List *new_paths = NIL;
+    ListCell *lc;
+
+    if (root == NULL || output_rel == NULL || output_rel->pathlist == NIL)
+        return;
+
+    foreach(lc, output_rel->pathlist)
+    {
+        Path *path = (Path *)lfirst(lc);
+        CustomPath *count_path;
+
+        if (!IsA(path, AggPath))
+            continue;
+
+        count_path = make_wcoj_count_path(root, output_rel,
+                                          (AggPath *)path);
+        if (count_path != NULL)
+            new_paths = lappend(new_paths, count_path);
+    }
+
+    foreach(lc, new_paths)
+        add_path(output_rel, lfirst(lc));
+}
+
+static void
+add_wcoj_limit_row_goal_paths(PlannerInfo *root, RelOptInfo *input_rel,
+                              RelOptInfo *output_rel,
+                              FinalPathExtraData *extra)
+{
+    List *new_paths = NIL;
+    ListCell *lc;
+
+    if (root == NULL || root->parse == NULL || output_rel == NULL ||
+        output_rel->pathlist == NIL || extra == NULL ||
+        !extra->limit_needed || root->parse->sortClause != NIL ||
+        root->parse->limitOption != LIMIT_OPTION_COUNT ||
+        extra->offset_est != 0 || extra->count_est <= 0)
+    {
+        return;
+    }
+
+    foreach(lc, output_rel->pathlist)
+    {
+        Path *path = lfirst(lc);
+        Path *row_goal_path;
+
+        if (IsA(path, LimitPath))
+            row_goal_path = make_wcoj_limit_row_goal_path(
+                root, output_rel, (LimitPath *)path);
+        else
+            row_goal_path = make_wcoj_final_limit_row_goal_path(
+                root, output_rel, path, extra);
+        if (row_goal_path != NULL)
+            new_paths = lappend(new_paths, row_goal_path);
+    }
+
+    if (input_rel != NULL && input_rel != output_rel)
+    {
+        foreach(lc, input_rel->pathlist)
+        {
+            Path *path = lfirst(lc);
+            Path *row_goal_path;
+
+            row_goal_path = make_wcoj_final_limit_row_goal_path(
+                root, output_rel, path, extra);
+            if (row_goal_path != NULL)
+                new_paths = lappend(new_paths, row_goal_path);
+        }
+    }
+
+    foreach(lc, new_paths)
+        add_path(output_rel, lfirst(lc));
+}
+
+static Path *
+make_wcoj_final_limit_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
+                                    Path *path, FinalPathExtraData *extra)
+{
+    CustomPath *wcoj_path;
+    CustomPath *row_goal_subpath;
+    Path *row_goal_path;
+    PathTarget *projection_target = NULL;
+
+    if (root == NULL || root->parse == NULL || output_rel == NULL ||
+        path == NULL || extra == NULL)
+    {
+        return NULL;
+    }
+    while (IsA(path, ProjectionPath))
+    {
+        ProjectionPath *projection_path = (ProjectionPath *)path;
+
+        projection_target = projection_path->path.pathtarget;
+        path = projection_path->subpath;
+    }
+    if (!IsA(path, CustomPath))
+        return NULL;
+
+    wcoj_path = (CustomPath *)path;
+    if (wcoj_path->methods != &age_wcoj_join_path_methods)
+        return NULL;
+
+    row_goal_subpath = copy_wcoj_path_with_row_goal(wcoj_path,
+                                                    extra->count_est);
+    if (row_goal_subpath == NULL)
+        return NULL;
+    if (projection_target != NULL)
+        row_goal_subpath->path.pathtarget = projection_target;
+
+    row_goal_path = (Path *)create_limit_path(
+        root, output_rel, (Path *)row_goal_subpath,
+        root->parse->limitOffset, root->parse->limitCount,
+        root->parse->limitOption, extra->offset_est, extra->count_est);
+    row_goal_path->total_cost = Max(row_goal_path->startup_cost,
+                                    row_goal_path->total_cost -
+                                    cpu_tuple_cost);
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE WCOJ final limit row-goal path added: "
+                             "row_goal=" INT64_FORMAT
+                             " original_cost=%.2f new_cost=%.2f",
+                             extra->count_est, path->total_cost,
+                             row_goal_path->total_cost)));
+
+    return row_goal_path;
+}
+
+static Path *
+make_wcoj_limit_row_goal_path(PlannerInfo *root, RelOptInfo *output_rel,
+                              LimitPath *limit_path)
+{
+    CustomPath *wcoj_path;
+    CustomPath *row_goal_subpath;
+    LimitPath *row_goal_path;
+    int64 row_goal;
+
+    (void)root;
+
+    if (output_rel == NULL || limit_path == NULL ||
+        limit_path->limitOption != LIMIT_OPTION_COUNT ||
+        !wcoj_limit_const_int64(limit_path->limitCount, &row_goal) ||
+        row_goal <= 0 ||
+        !wcoj_limit_offset_is_zero(limit_path->limitOffset) ||
+        limit_path->subpath == NULL ||
+        !IsA(limit_path->subpath, CustomPath))
+    {
+        return NULL;
+    }
+
+    wcoj_path = (CustomPath *)limit_path->subpath;
+    if (wcoj_path->methods != &age_wcoj_join_path_methods)
+        return NULL;
+
+    row_goal_subpath = copy_wcoj_path_with_row_goal(wcoj_path, row_goal);
+    if (row_goal_subpath == NULL)
+        return NULL;
+
+    row_goal_path = palloc(sizeof(*row_goal_path));
+    memcpy(row_goal_path, limit_path, sizeof(*row_goal_path));
+    row_goal_path->path.pathtype = T_Limit;
+    row_goal_path->path.parent = output_rel;
+    row_goal_path->subpath = (Path *)row_goal_subpath;
+    row_goal_path->path.startup_cost = limit_path->path.startup_cost;
+    row_goal_path->path.total_cost = Max(
+        row_goal_path->path.startup_cost,
+        limit_path->path.total_cost - cpu_tuple_cost);
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE WCOJ limit row-goal path added: "
+                             "row_goal=" INT64_FORMAT
+                             " original_cost=%.2f new_cost=%.2f",
+                             row_goal,
+                             limit_path->path.total_cost,
+                             row_goal_path->path.total_cost)));
+
+    return (Path *)row_goal_path;
+}
+
+static CustomPath *
+copy_wcoj_path_with_row_goal(CustomPath *wcoj_path, int64 row_goal)
+{
+    CustomPath *row_goal_path;
+    Const *existing_row_goal;
+    List *key_exprs;
+    List *estimated_postings;
+    List *provider_descs;
+    Const *output_type;
+    int64 existing_goal;
+    double row_fraction;
+
+    if (wcoj_path == NULL || row_goal <= 0 ||
+        wcoj_path->methods != &age_wcoj_join_path_methods ||
+        list_length(wcoj_path->custom_private) !=
+            AGE_WCOJ_PATH_PRIVATE_COUNT ||
+        intVal(list_nth(wcoj_path->custom_private,
+                        AGE_WCOJ_PATH_PRIVATE_CONSUMER)) !=
+            AGE_WCOJ_CONSUMER_ROWS)
+    {
+        return NULL;
+    }
+
+    existing_row_goal = list_nth_node(
+        Const, wcoj_path->custom_private, AGE_WCOJ_PATH_PRIVATE_ROW_GOAL);
+    if (existing_row_goal->constisnull ||
+        existing_row_goal->consttype != INT8OID)
+    {
+        return NULL;
+    }
+    existing_goal = DatumGetInt64(existing_row_goal->constvalue);
+    if (existing_goal != 0)
+        return NULL;
+
+    key_exprs = list_nth(wcoj_path->custom_private,
+                         AGE_WCOJ_PATH_PRIVATE_KEY_EXPRS);
+    estimated_postings = list_nth(
+        wcoj_path->custom_private,
+        AGE_WCOJ_PATH_PRIVATE_ESTIMATED_POSTINGS);
+    provider_descs = list_nth(
+        wcoj_path->custom_private,
+        AGE_WCOJ_PATH_PRIVATE_PROVIDER_DESCS);
+    output_type = list_nth_node(
+        Const, wcoj_path->custom_private,
+        AGE_WCOJ_PATH_PRIVATE_OUTPUT_TYPE);
+
+    row_goal_path = makeNode(CustomPath);
+    memcpy(row_goal_path, wcoj_path, sizeof(*row_goal_path));
+    row_goal_path->path.rows = clamp_row_est(
+        Min(wcoj_path->path.rows, (double)row_goal));
+    row_fraction = (double)row_goal / Max(wcoj_path->path.rows, 1.0);
+    if (row_fraction < 1.0)
+    {
+        Cost run_cost = Max(wcoj_path->path.total_cost -
+                            wcoj_path->path.startup_cost, 0.0);
+
+        row_goal_path->path.total_cost =
+            row_goal_path->path.startup_cost +
+            run_cost * Max(row_fraction, 0.01) + cpu_tuple_cost;
+        row_goal_path->path.total_cost = Max(
+            row_goal_path->path.startup_cost,
+            Min(row_goal_path->path.total_cost,
+                wcoj_path->path.total_cost));
+    }
+    row_goal_path->custom_paths = list_copy(wcoj_path->custom_paths);
+    row_goal_path->custom_restrictinfo = wcoj_path->custom_restrictinfo;
+    row_goal_path->custom_private = list_make3(
+        copyObject(key_exprs), copyObject(estimated_postings),
+        copyObject(provider_descs));
+    row_goal_path->custom_private = lappend(
+        row_goal_path->custom_private, makeInteger(AGE_WCOJ_CONSUMER_ROWS));
+    row_goal_path->custom_private = lappend(
+        row_goal_path->custom_private, copyObject(output_type));
+    row_goal_path->custom_private = lappend(
+        row_goal_path->custom_private, make_int8_const(row_goal));
+
+    return row_goal_path;
+}
+
+static bool
+wcoj_limit_const_int64(Node *node, int64 *value)
+{
+    Const *constant;
+
+    Assert(value != NULL);
+    *value = 0;
+    if (node == NULL || !IsA(node, Const))
+        return false;
+
+    constant = (Const *)node;
+    if (constant->constisnull)
+        return false;
+
+    switch (constant->consttype)
+    {
+    case INT8OID:
+        *value = DatumGetInt64(constant->constvalue);
+        return true;
+    case INT4OID:
+        *value = (int64)DatumGetInt32(constant->constvalue);
+        return true;
+    case INT2OID:
+        *value = (int64)DatumGetInt16(constant->constvalue);
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool
+wcoj_limit_offset_is_zero(Node *node)
+{
+    int64 value;
+
+    if (node == NULL)
+        return true;
+    if (!wcoj_limit_const_int64(node, &value))
+        return false;
+    return value == 0;
+}
+
+static CustomPath *
+make_wcoj_count_path(PlannerInfo *root, RelOptInfo *output_rel,
+                     AggPath *agg_path)
+{
+    CustomPath *wcoj_path;
+    CustomPath *count_path;
+    Oid output_type;
+    List *key_exprs;
+    List *estimated_postings;
+    List *provider_descs;
+
+    if (root == NULL || output_rel == NULL || agg_path == NULL ||
+        agg_path->aggstrategy != AGG_PLAIN ||
+        agg_path->aggsplit != AGGSPLIT_SIMPLE ||
+        agg_path->groupClause != NIL || agg_path->qual != NIL ||
+        agg_path->subpath == NULL || !IsA(agg_path->subpath, CustomPath))
+    {
+        return NULL;
+    }
+
+    output_type = adjacency_count_output_type(agg_path->path.pathtarget);
+    if (output_type != INT8OID && output_type != AGTYPEOID)
+        return NULL;
+
+    wcoj_path = (CustomPath *)agg_path->subpath;
+    if (wcoj_path->methods != &age_wcoj_join_path_methods ||
+        !wcoj_count_path_is_direct(wcoj_path) ||
+        !wcoj_count_restrictinfos_supported(wcoj_path))
+    {
+        return NULL;
+    }
+
+    key_exprs = list_nth(wcoj_path->custom_private,
+                         AGE_WCOJ_PATH_PRIVATE_KEY_EXPRS);
+    estimated_postings = list_nth(
+        wcoj_path->custom_private,
+        AGE_WCOJ_PATH_PRIVATE_ESTIMATED_POSTINGS);
+    provider_descs = list_nth(
+        wcoj_path->custom_private,
+        AGE_WCOJ_PATH_PRIVATE_PROVIDER_DESCS);
+
+    count_path = makeNode(CustomPath);
+    count_path->path.pathtype = T_CustomScan;
+    count_path->path.parent = output_rel;
+    count_path->path.pathtarget = agg_path->path.pathtarget;
+    count_path->path.param_info = NULL;
+    count_path->path.parallel_aware = false;
+    count_path->path.parallel_safe = false;
+    count_path->path.parallel_workers = 0;
+    count_path->path.pathkeys = NIL;
+    count_path->path.rows = 1.0;
+    count_path->path.disabled_nodes = wcoj_path->path.disabled_nodes;
+    count_path->path.startup_cost = wcoj_path->path.startup_cost;
+    count_path->path.total_cost = wcoj_path->path.total_cost +
+        cpu_operator_cost + cpu_tuple_cost;
+    if (count_path->path.total_cost >= agg_path->path.total_cost)
+    {
+        count_path->path.total_cost = Max(
+            count_path->path.startup_cost,
+            agg_path->path.total_cost - cpu_operator_cost);
+    }
+    count_path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+    count_path->custom_paths = list_copy(wcoj_path->custom_paths);
+    count_path->custom_restrictinfo = wcoj_path->custom_restrictinfo;
+    count_path->custom_private = list_make3(
+        copyObject(key_exprs), copyObject(estimated_postings),
+        copyObject(provider_descs));
+    count_path->custom_private = lappend(
+        count_path->custom_private, makeInteger(AGE_WCOJ_CONSUMER_COUNT));
+    count_path->custom_private = lappend(
+        count_path->custom_private, make_wcoj_oid_const(INT8OID));
+    count_path->custom_private = lappend(
+        count_path->custom_private, make_int8_const(0));
+    count_path->methods = &age_wcoj_join_path_methods;
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE WCOJ count path added: sources=%d "
+                             "source_cost=%.2f count_cost=%.2f "
+                             "output_type=%u",
+                             list_length(wcoj_path->custom_paths),
+                             wcoj_path->path.total_cost,
+                             count_path->path.total_cost, output_type)));
+
+    return count_path;
+}
+
+static bool
+wcoj_count_path_is_direct(CustomPath *wcoj_path)
+{
+    List *key_exprs;
+    List *provider_descs;
+    ListCell *lc;
+    int adjacency_provider_count = 0;
+    int terminal_stream_count = 0;
+
+    if (wcoj_path == NULL ||
+        wcoj_path->path.param_info != NULL ||
+        list_length(wcoj_path->custom_private) !=
+            AGE_WCOJ_PATH_PRIVATE_COUNT)
+    {
+        return false;
+    }
+    if (intVal(list_nth(wcoj_path->custom_private,
+                        AGE_WCOJ_PATH_PRIVATE_CONSUMER)) !=
+        AGE_WCOJ_CONSUMER_ROWS)
+    {
+        return false;
+    }
+
+    key_exprs = list_nth(wcoj_path->custom_private,
+                         AGE_WCOJ_PATH_PRIVATE_KEY_EXPRS);
+    provider_descs = list_nth(
+        wcoj_path->custom_private,
+        AGE_WCOJ_PATH_PRIVATE_PROVIDER_DESCS);
+    if (list_length(key_exprs) != list_length(wcoj_path->custom_paths) ||
+        list_length(provider_descs) != list_length(wcoj_path->custom_paths))
+    {
+        return false;
+    }
+
+    foreach(lc, provider_descs)
+    {
+        List *provider_desc = lfirst_node(List, lc);
+        int provider_kind;
+        Index edge_rti;
+
+        if (list_length(provider_desc) != AGE_WCOJ_PATH_PROVIDER_COUNT)
+        {
+            return false;
+        }
+
+        provider_kind = intVal(list_nth(provider_desc,
+                                        AGE_WCOJ_PATH_PROVIDER_KIND));
+        edge_rti = intVal(list_nth(provider_desc,
+                                   AGE_WCOJ_PATH_PROVIDER_EDGE_RTI));
+        if (provider_kind == AGE_WCOJ_PROVIDER_ADJACENCY)
+        {
+            adjacency_provider_count++;
+            continue;
+        }
+        if (provider_kind == AGE_WCOJ_PROVIDER_PLAN_STREAM && edge_rti == 0)
+        {
+            terminal_stream_count++;
+            continue;
+        }
+        return false;
+    }
+
+    return adjacency_provider_count > 0 && terminal_stream_count <= 1;
+}
+
+static bool
+wcoj_count_restrictinfos_supported(CustomPath *wcoj_path)
+{
+    List *provider_descs;
+    ListCell *lc;
+
+    provider_descs = list_nth(
+        wcoj_path->custom_private,
+        AGE_WCOJ_PATH_PRIVATE_PROVIDER_DESCS);
+    foreach(lc, wcoj_path->custom_restrictinfo)
+    {
+        Node *node = lfirst(lc);
+
+        if (!IsA(node, RestrictInfo) ||
+            !wcoj_count_restrictinfo_supported(
+                wcoj_path, provider_descs, (RestrictInfo *)node))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool
+wcoj_count_restrictinfo_supported(CustomPath *wcoj_path, List *provider_descs,
+                                  RestrictInfo *rinfo)
+{
+    Node *clause;
+
+    if (rinfo == NULL || rinfo->pseudoconstant || rinfo->clause == NULL)
+        return false;
+
+    clause = (Node *)rinfo->clause;
+    if (rinfo->mergeopfamilies != NIL &&
+        wcoj_count_clause_is_key_equality(wcoj_path, clause))
+    {
+        return true;
+    }
+    if (wcoj_count_clause_is_edge_uniqueness(clause))
+        return true;
+    if (wcoj_count_clause_is_provider_local(provider_descs, clause))
+        return true;
+
+    return false;
+}
+
+static bool
+wcoj_count_clause_is_key_equality(CustomPath *wcoj_path, Node *clause)
+{
+    OpExpr *op;
+    Node *left;
+    Node *right;
+    List *key_exprs;
+    ListCell *lc;
+    bool left_is_key = false;
+    bool right_is_key = false;
+
+    if (wcoj_path == NULL || clause == NULL || !IsA(clause, OpExpr) ||
+        list_length(wcoj_path->custom_private) !=
+            AGE_WCOJ_PATH_PRIVATE_COUNT)
+    {
+        return false;
+    }
+    op = castNode(OpExpr, clause);
+    if (list_length(op->args) != 2)
+        return false;
+
+    left = strip_implicit_coercions(linitial(op->args));
+    right = strip_implicit_coercions(lsecond(op->args));
+    key_exprs = list_nth(wcoj_path->custom_private,
+                         AGE_WCOJ_PATH_PRIVATE_KEY_EXPRS);
+    foreach(lc, key_exprs)
+    {
+        Node *key_expr = strip_implicit_coercions(lfirst(lc));
+
+        left_is_key = left_is_key || equal(left, key_expr);
+        right_is_key = right_is_key || equal(right, key_expr);
+        if (left_is_key && right_is_key)
+            return true;
+    }
+    return false;
+}
+
+static bool
+wcoj_count_clause_is_edge_uniqueness(Node *clause)
+{
+    FuncExpr *func;
+    char *name;
+    bool result;
+
+    if (clause == NULL || !IsA(clause, FuncExpr))
+        return false;
+
+    func = castNode(FuncExpr, clause);
+    name = get_func_name(func->funcid);
+    if (name == NULL)
+        return false;
+    result = strncmp(name, "_ag_enforce_edge_uniqueness",
+                     strlen("_ag_enforce_edge_uniqueness")) == 0;
+    pfree(name);
+    return result;
+}
+
+static bool
+wcoj_count_clause_is_provider_local(List *provider_descs, Node *clause)
+{
+    ListCell *desc_cell;
+
+    foreach(desc_cell, provider_descs)
+    {
+        List *provider_desc = lfirst_node(List, desc_cell);
+        List *local_quals;
+        ListCell *qual_cell;
+
+        if (list_length(provider_desc) != AGE_WCOJ_PATH_PROVIDER_COUNT)
+            return false;
+        local_quals = list_nth(provider_desc,
+                               AGE_WCOJ_PATH_PROVIDER_LOCAL_QUALS);
+        foreach(qual_cell, local_quals)
+        {
+            if (equal(lfirst(qual_cell), clause))
+                return true;
+        }
+    }
+    return false;
 }
 
 static CustomPath *
@@ -13492,7 +14131,8 @@ append_wcoj_adjacency_tlist(Plan *child_plan, List *path_desc,
 
 static List *
 build_wcoj_custom_scan_tlist(List *custom_plans, List *key_exprs,
-                             List *provider_descs, List **key_attnos,
+                             List *provider_descs, int first_scan_resno,
+                             List **key_attnos,
                              List **exec_provider_descs,
                              List **provider_local_quals)
 {
@@ -13500,7 +14140,7 @@ build_wcoj_custom_scan_tlist(List *custom_plans, List *key_exprs,
     ListCell *plan_cell;
     ListCell *key_cell;
     ListCell *desc_cell;
-    int scan_resno = 1;
+    int scan_resno = first_scan_resno;
 
     *key_attnos = NIL;
     *exec_provider_descs = NIL;
@@ -13569,6 +14209,71 @@ build_wcoj_custom_scan_tlist(List *custom_plans, List *key_exprs,
     }
 
     return scan_tlist;
+}
+
+static List *
+build_wcoj_count_custom_scan_tlist(PathTarget *target, List *provider_tlist)
+{
+    List *count_tlist;
+    TargetEntry *count_tle;
+
+    if (target == NULL || list_length(target->exprs) != 1)
+        elog(ERROR, "invalid AGE WCOJ count target");
+
+    count_tle = makeTargetEntry(wcoj_count_scan_expr(target), 1,
+                                pstrdup("wcoj_count"), false);
+    if (target->sortgrouprefs != NULL)
+        count_tle->ressortgroupref = target->sortgrouprefs[0];
+    count_tlist = list_make1(count_tle);
+
+    return list_concat(count_tlist, provider_tlist);
+}
+
+static Expr *
+wcoj_count_scan_expr(PathTarget *target)
+{
+    Node *expr;
+
+    if (target == NULL || list_length(target->exprs) != 1)
+        elog(ERROR, "invalid AGE WCOJ count scan target");
+
+    expr = linitial(target->exprs);
+    while (expr != NULL && IsA(expr, RelabelType))
+        expr = (Node *)castNode(RelabelType, expr)->arg;
+
+    if (expr != NULL && IsA(expr, Aggref) &&
+        is_plain_count_star_aggref((Aggref *)expr))
+    {
+        return (Expr *)copyObject(expr);
+    }
+
+    if (expr != NULL && IsA(expr, FuncExpr))
+    {
+        FuncExpr *func = castNode(FuncExpr, expr);
+        char *func_name = get_func_name(func->funcid);
+        Node *arg;
+
+        if (func_name == NULL || strcmp(func_name, "int8_to_agtype") != 0 ||
+            get_func_namespace(func->funcid) != ag_catalog_namespace_id() ||
+            func->funcresulttype != AGTYPEOID ||
+            list_length(func->args) != 1)
+        {
+            if (func_name != NULL)
+                pfree(func_name);
+            elog(ERROR, "invalid AGE WCOJ count scan target");
+        }
+        pfree(func_name);
+
+        arg = linitial(func->args);
+        if (IsA(arg, Aggref) &&
+            is_plain_count_star_aggref((Aggref *)arg))
+        {
+            return (Expr *)copyObject(arg);
+        }
+    }
+
+    elog(ERROR, "invalid AGE WCOJ count scan target");
+    return NULL;
 }
 
 static List *
@@ -13737,6 +14442,11 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
     List *uniqueness_groups;
     List *qual_restrictinfos;
     AgeWCOJEngineKind planned_engine;
+    int consumer_kind;
+    Const *output_type_const;
+    Const *row_goal_const;
+    Oid output_type;
+    int64 row_goal;
 
     (void)root;
     (void)clauses;
@@ -13756,18 +14466,54 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
     provider_descs = list_nth(
         best_path->custom_private,
         AGE_WCOJ_PATH_PRIVATE_PROVIDER_DESCS);
+    consumer_kind = intVal(list_nth(
+        best_path->custom_private, AGE_WCOJ_PATH_PRIVATE_CONSUMER));
+    output_type_const = list_nth_node(
+        Const, best_path->custom_private,
+        AGE_WCOJ_PATH_PRIVATE_OUTPUT_TYPE);
+    row_goal_const = list_nth_node(
+        Const, best_path->custom_private,
+        AGE_WCOJ_PATH_PRIVATE_ROW_GOAL);
     if (list_length(key_exprs) != list_length(custom_plans))
         elog(ERROR, "invalid AGE WCOJ key descriptor");
     if (list_length(estimated_postings) != list_length(custom_plans))
         elog(ERROR, "invalid AGE WCOJ posting estimate descriptor");
     if (list_length(provider_descs) != list_length(custom_plans))
         elog(ERROR, "invalid AGE WCOJ provider descriptor");
+    if ((consumer_kind != AGE_WCOJ_CONSUMER_ROWS &&
+         consumer_kind != AGE_WCOJ_CONSUMER_COUNT) ||
+        output_type_const->constisnull ||
+        output_type_const->consttype != OIDOID)
+    {
+        elog(ERROR, "invalid AGE WCOJ consumer descriptor");
+    }
+    output_type = DatumGetObjectId(output_type_const->constvalue);
+    if (consumer_kind == AGE_WCOJ_CONSUMER_COUNT &&
+        output_type != INT8OID && output_type != AGTYPEOID)
+    {
+        elog(ERROR, "invalid AGE WCOJ count output type %u", output_type);
+    }
+    if (row_goal_const->constisnull || row_goal_const->consttype != INT8OID)
+        elog(ERROR, "invalid AGE WCOJ row goal descriptor");
+    row_goal = DatumGetInt64(row_goal_const->constvalue);
+    if (row_goal < 0 ||
+        (consumer_kind != AGE_WCOJ_CONSUMER_ROWS && row_goal != 0))
+    {
+        elog(ERROR, "invalid AGE WCOJ row goal " INT64_FORMAT, row_goal);
+    }
     planned_engine = choose_wcoj_engine(estimated_postings,
                                          provider_descs);
 
     custom_scan_tlist = build_wcoj_custom_scan_tlist(
-        custom_plans, key_exprs, provider_descs, &key_attnos,
+        custom_plans, key_exprs, provider_descs,
+        consumer_kind == AGE_WCOJ_CONSUMER_COUNT ? 2 : 1,
+        &key_attnos,
         &exec_provider_descs, &provider_local_quals);
+    if (consumer_kind == AGE_WCOJ_CONSUMER_COUNT)
+    {
+        custom_scan_tlist = build_wcoj_count_custom_scan_tlist(
+            best_path->path.pathtarget, custom_scan_tlist);
+    }
     plan_tlist = tlist != NIL ? copyObject(tlist) :
         build_wcoj_plan_tlist(best_path->path.pathtarget);
     qual_restrictinfos = best_path->custom_restrictinfo;
@@ -13783,7 +14529,8 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
     cs->scan.plan.parallel_safe = false;
     cs->scan.plan.async_capable = false;
     cs->scan.plan.targetlist = plan_tlist;
-    cs->scan.plan.qual = extract_actual_clauses(qual_restrictinfos, false);
+    cs->scan.plan.qual = consumer_kind == AGE_WCOJ_CONSUMER_COUNT ?
+        NIL : extract_actual_clauses(qual_restrictinfos, false);
     cs->scan.plan.lefttree = NULL;
     cs->scan.plan.righttree = NULL;
     cs->scan.scanrelid = 0;
@@ -13799,6 +14546,12 @@ plan_age_wcoj_join_path(PlannerInfo *root, RelOptInfo *rel,
                                  copyObject(exec_provider_descs));
     cs->custom_private = lappend(cs->custom_private,
                                  uniqueness_groups);
+    cs->custom_private = lappend(cs->custom_private,
+                                 makeInteger(consumer_kind));
+    cs->custom_private = lappend(cs->custom_private,
+                                 make_wcoj_oid_const(output_type));
+    cs->custom_private = lappend(cs->custom_private,
+                                 copyObject(row_goal_const));
     cs->custom_scan_tlist = custom_scan_tlist;
     cs->custom_relids = NULL;
     cs->methods = &age_wcoj_join_scan_methods;

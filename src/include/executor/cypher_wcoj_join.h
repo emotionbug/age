@@ -38,6 +38,9 @@ typedef enum AgeWCOJJoinPrivateField
     AGE_WCOJ_JOIN_PRIVATE_ESTIMATED_POSTINGS,
     AGE_WCOJ_JOIN_PRIVATE_PROVIDER_DESCS,
     AGE_WCOJ_JOIN_PRIVATE_UNIQUENESS_GROUPS,
+    AGE_WCOJ_JOIN_PRIVATE_CONSUMER,
+    AGE_WCOJ_JOIN_PRIVATE_OUTPUT_TYPE,
+    AGE_WCOJ_JOIN_PRIVATE_ROW_GOAL,
     AGE_WCOJ_JOIN_PRIVATE_COUNT
 } AgeWCOJJoinPrivateField;
 
@@ -46,6 +49,12 @@ typedef enum AgeWCOJProviderKind
     AGE_WCOJ_PROVIDER_PLAN_STREAM = 0,
     AGE_WCOJ_PROVIDER_ADJACENCY
 } AgeWCOJProviderKind;
+
+typedef enum AgeWCOJConsumerKind
+{
+    AGE_WCOJ_CONSUMER_ROWS = 0,
+    AGE_WCOJ_CONSUMER_COUNT
+} AgeWCOJConsumerKind;
 
 /*
  * Executor-safe, node-serializable provider descriptor.  OIDs are Const
