@@ -1899,9 +1899,11 @@ SELECT total FROM cypher('wcoj_lowering', $$
 $$) AS (total agtype);
 
 -- A dense direct-provider star exercises survivor-block payload retrieval with
--- more than one terminal.  Three source postings contain the same 17
--- terminals, so batching replaces 51 survivor-local scan restarts with three
--- tagged source-key scans while preserving one output row per terminal.
+-- more than one terminal.  These edges are inserted after the adjacency index
+-- exists, so the raw plan shows 51 delta payload rows.  Three source postings
+-- contain the same 17 terminals, so batching replaces 51 survivor-local scan
+-- restarts with three tagged source-key scans while preserving one output row
+-- per terminal.
 INSERT INTO wcoj_lowering."S" (id, properties)
 SELECT _graphid(_label_id('wcoj_lowering', 'S'), source_no),
        format('{"id":%s}', source_no)::agtype
@@ -1929,75 +1931,21 @@ SELECT key, total FROM cypher('wcoj_lowering', $$
 $$) AS (key agtype, total agtype)
 ORDER BY key;
 
-DO $wcoj_survivor_batch_telemetry$
-DECLARE
-    plan_text text;
-    has_one_block boolean := false;
-    has_three_batches boolean := false;
-    has_zero_restarts boolean := false;
-    has_three_source_keys boolean := false;
-    has_three_distinct_source_keys boolean := false;
-    has_forty_eight_restarts_avoided boolean := false;
-    has_fifty_one_payload_rows_scanned boolean := false;
-    has_fifty_one_payload_rows boolean := false;
-    has_seventeen_candidate_flat_rows boolean := false;
-    has_zero_flat_rows_avoided boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('age.wcoj_engine', 'merge', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('wcoj_lowering', $cypher$
-            MATCH (s7:S {id: 7})-[e7:E]->(t:T),
-                  (s8:S {id: 8})-[e8:E]->(t),
-                  (s9:S {id: 9})-[e9:E]->(t)
-            RETURN id(e7), id(e8), id(e9), id(t)
-        $cypher$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype)
-    $plan$
-    LOOP
-        has_one_block := has_one_block OR
-            plan_text LIKE '%Survivor Blocks: 1%';
-        has_three_batches := has_three_batches OR
-            plan_text LIKE '%Payload Scan Batches: 3%';
-        has_zero_restarts := has_zero_restarts OR
-            plan_text LIKE '%Payload Scan Restarts: 0%';
-        has_three_source_keys := has_three_source_keys OR
-            plan_text LIKE '%Payload Source Keys Scanned: 3%';
-        has_three_distinct_source_keys := has_three_distinct_source_keys OR
-            plan_text LIKE '%Distinct Source Keys Scanned: 3%';
-        has_forty_eight_restarts_avoided :=
-            has_forty_eight_restarts_avoided OR
-            plan_text LIKE '%Payload Scan Restarts Avoided: 48%';
-        has_fifty_one_payload_rows_scanned :=
-            has_fifty_one_payload_rows_scanned OR
-            plan_text LIKE '%Payload Rows Scanned: 51%';
-        has_fifty_one_payload_rows := has_fifty_one_payload_rows OR
-            plan_text LIKE '%Payload Rows Matched: 51%';
-        has_seventeen_candidate_flat_rows :=
-            has_seventeen_candidate_flat_rows OR
-            plan_text LIKE '%Candidate Flat Rows: 17%';
-        has_zero_flat_rows_avoided := has_zero_flat_rows_avoided OR
-            plan_text LIKE '%Flat Rows Avoided: 0%';
-    END LOOP;
-
-    IF NOT has_one_block OR NOT has_three_batches OR
-       NOT has_zero_restarts OR
-       NOT has_three_source_keys OR NOT has_three_distinct_source_keys OR
-       NOT has_forty_eight_restarts_avoided OR
-       NOT has_fifty_one_payload_rows_scanned OR
-       NOT has_fifty_one_payload_rows OR
-       NOT has_seventeen_candidate_flat_rows OR
-       NOT has_zero_flat_rows_avoided THEN
-        RAISE EXCEPTION 'survivor payload batching telemetry was not observed';
-    END IF;
-    RAISE NOTICE 'wcoj survivor payload batching verified';
-END
-$wcoj_survivor_batch_telemetry$;
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s7:S {id: 7})-[e7:E]->(t:T),
+          (s8:S {id: 8})-[e8:E]->(t),
+          (s9:S {id: 9})-[e9:E]->(t)
+    RETURN id(e7), id(e8), id(e9), id(t)
+$$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype);
+ROLLBACK;
 
 /*
  * A high-multiplicity survivor block can exceed the soft batch budget before
@@ -2819,61 +2767,21 @@ ANALYZE wcoj_payload_mixed."S";
 ANALYZE wcoj_payload_mixed."T";
 ANALYZE wcoj_payload_mixed."E";
 
-DO $wcoj_payload_mixed_telemetry$
-DECLARE
-    plan_text text;
-    has_wcoj boolean := false;
-    has_three_batches boolean := false;
-    has_three_source_keys boolean := false;
-    has_three_distinct_source_keys boolean := false;
-    has_nine_payload_rows_scanned boolean := false;
-    has_nine_payload_rows boolean := false;
-    has_three_candidate_flat_rows boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('age.wcoj_engine', 'merge', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('wcoj_payload_mixed', $cypher$
-            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
-                  (s2:S {id: 2})-[e2:E]->(t),
-                  (s3:S {id: 3})-[e3:E]->(t)
-            RETURN id(e1), id(e2), id(e3), id(t)
-        $cypher$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype)
-    $plan$
-    LOOP
-        has_wcoj := has_wcoj OR
-            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
-        has_three_batches := has_three_batches OR
-            plan_text LIKE '%Payload Scan Batches: 3%';
-        has_three_source_keys := has_three_source_keys OR
-            plan_text LIKE '%Payload Source Keys Scanned: 3%';
-        has_three_distinct_source_keys := has_three_distinct_source_keys OR
-            plan_text LIKE '%Distinct Source Keys Scanned: 3%';
-        has_nine_payload_rows_scanned :=
-            has_nine_payload_rows_scanned OR
-            plan_text LIKE '%Payload Rows Scanned: 9%';
-        has_nine_payload_rows := has_nine_payload_rows OR
-            plan_text LIKE '%Payload Rows Matched: 9%';
-        has_three_candidate_flat_rows :=
-            has_three_candidate_flat_rows OR
-            plan_text LIKE '%Candidate Flat Rows: 3%';
-    END LOOP;
-
-    IF NOT has_wcoj OR NOT has_three_batches OR
-       NOT has_three_source_keys OR NOT has_three_distinct_source_keys OR
-       NOT has_nine_payload_rows_scanned OR NOT has_nine_payload_rows OR
-       NOT has_three_candidate_flat_rows THEN
-        RAISE EXCEPTION 'mixed main/delta payload telemetry was not observed';
-    END IF;
-    RAISE NOTICE 'wcoj mixed main/delta payload telemetry verified';
-END
-$wcoj_payload_mixed_telemetry$;
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_payload_mixed', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(e1), id(e2), id(e3), id(t)
+$$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
+ROLLBACK;
 
 SELECT drop_graph('wcoj_payload_mixed', true);
 

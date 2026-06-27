@@ -19,24 +19,30 @@
 
 #include "postgres.h"
 
+#include "access/detoast.h"
 #include "access/age_adjacency.h"
 #include "catalog/pg_type_d.h"
 #include "commands/explain_format.h"
 #include "commands/explain_state.h"
 #include "common/int.h"
+#include "executor/cypher_factorized_binding.h"
 #include "executor/cypher_generic_join.h"
 #include "executor/executor.h"
 #include "lib/stringinfo.h"
 #include "nodes/pg_list.h"
 #include "utils/agtype.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/graphid.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
+#include "utils/numeric.h"
 
 #define AGE_GENERIC_GALLOPING_MIN_RATIO 8
 #define AGE_GENERIC_PREFIX_RANGE_CACHE_SIZE 8
 #define AGE_GENERIC_PREFIX_RANGE_DIRECTORY_MIN_MISSES 8
+#define AGE_GENERIC_UNIQUENESS_EXACT_PAIR_LIMIT 4096
+#define AGE_GENERIC_SMALL_BAG_ENUMERATOR_LIMIT 4096
 
 typedef struct AgeGenericRow
 {
@@ -98,6 +104,7 @@ struct AgeGenericProvider
     AttrNumber key1_attno;
     AttrNumber key2_attno;
     AttrNumber edge_id_attno;
+    AttrNumber properties_attno;
     AgeGenericProviderPhysicalKind physical_kind;
     Oid adjacency_index_oid;
     int32 adjacency_terminal_label_id;
@@ -259,6 +266,9 @@ struct AgeGenericJoinState
     int *enumeration_order;
     graphid *selected_edge_ids;
     bool *selected_edge_id_valid;
+    AgeBindingFlatEnumerator small_bag_enumerator;
+    int64 *small_bag_row_multiplicities;
+    int small_bag_row_multiplicity_capacity;
     Bitmapset **uniqueness_groups;
     int uniqueness_group_count;
     AgeGenericDomainScratch reduction_scratch;
@@ -324,7 +334,30 @@ struct AgeGenericJoinState
     bool count_executed;
     bool count_emitted;
     int64 count_result;
+    bool count_multiplicity_fast_path;
+    bool count_multiplicity_product_path_used;
+    bool count_multiplicity_enumeration_used;
+    bool count_multiplicity_small_bag_enumerator_used;
+    int64 count_multiplicity_bindings;
+    int64 count_multiplicity_rows;
+    bool small_bag_enumerator_used;
+    int64 small_bag_enumerator_bindings;
+    int64 small_bag_enumerator_candidate_rows;
+    int64 small_bag_enumerator_rows;
     int64 distinct_key_count;
+    int property_aggregate_provider_index;
+    AttrNumber property_aggregate_attno;
+    Datum property_aggregate_key;
+    bool property_aggregate_key_isnull;
+    bool property_aggregate_executed;
+    bool property_aggregate_emitted;
+    bool property_aggregate_has_value;
+    agtype_value property_aggregate_sum_value;
+    agtype *property_aggregate_minmax_value;
+    float8 property_aggregate_avg_sum;
+    int64 property_aggregate_value_input_rows;
+    int64 property_aggregate_input_rows;
+    int64 property_aggregate_null_rows;
     bool exists_executed;
     bool exists_emitted;
     int64 uniqueness_rejects;
@@ -391,12 +424,49 @@ add_generic_count_result(int64 count, int64 increment)
     return result;
 }
 
+static int64
+generic_checked_int64_product(int64 left, int64 right)
+{
+    int64 result;
+
+    if (left < 0 || right < 0 ||
+        pg_mul_s64_overflow(left, right, &result))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                 errmsg("bigint out of range")));
+    }
+    return result;
+}
+
+static int64
+generic_checked_int64_sum(int64 left, int64 right)
+{
+    int64 result;
+
+    if (pg_add_s64_overflow(left, right, &result))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                 errmsg("bigint out of range")));
+    }
+    return result;
+}
+
 static Node *create_age_generic_join_state(CustomScan *cscan);
 static void begin_age_generic_join(CustomScanState *node, EState *estate,
                                    int eflags);
 static TupleTableSlot *exec_age_generic_join(CustomScanState *node);
 static TupleTableSlot *access_age_generic_join(ScanState *node);
 static TupleTableSlot *access_age_generic_count_scan(ScanState *node);
+static TupleTableSlot *access_age_generic_group_count_scan(ScanState *node);
+static TupleTableSlot *access_age_generic_distinct_key_scan(ScanState *node);
+static TupleTableSlot *access_age_generic_sum_property_scan(ScanState *node);
+static TupleTableSlot *store_age_generic_sum_property_result(ScanState *node);
+static TupleTableSlot *access_age_generic_group_sum_property_scan(
+    ScanState *node);
+static TupleTableSlot *store_age_generic_group_sum_property_result(
+    ScanState *node, graphid key);
 static TupleTableSlot *access_age_generic_exists_scan(ScanState *node);
 static bool recheck_age_generic_join(ScanState *node, TupleTableSlot *slot);
 static void end_age_generic_join(CustomScanState *node);
@@ -430,11 +500,29 @@ static void generic_physical_provider_pair_range(AgeGenericJoinState *state,
 static AgeGenericRow *generic_provider_bag_row(AgeGenericProvider *provider,
                                                int local_index);
 static void reduce_generic_providers(AgeGenericJoinState *state);
+static int64 reduce_generic_semijoin_steps(
+    AgeGenericJoinState *state, MemoryContext reduction_context);
 static void reduce_generic_leaf_tail_separators(
     AgeGenericJoinState *state, MemoryContext reduction_context);
 static void initialize_generic_provider_output(
     AgeGenericProvider *provider, TupleDesc tuple_desc, EState *estate);
 static const char *generic_consumer_name(AgeGenericConsumerKind consumer);
+static bool age_generic_property_aggregate_consumer(
+    AgeGenericConsumerKind consumer);
+static bool age_generic_property_minmax_consumer(
+    AgeGenericConsumerKind consumer);
+static bool age_generic_property_avg_consumer(
+    AgeGenericConsumerKind consumer);
+static bool age_generic_group_property_aggregate_consumer(
+    AgeGenericConsumerKind consumer);
+static void reset_age_generic_property_aggregate_value(
+    AgeGenericJoinState *state);
+static void reset_age_generic_property_aggregate_state(
+    AgeGenericJoinState *state);
+static void free_age_generic_agtype_value(agtype_value *value,
+                                          bool needs_free);
+static void free_age_generic_detoasted_agtype(Datum original,
+                                              agtype *value);
 
 const CustomScanMethods age_generic_join_scan_methods = {
     AGE_GENERIC_JOIN_SCAN_NAME,
@@ -476,6 +564,44 @@ generic_provider_desc_oid(List *desc, int field)
     if (constant->constisnull || constant->consttype != OIDOID)
         elog(ERROR, "invalid AGE Generic Join provider OID descriptor");
     return DatumGetObjectId(constant->constvalue);
+}
+
+static bool
+age_generic_property_aggregate_consumer(AgeGenericConsumerKind consumer)
+{
+    return consumer == AGE_GENERIC_CONSUMER_SUM_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_MIN_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_MAX_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_AVG_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY;
+}
+
+static bool
+age_generic_property_minmax_consumer(AgeGenericConsumerKind consumer)
+{
+    return consumer == AGE_GENERIC_CONSUMER_MIN_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_MAX_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY;
+}
+
+static bool
+age_generic_property_avg_consumer(AgeGenericConsumerKind consumer)
+{
+    return consumer == AGE_GENERIC_CONSUMER_AVG_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY;
+}
+
+static bool
+age_generic_group_property_aggregate_consumer(AgeGenericConsumerKind consumer)
+{
+    return consumer == AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY ||
+        consumer == AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY;
 }
 
 static void
@@ -1062,11 +1188,28 @@ initialize_generic_reduction_order(AgeGenericJoinState *state,
         }
         validate_generic_leaf_peel_order(state, provider_descs);
     }
-    else if (state->reduction_order_kind != AGE_GENERIC_REDUCTION_ORDER_NONE ||
-             state->reduction_order_edge_count != 0 ||
-             state->reduction_semijoin_step_count != 0)
+    else
     {
-        elog(ERROR, "invalid AGE Generic Join cyclic reduction order");
+        if (state->reduction_order_kind != AGE_GENERIC_REDUCTION_ORDER_NONE ||
+            state->reduction_order_edge_count != 0)
+        {
+            elog(ERROR, "invalid AGE Generic Join cyclic reduction order");
+        }
+        if (state->reduction_semijoin_step_count != 0)
+        {
+            if (state->reduction_shape !=
+                AGE_GENERIC_REDUCTION_CYCLIC_WITH_TAIL ||
+                state->reduction_semijoin_step_count !=
+                state->reduction_tail_separators * 2 ||
+                state->reduction_semijoin_bottom_up_step_count !=
+                state->reduction_tail_separators ||
+                state->reduction_semijoin_top_down_step_count !=
+                state->reduction_tail_separators)
+            {
+                elog(ERROR,
+                     "invalid AGE Generic Join cyclic semijoin steps");
+            }
+        }
     }
 }
 
@@ -1080,6 +1223,7 @@ create_age_generic_join_state(CustomScan *cscan)
     List *reduction_desc;
     Const *output_type_const;
     Const *row_goal_const;
+    List *consumer_desc;
     int consumer_kind;
     int64 row_goal;
     int row_goal_source;
@@ -1121,6 +1265,8 @@ create_age_generic_join_state(CustomScan *cscan)
         cscan->custom_private, AGE_GENERIC_JOIN_PRIVATE_ROW_GOAL_SOURCE));
     distinct_variable = intVal(list_nth(
         cscan->custom_private, AGE_GENERIC_JOIN_PRIVATE_DISTINCT_VARIABLE));
+    consumer_desc = list_nth(
+        cscan->custom_private, AGE_GENERIC_JOIN_PRIVATE_CONSUMER_DESC);
     if (state->variable_count < 2 ||
         list_length(variable_rtis) != state->variable_count ||
         provider_descs == NIL ||
@@ -1129,6 +1275,17 @@ create_age_generic_join_state(CustomScan *cscan)
         (consumer_kind != AGE_GENERIC_CONSUMER_ROWS &&
          consumer_kind != AGE_GENERIC_CONSUMER_COUNT &&
          consumer_kind != AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_DISTINCT_KEY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_COUNT &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_SUM_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_MIN_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_MAX_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_AVG_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY &&
          consumer_kind != AGE_GENERIC_CONSUMER_EXISTS &&
          consumer_kind != AGE_GENERIC_CONSUMER_LIMIT) ||
         output_type_const->constisnull ||
@@ -1145,6 +1302,7 @@ create_age_generic_join_state(CustomScan *cscan)
         DatumGetObjectId(output_type_const->constvalue);
     state->row_goal = row_goal;
     state->distinct_variable = distinct_variable;
+    state->property_aggregate_provider_index = -1;
     if (state->consumer_kind == AGE_GENERIC_CONSUMER_ROWS ||
         state->consumer_kind == AGE_GENERIC_CONSUMER_LIMIT)
     {
@@ -1153,12 +1311,66 @@ create_age_generic_join_state(CustomScan *cscan)
     }
     else if ((state->consumer_kind == AGE_GENERIC_CONSUMER_COUNT ||
               state->consumer_kind ==
-              AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY) &&
+              AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY ||
+              state->consumer_kind == AGE_GENERIC_CONSUMER_GROUP_COUNT ||
+              state->consumer_kind ==
+              AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY) &&
              state->consumer_output_type != INT8OID &&
              state->consumer_output_type != AGTYPEOID)
     {
         elog(ERROR, "invalid AGE Generic Join count output type %u",
              state->consumer_output_type);
+    }
+    else if (state->consumer_kind == AGE_GENERIC_CONSUMER_DISTINCT_KEY &&
+             state->consumer_output_type != GRAPHIDOID &&
+             state->consumer_output_type != INT8OID &&
+             state->consumer_output_type != AGTYPEOID)
+    {
+        elog(ERROR, "invalid AGE Generic Join distinct-key output type %u",
+             state->consumer_output_type);
+    }
+    else if (age_generic_property_aggregate_consumer(
+                 state->consumer_kind))
+    {
+        int provider_index;
+        AttrNumber properties_attno;
+        Const *key_const;
+        bool avg_consumer =
+            age_generic_property_avg_consumer(state->consumer_kind);
+
+        if ((!avg_consumer && state->consumer_output_type != AGTYPEOID) ||
+            (avg_consumer &&
+             state->consumer_output_type != AGTYPEOID &&
+             state->consumer_output_type != FLOAT8OID) ||
+            list_length(consumer_desc) != AGE_GENERIC_SUM_PROPERTY_COUNT)
+        {
+            elog(ERROR,
+                 "invalid AGE Generic Join property aggregate descriptor");
+        }
+        provider_index = intVal(list_nth(
+            consumer_desc, AGE_GENERIC_SUM_PROPERTY_PROVIDER_INDEX));
+        key_const = list_nth_node(
+            Const, consumer_desc, AGE_GENERIC_SUM_PROPERTY_KEY);
+        properties_attno = (AttrNumber)intVal(list_nth(
+            consumer_desc,
+            AGE_GENERIC_SUM_PROPERTY_PROPERTIES_ATTNO));
+        if (provider_index < 0 ||
+            provider_index >= list_length(provider_descs) ||
+            key_const->constisnull ||
+            key_const->consttype != AGTYPEOID ||
+            properties_attno <= 0)
+        {
+            elog(ERROR,
+                 "invalid AGE Generic Join property aggregate key "
+                 "descriptor");
+        }
+
+        state->property_aggregate_provider_index = provider_index;
+        state->property_aggregate_attno = properties_attno;
+        state->property_aggregate_key =
+            datumCopy(key_const->constvalue, key_const->constbyval,
+                      key_const->constlen);
+        state->property_aggregate_key_isnull = false;
     }
     else if (state->consumer_kind == AGE_GENERIC_CONSUMER_EXISTS &&
              state->consumer_output_type != AGTYPEOID)
@@ -1182,12 +1394,24 @@ create_age_generic_join_state(CustomScan *cscan)
         elog(ERROR, "invalid AGE Generic Join row goal " INT64_FORMAT,
              row_goal);
     }
-    if ((state->consumer_kind ==
-         AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY &&
+    if (((state->consumer_kind ==
+          AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY ||
+          state->consumer_kind == AGE_GENERIC_CONSUMER_DISTINCT_KEY ||
+          state->consumer_kind == AGE_GENERIC_CONSUMER_GROUP_COUNT ||
+          state->consumer_kind ==
+          AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY ||
+          age_generic_group_property_aggregate_consumer(
+              state->consumer_kind)) &&
          (distinct_variable < 0 ||
           distinct_variable >= state->variable_count)) ||
         (state->consumer_kind !=
          AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY &&
+         state->consumer_kind != AGE_GENERIC_CONSUMER_DISTINCT_KEY &&
+         state->consumer_kind != AGE_GENERIC_CONSUMER_GROUP_COUNT &&
+         state->consumer_kind !=
+         AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY &&
+         !age_generic_group_property_aggregate_consumer(
+             state->consumer_kind) &&
          distinct_variable != -1))
     {
         elog(ERROR, "invalid AGE Generic Join distinct variable %d",
@@ -3187,6 +3411,195 @@ generic_provider_row_key_for_variable(AgeGenericProvider *provider,
     return false;
 }
 
+static graphid *
+build_generic_semijoin_step_domain(AgeGenericJoinState *state,
+                                   AgeGenericSemijoinStepPlan *step,
+                                   const AgeGenericDomain *domains,
+                                   MemoryContext context,
+                                   int *domain_count)
+{
+    AgeGenericProvider *provider;
+    graphid *domain;
+    int row_index;
+    int output_count = 0;
+    int count = 0;
+    MemoryContext oldcontext;
+
+    *domain_count = 0;
+    if (step == NULL ||
+        step->provider_index < 0 ||
+        step->provider_index >= state->provider_count ||
+        domains[step->from_variable].count <= 0)
+    {
+        return NULL;
+    }
+
+    provider = &state->providers[step->provider_index];
+    if (provider->row_count <= 0)
+        return NULL;
+
+    oldcontext = MemoryContextSwitchTo(context);
+    domain = palloc(sizeof(graphid) * provider->row_count);
+    MemoryContextSwitchTo(oldcontext);
+
+    for (row_index = 0; row_index < provider->row_count; row_index++)
+    {
+        AgeGenericRow *row = &provider->rows[row_index];
+        graphid from_key;
+        graphid key;
+
+        if (!generic_provider_row_key_for_variable(
+                provider, row, step->from_variable, &from_key) ||
+            !generic_provider_row_key_for_variable(
+                provider, row, step->key_variable, &key))
+        {
+            elog(ERROR, "invalid AGE Generic Join semijoin step row");
+        }
+        if (!generic_domain_contains(&domains[step->from_variable],
+                                     from_key))
+        {
+            continue;
+        }
+        domain[count++] = key;
+    }
+
+    if (count <= 0)
+        return NULL;
+    if (count > 1)
+        qsort(domain, count, sizeof(graphid), compare_generic_graphids);
+    for (row_index = 0; row_index < count; row_index++)
+    {
+        if (output_count == 0 ||
+            domain[row_index] != domain[output_count - 1])
+        {
+            domain[output_count++] = domain[row_index];
+        }
+    }
+    *domain_count = output_count;
+    return domain;
+}
+
+static int64
+filter_generic_providers_for_semijoin_step(
+    AgeGenericJoinState *state, AgeGenericSemijoinStepPlan *step,
+    const AgeGenericDomain *domains, MemoryContext context)
+{
+    AgeGenericDomain step_domain;
+    graphid *domain_keys;
+    int domain_count;
+    int provider_index;
+    int64 rows_removed = 0;
+
+    domain_keys = build_generic_semijoin_step_domain(
+        state, step, domains, context, &domain_count);
+    if (domain_count <= 0)
+    {
+        state->exhausted = true;
+        return 0;
+    }
+
+    step_domain.keys = domain_keys;
+    step_domain.count = domain_count;
+    for (provider_index = 0;
+         provider_index < state->provider_count;
+         provider_index++)
+    {
+        AgeGenericProvider *provider = &state->providers[provider_index];
+
+        if (!generic_provider_has_variable(provider, step->to_variable))
+            continue;
+        rows_removed += filter_generic_provider_on_variable(
+            provider, step->to_variable, &step_domain);
+        if (provider->row_count <= 0)
+        {
+            state->exhausted = true;
+            break;
+        }
+    }
+    return rows_removed;
+}
+
+static bool
+generic_cyclic_semijoin_steps_applicable(AgeGenericJoinState *state)
+{
+    return state->reduction_shape == AGE_GENERIC_REDUCTION_CYCLIC_WITH_TAIL &&
+        state->reduction_order_kind == AGE_GENERIC_REDUCTION_ORDER_NONE &&
+        state->reduction_order_edge_count == 0 &&
+        state->reduction_semijoin_steps != NULL &&
+        state->reduction_semijoin_step_count ==
+        state->reduction_tail_separators * 2 &&
+        state->reduction_semijoin_bottom_up_step_count ==
+        state->reduction_tail_separators &&
+        state->reduction_semijoin_top_down_step_count ==
+        state->reduction_tail_separators;
+}
+
+static int64
+reduce_generic_semijoin_steps(AgeGenericJoinState *state,
+                              MemoryContext reduction_context)
+{
+    MemoryContext step_context;
+    int step_index;
+    int64 total_rows_removed = 0;
+    bool bottom_up_pass = false;
+    bool top_down_pass = false;
+
+    if (!generic_cyclic_semijoin_steps_applicable(state))
+        return 0;
+
+    step_context = AllocSetContextCreate(
+        reduction_context,
+        "AGE Generic Join semijoin step domains",
+        ALLOCSET_SMALL_SIZES);
+    for (step_index = 0;
+         step_index < state->reduction_semijoin_step_count;
+         step_index++)
+    {
+        AgeGenericSemijoinStepPlan *step =
+            &state->reduction_semijoin_steps[step_index];
+        AgeGenericDomain *domains;
+        int64 rows_removed;
+
+        MemoryContextReset(step_context);
+        domains = build_generic_domains_in_context(state, step_context);
+        if (domains == NULL)
+        {
+            state->exhausted = true;
+            break;
+        }
+
+        rows_removed = filter_generic_providers_for_semijoin_step(
+            state, step, domains, step_context);
+        increment_generic_counter(&state->semijoin_steps_applied);
+        if (step->phase == AGE_GENERIC_SEMIJOIN_STEP_BOTTOM_UP)
+        {
+            bottom_up_pass = true;
+            increment_generic_counter(
+                &state->semijoin_bottom_up_steps_applied);
+            add_generic_counter(&state->semijoin_bottom_up_rows_removed,
+                                rows_removed);
+        }
+        else
+        {
+            top_down_pass = true;
+            increment_generic_counter(
+                &state->semijoin_top_down_steps_applied);
+            add_generic_counter(&state->semijoin_top_down_rows_removed,
+                                rows_removed);
+        }
+        add_generic_counter(&total_rows_removed, rows_removed);
+        if (state->exhausted)
+            break;
+    }
+
+    if (bottom_up_pass)
+        increment_generic_counter(&state->semijoin_bottom_up_passes);
+    if (top_down_pass)
+        increment_generic_counter(&state->semijoin_top_down_passes);
+    MemoryContextDelete(step_context);
+    return total_rows_removed;
+}
+
 static int
 generic_ghd_path_bag_internal_variable(AgeGenericGHDBagPlan *bag,
                                        int separator_var1,
@@ -3795,12 +4208,28 @@ reduce_generic_providers(AgeGenericJoinState *state)
     MemoryContext reduction_context;
     int max_passes = generic_semijoin_pass_budget(state);
     int pass;
+    int64 step_rows_removed;
 
     reduction_context = AllocSetContextCreate(
         state->css.ss.ps.state->es_query_cxt,
         "AGE Generic Join semijoin reduction", ALLOCSET_SMALL_SIZES);
     state->semijoin_provider_rows_after = 0;
     state->semijoin_final_domain_keys = 0;
+    step_rows_removed = reduce_generic_semijoin_steps(
+        state, reduction_context);
+    add_generic_counter(&state->semijoin_rows_removed, step_rows_removed);
+    if (state->exhausted)
+    {
+        state->peak_memory = Max(
+            state->peak_memory,
+            MemoryContextMemAllocated(state->data_context, true) +
+            MemoryContextMemAllocated(reduction_context, true));
+        state->semijoin_provider_rows_after =
+            generic_provider_row_total(state);
+        state->semijoin_final_domain_keys = 0;
+        MemoryContextDelete(reduction_context);
+        return;
+    }
     reduce_generic_leaf_tail_separators(state, reduction_context);
     if (!state->exhausted)
         reduce_generic_pair_ghd_separators(state, reduction_context);
@@ -4144,6 +4573,924 @@ next_generic_combination(AgeGenericJoinState *state)
     return false;
 }
 
+static bool
+age_generic_uniqueness_may_reject(AgeGenericJoinState *state)
+{
+    int left;
+    int right;
+
+    if (state->uniqueness_group_count <= 0)
+        return false;
+
+    for (left = 0; left < state->provider_count; left++)
+    {
+        for (right = left + 1; right < state->provider_count; right++)
+        {
+            if (bms_overlap(state->uniqueness_groups[left],
+                            state->uniqueness_groups[right]))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool
+generic_provider_bag_single_edge_label(AgeGenericProvider *provider,
+                                       int32 *label_id)
+{
+    int local_index;
+    bool found = false;
+    int32 found_label = INVALID_LABEL_ID;
+
+    for (local_index = 0; local_index < provider->bag_count; local_index++)
+    {
+        AgeGenericRow *row = generic_provider_bag_row(provider,
+                                                      local_index);
+        int32 row_label;
+
+        if (!row->edge_id_valid)
+            return false;
+        row_label = GET_LABEL_ID(row->edge_id);
+        if (!label_id_is_valid(row_label))
+            return false;
+        if (!found)
+        {
+            found = true;
+            found_label = row_label;
+        }
+        else if (found_label != row_label)
+            return false;
+    }
+
+    if (!found)
+        return false;
+    *label_id = found_label;
+    return true;
+}
+
+static bool
+generic_provider_bag_has_common_edge_id(AgeGenericProvider *left,
+                                        AgeGenericProvider *right)
+{
+    int left_index;
+
+    for (left_index = 0; left_index < left->bag_count; left_index++)
+    {
+        AgeGenericRow *left_row = generic_provider_bag_row(left, left_index);
+        int right_index;
+
+        if (!left_row->edge_id_valid)
+            continue;
+        for (right_index = 0; right_index < right->bag_count; right_index++)
+        {
+            AgeGenericRow *right_row =
+                generic_provider_bag_row(right, right_index);
+
+            if (right_row->edge_id_valid &&
+                left_row->edge_id == right_row->edge_id)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool
+generic_provider_bags_may_share_edge_id(AgeGenericProvider *left,
+                                        AgeGenericProvider *right)
+{
+    int32 left_label;
+    int32 right_label;
+    int64 pair_count;
+
+    if (left->bag_count <= 0 || right->bag_count <= 0)
+        return false;
+    if (generic_provider_bag_single_edge_label(left, &left_label) &&
+        generic_provider_bag_single_edge_label(right, &right_label) &&
+        left_label != right_label)
+    {
+        return false;
+    }
+
+    if (left->bag_count >
+        AGE_GENERIC_UNIQUENESS_EXACT_PAIR_LIMIT / right->bag_count)
+    {
+        return true;
+    }
+    pair_count = (int64)left->bag_count * right->bag_count;
+    if (pair_count > AGE_GENERIC_UNIQUENESS_EXACT_PAIR_LIMIT)
+        return true;
+
+    return generic_provider_bag_has_common_edge_id(left, right);
+}
+
+static bool
+age_generic_active_binding_uniqueness_may_reject(AgeGenericJoinState *state)
+{
+    int left;
+    int right;
+
+    for (left = 0; left < state->provider_count; left++)
+    {
+        for (right = left + 1; right < state->provider_count; right++)
+        {
+            if (!bms_overlap(state->uniqueness_groups[left],
+                             state->uniqueness_groups[right]))
+            {
+                continue;
+            }
+            if (generic_provider_bags_may_share_edge_id(
+                    &state->providers[left], &state->providers[right]))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool
+age_generic_count_binding_product_safe(AgeGenericJoinState *state,
+                                       bool uniqueness_may_reject)
+{
+    return !uniqueness_may_reject ||
+        !age_generic_active_binding_uniqueness_may_reject(state);
+}
+
+static int64
+count_age_generic_binding_product(AgeGenericJoinState *state)
+{
+    int64 product = 1;
+    int provider_index;
+
+    for (provider_index = 0;
+         provider_index < state->provider_count;
+         provider_index++)
+    {
+        AgeGenericProvider *provider = &state->providers[provider_index];
+
+        if (provider->bag_count <= 0)
+            return 0;
+        product = generic_checked_int64_product(product,
+                                                provider->bag_count);
+    }
+    return product;
+}
+
+static bool
+age_generic_binding_product_within_limit(AgeGenericJoinState *state,
+                                         int64 limit, int64 *product)
+{
+    int64 result = 1;
+    int provider_index;
+
+    if (limit <= 0)
+        return false;
+    for (provider_index = 0;
+         provider_index < state->provider_count;
+         provider_index++)
+    {
+        AgeGenericProvider *provider = &state->providers[provider_index];
+
+        if (provider->bag_count <= 0)
+            return false;
+        if (provider->bag_count > limit ||
+            result > limit / provider->bag_count)
+        {
+            return false;
+        }
+        result *= provider->bag_count;
+    }
+
+    *product = result;
+    return true;
+}
+
+static int
+age_generic_provider_bag_count(void *callback_state, int provider_index)
+{
+    AgeGenericJoinState *state = callback_state;
+
+    if (state == NULL || provider_index < 0 ||
+        provider_index >= state->provider_count)
+    {
+        elog(ERROR, "invalid AGE Generic Join small-bag provider index");
+    }
+    return state->providers[provider_index].bag_count;
+}
+
+static bool
+age_generic_provider_bag_edge_id(void *callback_state, int provider_index,
+                                 int tuple_index, graphid *edge_id)
+{
+    AgeGenericJoinState *state = callback_state;
+    AgeGenericProvider *provider;
+    AgeGenericRow *row;
+
+    if (state == NULL || provider_index < 0 ||
+        provider_index >= state->provider_count)
+    {
+        elog(ERROR, "invalid AGE Generic Join small-bag provider index");
+    }
+    provider = &state->providers[provider_index];
+    if (tuple_index < 0 || tuple_index >= provider->bag_count)
+        elog(ERROR, "invalid AGE Generic Join small-bag row index");
+
+    row = generic_provider_bag_row(provider, tuple_index);
+    if (!row->edge_id_valid)
+        return false;
+    *edge_id = row->edge_id;
+    return true;
+}
+
+static bool
+begin_age_generic_small_bag_enumerator(AgeGenericJoinState *state,
+                                       int64 *candidate_rows,
+                                       int64 *uniqueness_rejects_before)
+{
+    int64 product;
+
+    if (!state->binding_ready)
+        return false;
+    if (!age_generic_binding_product_within_limit(
+            state, AGE_GENERIC_SMALL_BAG_ENUMERATOR_LIMIT, &product))
+    {
+        return false;
+    }
+
+    *candidate_rows = age_binding_begin_flat_enumerator(
+        &state->small_bag_enumerator, age_generic_provider_bag_count,
+        age_generic_provider_bag_edge_id, state, state->uniqueness_groups);
+    if (*candidate_rows != product)
+        elog(ERROR, "AGE Generic Join small-bag cardinality mismatch");
+    *uniqueness_rejects_before =
+        age_binding_flat_enumerator_uniqueness_rejects(
+            &state->small_bag_enumerator);
+
+    state->small_bag_enumerator_used = true;
+    increment_generic_counter(&state->small_bag_enumerator_bindings);
+    add_generic_counter(&state->small_bag_enumerator_candidate_rows,
+                        *candidate_rows);
+    return true;
+}
+
+static void
+finish_age_generic_small_bag_enumerator(
+    AgeGenericJoinState *state, int64 accepted_rows,
+    int64 uniqueness_rejects_before)
+{
+    int64 uniqueness_rejects_after =
+        age_binding_flat_enumerator_uniqueness_rejects(
+            &state->small_bag_enumerator);
+    int64 uniqueness_reject_delta =
+        uniqueness_rejects_after - uniqueness_rejects_before;
+
+    add_generic_counter(&state->candidate_combinations, accepted_rows);
+    add_generic_counter(&state->consumer_flat_rows_avoided, accepted_rows);
+    add_generic_counter(&state->small_bag_enumerator_rows, accepted_rows);
+    add_generic_counter(&state->uniqueness_rejects, uniqueness_reject_delta);
+    state->binding_ready = false;
+    state->combination_started = false;
+}
+
+static bool
+count_age_generic_small_binding(AgeGenericJoinState *state, int64 *rows)
+{
+    int64 candidate_rows;
+    int64 uniqueness_rejects_before;
+    int64 accepted_rows = 0;
+
+    if (!begin_age_generic_small_bag_enumerator(
+            state, &candidate_rows, &uniqueness_rejects_before))
+    {
+        return false;
+    }
+
+    while (age_binding_flat_enumerator_next(&state->small_bag_enumerator))
+        accepted_rows = add_generic_count_result(accepted_rows, 1);
+
+    finish_age_generic_small_bag_enumerator(
+        state, accepted_rows, uniqueness_rejects_before);
+    *rows = accepted_rows;
+    return true;
+}
+
+static void
+free_age_generic_agtype_value(agtype_value *value, bool needs_free)
+{
+    if (needs_free)
+        pfree_agtype_value_content(value);
+}
+
+static void
+free_age_generic_detoasted_agtype(Datum original, agtype *value)
+{
+    if (value != NULL && (Pointer)value != DatumGetPointer(original))
+        pfree(value);
+}
+
+static Datum
+age_generic_numeric_from_value(agtype_value *value)
+{
+    switch (value->type)
+    {
+    case AGTV_INTEGER:
+        return DirectFunctionCall1(int8_numeric,
+                                   Int64GetDatum(value->val.int_value));
+    case AGTV_FLOAT:
+        return DirectFunctionCall1(float8_numeric,
+                                   Float8GetDatum(value->val.float_value));
+    case AGTV_NUMERIC:
+        return NumericGetDatum(value->val.numeric);
+    default:
+        break;
+    }
+
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("arguments must resolve to a number")));
+    return (Datum)0;
+}
+
+static Datum
+age_generic_numeric_mul_int64(Datum value, int64 multiplier)
+{
+    Datum multiplier_numeric;
+
+    if (multiplier == 1)
+        return NumericGetDatum(DatumGetNumericCopy(value));
+    multiplier_numeric = DirectFunctionCall1(int8_numeric,
+                                             Int64GetDatum(multiplier));
+    return DirectFunctionCall2(numeric_mul, value, multiplier_numeric);
+}
+
+static Datum
+age_generic_numeric_add(Datum left, Datum right)
+{
+    return DirectFunctionCall2(numeric_add, left, right);
+}
+
+static float8
+age_generic_float8_from_value(agtype_value *value)
+{
+    switch (value->type)
+    {
+    case AGTV_INTEGER:
+        return (float8)value->val.int_value;
+    case AGTV_FLOAT:
+        return value->val.float_value;
+    case AGTV_NUMERIC:
+        return DatumGetFloat8(DirectFunctionCall1(
+            numeric_float8, NumericGetDatum(value->val.numeric)));
+    default:
+        break;
+    }
+
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("arguments must resolve to a number")));
+    return 0.0;
+}
+
+static void
+age_generic_sum_promote_to_numeric(AgeGenericJoinState *state)
+{
+    Datum numeric;
+
+    if (!state->property_aggregate_has_value ||
+        state->property_aggregate_sum_value.type == AGTV_NUMERIC)
+    {
+        return;
+    }
+
+    if (state->property_aggregate_sum_value.type == AGTV_INTEGER)
+    {
+        numeric = DirectFunctionCall1(
+            int8_numeric,
+            Int64GetDatum(
+                state->property_aggregate_sum_value.val.int_value));
+    }
+    else if (state->property_aggregate_sum_value.type == AGTV_FLOAT)
+    {
+        numeric = DirectFunctionCall1(
+            float8_numeric,
+            Float8GetDatum(
+                state->property_aggregate_sum_value.val.float_value));
+    }
+    else
+    {
+        elog(ERROR, "invalid AGE Generic Join property aggregate state");
+        numeric = (Datum)0;
+    }
+
+    state->property_aggregate_sum_value.type = AGTV_NUMERIC;
+    state->property_aggregate_sum_value.val.numeric =
+        DatumGetNumeric(numeric);
+}
+
+static void
+age_generic_sum_promote_to_float(AgeGenericJoinState *state)
+{
+    if (!state->property_aggregate_has_value ||
+        state->property_aggregate_sum_value.type == AGTV_FLOAT)
+    {
+        return;
+    }
+    if (state->property_aggregate_sum_value.type != AGTV_INTEGER)
+        elog(ERROR, "invalid AGE Generic Join property aggregate state");
+
+    state->property_aggregate_sum_value.type = AGTV_FLOAT;
+    state->property_aggregate_sum_value.val.float_value =
+        (float8)state->property_aggregate_sum_value.val.int_value;
+}
+
+static void
+add_age_generic_avg_value(AgeGenericJoinState *state, agtype_value *value,
+                          int64 multiplicity)
+{
+    float8 addend;
+
+    if (multiplicity <= 0)
+        return;
+    addend = DatumGetFloat8(DirectFunctionCall2(
+        float8mul, Float8GetDatum(age_generic_float8_from_value(value)),
+        Float8GetDatum((float8)multiplicity)));
+    if (!state->property_aggregate_has_value)
+    {
+        state->property_aggregate_avg_sum = addend;
+        state->property_aggregate_has_value = true;
+    }
+    else
+    {
+        state->property_aggregate_avg_sum = DatumGetFloat8(
+            DirectFunctionCall2(
+                float8pl,
+                Float8GetDatum(state->property_aggregate_avg_sum),
+                Float8GetDatum(addend)));
+    }
+}
+
+static void
+add_age_generic_sum_value(AgeGenericJoinState *state, agtype_value *value,
+                          int64 multiplicity)
+{
+    MemoryContext oldcontext;
+
+    if (multiplicity <= 0)
+        return;
+    if (value->type != AGTV_INTEGER &&
+        value->type != AGTV_FLOAT &&
+        value->type != AGTV_NUMERIC)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("arguments must resolve to a number")));
+    }
+
+    oldcontext = MemoryContextSwitchTo(state->css.ss.ps.state->es_query_cxt);
+    if (value->type == AGTV_NUMERIC)
+    {
+        Datum addend;
+
+        age_generic_sum_promote_to_numeric(state);
+        addend = age_generic_numeric_mul_int64(
+            age_generic_numeric_from_value(value), multiplicity);
+        if (!state->property_aggregate_has_value)
+        {
+            state->property_aggregate_sum_value.type = AGTV_NUMERIC;
+            state->property_aggregate_sum_value.val.numeric =
+                DatumGetNumeric(addend);
+            state->property_aggregate_has_value = true;
+        }
+        else
+        {
+            state->property_aggregate_sum_value.val.numeric =
+                DatumGetNumeric(age_generic_numeric_add(
+                    NumericGetDatum(
+                        state->property_aggregate_sum_value.val.numeric),
+                    addend));
+        }
+    }
+    else if (value->type == AGTV_FLOAT)
+    {
+        float8 addend;
+
+        if (state->property_aggregate_has_value &&
+            state->property_aggregate_sum_value.type == AGTV_NUMERIC)
+        {
+            Datum numeric_addend = age_generic_numeric_mul_int64(
+                age_generic_numeric_from_value(value), multiplicity);
+
+            state->property_aggregate_sum_value.val.numeric =
+                DatumGetNumeric(age_generic_numeric_add(
+                    NumericGetDatum(
+                        state->property_aggregate_sum_value.val.numeric),
+                    numeric_addend));
+            MemoryContextSwitchTo(oldcontext);
+            return;
+        }
+
+        age_generic_sum_promote_to_float(state);
+        addend = DatumGetFloat8(DirectFunctionCall2(
+            float8mul, Float8GetDatum(value->val.float_value),
+            Float8GetDatum((float8)multiplicity)));
+        if (!state->property_aggregate_has_value)
+        {
+            state->property_aggregate_sum_value.type = AGTV_FLOAT;
+            state->property_aggregate_sum_value.val.float_value = addend;
+            state->property_aggregate_has_value = true;
+        }
+        else
+        {
+            state->property_aggregate_sum_value.val.float_value =
+                DatumGetFloat8(DirectFunctionCall2(
+                    float8pl,
+                    Float8GetDatum(
+                        state->property_aggregate_sum_value.val.float_value),
+                    Float8GetDatum(addend)));
+        }
+    }
+    else
+    {
+        int64 addend = generic_checked_int64_product(value->val.int_value,
+                                                     multiplicity);
+
+        if (state->property_aggregate_has_value &&
+            state->property_aggregate_sum_value.type == AGTV_NUMERIC)
+        {
+            Datum numeric_addend = age_generic_numeric_mul_int64(
+                age_generic_numeric_from_value(value), multiplicity);
+
+            state->property_aggregate_sum_value.val.numeric =
+                DatumGetNumeric(age_generic_numeric_add(
+                    NumericGetDatum(
+                        state->property_aggregate_sum_value.val.numeric),
+                    numeric_addend));
+        }
+        else if (state->property_aggregate_has_value &&
+                 state->property_aggregate_sum_value.type == AGTV_FLOAT)
+        {
+            state->property_aggregate_sum_value.val.float_value =
+                DatumGetFloat8(DirectFunctionCall2(
+                    float8pl,
+                    Float8GetDatum(
+                        state->property_aggregate_sum_value.val.float_value),
+                    Float8GetDatum((float8)addend)));
+        }
+        else if (!state->property_aggregate_has_value)
+        {
+            state->property_aggregate_sum_value.type = AGTV_INTEGER;
+            state->property_aggregate_sum_value.val.int_value = addend;
+            state->property_aggregate_has_value = true;
+        }
+        else
+        {
+            state->property_aggregate_sum_value.val.int_value =
+                generic_checked_int64_sum(
+                    state->property_aggregate_sum_value.val.int_value,
+                    addend);
+        }
+    }
+    MemoryContextSwitchTo(oldcontext);
+}
+
+static void
+add_age_generic_minmax_value(AgeGenericJoinState *state,
+                             agtype_value *value)
+{
+    agtype *candidate;
+    bool replace_value;
+
+    candidate = agtype_value_to_agtype(value);
+    if (!state->property_aggregate_has_value)
+    {
+        replace_value = true;
+    }
+    else
+    {
+        int cmp = compare_agtype_containers_orderability(
+            &candidate->root,
+            &state->property_aggregate_minmax_value->root);
+
+        replace_value =
+            (state->consumer_kind == AGE_GENERIC_CONSUMER_MAX_PROPERTY ||
+             state->consumer_kind ==
+             AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY) ?
+            cmp > 0 : cmp < 0;
+    }
+
+    if (replace_value)
+    {
+        MemoryContext oldcontext;
+
+        oldcontext = MemoryContextSwitchTo(
+            state->css.ss.ps.state->es_query_cxt);
+        pfree_if_not_null(state->property_aggregate_minmax_value);
+        state->property_aggregate_minmax_value =
+            (agtype *)DatumGetPointer(
+                datumCopy(PointerGetDatum(candidate), false, -1));
+        state->property_aggregate_has_value = true;
+        MemoryContextSwitchTo(oldcontext);
+    }
+    pfree(candidate);
+}
+
+static bool
+age_generic_row_property_value(AgeGenericJoinState *state,
+                               AgeGenericProvider *provider,
+                               AgeGenericRow *row,
+                               agtype_value *value,
+                               agtype **properties,
+                               agtype **key,
+                               Datum *properties_datum,
+                               bool *needs_free)
+{
+    bool isnull;
+    agtype_value key_value;
+    bool key_needs_free = false;
+    bool found;
+
+    *needs_free = false;
+    *properties = NULL;
+    *key = NULL;
+    *properties_datum = (Datum)0;
+    if (provider->tuple_slot == NULL ||
+        row == NULL ||
+        row->tuple == NULL ||
+        provider->properties_attno <= 0 ||
+        state->property_aggregate_key_isnull)
+    {
+        return false;
+    }
+
+    ExecStoreMinimalTuple(row->tuple, provider->tuple_slot, false);
+    *properties_datum =
+        slot_getattr(provider->tuple_slot, provider->properties_attno,
+                     &isnull);
+    if (isnull)
+        return false;
+
+    *properties = DATUM_GET_AGTYPE_P(*properties_datum);
+    *key = DATUM_GET_AGTYPE_P(state->property_aggregate_key);
+    if (!AGT_ROOT_IS_OBJECT(*properties) || !AGT_ROOT_IS_SCALAR(*key))
+        return false;
+    if (!get_ith_agtype_value_from_container_no_copy(&(*key)->root, 0,
+                                                     &key_value,
+                                                     &key_needs_free))
+    {
+        return false;
+    }
+    if (key_value.type != AGTV_STRING)
+    {
+        free_age_generic_agtype_value(&key_value, key_needs_free);
+        return false;
+    }
+
+    found = find_agtype_value_from_container_no_copy(
+        &(*properties)->root, AGT_FOBJECT, &key_value, value, needs_free);
+    free_age_generic_agtype_value(&key_value, key_needs_free);
+    if (!found || value->type == AGTV_NULL)
+    {
+        if (found)
+            free_age_generic_agtype_value(value, *needs_free);
+        *needs_free = false;
+        return false;
+    }
+    return true;
+}
+
+static void
+add_age_generic_property_row(AgeGenericJoinState *state,
+                             AgeGenericProvider *provider,
+                             AgeGenericRow *row, int64 multiplicity)
+{
+    agtype_value value;
+    agtype *properties;
+    agtype *key;
+    Datum properties_datum;
+    bool needs_free = false;
+    bool found;
+
+    if (multiplicity <= 0)
+        return;
+
+    found = age_generic_row_property_value(state, provider, row,
+                                           &value, &properties, &key,
+                                           &properties_datum, &needs_free);
+    if (!found)
+    {
+        state->property_aggregate_null_rows = add_generic_count_result(
+            state->property_aggregate_null_rows, multiplicity);
+    }
+    else
+    {
+        state->property_aggregate_input_rows = add_generic_count_result(
+            state->property_aggregate_input_rows, multiplicity);
+        state->property_aggregate_value_input_rows =
+            add_generic_count_result(
+                state->property_aggregate_value_input_rows, multiplicity);
+        if (age_generic_property_avg_consumer(state->consumer_kind))
+            add_age_generic_avg_value(state, &value, multiplicity);
+        else if (age_generic_property_minmax_consumer(state->consumer_kind))
+            add_age_generic_minmax_value(state, &value);
+        else
+            add_age_generic_sum_value(state, &value, multiplicity);
+        free_age_generic_agtype_value(&value, needs_free);
+    }
+
+    free_age_generic_detoasted_agtype(properties_datum, properties);
+    free_age_generic_detoasted_agtype(state->property_aggregate_key, key);
+}
+
+static void
+ensure_age_generic_small_bag_multiplicity_capacity(
+    AgeGenericJoinState *state, int capacity)
+{
+    MemoryContext oldcontext;
+
+    if (capacity <= state->small_bag_row_multiplicity_capacity)
+        return;
+    if ((Size)capacity > MaxAllocSize / sizeof(int64))
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("AGE Generic Join small-bag multiplicity scratch is "
+                        "too large")));
+    }
+
+    oldcontext = MemoryContextSwitchTo(
+        state->css.ss.ps.state->es_query_cxt);
+    if (state->small_bag_row_multiplicities == NULL)
+        state->small_bag_row_multiplicities =
+            palloc0(sizeof(int64) * capacity);
+    else
+        state->small_bag_row_multiplicities = repalloc0(
+            state->small_bag_row_multiplicities,
+            sizeof(int64) * state->small_bag_row_multiplicity_capacity,
+            sizeof(int64) * capacity);
+    MemoryContextSwitchTo(oldcontext);
+    state->small_bag_row_multiplicity_capacity = capacity;
+}
+
+static bool
+add_age_generic_small_bag_property_rows(AgeGenericJoinState *state,
+                                        int sum_index)
+{
+    AgeGenericProvider *sum_provider = &state->providers[sum_index];
+    int64 candidate_rows;
+    int64 uniqueness_rejects_before;
+    int64 accepted_rows = 0;
+    int local_index;
+
+    if (!begin_age_generic_small_bag_enumerator(
+            state, &candidate_rows, &uniqueness_rejects_before))
+    {
+        return false;
+    }
+
+    ensure_age_generic_small_bag_multiplicity_capacity(
+        state, sum_provider->bag_count);
+    memset(state->small_bag_row_multiplicities, 0,
+           sizeof(int64) * sum_provider->bag_count);
+
+    while (age_binding_flat_enumerator_next(&state->small_bag_enumerator))
+    {
+        int row_index = age_binding_flat_enumerator_index(
+            &state->small_bag_enumerator, sum_index);
+
+        if (row_index < 0 || row_index >= sum_provider->bag_count)
+            elog(ERROR, "invalid AGE Generic Join property aggregate row");
+        state->small_bag_row_multiplicities[row_index] =
+            add_generic_count_result(
+                state->small_bag_row_multiplicities[row_index], 1);
+        accepted_rows = add_generic_count_result(accepted_rows, 1);
+    }
+
+    finish_age_generic_small_bag_enumerator(
+        state, accepted_rows, uniqueness_rejects_before);
+
+    for (local_index = 0;
+         local_index < sum_provider->bag_count;
+         local_index++)
+    {
+        int64 multiplicity =
+            state->small_bag_row_multiplicities[local_index];
+
+        if (multiplicity > 0)
+        {
+            AgeGenericRow *row = generic_provider_bag_row(
+                sum_provider, local_index);
+
+            add_age_generic_property_row(state, sum_provider, row,
+                                         multiplicity);
+        }
+    }
+    return true;
+}
+
+static void
+add_age_generic_sum_active_binding(AgeGenericJoinState *state)
+{
+    int sum_index = state->property_aggregate_provider_index;
+    AgeGenericProvider *sum_provider;
+
+    if (!state->binding_ready ||
+        sum_index < 0 || sum_index >= state->provider_count)
+    {
+        return;
+    }
+
+    sum_provider = &state->providers[sum_index];
+    if (sum_provider->kind != AGE_GENERIC_PROVIDER_EDGE)
+        elog(ERROR, "AGE Generic Join property aggregate provider is not edge");
+
+    if (!age_generic_uniqueness_may_reject(state))
+    {
+        int64 other_product = 1;
+        int64 binding_count = count_age_generic_binding_product(state);
+        int provider_index;
+        int local_index;
+
+        for (provider_index = 0;
+             provider_index < state->provider_count;
+             provider_index++)
+        {
+            if (provider_index == sum_index)
+                continue;
+            other_product = generic_checked_int64_product(
+                other_product, state->providers[provider_index].bag_count);
+        }
+
+        add_generic_counter(&state->candidate_combinations, binding_count);
+        add_generic_counter(&state->consumer_flat_rows_avoided,
+                            binding_count);
+        for (local_index = 0;
+             local_index < sum_provider->bag_count;
+             local_index++)
+        {
+            AgeGenericRow *row = generic_provider_bag_row(sum_provider,
+                                                          local_index);
+
+            add_age_generic_property_row(state, sum_provider, row,
+                                         other_product);
+        }
+        state->binding_ready = false;
+        state->combination_started = false;
+        return;
+    }
+
+    if (age_generic_active_binding_uniqueness_may_reject(state))
+    {
+        if (add_age_generic_small_bag_property_rows(state, sum_index))
+            return;
+    }
+
+    while (next_generic_combination(state))
+    {
+        AgeGenericRow *row = generic_provider_bag_row(
+            sum_provider, state->combination_indexes[sum_index]);
+
+        increment_generic_counter(&state->consumer_flat_rows_avoided);
+        add_age_generic_property_row(state, sum_provider, row, 1);
+    }
+}
+
+static void
+add_age_generic_sum_rows(AgeGenericJoinState *state)
+{
+    for (;;)
+    {
+        if (!state->binding_ready && !next_generic_binding(state))
+            break;
+
+        add_age_generic_sum_active_binding(state);
+    }
+}
+
+static void
+reset_age_generic_property_aggregate_value(AgeGenericJoinState *state)
+{
+    state->property_aggregate_has_value = false;
+    state->property_aggregate_sum_value.type = AGTV_NULL;
+    state->property_aggregate_avg_sum = 0.0;
+    state->property_aggregate_value_input_rows = 0;
+    pfree_if_not_null(state->property_aggregate_minmax_value);
+    state->property_aggregate_minmax_value = NULL;
+}
+
+static void
+reset_age_generic_property_aggregate_state(AgeGenericJoinState *state)
+{
+    state->property_aggregate_emitted = false;
+    state->property_aggregate_executed = false;
+    reset_age_generic_property_aggregate_value(state);
+    state->property_aggregate_input_rows = 0;
+    state->property_aggregate_null_rows = 0;
+}
+
 static TupleTableSlot *
 materialize_generic_combination(AgeGenericJoinState *state)
 {
@@ -4264,6 +5611,96 @@ store_age_generic_count_result(ScanState *node, int64 count)
     return slot;
 }
 
+static TupleTableSlot *
+store_age_generic_group_count_result(ScanState *node, graphid key,
+                                     int64 count)
+{
+    TupleTableSlot *slot = node->ss_ScanTupleSlot;
+    TupleDesc tupdesc = slot->tts_tupleDescriptor;
+    Oid key_type;
+    Oid count_type;
+
+    ExecClearTuple(slot);
+    if (tupdesc->natts < 2)
+        elog(ERROR,
+             "AGE Generic Join group count scan expected two output columns");
+    memset(slot->tts_values, 0, sizeof(Datum) * tupdesc->natts);
+    memset(slot->tts_isnull, true, sizeof(bool) * tupdesc->natts);
+
+    key_type = TupleDescAttr(tupdesc, 0)->atttypid;
+    if (key_type == GRAPHIDOID)
+        slot->tts_values[0] = GRAPHID_GET_DATUM(key);
+    else if (key_type == INT8OID)
+        slot->tts_values[0] = Int64GetDatum((int64)key);
+    else if (key_type == AGTYPEOID)
+        slot->tts_values[0] =
+            PointerGetDatum(agtype_integer_to_agtype(key));
+    else
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("AGE Generic Join group count scan cannot produce "
+                        "group type %s",
+                        format_type_be(key_type))));
+    }
+    slot->tts_isnull[0] = false;
+
+    count_type = TupleDescAttr(tupdesc, 1)->atttypid;
+    if (count_type == INT8OID)
+        slot->tts_values[1] = Int64GetDatum(count);
+    else if (count_type == AGTYPEOID)
+        slot->tts_values[1] =
+            PointerGetDatum(agtype_integer_to_agtype(count));
+    else
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("AGE Generic Join group count scan cannot produce "
+                        "count type %s",
+                        format_type_be(count_type))));
+    }
+    slot->tts_isnull[1] = false;
+
+    ExecStoreVirtualTuple(slot);
+    return slot;
+}
+
+static TupleTableSlot *
+store_age_generic_distinct_key_result(ScanState *node, graphid key)
+{
+    AgeGenericJoinState *state = (AgeGenericJoinState *)node;
+    TupleTableSlot *slot = node->ss_ScanTupleSlot;
+
+    ExecClearTuple(slot);
+    if (slot->tts_tupleDescriptor->natts < 1)
+        elog(ERROR,
+             "AGE Generic Join distinct-key scan expected an output column");
+    memset(slot->tts_values, 0,
+           sizeof(Datum) * slot->tts_tupleDescriptor->natts);
+    memset(slot->tts_isnull, true,
+           sizeof(bool) * slot->tts_tupleDescriptor->natts);
+
+    if (state->consumer_output_type == GRAPHIDOID)
+        slot->tts_values[0] = GRAPHID_GET_DATUM(key);
+    else if (state->consumer_output_type == INT8OID)
+        slot->tts_values[0] = Int64GetDatum((int64)key);
+    else if (state->consumer_output_type == AGTYPEOID)
+        slot->tts_values[0] =
+            PointerGetDatum(agtype_integer_to_agtype(key));
+    else
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("AGE Generic Join distinct-key scan cannot produce "
+                        "type %s",
+                        format_type_be(state->consumer_output_type))));
+    }
+    slot->tts_isnull[0] = false;
+
+    ExecStoreVirtualTuple(slot);
+    return slot;
+}
+
 static bool
 age_generic_record_distinct_key(AgeGenericJoinState *state, graphid key)
 {
@@ -4285,6 +5722,192 @@ age_generic_record_distinct_key(AgeGenericJoinState *state, graphid key)
     entry = hash_search(state->distinct_key_hash, &key, HASH_ENTER, &found);
     (void)entry;
     return !found;
+}
+
+static TupleTableSlot *
+store_age_generic_sum_property_result(ScanState *node)
+{
+    AgeGenericJoinState *state = (AgeGenericJoinState *)node;
+    TupleTableSlot *slot = node->ss_ScanTupleSlot;
+
+    ExecClearTuple(slot);
+    if (slot->tts_tupleDescriptor->natts < 1)
+    {
+        elog(ERROR,
+             "AGE Generic Join property aggregate scan expected an "
+             "output column");
+    }
+    memset(slot->tts_values, 0,
+           sizeof(Datum) * slot->tts_tupleDescriptor->natts);
+    memset(slot->tts_isnull, true,
+           sizeof(bool) * slot->tts_tupleDescriptor->natts);
+
+    if (age_generic_property_avg_consumer(state->consumer_kind))
+    {
+        float8 avg_value;
+
+        if (state->consumer_output_type != AGTYPEOID &&
+            state->consumer_output_type != FLOAT8OID)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATATYPE_MISMATCH),
+                     errmsg("AGE Generic Join property aggregate scan cannot "
+                            "produce type %s",
+                            format_type_be(state->consumer_output_type))));
+        }
+        if (!state->property_aggregate_has_value)
+        {
+            ExecStoreVirtualTuple(slot);
+            return slot;
+        }
+
+        avg_value = DatumGetFloat8(DirectFunctionCall2(
+            float8div, Float8GetDatum(state->property_aggregate_avg_sum),
+            Float8GetDatum(
+                (float8)state->property_aggregate_value_input_rows)));
+        if (state->consumer_output_type == FLOAT8OID)
+            slot->tts_values[0] = Float8GetDatum(avg_value);
+        else
+        {
+            agtype_value value;
+
+            value.type = AGTV_FLOAT;
+            value.val.float_value = avg_value;
+            slot->tts_values[0] =
+                PointerGetDatum(agtype_value_to_agtype(&value));
+        }
+        slot->tts_isnull[0] = false;
+        ExecStoreVirtualTuple(slot);
+        return slot;
+    }
+
+    if (state->consumer_output_type != AGTYPEOID)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("AGE Generic Join property aggregate scan cannot "
+                        "produce type %s",
+                        format_type_be(state->consumer_output_type))));
+    }
+
+    if (state->property_aggregate_has_value &&
+        age_generic_property_minmax_consumer(state->consumer_kind))
+    {
+        slot->tts_values[0] =
+            PointerGetDatum(state->property_aggregate_minmax_value);
+        slot->tts_isnull[0] = false;
+    }
+    else if (state->property_aggregate_has_value)
+    {
+        slot->tts_values[0] = PointerGetDatum(
+            agtype_value_to_agtype(&state->property_aggregate_sum_value));
+        slot->tts_isnull[0] = false;
+    }
+
+    ExecStoreVirtualTuple(slot);
+    return slot;
+}
+
+static TupleTableSlot *
+store_age_generic_group_sum_property_result(ScanState *node, graphid key)
+{
+    AgeGenericJoinState *state = (AgeGenericJoinState *)node;
+    TupleTableSlot *slot = node->ss_ScanTupleSlot;
+    TupleDesc tupdesc = slot->tts_tupleDescriptor;
+    Oid key_type;
+    Oid value_type;
+
+    ExecClearTuple(slot);
+    if (tupdesc->natts < 2)
+    {
+        elog(ERROR,
+             "AGE Generic Join group property aggregate scan expected two "
+             "output columns");
+    }
+    memset(slot->tts_values, 0, sizeof(Datum) * tupdesc->natts);
+    memset(slot->tts_isnull, true, sizeof(bool) * tupdesc->natts);
+
+    key_type = TupleDescAttr(tupdesc, 0)->atttypid;
+    if (key_type == GRAPHIDOID)
+        slot->tts_values[0] = GRAPHID_GET_DATUM(key);
+    else if (key_type == INT8OID)
+        slot->tts_values[0] = Int64GetDatum((int64)key);
+    else if (key_type == AGTYPEOID)
+        slot->tts_values[0] =
+            PointerGetDatum(agtype_integer_to_agtype(key));
+    else
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("AGE Generic Join group property aggregate scan "
+                        "cannot produce group type %s",
+                        format_type_be(key_type))));
+    }
+    slot->tts_isnull[0] = false;
+
+    value_type = TupleDescAttr(tupdesc, 1)->atttypid;
+    if (age_generic_property_avg_consumer(state->consumer_kind))
+    {
+        float8 avg_value;
+
+        if (value_type != AGTYPEOID && value_type != FLOAT8OID)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATATYPE_MISMATCH),
+                     errmsg("AGE Generic Join group property aggregate scan "
+                            "cannot produce value type %s",
+                            format_type_be(value_type))));
+        }
+        if (!state->property_aggregate_has_value)
+        {
+            ExecStoreVirtualTuple(slot);
+            return slot;
+        }
+
+        avg_value = DatumGetFloat8(DirectFunctionCall2(
+            float8div, Float8GetDatum(state->property_aggregate_avg_sum),
+            Float8GetDatum(
+                (float8)state->property_aggregate_value_input_rows)));
+        if (value_type == FLOAT8OID)
+            slot->tts_values[1] = Float8GetDatum(avg_value);
+        else
+        {
+            agtype_value value;
+
+            value.type = AGTV_FLOAT;
+            value.val.float_value = avg_value;
+            slot->tts_values[1] =
+                PointerGetDatum(agtype_value_to_agtype(&value));
+        }
+        slot->tts_isnull[1] = false;
+        ExecStoreVirtualTuple(slot);
+        return slot;
+    }
+
+    if (value_type != AGTYPEOID)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("AGE Generic Join group property aggregate scan "
+                        "cannot produce value type %s",
+                        format_type_be(value_type))));
+    }
+    if (state->property_aggregate_has_value &&
+        age_generic_property_minmax_consumer(state->consumer_kind))
+    {
+        slot->tts_values[1] =
+            PointerGetDatum(state->property_aggregate_minmax_value);
+        slot->tts_isnull[1] = false;
+    }
+    else if (state->property_aggregate_has_value)
+    {
+        slot->tts_values[1] = PointerGetDatum(
+            agtype_value_to_agtype(&state->property_aggregate_sum_value));
+        slot->tts_isnull[1] = false;
+    }
+
+    ExecStoreVirtualTuple(slot);
+    return slot;
 }
 
 static TupleTableSlot *
@@ -4316,6 +5939,53 @@ store_age_generic_exists_result(ScanState *node)
 }
 
 static TupleTableSlot *
+access_age_generic_sum_property_scan(ScanState *node)
+{
+    AgeGenericJoinState *state = (AgeGenericJoinState *)node;
+
+    if (state->property_aggregate_emitted)
+        return ExecClearTuple(node->ss_ScanTupleSlot);
+
+    state->property_aggregate_emitted = true;
+    state->property_aggregate_executed = true;
+    add_age_generic_sum_rows(state);
+    return store_age_generic_sum_property_result(node);
+}
+
+static TupleTableSlot *
+access_age_generic_group_sum_property_scan(ScanState *node)
+{
+    AgeGenericJoinState *state = (AgeGenericJoinState *)node;
+
+    state->property_aggregate_executed = true;
+    for (;;)
+    {
+        graphid key;
+
+        if (!state->binding_ready && !next_generic_binding(state))
+            return ExecClearTuple(node->ss_ScanTupleSlot);
+
+        key = state->bindings[state->distinct_variable];
+        reset_age_generic_property_aggregate_value(state);
+        for (;;)
+        {
+            if (!state->binding_ready)
+                break;
+            if (state->bindings[state->distinct_variable] != key)
+                break;
+
+            add_age_generic_sum_active_binding(state);
+            state->binding_ready = false;
+            state->combination_started = false;
+            if (!next_generic_binding(state))
+                break;
+        }
+
+        return store_age_generic_group_sum_property_result(node, key);
+    }
+}
+
+static TupleTableSlot *
 access_age_generic_join(ScanState *node)
 {
     AgeGenericJoinState *state = (AgeGenericJoinState *)node;
@@ -4344,6 +6014,11 @@ access_age_generic_count_scan(ScanState *node)
     distinct_key =
         state->consumer_kind == AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY;
     state->count_executed = true;
+    state->count_multiplicity_product_path_used = false;
+    state->count_multiplicity_enumeration_used = false;
+    state->count_multiplicity_small_bag_enumerator_used = false;
+    state->count_multiplicity_fast_path =
+        !distinct_key && !age_generic_uniqueness_may_reject(state);
     for (;;)
     {
         if (!state->binding_ready && !next_generic_binding(state))
@@ -4366,20 +6041,247 @@ access_age_generic_count_scan(ScanState *node)
                 state->combination_started = false;
             }
         }
+        else if (state->count_multiplicity_fast_path)
+        {
+            int64 binding_count = count_age_generic_binding_product(state);
+
+            state->count_multiplicity_product_path_used = true;
+            state->count_result =
+                add_generic_count_result(state->count_result,
+                                         binding_count);
+            add_generic_counter(&state->candidate_combinations,
+                                binding_count);
+            add_generic_counter(&state->consumer_flat_rows_avoided,
+                                binding_count);
+            increment_generic_counter(
+                &state->count_multiplicity_bindings);
+            add_generic_counter(&state->count_multiplicity_rows,
+                                binding_count);
+            state->binding_ready = false;
+            state->combination_started = false;
+        }
         else
         {
-            while (next_generic_combination(state))
+            bool uniqueness_may_reject =
+                age_generic_uniqueness_may_reject(state);
+
+            if (age_generic_count_binding_product_safe(
+                    state, uniqueness_may_reject))
             {
+                int64 binding_count = count_age_generic_binding_product(
+                    state);
+
+                state->count_multiplicity_product_path_used = true;
                 state->count_result =
-                    add_generic_count_result(state->count_result, 1);
+                    add_generic_count_result(state->count_result,
+                                             binding_count);
+                add_generic_counter(&state->candidate_combinations,
+                                    binding_count);
+                add_generic_counter(&state->consumer_flat_rows_avoided,
+                                    binding_count);
                 increment_generic_counter(
-                    &state->consumer_flat_rows_avoided);
+                    &state->count_multiplicity_bindings);
+                add_generic_counter(&state->count_multiplicity_rows,
+                                    binding_count);
+                state->binding_ready = false;
+                state->combination_started = false;
+            }
+            else
+            {
+                int64 enumerated_rows;
+
+                if (count_age_generic_small_binding(state, &enumerated_rows))
+                {
+                    state->count_multiplicity_enumeration_used = true;
+                    state->count_multiplicity_small_bag_enumerator_used =
+                        true;
+                    state->count_result =
+                        add_generic_count_result(state->count_result,
+                                                 enumerated_rows);
+                    increment_generic_counter(
+                        &state->count_multiplicity_bindings);
+                    add_generic_counter(&state->count_multiplicity_rows,
+                                        enumerated_rows);
+                    continue;
+                }
+
+                state->count_multiplicity_enumeration_used = true;
+                while (next_generic_combination(state))
+                {
+                    state->count_result =
+                        add_generic_count_result(state->count_result, 1);
+                    increment_generic_counter(
+                        &state->consumer_flat_rows_avoided);
+                }
             }
         }
     }
 
     state->count_emitted = true;
     return store_age_generic_count_result(node, state->count_result);
+}
+
+static TupleTableSlot *
+access_age_generic_group_count_scan(ScanState *node)
+{
+    AgeGenericJoinState *state = (AgeGenericJoinState *)node;
+    bool distinct_key =
+        state->consumer_kind ==
+        AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY;
+    bool uniqueness_may_reject = age_generic_uniqueness_may_reject(state);
+
+    state->count_executed = true;
+    state->count_multiplicity_product_path_used = false;
+    state->count_multiplicity_enumeration_used = false;
+    state->count_multiplicity_small_bag_enumerator_used = false;
+    state->count_multiplicity_fast_path =
+        !distinct_key && !uniqueness_may_reject;
+
+    for (;;)
+    {
+        graphid key;
+        int64 group_count = 0;
+        bool group_has_binding = false;
+
+        if (!state->binding_ready && !next_generic_binding(state))
+            return ExecClearTuple(node->ss_ScanTupleSlot);
+
+        key = state->bindings[state->distinct_variable];
+        for (;;)
+        {
+            int64 binding_count;
+
+            if (!state->binding_ready)
+                break;
+            if (state->bindings[state->distinct_variable] != key)
+                break;
+
+            binding_count = count_age_generic_binding_product(state);
+            if (distinct_key)
+            {
+                if (!uniqueness_may_reject)
+                {
+                    group_has_binding = true;
+                    add_generic_counter(&state->consumer_flat_rows_avoided,
+                                        binding_count);
+                }
+                else if (next_generic_combination(state))
+                {
+                    group_has_binding = true;
+                    if (binding_count > 1)
+                    {
+                        add_generic_counter(
+                            &state->consumer_flat_rows_avoided,
+                            binding_count - 1);
+                    }
+                }
+            }
+            else if (state->count_multiplicity_fast_path)
+            {
+                group_count =
+                    add_generic_count_result(group_count, binding_count);
+                state->count_multiplicity_product_path_used = true;
+                add_generic_counter(&state->candidate_combinations,
+                                    binding_count);
+                add_generic_counter(&state->consumer_flat_rows_avoided,
+                                    binding_count);
+                increment_generic_counter(
+                    &state->count_multiplicity_bindings);
+                add_generic_counter(&state->count_multiplicity_rows,
+                                    binding_count);
+            }
+            else
+            {
+                if (age_generic_count_binding_product_safe(
+                        state, uniqueness_may_reject))
+                {
+                    group_count =
+                        add_generic_count_result(group_count, binding_count);
+                    state->count_multiplicity_product_path_used = true;
+                    add_generic_counter(&state->candidate_combinations,
+                                        binding_count);
+                    add_generic_counter(&state->consumer_flat_rows_avoided,
+                                        binding_count);
+                    increment_generic_counter(
+                        &state->count_multiplicity_bindings);
+                    add_generic_counter(&state->count_multiplicity_rows,
+                                        binding_count);
+                }
+                else
+                {
+                    int64 enumerated_rows;
+
+                    if (count_age_generic_small_binding(state,
+                                                        &enumerated_rows))
+                    {
+                        group_count =
+                            add_generic_count_result(group_count,
+                                                     enumerated_rows);
+                        state->count_multiplicity_enumeration_used = true;
+                        state->count_multiplicity_small_bag_enumerator_used =
+                            true;
+                        increment_generic_counter(
+                            &state->count_multiplicity_bindings);
+                        add_generic_counter(
+                            &state->count_multiplicity_rows,
+                            enumerated_rows);
+                    }
+                    else
+                    {
+                        state->count_multiplicity_enumeration_used = true;
+                        while (next_generic_combination(state))
+                        {
+                            group_count = add_generic_count_result(
+                                group_count, 1);
+                            increment_generic_counter(
+                                &state->consumer_flat_rows_avoided);
+                        }
+                    }
+                }
+            }
+
+            state->binding_ready = false;
+            state->combination_started = false;
+            if (!next_generic_binding(state))
+                break;
+        }
+
+        if (distinct_key)
+            group_count = group_has_binding ? 1 : 0;
+        if (group_count <= 0)
+            continue;
+
+        state->count_result =
+            add_generic_count_result(state->count_result, group_count);
+        if (distinct_key)
+            increment_generic_counter(&state->distinct_key_count);
+        return store_age_generic_group_count_result(node, key, group_count);
+    }
+}
+
+static TupleTableSlot *
+access_age_generic_distinct_key_scan(ScanState *node)
+{
+    AgeGenericJoinState *state = (AgeGenericJoinState *)node;
+
+    for (;;)
+    {
+        if (!state->binding_ready && !next_generic_binding(state))
+            return ExecClearTuple(node->ss_ScanTupleSlot);
+        if (next_generic_combination(state))
+        {
+            graphid key = state->bindings[state->distinct_variable];
+
+            increment_generic_counter(&state->consumer_flat_rows_avoided);
+            state->binding_ready = false;
+            state->combination_started = false;
+            if (age_generic_record_distinct_key(state, key))
+            {
+                increment_generic_counter(&state->distinct_key_count);
+                return store_age_generic_distinct_key_result(node, key);
+            }
+        }
+    }
 }
 
 static TupleTableSlot *
@@ -4423,6 +6325,29 @@ exec_age_generic_join(CustomScanState *node)
              AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY)
     {
         slot = ExecScan(&node->ss, access_age_generic_count_scan,
+                        recheck_age_generic_join);
+    }
+    else if (state->consumer_kind == AGE_GENERIC_CONSUMER_GROUP_COUNT ||
+             state->consumer_kind ==
+             AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY)
+    {
+        slot = ExecScan(&node->ss, access_age_generic_group_count_scan,
+                        recheck_age_generic_join);
+    }
+    else if (state->consumer_kind == AGE_GENERIC_CONSUMER_DISTINCT_KEY)
+    {
+        slot = ExecScan(&node->ss, access_age_generic_distinct_key_scan,
+                        recheck_age_generic_join);
+    }
+    else if (age_generic_group_property_aggregate_consumer(
+                 state->consumer_kind))
+    {
+        slot = ExecScan(&node->ss, access_age_generic_group_sum_property_scan,
+                        recheck_age_generic_join);
+    }
+    else if (age_generic_property_aggregate_consumer(state->consumer_kind))
+    {
+        slot = ExecScan(&node->ss, access_age_generic_sum_property_scan,
                         recheck_age_generic_join);
     }
     else
@@ -4573,6 +6498,8 @@ initialize_generic_provider(AgeGenericJoinState *state,
         desc, AGE_GENERIC_PROVIDER_DESC_KEY2_ATTNO));
     provider->edge_id_attno = (AttrNumber)intVal(list_nth(
         desc, AGE_GENERIC_PROVIDER_DESC_EDGE_ID_ATTNO));
+    provider->properties_attno = (AttrNumber)intVal(list_nth(
+        desc, AGE_GENERIC_PROVIDER_DESC_PROPERTIES_ATTNO));
     provider->physical_kind = (AgeGenericProviderPhysicalKind)intVal(list_nth(
         desc, AGE_GENERIC_PROVIDER_DESC_PHYSICAL_KIND));
     provider->adjacency_index_oid = generic_provider_desc_oid(
@@ -4589,13 +6516,18 @@ initialize_generic_provider(AgeGenericJoinState *state,
     {
         elog(ERROR, "invalid AGE Generic Join provider keys");
     }
+    if (provider->properties_attno < 0 ||
+        provider->properties_attno > tuple_desc->natts)
+    {
+        elog(ERROR, "invalid AGE Generic Join provider properties column");
+    }
     if (provider->kind == AGE_GENERIC_PROVIDER_EDGE &&
         (provider->var2 <= provider->var1 ||
          provider->var2 >= state->variable_count ||
          provider->key2_attno <= 0 ||
          provider->key2_attno > tuple_desc->natts ||
          provider->edge_id_attno <= 0 ||
-         provider->edge_id_attno > tuple_desc->natts))
+        provider->edge_id_attno > tuple_desc->natts))
     {
         elog(ERROR, "invalid AGE Generic Join edge provider");
     }
@@ -4665,6 +6597,11 @@ begin_age_generic_join(CustomScanState *node, EState *estate, int eflags)
                                              state->provider_count);
     state->uniqueness_groups = palloc0(sizeof(Bitmapset *) *
                                         state->provider_count);
+    age_binding_init_flat_enumerator(&state->small_bag_enumerator,
+                                     state->provider_count,
+                                     estate->es_query_cxt);
+    state->small_bag_row_multiplicities = NULL;
+    state->small_bag_row_multiplicity_capacity = 0;
     state->data_context = AllocSetContextCreate(
         estate->es_query_cxt, "AGE Generic Join provider rows",
         ALLOCSET_DEFAULT_SIZES);
@@ -4679,6 +6616,19 @@ begin_age_generic_join(CustomScanState *node, EState *estate, int eflags)
         AgeGenericProvider *provider = &state->providers[provider_index];
 
         initialize_generic_provider(state, provider, plan_state, desc, estate);
+        if (age_generic_property_aggregate_consumer(state->consumer_kind) &&
+            provider_index == state->property_aggregate_provider_index)
+        {
+            if (provider->kind != AGE_GENERIC_PROVIDER_EDGE ||
+                provider->properties_attno <= 0 ||
+                provider->properties_attno !=
+                    state->property_aggregate_attno ||
+                provider->tuple_slot == NULL)
+            {
+                elog(ERROR,
+                     "invalid AGE Generic Join property aggregate provider");
+            }
+        }
         provider_index++;
     }
 
@@ -4732,11 +6682,28 @@ reset_age_generic_join_state(AgeGenericJoinState *state)
     state->search_started = false;
     state->binding_ready = false;
     state->combination_started = false;
+    age_binding_reset_flat_enumerator(&state->small_bag_enumerator);
+    if (state->small_bag_row_multiplicities != NULL)
+    {
+        memset(state->small_bag_row_multiplicities, 0,
+               sizeof(int64) * state->small_bag_row_multiplicity_capacity);
+    }
     state->count_emitted = false;
     state->count_executed = false;
     state->count_result = 0;
+    state->count_multiplicity_fast_path = false;
+    state->count_multiplicity_product_path_used = false;
+    state->count_multiplicity_enumeration_used = false;
+    state->count_multiplicity_small_bag_enumerator_used = false;
+    state->count_multiplicity_bindings = 0;
+    state->count_multiplicity_rows = 0;
+    state->small_bag_enumerator_used = false;
+    state->small_bag_enumerator_bindings = 0;
+    state->small_bag_enumerator_candidate_rows = 0;
+    state->small_bag_enumerator_rows = 0;
     state->distinct_key_hash = NULL;
     state->distinct_key_count = 0;
+    reset_age_generic_property_aggregate_state(state);
     state->exists_emitted = false;
     state->exists_executed = false;
     state->row_goal_emitted = 0;
@@ -5000,6 +6967,28 @@ generic_consumer_name(AgeGenericConsumerKind consumer)
         return "count(*)";
     case AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY:
         return "count(distinct key)";
+    case AGE_GENERIC_CONSUMER_DISTINCT_KEY:
+        return "distinct key";
+    case AGE_GENERIC_CONSUMER_GROUP_COUNT:
+        return "group count(key)";
+    case AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY:
+        return "group count(distinct key)";
+    case AGE_GENERIC_CONSUMER_SUM_PROPERTY:
+        return "sum(property)";
+    case AGE_GENERIC_CONSUMER_MIN_PROPERTY:
+        return "min(property)";
+    case AGE_GENERIC_CONSUMER_MAX_PROPERTY:
+        return "max(property)";
+    case AGE_GENERIC_CONSUMER_AVG_PROPERTY:
+        return "avg(property)";
+    case AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY:
+        return "group sum(property)";
+    case AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY:
+        return "group min(property)";
+    case AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY:
+        return "group max(property)";
+    case AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY:
+        return "group avg(property)";
     case AGE_GENERIC_CONSUMER_EXISTS:
         return "exists";
     case AGE_GENERIC_CONSUMER_LIMIT:
@@ -5293,6 +7282,23 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
                                flat_rows_avoided, es);
         ExplainPropertyInteger("Consumer Flat Rows Avoided", NULL,
                                state->consumer_flat_rows_avoided, es);
+        if (state->small_bag_enumerator_used)
+        {
+            ExplainPropertyBool("Generic Small Bag Enumerator", true, es);
+            ExplainPropertyInteger("Generic Small Bag Enumerator Limit",
+                                   NULL,
+                                   AGE_GENERIC_SMALL_BAG_ENUMERATOR_LIMIT,
+                                   es);
+            ExplainPropertyInteger(
+                "Generic Small Bag Enumerator Bindings", NULL,
+                state->small_bag_enumerator_bindings, es);
+            ExplainPropertyInteger(
+                "Generic Small Bag Enumerator Candidate Rows", NULL,
+                state->small_bag_enumerator_candidate_rows, es);
+            ExplainPropertyInteger(
+                "Generic Small Bag Enumerator Rows", NULL,
+                state->small_bag_enumerator_rows, es);
+        }
         if (state->row_goal > 0)
         {
             ExplainPropertyInteger("Row Goal Rows Emitted", NULL,
@@ -5303,20 +7309,114 @@ explain_age_generic_join(CustomScanState *node, List *ancestors,
         ExplainPropertyBool("Row Goal Reached",
                             state->row_goal > 0 &&
                             state->row_goal_emitted >= state->row_goal, es);
-        if (state->consumer_kind == AGE_GENERIC_CONSUMER_COUNT &&
+        if ((state->consumer_kind == AGE_GENERIC_CONSUMER_COUNT ||
+             state->consumer_kind == AGE_GENERIC_CONSUMER_GROUP_COUNT) &&
             state->count_executed)
         {
+            const char *mode;
+            const char *reason;
+            bool small_bag_used =
+                state->count_multiplicity_small_bag_enumerator_used ||
+                state->small_bag_enumerator_used;
+
+            if (state->count_multiplicity_fast_path)
+            {
+                mode = "binding-bag-product";
+                reason = "no overlapping uniqueness groups";
+            }
+            else if (state->count_multiplicity_product_path_used &&
+                     !state->count_multiplicity_enumeration_used)
+            {
+                mode = "exact-bag-product";
+                reason = "active edge bags cannot collide";
+            }
+            else if (state->count_multiplicity_product_path_used &&
+                     small_bag_used)
+            {
+                mode = "mixed product/small-bag-exact-enumerator";
+                reason = "bounded active bags used where uniqueness "
+                         "overlapped";
+            }
+            else if (state->count_multiplicity_product_path_used)
+            {
+                mode = "mixed product/enumerate";
+                reason = "edge uniqueness checked per binding";
+            }
+            else if (small_bag_used)
+            {
+                mode = "small-bag-exact-enumerator";
+                reason = "bounded active bags with overlapping uniqueness";
+            }
+            else
+            {
+                mode = "enumerate-combinations";
+                reason = "edge uniqueness may reject";
+            }
+
+            ExplainPropertyText(
+                "Generic Count Multiplicity Mode", mode, es);
+            ExplainPropertyText(
+                "Generic Count Multiplicity Reason", reason, es);
+            ExplainPropertyInteger("Generic Count Multiplicity Bindings",
+                                   NULL,
+                                   state->count_multiplicity_bindings, es);
+            ExplainPropertyInteger("Generic Count Multiplicity Rows", NULL,
+                                   state->count_multiplicity_rows, es);
             ExplainPropertyInteger("Count Result", NULL,
                                    state->count_result, es);
         }
-        if (state->consumer_kind ==
-            AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY &&
+        if ((state->consumer_kind ==
+             AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY ||
+             state->consumer_kind ==
+             AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY) &&
             state->count_executed)
         {
             ExplainPropertyInteger("Count Result", NULL,
                                    state->count_result, es);
             ExplainPropertyInteger("Distinct Key Count", NULL,
                                    state->distinct_key_count, es);
+        }
+        if (state->consumer_kind == AGE_GENERIC_CONSUMER_DISTINCT_KEY)
+        {
+            ExplainPropertyInteger("Distinct Key Count", NULL,
+                                   state->distinct_key_count, es);
+        }
+        if (age_generic_property_aggregate_consumer(state->consumer_kind) &&
+            state->property_aggregate_executed)
+        {
+            const char *prefix = "Sum";
+            char *provider_label;
+            char *input_label;
+            char *null_label;
+
+            if (state->consumer_kind == AGE_GENERIC_CONSUMER_MIN_PROPERTY ||
+                state->consumer_kind ==
+                AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY)
+                prefix = "Min";
+            else if (state->consumer_kind ==
+                     AGE_GENERIC_CONSUMER_MAX_PROPERTY ||
+                     state->consumer_kind ==
+                     AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY)
+                prefix = "Max";
+            else if (state->consumer_kind ==
+                     AGE_GENERIC_CONSUMER_AVG_PROPERTY ||
+                     state->consumer_kind ==
+                     AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY)
+                prefix = "Avg";
+
+            provider_label = psprintf("%s Property Provider", prefix);
+            input_label = psprintf("%s Property Input Rows", prefix);
+            null_label = psprintf("%s Property Null Rows", prefix);
+            ExplainPropertyInteger(
+                provider_label, NULL,
+                state->property_aggregate_provider_index + 1, es);
+            ExplainPropertyInteger(input_label, NULL,
+                                   state->property_aggregate_input_rows, es);
+            ExplainPropertyInteger(null_label, NULL,
+                                   state->property_aggregate_null_rows, es);
+            pfree(provider_label);
+            pfree(input_label);
+            pfree(null_label);
         }
         if (state->consumer_kind == AGE_GENERIC_CONSUMER_EXISTS &&
             state->exists_executed)

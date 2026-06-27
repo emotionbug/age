@@ -445,6 +445,9 @@ $$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -511,7 +514,7 @@ $$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
          Sort Method: quicksort  Memory: 25kB
          ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
                Output: t.id
-(94 rows)
+(97 rows)
 
 ROLLBACK;
 BEGIN;
@@ -560,6 +563,9 @@ $$) AS (tag agtype, eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -634,7 +640,7 @@ $$) AS (tag agtype, eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
          Sort Method: quicksort  Memory: 25kB
          ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
                Output: t.id
-(102 rows)
+(105 rows)
 
 ROLLBACK;
 DO $wcoj_direct_provider_telemetry$
@@ -980,6 +986,9 @@ $$) AS (total agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -1047,7 +1056,7 @@ $$) AS (total agtype);
          Sort Method: quicksort  Memory: 25kB
          ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
                Output: t.id
-(94 rows)
+(97 rows)
 
 ROLLBACK;
 DO $wcoj_count_consumer_telemetry$
@@ -1162,6 +1171,9 @@ $$) AS (total agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -1237,7 +1249,7 @@ $$) AS (total agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(102 rows)
+(105 rows)
 
 ROLLBACK;
 BEGIN;
@@ -1333,6 +1345,9 @@ $$) AS (total agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -1402,7 +1417,7 @@ $$) AS (total agtype);
          Sort Method: quicksort  Memory: 25kB
          ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
                Output: t.id
-(96 rows)
+(99 rows)
 
 ROLLBACK;
 DO $wcoj_sum_property_consumer_telemetry$
@@ -1540,6 +1555,9 @@ $$) AS (value agtype);
          Distinct Source Keys Scanned: 3
          Payload Scan Restarts Avoided: 0
          Payload Rows Scanned: 9
+         Payload Main Rows Scanned: 9
+         Payload Delta Rows Scanned: 0
+         Payload Rows After Survivor Filter: 9
          Payload Rows Matched: 9
          Payload Rows Fetched: 10
          Payload Block Budget Overruns: 0
@@ -1617,7 +1635,7 @@ $$) AS (value agtype);
                      Buffers: shared hit=1
  Planning:
    Buffers: shared hit=15
-(107 rows)
+(110 rows)
 
 ROLLBACK;
 DO $wcoj_avg_property_consumer_telemetry$
@@ -1755,6 +1773,9 @@ $$) AS (value agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -1832,7 +1853,7 @@ $$) AS (value agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=6
-(104 rows)
+(107 rows)
 
 ROLLBACK;
 BEGIN;
@@ -1917,6 +1938,9 @@ $$) AS (value agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -1994,7 +2018,7 @@ $$) AS (value agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=6
-(104 rows)
+(107 rows)
 
 ROLLBACK;
 BEGIN;
@@ -2091,6 +2115,9 @@ $$) AS (key agtype, total agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -2160,7 +2187,7 @@ $$) AS (key agtype, total agtype);
          Sort Method: quicksort  Memory: 25kB
          ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
                Output: t.id
-(96 rows)
+(99 rows)
 
 ROLLBACK;
 DO $wcoj_group_sum_property_consumer_telemetry$
@@ -2303,6 +2330,9 @@ $$) AS (key agtype, value agtype);
          Distinct Source Keys Scanned: 3
          Payload Scan Restarts Avoided: 0
          Payload Rows Scanned: 9
+         Payload Main Rows Scanned: 9
+         Payload Delta Rows Scanned: 0
+         Payload Rows After Survivor Filter: 9
          Payload Rows Matched: 9
          Payload Rows Fetched: 10
          Payload Block Budget Overruns: 0
@@ -2380,7 +2410,7 @@ $$) AS (key agtype, value agtype);
                      Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(107 rows)
+(110 rows)
 
 ROLLBACK;
 DO $wcoj_group_avg_property_consumer_telemetry$
@@ -2520,6 +2550,9 @@ $$) AS (key agtype, value agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -2597,7 +2630,7 @@ $$) AS (key agtype, value agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(104 rows)
+(107 rows)
 
 ROLLBACK;
 BEGIN;
@@ -2682,6 +2715,9 @@ $$) AS (key agtype, value agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -2759,7 +2795,7 @@ $$) AS (key agtype, value agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(104 rows)
+(107 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3025,6 +3061,9 @@ $$) AS (key agtype, total agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -3100,7 +3139,7 @@ $$) AS (key agtype, total agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(102 rows)
+(105 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3199,6 +3238,9 @@ $$) AS (key agtype, total agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -3274,7 +3316,7 @@ $$) AS (key agtype, total agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(102 rows)
+(105 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3410,6 +3452,9 @@ $$) AS (key agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 9
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 9
    Payload Rows Matched: 9
    Payload Rows Fetched: 10
    Payload Block Budget Overruns: 0
@@ -3484,7 +3529,7 @@ $$) AS (key agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(101 rows)
+(104 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3535,6 +3580,9 @@ $$) AS (key agtype);
          Distinct Source Keys Scanned: 3
          Payload Scan Restarts Avoided: 0
          Payload Rows Scanned: 9
+         Payload Main Rows Scanned: 9
+         Payload Delta Rows Scanned: 0
+         Payload Rows After Survivor Filter: 9
          Payload Rows Matched: 9
          Payload Rows Fetched: 10
          Payload Block Budget Overruns: 0
@@ -3611,7 +3659,7 @@ $$) AS (key agtype);
                      Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(106 rows)
+(109 rows)
 
 ROLLBACK;
 BEGIN;
@@ -3700,6 +3748,9 @@ $$) AS (ok agtype);
            Distinct Source Keys Scanned: 3
            Payload Scan Restarts Avoided: 0
            Payload Rows Scanned: 9
+           Payload Main Rows Scanned: 9
+           Payload Delta Rows Scanned: 0
+           Payload Rows After Survivor Filter: 9
            Payload Rows Matched: 9
            Payload Rows Fetched: 10
            Payload Block Budget Overruns: 0
@@ -3769,7 +3820,7 @@ $$) AS (ok agtype);
                  Sort Method: quicksort  Memory: 25kB
                  ->  Seq Scan on wcoj_lowering."T" t (actual rows=1.00 loops=1)
                        Output: t.id
-(98 rows)
+(101 rows)
 
 ROLLBACK;
 DO $wcoj_exists_factorized_row_goal_telemetry$
@@ -3879,9 +3930,11 @@ $$) AS (total agtype);
 (1 row)
 
 -- A dense direct-provider star exercises survivor-block payload retrieval with
--- more than one terminal.  Three source postings contain the same 17
--- terminals, so batching replaces 51 survivor-local scan restarts with three
--- tagged source-key scans while preserving one output row per terminal.
+-- more than one terminal.  These edges are inserted after the adjacency index
+-- exists, so the raw plan shows 51 delta payload rows.  Three source postings
+-- contain the same 17 terminals, so batching replaces 51 survivor-local scan
+-- restarts with three tagged source-key scans while preserving one output row
+-- per terminal.
 INSERT INTO wcoj_lowering."S" (id, properties)
 SELECT _graphid(_label_id('wcoj_lowering', 'S'), source_no),
        format('{"id":%s}', source_no)::agtype
@@ -3928,76 +3981,130 @@ ORDER BY key;
  1125899906842740 | 1
 (17 rows)
 
-DO $wcoj_survivor_batch_telemetry$
-DECLARE
-    plan_text text;
-    has_one_block boolean := false;
-    has_three_batches boolean := false;
-    has_zero_restarts boolean := false;
-    has_three_source_keys boolean := false;
-    has_three_distinct_source_keys boolean := false;
-    has_forty_eight_restarts_avoided boolean := false;
-    has_fifty_one_payload_rows_scanned boolean := false;
-    has_fifty_one_payload_rows boolean := false;
-    has_seventeen_candidate_flat_rows boolean := false;
-    has_zero_flat_rows_avoided boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('age.wcoj_engine', 'merge', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_lowering', $$
+    MATCH (s7:S {id: 7})-[e7:E]->(t:T),
+          (s8:S {id: 8})-[e8:E]->(t),
+          (s9:S {id: 9})-[e9:E]->(t)
+    RETURN id(e7), id(e8), id(e9), id(t)
+$$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype);
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE WCOJ Multiway Join) (actual rows=17.00 loops=1)
+   Output: (e7.id)::agtype, (e8.id)::agtype, (e9.id)::agtype, (t.id)::agtype
+   Filter: ((e7.end_id = t.id) AND (e7.end_id = e8.end_id) AND (e8.end_id = e9.end_id))
+   WCOJ Algorithm: streaming merge intersection with delayed bag product
+   Planned Engine: merge
+   Actual Engine: merge
+   Fallback Reason: none
+   Source Count: 4
+   Adjacency Providers: 3
+   WCOJ Consumer: rows
+   WCOJ Row Goal: 0
+   WCOJ Row Goal Source: none
+   Batched Payload Materialization: true
+   WCOJ Arity: 4
+   Seed Source: 1
+   Estimated Postings: 1=4, 2=7, 3=7, 4=20
+   Observed Postings: 1=17, 2=17, 3=17, 4=20
+   Stage Survivors: 1=0, 2=0, 3=0, 4=0
+   Cursor Advances: 71
+   Seek Calls: 0
+   Posting Rows Scanned: 71
+   Survivor Blocks: 1
+   Payload Scan Batches: 3
+   Payload Scan Restarts: 0
+   Payload Source Keys Scanned: 3
+   Distinct Source Keys Scanned: 3
+   Payload Scan Restarts Avoided: 48
+   Payload Rows Scanned: 51
+   Payload Main Rows Scanned: 0
+   Payload Delta Rows Scanned: 51
+   Payload Rows After Survivor Filter: 51
+   Payload Rows Matched: 51
+   Payload Rows Fetched: 71
+   Payload Block Budget Overruns: 0
+   Payload Block Capacity Clamps: 0
+   Peak Payload Block Rows: 51
+   Progressive Probes: 0
+   Progressive Matches: 0
+   Exact Set Filters: 0
+   Exact Set Candidates Tested: 0
+   Source Rows Scanned: 3
+   Distinct Source Keys: 3
+   Source Bag Rows: 3
+   Source Bag Keys: 3
+   Factorized Binding Source Bags: 3
+   Binding Nodes Created: 17
+   Binding Node Source Bags: 17
+   Binding Node Edge Bags: 51
+   Binding Node Memory: 376 bytes
+   Source Bag Bytes: 888 bytes
+   Source Bag Memory Reserve: 888 bytes
+   Intersection Builds: 3
+   Intersection Merge Calls: 0
+   Intersection Galloping Calls: 0
+   Intersection Galloping Steps: 0
+   Payload Rows Rejected by Local Qual: 0
+   Local Predicate Rejects: 0
+   Matched Terminal Groups: 17
+   Candidate Flat Rows: 17
+   Candidate Bag Combinations: 17
+   Flat Rows Materialized: 17
+   Factorized Binding Enumerators: 17
+   Shared Factor Enumerator Steps: 68
+   Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 0
+   Consumer Flat Rows Avoided: 0
+   Row Goal Survivor Blocks Clamped: 0
+   Row Goal Reached: false
+   Uniqueness Constraint Groups: 0
+   Uniqueness Rejects: 0
+   Rows Emitted: 17
+   Rescans: 0
+   Peak WCOJ Memory: 556000 bytes
+   Peak Factor Memory: 255868 bytes
+   Payload Rows Spilled: 0
+   Payload Bucket Blocks Spilled: 0
+   Payload Bucket Rows Spilled: 0
+   Payload Bucket Bytes Spilled: 0 bytes
+   Spill Bytes: 0 bytes
+   Buffers: shared hit=221
+   ->  Seq Scan on wcoj_lowering."S" s7 (actual rows=1.00 loops=1)
+         Output: s7.id
+         Filter: ((s7.properties @> '{"id": 7}'::agtype) AND agtype_object_field_equals(s7.properties, '"id"'::agtype, '7'::agtype))
+         Rows Removed by Filter: 8
+         Buffers: shared hit=1
+   ->  Seq Scan on wcoj_lowering."S" s8 (actual rows=1.00 loops=1)
+         Output: s8.id
+         Filter: ((s8.properties @> '{"id": 8}'::agtype) AND agtype_object_field_equals(s8.properties, '"id"'::agtype, '8'::agtype))
+         Rows Removed by Filter: 8
+         Buffers: shared hit=1
+   ->  Seq Scan on wcoj_lowering."S" s9 (actual rows=1.00 loops=1)
+         Output: s9.id
+         Filter: ((s9.properties @> '{"id": 9}'::agtype) AND agtype_object_field_equals(s9.properties, '"id"'::agtype, '9'::agtype))
+         Rows Removed by Filter: 8
+         Buffers: shared hit=1
+   ->  Sort (actual rows=20.00 loops=1)
+         Output: t.id
+         Sort Key: t.id
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=1
+         ->  Seq Scan on wcoj_lowering."T" t (actual rows=20.00 loops=1)
+               Output: t.id
+               Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=6
+(105 rows)
 
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('wcoj_lowering', $cypher$
-            MATCH (s7:S {id: 7})-[e7:E]->(t:T),
-                  (s8:S {id: 8})-[e8:E]->(t),
-                  (s9:S {id: 9})-[e9:E]->(t)
-            RETURN id(e7), id(e8), id(e9), id(t)
-        $cypher$) AS (eid7 agtype, eid8 agtype, eid9 agtype, tid agtype)
-    $plan$
-    LOOP
-        has_one_block := has_one_block OR
-            plan_text LIKE '%Survivor Blocks: 1%';
-        has_three_batches := has_three_batches OR
-            plan_text LIKE '%Payload Scan Batches: 3%';
-        has_zero_restarts := has_zero_restarts OR
-            plan_text LIKE '%Payload Scan Restarts: 0%';
-        has_three_source_keys := has_three_source_keys OR
-            plan_text LIKE '%Payload Source Keys Scanned: 3%';
-        has_three_distinct_source_keys := has_three_distinct_source_keys OR
-            plan_text LIKE '%Distinct Source Keys Scanned: 3%';
-        has_forty_eight_restarts_avoided :=
-            has_forty_eight_restarts_avoided OR
-            plan_text LIKE '%Payload Scan Restarts Avoided: 48%';
-        has_fifty_one_payload_rows_scanned :=
-            has_fifty_one_payload_rows_scanned OR
-            plan_text LIKE '%Payload Rows Scanned: 51%';
-        has_fifty_one_payload_rows := has_fifty_one_payload_rows OR
-            plan_text LIKE '%Payload Rows Matched: 51%';
-        has_seventeen_candidate_flat_rows :=
-            has_seventeen_candidate_flat_rows OR
-            plan_text LIKE '%Candidate Flat Rows: 17%';
-        has_zero_flat_rows_avoided := has_zero_flat_rows_avoided OR
-            plan_text LIKE '%Flat Rows Avoided: 0%';
-    END LOOP;
-
-    IF NOT has_one_block OR NOT has_three_batches OR
-       NOT has_zero_restarts OR
-       NOT has_three_source_keys OR NOT has_three_distinct_source_keys OR
-       NOT has_forty_eight_restarts_avoided OR
-       NOT has_fifty_one_payload_rows_scanned OR
-       NOT has_fifty_one_payload_rows OR
-       NOT has_seventeen_candidate_flat_rows OR
-       NOT has_zero_flat_rows_avoided THEN
-        RAISE EXCEPTION 'survivor payload batching telemetry was not observed';
-    END IF;
-    RAISE NOTICE 'wcoj survivor payload batching verified';
-END
-$wcoj_survivor_batch_telemetry$;
-NOTICE:  wcoj survivor payload batching verified
+ROLLBACK;
 /*
  * A high-multiplicity survivor block can exceed the soft batch budget before
  * final row emission.  The executor spills compact payload buckets, loads
@@ -4156,6 +4263,9 @@ $$) AS (total agtype);
    Distinct Source Keys Scanned: 6
    Payload Scan Restarts Avoided: 54
    Payload Rows Scanned: 1920
+   Payload Main Rows Scanned: 1920
+   Payload Delta Rows Scanned: 0
+   Payload Rows After Survivor Filter: 960
    Payload Rows Matched: 960
    Payload Rows Fetched: 980
    Payload Block Budget Overruns: 1
@@ -4231,7 +4341,7 @@ $$) AS (total agtype);
                Buffers: shared hit=1
  Planning:
    Buffers: shared hit=3
-(102 rows)
+(105 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4634,6 +4744,9 @@ $$) AS (total agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 5
+   Payload Main Rows Scanned: 0
+   Payload Delta Rows Scanned: 5
+   Payload Rows After Survivor Filter: 5
    Payload Rows Matched: 5
    Payload Rows Fetched: 6
    Payload Block Budget Overruns: 0
@@ -4703,7 +4816,7 @@ $$) AS (total agtype);
                Output: t.id
                Filter: ((t.properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(t.properties, '"id"'::agtype, '1900'::agtype))
                Rows Removed by Filter: 100
-(96 rows)
+(99 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4750,6 +4863,9 @@ $$) AS (total agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 5
+   Payload Main Rows Scanned: 0
+   Payload Delta Rows Scanned: 5
+   Payload Rows After Survivor Filter: 5
    Payload Rows Matched: 5
    Payload Rows Fetched: 6
    Payload Block Budget Overruns: 0
@@ -4821,7 +4937,7 @@ $$) AS (total agtype);
                Output: t.id
                Filter: ((t.properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(t.properties, '"id"'::agtype, '1900'::agtype))
                Rows Removed by Filter: 100
-(98 rows)
+(101 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4868,6 +4984,9 @@ $$) AS (key agtype, total agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 5
+   Payload Main Rows Scanned: 0
+   Payload Delta Rows Scanned: 5
+   Payload Rows After Survivor Filter: 5
    Payload Rows Matched: 5
    Payload Rows Fetched: 6
    Payload Block Budget Overruns: 0
@@ -4937,7 +5056,7 @@ $$) AS (key agtype, total agtype);
                Output: t.id
                Filter: ((t.properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(t.properties, '"id"'::agtype, '1900'::agtype))
                Rows Removed by Filter: 100
-(96 rows)
+(99 rows)
 
 ROLLBACK;
 BEGIN;
@@ -4984,6 +5103,9 @@ $$) AS (key agtype, total agtype);
    Distinct Source Keys Scanned: 3
    Payload Scan Restarts Avoided: 0
    Payload Rows Scanned: 5
+   Payload Main Rows Scanned: 0
+   Payload Delta Rows Scanned: 5
+   Payload Rows After Survivor Filter: 5
    Payload Rows Matched: 5
    Payload Rows Fetched: 6
    Payload Block Budget Overruns: 0
@@ -5055,7 +5177,7 @@ $$) AS (key agtype, total agtype);
                Output: t.id
                Filter: ((t.properties @> '{"id": 1900}'::agtype) AND agtype_object_field_equals(t.properties, '"id"'::agtype, '1900'::agtype))
                Rows Removed by Filter: 100
-(98 rows)
+(101 rows)
 
 ROLLBACK;
 DO $wcoj_same_edge_semiring_telemetry$
@@ -5416,62 +5538,130 @@ FROM generate_series(1, 3) source_no;
 ANALYZE wcoj_payload_mixed."S";
 ANALYZE wcoj_payload_mixed."T";
 ANALYZE wcoj_payload_mixed."E";
-DO $wcoj_payload_mixed_telemetry$
-DECLARE
-    plan_text text;
-    has_wcoj boolean := false;
-    has_three_batches boolean := false;
-    has_three_source_keys boolean := false;
-    has_three_distinct_source_keys boolean := false;
-    has_nine_payload_rows_scanned boolean := false;
-    has_nine_payload_rows boolean := false;
-    has_three_candidate_flat_rows boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('age.wcoj_engine', 'merge', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT *
+FROM cypher('wcoj_payload_mixed', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(e1), id(e2), id(e3), id(t)
+$$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype);
+                                                             QUERY PLAN                                                              
+-------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (AGE WCOJ Multiway Join) (actual rows=3.00 loops=1)
+   Output: (e1.id)::agtype, (e2.id)::agtype, (e3.id)::agtype, (t.id)::agtype
+   Filter: ((e1.end_id = t.id) AND (e1.end_id = e2.end_id) AND (e2.end_id = e3.end_id))
+   WCOJ Algorithm: streaming merge intersection with delayed bag product
+   Planned Engine: merge
+   Actual Engine: merge
+   Fallback Reason: none
+   Source Count: 4
+   Adjacency Providers: 3
+   WCOJ Consumer: rows
+   WCOJ Row Goal: 0
+   WCOJ Row Goal Source: none
+   Batched Payload Materialization: true
+   WCOJ Arity: 4
+   Seed Source: 1
+   Estimated Postings: 1=1, 2=3, 3=3, 4=3
+   Observed Postings: 1=3, 2=3, 3=3, 4=3
+   Stage Survivors: 1=0, 2=0, 3=0, 4=0
+   Cursor Advances: 12
+   Seek Calls: 0
+   Posting Rows Scanned: 12
+   Survivor Blocks: 1
+   Payload Scan Batches: 3
+   Payload Scan Restarts: 0
+   Payload Source Keys Scanned: 3
+   Distinct Source Keys Scanned: 3
+   Payload Scan Restarts Avoided: 6
+   Payload Rows Scanned: 9
+   Payload Main Rows Scanned: 6
+   Payload Delta Rows Scanned: 3
+   Payload Rows After Survivor Filter: 9
+   Payload Rows Matched: 9
+   Payload Rows Fetched: 12
+   Payload Block Budget Overruns: 0
+   Payload Block Capacity Clamps: 0
+   Peak Payload Block Rows: 9
+   Progressive Probes: 0
+   Progressive Matches: 0
+   Exact Set Filters: 0
+   Exact Set Candidates Tested: 0
+   Source Rows Scanned: 3
+   Distinct Source Keys: 3
+   Source Bag Rows: 3
+   Source Bag Keys: 3
+   Factorized Binding Source Bags: 3
+   Binding Nodes Created: 3
+   Binding Node Source Bags: 3
+   Binding Node Edge Bags: 9
+   Binding Node Memory: 376 bytes
+   Source Bag Bytes: 888 bytes
+   Source Bag Memory Reserve: 888 bytes
+   Intersection Builds: 3
+   Intersection Merge Calls: 0
+   Intersection Galloping Calls: 0
+   Intersection Galloping Steps: 0
+   Payload Rows Rejected by Local Qual: 0
+   Local Predicate Rejects: 0
+   Matched Terminal Groups: 3
+   Candidate Flat Rows: 3
+   Candidate Bag Combinations: 3
+   Flat Rows Materialized: 3
+   Factorized Binding Enumerators: 3
+   Shared Factor Enumerator Steps: 12
+   Flat Rows Avoided: 0
+   Binding Node Flat Rows Avoided: 0
+   Consumer Flat Rows Avoided: 0
+   Row Goal Survivor Blocks Clamped: 0
+   Row Goal Reached: false
+   Uniqueness Constraint Groups: 0
+   Uniqueness Rejects: 0
+   Rows Emitted: 3
+   Rescans: 0
+   Peak WCOJ Memory: 556000 bytes
+   Peak Factor Memory: 255868 bytes
+   Payload Rows Spilled: 0
+   Payload Bucket Blocks Spilled: 0
+   Payload Bucket Rows Spilled: 0
+   Payload Bucket Bytes Spilled: 0 bytes
+   Spill Bytes: 0 bytes
+   Buffers: shared hit=47
+   ->  Seq Scan on wcoj_payload_mixed."S" s1 (actual rows=1.00 loops=1)
+         Output: s1.id
+         Filter: ((s1.properties @> '{"id": 1}'::agtype) AND agtype_object_field_equals(s1.properties, '"id"'::agtype, '1'::agtype))
+         Rows Removed by Filter: 2
+         Buffers: shared hit=1
+   ->  Seq Scan on wcoj_payload_mixed."S" s2 (actual rows=1.00 loops=1)
+         Output: s2.id
+         Filter: ((s2.properties @> '{"id": 2}'::agtype) AND agtype_object_field_equals(s2.properties, '"id"'::agtype, '2'::agtype))
+         Rows Removed by Filter: 2
+         Buffers: shared hit=1
+   ->  Seq Scan on wcoj_payload_mixed."S" s3 (actual rows=1.00 loops=1)
+         Output: s3.id
+         Filter: ((s3.properties @> '{"id": 3}'::agtype) AND agtype_object_field_equals(s3.properties, '"id"'::agtype, '3'::agtype))
+         Rows Removed by Filter: 2
+         Buffers: shared hit=1
+   ->  Sort (actual rows=3.00 loops=1)
+         Output: t.id
+         Sort Key: t.id
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=1
+         ->  Seq Scan on wcoj_payload_mixed."T" t (actual rows=3.00 loops=1)
+               Output: t.id
+               Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=40
+(105 rows)
 
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('wcoj_payload_mixed', $cypher$
-            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
-                  (s2:S {id: 2})-[e2:E]->(t),
-                  (s3:S {id: 3})-[e3:E]->(t)
-            RETURN id(e1), id(e2), id(e3), id(t)
-        $cypher$) AS (eid1 agtype, eid2 agtype, eid3 agtype, tid agtype)
-    $plan$
-    LOOP
-        has_wcoj := has_wcoj OR
-            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
-        has_three_batches := has_three_batches OR
-            plan_text LIKE '%Payload Scan Batches: 3%';
-        has_three_source_keys := has_three_source_keys OR
-            plan_text LIKE '%Payload Source Keys Scanned: 3%';
-        has_three_distinct_source_keys := has_three_distinct_source_keys OR
-            plan_text LIKE '%Distinct Source Keys Scanned: 3%';
-        has_nine_payload_rows_scanned :=
-            has_nine_payload_rows_scanned OR
-            plan_text LIKE '%Payload Rows Scanned: 9%';
-        has_nine_payload_rows := has_nine_payload_rows OR
-            plan_text LIKE '%Payload Rows Matched: 9%';
-        has_three_candidate_flat_rows :=
-            has_three_candidate_flat_rows OR
-            plan_text LIKE '%Candidate Flat Rows: 3%';
-    END LOOP;
-
-    IF NOT has_wcoj OR NOT has_three_batches OR
-       NOT has_three_source_keys OR NOT has_three_distinct_source_keys OR
-       NOT has_nine_payload_rows_scanned OR NOT has_nine_payload_rows OR
-       NOT has_three_candidate_flat_rows THEN
-        RAISE EXCEPTION 'mixed main/delta payload telemetry was not observed';
-    END IF;
-    RAISE NOTICE 'wcoj mixed main/delta payload telemetry verified';
-END
-$wcoj_payload_mixed_telemetry$;
-NOTICE:  wcoj mixed main/delta payload telemetry verified
+ROLLBACK;
 SELECT drop_graph('wcoj_payload_mixed', true);
 NOTICE:  drop cascades to 5 other objects
 DETAIL:  drop cascades to table wcoj_payload_mixed._ag_label_vertex
@@ -6496,7 +6686,7 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
    Uniqueness Rejects: 0
    Rows Emitted: 128
    Rescans: 0
-   Peak Generic Join Memory: 154744 bytes
+   Peak Generic Join Memory: 156736 bytes
    Spill Bytes: 0 bytes
    ->  Seq Scan on wcoj_generic."B" b (actual rows=1.00 loops=1)
          Output: b.id

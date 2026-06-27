@@ -10,11 +10,19 @@ SELECT create_vlabel('generic_ghd', 'B');
 SELECT create_vlabel('generic_ghd', 'C');
 SELECT create_vlabel('generic_ghd', 'D');
 SELECT create_vlabel('generic_ghd', 'X');
+SELECT create_vlabel('generic_ghd', 'GPA');
+SELECT create_vlabel('generic_ghd', 'GPB');
+SELECT create_vlabel('generic_ghd', 'GPC');
+SELECT create_vlabel('generic_ghd', 'GPD');
 SELECT create_elabel('generic_ghd', 'E1');
 SELECT create_elabel('generic_ghd', 'E2');
 SELECT create_elabel('generic_ghd', 'E3');
 SELECT create_elabel('generic_ghd', 'E4');
 SELECT create_elabel('generic_ghd', 'TX');
+SELECT create_elabel('generic_ghd', 'GPE1');
+SELECT create_elabel('generic_ghd', 'GPE2');
+SELECT create_elabel('generic_ghd', 'GPE3');
+SELECT create_elabel('generic_ghd', 'GPE4');
 
 INSERT INTO generic_ghd."A" (id, properties)
 SELECT _graphid(_label_id('generic_ghd', 'A'), i), '{}'::agtype
@@ -35,7 +43,7 @@ INSERT INTO generic_ghd."E1" (id, start_id, end_id, properties)
 SELECT _graphid(_label_id('generic_ghd', 'E1'), i),
        _graphid(_label_id('generic_ghd', 'A'), i),
        _graphid(_label_id('generic_ghd', 'B'), i),
-       '{}'::agtype
+       format('{"score":%s}', i)::agtype
 FROM generate_series(1, 64) i;
 INSERT INTO generic_ghd."E2" (id, start_id, end_id, properties)
 SELECT _graphid(_label_id('generic_ghd', 'E2'), i),
@@ -61,6 +69,45 @@ VALUES (_graphid(_label_id('generic_ghd', 'TX'), 1),
         _graphid(_label_id('generic_ghd', 'X'), 1),
         '{}'::agtype);
 
+INSERT INTO generic_ghd."GPA" (id, properties)
+SELECT _graphid(_label_id('generic_ghd', 'GPA'), i), '{}'::agtype
+FROM generate_series(1, 4) i;
+INSERT INTO generic_ghd."GPB" (id, properties)
+SELECT _graphid(_label_id('generic_ghd', 'GPB'), i), '{}'::agtype
+FROM generate_series(1, 4) i;
+INSERT INTO generic_ghd."GPC" (id, properties)
+SELECT _graphid(_label_id('generic_ghd', 'GPC'), i), '{}'::agtype
+FROM generate_series(1, 4) i;
+INSERT INTO generic_ghd."GPD" (id, properties)
+SELECT _graphid(_label_id('generic_ghd', 'GPD'), i), '{}'::agtype
+FROM generate_series(1, 4) i;
+
+INSERT INTO generic_ghd."GPE1" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('generic_ghd', 'GPE1'), (i - 1) * 3 + j),
+       _graphid(_label_id('generic_ghd', 'GPA'), i),
+       _graphid(_label_id('generic_ghd', 'GPB'), i),
+       format('{"score":%s}', 10 * i + j)::agtype
+FROM generate_series(1, 4) i,
+     generate_series(1, 3) j;
+INSERT INTO generic_ghd."GPE2" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('generic_ghd', 'GPE2'), i),
+       _graphid(_label_id('generic_ghd', 'GPB'), i),
+       _graphid(_label_id('generic_ghd', 'GPC'), i),
+       '{}'::agtype
+FROM generate_series(1, 4) i;
+INSERT INTO generic_ghd."GPE3" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('generic_ghd', 'GPE3'), i),
+       _graphid(_label_id('generic_ghd', 'GPC'), i),
+       _graphid(_label_id('generic_ghd', 'GPD'), i),
+       '{}'::agtype
+FROM generate_series(1, 4) i;
+INSERT INTO generic_ghd."GPE4" (id, start_id, end_id, properties)
+SELECT _graphid(_label_id('generic_ghd', 'GPE4'), i),
+       _graphid(_label_id('generic_ghd', 'GPD'), i),
+       _graphid(_label_id('generic_ghd', 'GPA'), i),
+       '{}'::agtype
+FROM generate_series(1, 4) i;
+
 CREATE INDEX generic_ghd_e1_out
 ON generic_ghd."E1" USING age_adjacency(start_id, id, end_id);
 CREATE INDEX generic_ghd_e2_out
@@ -71,17 +118,33 @@ CREATE INDEX generic_ghd_e4_out
 ON generic_ghd."E4" USING age_adjacency(start_id, id, end_id);
 CREATE INDEX generic_ghd_tx_out
 ON generic_ghd."TX" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX generic_ghd_gpe1_out
+ON generic_ghd."GPE1" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX generic_ghd_gpe2_out
+ON generic_ghd."GPE2" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX generic_ghd_gpe3_out
+ON generic_ghd."GPE3" USING age_adjacency(start_id, id, end_id);
+CREATE INDEX generic_ghd_gpe4_out
+ON generic_ghd."GPE4" USING age_adjacency(start_id, id, end_id);
 
 ANALYZE generic_ghd."A";
 ANALYZE generic_ghd."B";
 ANALYZE generic_ghd."C";
 ANALYZE generic_ghd."D";
 ANALYZE generic_ghd."X";
+ANALYZE generic_ghd."GPA";
+ANALYZE generic_ghd."GPB";
+ANALYZE generic_ghd."GPC";
+ANALYZE generic_ghd."GPD";
 ANALYZE generic_ghd."E1";
 ANALYZE generic_ghd."E2";
 ANALYZE generic_ghd."E3";
 ANALYZE generic_ghd."E4";
 ANALYZE generic_ghd."TX";
+ANALYZE generic_ghd."GPE1";
+ANALYZE generic_ghd."GPE2";
+ANALYZE generic_ghd."GPE3";
+ANALYZE generic_ghd."GPE4";
 
 BEGIN;
 SET LOCAL age.enable_wcoj = on;
@@ -128,6 +191,8 @@ DECLARE
     has_full_materialization boolean := false;
     has_separator_pass boolean := false;
     has_descriptor_separators boolean := false;
+    has_exact_product_mode boolean := false;
+    has_exact_product_reason boolean := false;
 BEGIN
     PERFORM set_config('age.enable_wcoj', 'on', true);
     PERFORM set_config('enable_nestloop', 'off', true);
@@ -165,19 +230,959 @@ BEGIN
             plan_text LIKE '%GHD Separator Reduction Passes: 2%';
         has_descriptor_separators := has_descriptor_separators OR
             plan_text LIKE '%GHD Descriptor Separators Applied: 2%';
+        has_exact_product_mode := has_exact_product_mode OR
+            plan_text LIKE '%Generic Count Multiplicity Mode: exact-bag-product%';
+        has_exact_product_reason := has_exact_product_reason OR
+            plan_text LIKE '%Generic Count Multiplicity Reason: active edge bags cannot collide%';
     END LOOP;
 
     IF NOT has_generic OR NOT has_count_consumer OR
        NOT has_count_result OR NOT has_no_flat_rows OR
        NOT has_consumer_avoids OR NOT has_rows_emitted OR
        NOT has_eager_provider OR NOT has_full_materialization OR
-       NOT has_separator_pass OR NOT has_descriptor_separators THEN
+       NOT has_separator_pass OR NOT has_descriptor_separators OR
+       NOT has_exact_product_mode OR NOT has_exact_product_reason THEN
         RAISE EXCEPTION
             'Generic Join count consumer with GHD separator reduction was not observed';
     END IF;
     RAISE NOTICE 'generic join count consumer with GHD separator reduction verified';
 END
 $generic_ghd_count_consumer_plan$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN count(*) AS total
+$$) AS (total agtype);
+ROLLBACK;
+
+DO $generic_count_multiplicity_fast_path$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_count_consumer boolean := false;
+    has_product_mode boolean := false;
+    has_product_reason boolean := false;
+    has_product_bindings boolean := false;
+    has_product_rows boolean := false;
+    has_count_result boolean := false;
+    has_no_flat_rows boolean := false;
+    has_consumer_avoids boolean := false;
+    has_no_uniqueness_groups boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+        SELECT *
+        FROM cypher('generic_ghd', $cypher$
+            MATCH (a:A)-[:E1]->(b:B),
+                  (b)-[:E2]->(c:C),
+                  (c)-[:E3]->(d:D),
+                  (d)-[:E4]->(a)
+            RETURN count(*) AS total
+        $cypher$) AS (total agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_count_consumer := has_count_consumer OR
+            plan_text LIKE '%Generic Join Consumer: count(*)%';
+        has_product_mode := has_product_mode OR
+            plan_text LIKE '%Generic Count Multiplicity Mode: binding-bag-product%';
+        has_product_reason := has_product_reason OR
+            plan_text LIKE '%Generic Count Multiplicity Reason: no overlapping uniqueness groups%';
+        has_product_bindings := has_product_bindings OR
+            plan_text LIKE '%Generic Count Multiplicity Bindings: 64%';
+        has_product_rows := has_product_rows OR
+            plan_text LIKE '%Generic Count Multiplicity Rows: 64%';
+        has_count_result := has_count_result OR
+            plan_text LIKE '%Count Result: 64%';
+        has_no_flat_rows := has_no_flat_rows OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_consumer_avoids := has_consumer_avoids OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 64%';
+        has_no_uniqueness_groups := has_no_uniqueness_groups OR
+            plan_text LIKE '%Uniqueness Constraint Groups: 0%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_count_consumer OR
+       NOT has_product_mode OR NOT has_product_reason OR
+       NOT has_product_bindings OR NOT has_product_rows OR
+       NOT has_count_result OR NOT has_no_flat_rows OR
+       NOT has_consumer_avoids OR NOT has_no_uniqueness_groups THEN
+        RAISE EXCEPTION
+            'Generic Join count multiplicity fast path was not observed';
+    END IF;
+    RAISE NOTICE 'generic join count multiplicity fast path verified';
+END
+$generic_count_multiplicity_fast_path$;
+
+-- Same-label parallel edge bags force bounded exact enumeration under
+-- explicit edge uniqueness while preserving the Generic Join count shape.
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (a)-[e2:GPE1]->(b),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    WHERE _ag_enforce_edge_uniqueness2(id(e1), id(e2))
+    RETURN count(*) AS total
+$$) AS (total agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (a)-[e2:GPE1]->(b),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    WHERE _ag_enforce_edge_uniqueness2(id(e1), id(e2))
+    RETURN id(a) AS key, count(*) AS total
+$$) AS (key agtype, total agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (a)-[e2:GPE1]->(b),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    WHERE _ag_enforce_edge_uniqueness2(id(e1), id(e2))
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (a)-[e2:GPE1]->(b),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    WHERE _ag_enforce_edge_uniqueness2(id(e1), id(e2))
+    RETURN id(a) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_small_enum_count ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (a)-[e2:GPE1]->(b),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    WHERE _ag_enforce_edge_uniqueness2(id(e1), id(e2))
+    RETURN count(*) AS total
+$$) AS (total agtype);
+CREATE TEMP TABLE generic_ghd_binary_small_enum_group_count ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (a)-[e2:GPE1]->(b),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    WHERE _ag_enforce_edge_uniqueness2(id(e1), id(e2))
+    RETURN id(a) AS key, count(*) AS total
+$$) AS (key agtype, total agtype);
+CREATE TEMP TABLE generic_ghd_binary_small_enum_sum ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (a)-[e2:GPE1]->(b),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    WHERE _ag_enforce_edge_uniqueness2(id(e1), id(e2))
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+CREATE TEMP TABLE generic_ghd_binary_small_enum_group_sum ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (a)-[e2:GPE1]->(b),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    WHERE _ag_enforce_edge_uniqueness2(id(e1), id(e2))
+    RETURN id(a) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+CREATE TEMP TABLE generic_ghd_join_small_enum_count ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (a)-[e2:GPE1]->(b),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    WHERE _ag_enforce_edge_uniqueness2(id(e1), id(e2))
+    RETURN count(*) AS total
+$$) AS (total agtype);
+CREATE TEMP TABLE generic_ghd_join_small_enum_group_count ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (a)-[e2:GPE1]->(b),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    WHERE _ag_enforce_edge_uniqueness2(id(e1), id(e2))
+    RETURN id(a) AS key, count(*) AS total
+$$) AS (key agtype, total agtype);
+CREATE TEMP TABLE generic_ghd_join_small_enum_sum ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (a)-[e2:GPE1]->(b),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    WHERE _ag_enforce_edge_uniqueness2(id(e1), id(e2))
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+CREATE TEMP TABLE generic_ghd_join_small_enum_group_sum ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (a)-[e2:GPE1]->(b),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    WHERE _ag_enforce_edge_uniqueness2(id(e1), id(e2))
+    RETURN id(a) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+
+SELECT (SELECT total FROM generic_ghd_binary_small_enum_count) AS binary_count,
+       (SELECT total FROM generic_ghd_join_small_enum_count) AS generic_count,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_small_enum_count
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_small_enum_count)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_small_enum_count
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_small_enum_count)
+        ) diff) AS count_diff_rows,
+       (SELECT count(*) FROM generic_ghd_binary_small_enum_group_count) AS binary_group_count_rows,
+       (SELECT count(*) FROM generic_ghd_join_small_enum_group_count) AS generic_group_count_rows,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_small_enum_group_count
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_small_enum_group_count)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_small_enum_group_count
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_small_enum_group_count)
+        ) diff) AS group_count_diff_rows,
+       (SELECT total FROM generic_ghd_binary_small_enum_sum) AS binary_sum,
+       (SELECT total FROM generic_ghd_join_small_enum_sum) AS generic_sum,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_small_enum_sum
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_small_enum_sum)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_small_enum_sum
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_small_enum_sum)
+        ) diff) AS sum_diff_rows,
+       (SELECT count(*) FROM generic_ghd_binary_small_enum_group_sum) AS binary_group_sum_rows,
+       (SELECT count(*) FROM generic_ghd_join_small_enum_group_sum) AS generic_group_sum_rows,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_small_enum_group_sum
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_small_enum_group_sum)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_small_enum_group_sum
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_small_enum_group_sum)
+        ) diff) AS group_sum_diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN avg(e1.score) AS value
+$$) AS (value agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN min(e1.score) AS value
+$$) AS (value agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN max(e1.score) AS value
+$$) AS (value agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_sum_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE generic_ghd_join_sum_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+
+SELECT (SELECT total FROM generic_ghd_binary_sum_property) AS binary_total,
+       (SELECT total FROM generic_ghd_join_sum_property) AS generic_total,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_sum_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_sum_property)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_sum_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_sum_property)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_avg_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN avg(e1.score) AS value
+$$) AS (value agtype);
+CREATE TEMP TABLE generic_ghd_binary_min_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN min(e1.score) AS value
+$$) AS (value agtype);
+CREATE TEMP TABLE generic_ghd_binary_max_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN max(e1.score) AS value
+$$) AS (value agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE generic_ghd_join_avg_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN avg(e1.score) AS value
+$$) AS (value agtype);
+CREATE TEMP TABLE generic_ghd_join_min_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN min(e1.score) AS value
+$$) AS (value agtype);
+CREATE TEMP TABLE generic_ghd_join_max_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN max(e1.score) AS value
+$$) AS (value agtype);
+
+SELECT (SELECT value FROM generic_ghd_binary_avg_property) AS binary_avg,
+       (SELECT value FROM generic_ghd_join_avg_property) AS generic_avg,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_avg_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_avg_property)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_avg_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_avg_property)
+        ) diff) AS avg_diff_rows,
+       (SELECT value FROM generic_ghd_binary_min_property) AS binary_min,
+       (SELECT value FROM generic_ghd_join_min_property) AS generic_min,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_min_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_min_property)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_min_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_min_property)
+        ) diff) AS min_diff_rows,
+       (SELECT value FROM generic_ghd_binary_max_property) AS binary_max,
+       (SELECT value FROM generic_ghd_join_max_property) AS generic_max,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_max_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_max_property)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_max_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_max_property)
+        ) diff) AS max_diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    RETURN id(a) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    RETURN id(a) AS key, avg(e1.score) AS value
+$$) AS (key agtype, value agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    RETURN id(a) AS key, min(e1.score) AS value
+$$) AS (key agtype, value agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    RETURN id(a) AS key, max(e1.score) AS value
+$$) AS (key agtype, value agtype);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_group_sum_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    RETURN id(a) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+CREATE TEMP TABLE generic_ghd_binary_group_avg_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    RETURN id(a) AS key, avg(e1.score) AS value
+$$) AS (key agtype, value agtype);
+CREATE TEMP TABLE generic_ghd_binary_group_min_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    RETURN id(a) AS key, min(e1.score) AS value
+$$) AS (key agtype, value agtype);
+CREATE TEMP TABLE generic_ghd_binary_group_max_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    RETURN id(a) AS key, max(e1.score) AS value
+$$) AS (key agtype, value agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+CREATE TEMP TABLE generic_ghd_join_group_sum_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    RETURN id(a) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+CREATE TEMP TABLE generic_ghd_join_group_avg_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    RETURN id(a) AS key, avg(e1.score) AS value
+$$) AS (key agtype, value agtype);
+CREATE TEMP TABLE generic_ghd_join_group_min_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    RETURN id(a) AS key, min(e1.score) AS value
+$$) AS (key agtype, value agtype);
+CREATE TEMP TABLE generic_ghd_join_group_max_property ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:GPA)-[e1:GPE1]->(b:GPB),
+          (b)-[:GPE2]->(c:GPC),
+          (c)-[:GPE3]->(d:GPD),
+          (d)-[:GPE4]->(a)
+    RETURN id(a) AS key, max(e1.score) AS value
+$$) AS (key agtype, value agtype);
+
+SELECT (SELECT count(*) FROM generic_ghd_binary_group_sum_property) AS binary_sum_rows,
+       (SELECT count(*) FROM generic_ghd_join_group_sum_property) AS generic_sum_rows,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_group_sum_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_group_sum_property)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_group_sum_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_group_sum_property)
+        ) diff) AS sum_diff_rows,
+       (SELECT count(*) FROM generic_ghd_binary_group_avg_property) AS binary_avg_rows,
+       (SELECT count(*) FROM generic_ghd_join_group_avg_property) AS generic_avg_rows,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_group_avg_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_group_avg_property)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_group_avg_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_group_avg_property)
+        ) diff) AS avg_diff_rows,
+       (SELECT count(*) FROM generic_ghd_binary_group_min_property) AS binary_min_rows,
+       (SELECT count(*) FROM generic_ghd_join_group_min_property) AS generic_min_rows,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_group_min_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_group_min_property)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_group_min_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_group_min_property)
+        ) diff) AS min_diff_rows,
+       (SELECT count(*) FROM generic_ghd_binary_group_max_property) AS binary_max_rows,
+       (SELECT count(*) FROM generic_ghd_join_group_max_property) AS generic_max_rows,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_group_max_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_group_max_property)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_group_max_property
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_group_max_property)
+        ) diff) AS max_diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN id(a) AS key, count(*) AS total
+$$) AS (key agtype, total agtype);
+ROLLBACK;
+
+DO $generic_group_count_fast_path$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_group_count_consumer boolean := false;
+    has_product_mode boolean := false;
+    has_product_reason boolean := false;
+    has_product_bindings boolean := false;
+    has_product_rows boolean := false;
+    has_count_result boolean := false;
+    has_no_flat_rows boolean := false;
+    has_consumer_avoids boolean := false;
+    has_rows_emitted boolean := false;
+    has_no_uniqueness_groups boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+    PERFORM set_config('enable_hashagg', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+        SELECT *
+        FROM cypher('generic_ghd', $cypher$
+            MATCH (a:A)-[:E1]->(b:B),
+                  (b)-[:E2]->(c:C),
+                  (c)-[:E3]->(d:D),
+                  (d)-[:E4]->(a)
+            RETURN id(a) AS key, count(*) AS total
+        $cypher$) AS (key agtype, total agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_group_count_consumer := has_group_count_consumer OR
+            plan_text LIKE '%Generic Join Consumer: group count(key)%';
+        has_product_mode := has_product_mode OR
+            plan_text LIKE '%Generic Count Multiplicity Mode: binding-bag-product%';
+        has_product_reason := has_product_reason OR
+            plan_text LIKE '%Generic Count Multiplicity Reason: no overlapping uniqueness groups%';
+        has_product_bindings := has_product_bindings OR
+            plan_text LIKE '%Generic Count Multiplicity Bindings: 64%';
+        has_product_rows := has_product_rows OR
+            plan_text LIKE '%Generic Count Multiplicity Rows: 64%';
+        has_count_result := has_count_result OR
+            plan_text LIKE '%Count Result: 64%';
+        has_no_flat_rows := has_no_flat_rows OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_consumer_avoids := has_consumer_avoids OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 64%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 64%';
+        has_no_uniqueness_groups := has_no_uniqueness_groups OR
+            plan_text LIKE '%Uniqueness Constraint Groups: 0%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_group_count_consumer OR
+       NOT has_product_mode OR NOT has_product_reason OR
+       NOT has_product_bindings OR NOT has_product_rows OR
+       NOT has_count_result OR NOT has_no_flat_rows OR
+       NOT has_consumer_avoids OR NOT has_rows_emitted OR
+       NOT has_no_uniqueness_groups THEN
+        RAISE EXCEPTION
+            'Generic Join grouped count fast path was not observed';
+    END IF;
+    RAISE NOTICE 'generic join grouped count fast path verified';
+END
+$generic_group_count_fast_path$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN id(a) AS key, count(DISTINCT id(a)) AS total
+$$) AS (key agtype, total agtype);
+ROLLBACK;
+
+DO $generic_group_count_distinct_key$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_group_distinct_consumer boolean := false;
+    has_count_result boolean := false;
+    has_distinct_count boolean := false;
+    has_no_flat_rows boolean := false;
+    has_consumer_avoids boolean := false;
+    has_rows_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+    PERFORM set_config('enable_hashagg', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+        SELECT *
+        FROM cypher('generic_ghd', $cypher$
+            MATCH (a:A)-[:E1]->(b:B),
+                  (b)-[:E2]->(c:C),
+                  (c)-[:E3]->(d:D),
+                  (d)-[:E4]->(a)
+            RETURN id(a) AS key, count(DISTINCT id(a)) AS total
+        $cypher$) AS (key agtype, total agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_group_distinct_consumer := has_group_distinct_consumer OR
+            plan_text LIKE '%Generic Join Consumer: group count(distinct key)%';
+        has_count_result := has_count_result OR
+            plan_text LIKE '%Count Result: 64%';
+        has_distinct_count := has_distinct_count OR
+            plan_text LIKE '%Distinct Key Count: 64%';
+        has_no_flat_rows := has_no_flat_rows OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_consumer_avoids := has_consumer_avoids OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 64%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 64%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_group_distinct_consumer OR
+       NOT has_count_result OR NOT has_distinct_count OR
+       NOT has_no_flat_rows OR NOT has_consumer_avoids OR
+       NOT has_rows_emitted THEN
+        RAISE EXCEPTION
+            'Generic Join grouped count distinct-key consumer was not observed';
+    END IF;
+    RAISE NOTICE 'generic join grouped count distinct-key consumer verified';
+END
+$generic_group_count_distinct_key$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_group_count ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN id(a) AS key, count(*) AS total
+$$) AS (key agtype, total agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+CREATE TEMP TABLE generic_ghd_join_group_count ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN id(a) AS key, count(*) AS total
+$$) AS (key agtype, total agtype);
+
+SELECT (SELECT count(*) FROM generic_ghd_binary_group_count) AS binary_rows,
+       (SELECT count(*) FROM generic_ghd_join_group_count) AS generic_rows,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_group_count
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_group_count)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_group_count
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_group_count)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_group_count_distinct ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN id(a) AS key, count(DISTINCT id(a)) AS total
+$$) AS (key agtype, total agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+CREATE TEMP TABLE generic_ghd_join_group_count_distinct ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[:E1]->(b:B),
+          (b)-[:E2]->(c:C),
+          (c)-[:E3]->(d:D),
+          (d)-[:E4]->(a)
+    RETURN id(a) AS key, count(DISTINCT id(a)) AS total
+$$) AS (key agtype, total agtype);
+
+SELECT (SELECT count(*) FROM generic_ghd_binary_group_count_distinct) AS binary_rows,
+       (SELECT count(*) FROM generic_ghd_join_group_count_distinct) AS generic_rows,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_group_count_distinct
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_group_count_distinct)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_group_count_distinct
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_group_count_distinct)
+        ) diff) AS diff_rows;
+ROLLBACK;
 
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
@@ -318,6 +1323,107 @@ SELECT (SELECT total FROM generic_ghd_binary_count_distinct) AS binary_total,
             (SELECT * FROM generic_ghd_join_count_distinct
              EXCEPT ALL
              SELECT * FROM generic_ghd_binary_count_distinct)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN DISTINCT id(a) AS key
+$$) AS (key agtype);
+ROLLBACK;
+
+DO $generic_ghd_distinct_key_consumer_plan$
+DECLARE
+    plan_text text;
+    has_generic boolean := false;
+    has_distinct_consumer boolean := false;
+    has_distinct_count boolean := false;
+    has_no_flat_rows boolean := false;
+    has_consumer_avoids boolean := false;
+    has_rows_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+    PERFORM set_config('enable_hashagg', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+        SELECT *
+        FROM cypher('generic_ghd', $cypher$
+            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+                  -[e3:E3]->(d:D)-[e4:E4]->(a)
+            RETURN DISTINCT id(a) AS key
+        $cypher$) AS (key agtype)
+    $plan$
+    LOOP
+        has_generic := has_generic OR
+            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_distinct_consumer := has_distinct_consumer OR
+            plan_text LIKE '%Generic Join Consumer: distinct key%';
+        has_distinct_count := has_distinct_count OR
+            plan_text LIKE '%Distinct Key Count: 64%';
+        has_no_flat_rows := has_no_flat_rows OR
+            plan_text LIKE '%Flat Rows Materialized: 0%';
+        has_consumer_avoids := has_consumer_avoids OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 64%';
+        has_rows_emitted := has_rows_emitted OR
+            plan_text LIKE '%Rows Emitted: 64%';
+    END LOOP;
+
+    IF NOT has_generic OR NOT has_distinct_consumer OR
+       NOT has_distinct_count OR NOT has_no_flat_rows OR
+       NOT has_consumer_avoids OR NOT has_rows_emitted THEN
+        RAISE EXCEPTION
+            'Generic Join distinct-key consumer was not observed';
+    END IF;
+    RAISE NOTICE 'generic join distinct-key consumer verified';
+END
+$generic_ghd_distinct_key_consumer_plan$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE generic_ghd_binary_distinct_key ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN DISTINCT id(a) AS key
+$$) AS (key agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+SET LOCAL enable_hashagg = off;
+CREATE TEMP TABLE generic_ghd_join_distinct_key ON COMMIT DROP AS
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a)
+    RETURN DISTINCT id(a) AS key
+$$) AS (key agtype);
+
+SELECT (SELECT count(*) FROM generic_ghd_binary_distinct_key) AS binary_rows,
+       (SELECT count(*) FROM generic_ghd_join_distinct_key) AS generic_rows,
+       (SELECT count(*) FROM (
+            (SELECT * FROM generic_ghd_binary_distinct_key
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_join_distinct_key)
+            UNION ALL
+            (SELECT * FROM generic_ghd_join_distinct_key
+             EXCEPT ALL
+             SELECT * FROM generic_ghd_binary_distinct_key)
         ) diff) AS diff_rows;
 ROLLBACK;
 
@@ -547,131 +1653,22 @@ SELECT (SELECT count(*) FROM generic_ghd_binary_limit) AS binary_rows,
         ) diff) AS diff_rows;
 ROLLBACK;
 
-DO $generic_ghd_separator_plan$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_component_count boolean := false;
-    has_component_ids boolean := false;
-    has_reduction_shape boolean := false;
-    has_descriptor_source boolean := false;
-    has_ghd_mode boolean := false;
-    has_ghd_general boolean := false;
-    has_ghd_fallback boolean := false;
-    has_ghd_bag_count boolean := false;
-    has_ghd_bag_details boolean := false;
-    has_ghd_separator_count boolean := false;
-    has_ghd_separator_details boolean := false;
-    has_ghd_descriptor_source boolean := false;
-    has_reduction_core boolean := false;
-    has_reduction_tail boolean := false;
-    has_separator_pass boolean := false;
-    has_leaf_tail_provider boolean := false;
-    has_descriptor_separators boolean := false;
-    has_separator_domain boolean := false;
-    has_core_pruning boolean := false;
-    has_provider_rows boolean := false;
-    has_key_only_tuple_skip boolean := false;
-    has_reduction_scratch_allocation boolean := false;
-    has_reduction_scratch_reuse boolean := false;
-    has_one_row boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('generic_ghd', $cypher$
-            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
-                  -[e3:E3]->(d:D)-[e4:E4]->(a),
-                  (c)-[t:TX]->(x:X)
-            RETURN id(a), id(b), id(c), id(d), id(x),
-                   id(e1), id(e2), id(e3), id(e4), id(t)
-        $cypher$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
-                      e1 agtype, e2 agtype, e3 agtype, e4 agtype,
-                      t agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_component_count := has_component_count OR
-            plan_text LIKE '%Component Count: 1%';
-        has_component_ids := has_component_ids OR
-            plan_text LIKE '%Component IDs: 1, 1, 1, 1, 1%';
-        has_reduction_shape := has_reduction_shape OR
-            plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
-        has_ghd_mode := has_ghd_mode OR
-            plan_text LIKE '%GHD Mode: general GHD%';
-        has_ghd_general := has_ghd_general OR
-            plan_text LIKE '%GHD General Decomposition: true%';
-        has_ghd_fallback := has_ghd_fallback OR
-            plan_text LIKE '%GHD Fallback Reason: none%';
-        has_descriptor_source := has_descriptor_source OR
-            plan_text LIKE
-            '%Reduction Descriptor Source: graph-join-match-ir%';
-        has_ghd_bag_count := has_ghd_bag_count OR
-            plan_text LIKE '%GHD Bag Count: 3%';
-        has_ghd_bag_details := has_ghd_bag_details OR
-            plan_text LIKE
-            '%GHD Bags: bag 1 cyclic-core:%bag 2 cyclic-core:%bag 3 leaf-tail:%';
-        has_ghd_separator_count := has_ghd_separator_count OR
-            plan_text LIKE '%GHD Separator Count: 2%';
-        has_ghd_separator_details := has_ghd_separator_details OR
-            plan_text LIKE '%GHD Separators:%pair v%provider %';
-        has_ghd_descriptor_source := has_ghd_descriptor_source OR
-            plan_text LIKE '%GHD Descriptor Source: graph-join-match-ir%';
-        has_reduction_core := has_reduction_core OR
-            plan_text LIKE '%Reduction Core Variables: 4%';
-        has_reduction_tail := has_reduction_tail OR
-            plan_text LIKE '%Reduction Tail Separators: 1%';
-        has_separator_pass := has_separator_pass OR
-            plan_text LIKE '%GHD Separator Reduction Passes: 2%';
-        has_leaf_tail_provider := has_leaf_tail_provider OR
-            plan_text LIKE '%GHD Leaf Tail Providers: 1%';
-        has_descriptor_separators := has_descriptor_separators OR
-            plan_text LIKE '%GHD Descriptor Separators Applied: 2%';
-        has_separator_domain := has_separator_domain OR
-            plan_text LIKE '%GHD Separator Domain Keys: 3%';
-        has_core_pruning := has_core_pruning OR
-            plan_text LIKE '%GHD Cyclic Core Rows Removed: 315%';
-        has_provider_rows := has_provider_rows OR
-            plan_text ~ 'Provider Rows Materialized: [1-9][0-9]*';
-        has_key_only_tuple_skip := has_key_only_tuple_skip OR
-            plan_text LIKE '%Provider Tuples Materialized: 0%';
-        has_reduction_scratch_allocation :=
-            has_reduction_scratch_allocation OR
-            plan_text ~ 'Reduction Scratch Allocations: [1-9][0-9]*';
-        has_reduction_scratch_reuse := has_reduction_scratch_reuse OR
-            plan_text ~ 'Reduction Scratch Reuses: [1-9][0-9]*';
-        has_one_row := has_one_row OR
-            plan_text LIKE '%Rows Emitted: 1%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_component_count OR
-       NOT has_component_ids OR NOT has_reduction_shape OR
-       NOT has_ghd_mode OR NOT has_ghd_general OR
-       NOT has_ghd_fallback OR
-       NOT has_descriptor_source OR NOT has_reduction_core OR
-       NOT has_ghd_bag_count OR NOT has_ghd_bag_details OR
-       NOT has_ghd_separator_count OR NOT has_ghd_separator_details OR
-       NOT has_ghd_descriptor_source OR
-       NOT has_reduction_tail OR
-       NOT has_separator_pass OR
-       NOT has_leaf_tail_provider OR
-       NOT has_descriptor_separators OR NOT has_separator_domain OR
-       NOT has_core_pruning OR NOT has_provider_rows OR
-       NOT has_key_only_tuple_skip OR
-       NOT has_reduction_scratch_allocation OR
-       NOT has_reduction_scratch_reuse OR NOT has_one_row THEN
-        RAISE EXCEPTION
-            'Generic Join GHD separator reduction/key-only/scratch reuse was not observed';
-    END IF;
-    RAISE NOTICE 'generic join GHD separator reduction, key-only materialization, and scratch reuse verified';
-END
-$generic_ghd_separator_plan$;
+BEGIN;
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT *
+FROM cypher('generic_ghd', $$
+    MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
+          -[e3:E3]->(d:D)-[e4:E4]->(a),
+          (c)-[t:TX]->(x:X)
+    RETURN id(a), id(b), id(c), id(d), id(x),
+           id(e1), id(e2), id(e3), id(e4), id(t)
+$$) AS (a agtype, b agtype, c agtype, d agtype, x agtype,
+        e1 agtype, e2 agtype, e3 agtype, e4 agtype, t agtype);
+ROLLBACK;
 
 BEGIN;
 SET LOCAL age.enable_wcoj = off;
@@ -749,116 +1746,6 @@ $$) AS (a agtype, b agtype, c agtype, d agtype,
         x agtype, y agtype, e1 agtype, e2 agtype,
         e3 agtype, e4 agtype, tx agtype, ty agtype);
 ROLLBACK;
-
-DO $generic_ghd_multi_tail_plan$
-DECLARE
-    plan_text text;
-    has_generic boolean := false;
-    has_component_count boolean := false;
-    has_component_ids boolean := false;
-    has_reduction_shape boolean := false;
-    has_descriptor_source boolean := false;
-    has_ghd_mode boolean := false;
-    has_ghd_general boolean := false;
-    has_ghd_fallback boolean := false;
-    has_ghd_bag_count boolean := false;
-    has_ghd_bag_details boolean := false;
-    has_ghd_separator_count boolean := false;
-    has_ghd_separator_details boolean := false;
-    has_ghd_descriptor_source boolean := false;
-    has_reduction_core boolean := false;
-    has_reduction_tail boolean := false;
-    has_separator_pass boolean := false;
-    has_leaf_tail_providers boolean := false;
-    has_descriptor_separators boolean := false;
-    has_separator_domain boolean := false;
-    has_core_pruning boolean := false;
-    has_one_row boolean := false;
-BEGIN
-    PERFORM set_config('age.enable_wcoj', 'on', true);
-    PERFORM set_config('enable_nestloop', 'off', true);
-    PERFORM set_config('enable_hashjoin', 'off', true);
-    PERFORM set_config('enable_mergejoin', 'off', true);
-
-    FOR plan_text IN EXECUTE $plan$
-        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
-        SELECT *
-        FROM cypher('generic_ghd', $cypher$
-            MATCH (a:A)-[e1:E1]->(b:B)-[e2:E2]->(c:C)
-                  -[e3:E3]->(d:D)-[e4:E4]->(a),
-                  (c)-[tx:TX]->(x:X),
-                  (a)-[ty:TY]->(y:Y)
-            RETURN id(a), id(b), id(c), id(d), id(x), id(y),
-                   id(e1), id(e2), id(e3), id(e4), id(tx), id(ty)
-        $cypher$) AS (a agtype, b agtype, c agtype, d agtype,
-                      x agtype, y agtype, e1 agtype, e2 agtype,
-                      e3 agtype, e4 agtype, tx agtype, ty agtype)
-    $plan$
-    LOOP
-        has_generic := has_generic OR
-            plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
-        has_component_count := has_component_count OR
-            plan_text LIKE '%Component Count: 1%';
-        has_component_ids := has_component_ids OR
-            plan_text LIKE '%Component IDs: 1, 1, 1, 1, 1, 1%';
-        has_reduction_shape := has_reduction_shape OR
-            plan_text LIKE '%Reduction Shape: cyclic-with-tail%';
-        has_ghd_mode := has_ghd_mode OR
-            plan_text LIKE '%GHD Mode: general GHD%';
-        has_ghd_general := has_ghd_general OR
-            plan_text LIKE '%GHD General Decomposition: true%';
-        has_ghd_fallback := has_ghd_fallback OR
-            plan_text LIKE '%GHD Fallback Reason: none%';
-        has_descriptor_source := has_descriptor_source OR
-            plan_text LIKE
-            '%Reduction Descriptor Source: graph-join-match-ir%';
-        has_ghd_bag_count := has_ghd_bag_count OR
-            plan_text LIKE '%GHD Bag Count: 4%';
-        has_ghd_bag_details := has_ghd_bag_details OR
-            plan_text LIKE
-            '%GHD Bags: bag 1 cyclic-core:%bag 2 cyclic-core:%bag 3 leaf-tail:%bag 4 leaf-tail:%';
-        has_ghd_separator_count := has_ghd_separator_count OR
-            plan_text LIKE '%GHD Separator Count: 3%';
-        has_ghd_separator_details := has_ghd_separator_details OR
-            plan_text LIKE '%GHD Separators:%pair v%provider %provider %';
-        has_ghd_descriptor_source := has_ghd_descriptor_source OR
-            plan_text LIKE '%GHD Descriptor Source: graph-join-match-ir%';
-        has_reduction_core := has_reduction_core OR
-            plan_text LIKE '%Reduction Core Variables: 4%';
-        has_reduction_tail := has_reduction_tail OR
-            plan_text LIKE '%Reduction Tail Separators: 2%';
-        has_separator_pass := has_separator_pass OR
-            plan_text LIKE '%GHD Separator Reduction Passes: 2%';
-        has_leaf_tail_providers := has_leaf_tail_providers OR
-            plan_text LIKE '%GHD Leaf Tail Providers: 2%';
-        has_descriptor_separators := has_descriptor_separators OR
-            plan_text LIKE '%GHD Descriptor Separators Applied: 3%';
-        has_separator_domain := has_separator_domain OR
-            plan_text LIKE '%GHD Separator Domain Keys: 4%';
-        has_core_pruning := has_core_pruning OR
-            plan_text LIKE '%GHD Cyclic Core Rows Removed: 378%';
-        has_one_row := has_one_row OR
-            plan_text LIKE '%Rows Emitted: 1%';
-    END LOOP;
-
-    IF NOT has_generic OR NOT has_component_count OR
-       NOT has_component_ids OR NOT has_reduction_shape OR
-       NOT has_ghd_mode OR NOT has_ghd_general OR
-       NOT has_ghd_fallback OR
-       NOT has_descriptor_source OR NOT has_ghd_bag_count OR
-       NOT has_ghd_bag_details OR NOT has_ghd_separator_count OR
-       NOT has_ghd_separator_details OR NOT has_ghd_descriptor_source OR
-       NOT has_reduction_core OR NOT has_reduction_tail OR
-       NOT has_separator_pass OR NOT has_leaf_tail_providers OR
-       NOT has_descriptor_separators OR NOT has_separator_domain OR
-       NOT has_core_pruning OR
-       NOT has_one_row THEN
-        RAISE EXCEPTION
-            'Generic Join multi-tail GHD separator reduction was not observed';
-    END IF;
-    RAISE NOTICE 'generic join multi-tail GHD separator reduction verified';
-END
-$generic_ghd_multi_tail_plan$;
 
 BEGIN;
 SET LOCAL age.enable_wcoj = off;

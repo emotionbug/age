@@ -186,6 +186,7 @@ typedef enum AgeGenericPathPrivateField
     AGE_GENERIC_PATH_PRIVATE_ROW_GOAL,
     AGE_GENERIC_PATH_PRIVATE_ROW_GOAL_SOURCE,
     AGE_GENERIC_PATH_PRIVATE_DISTINCT_VARIABLE,
+    AGE_GENERIC_PATH_PRIVATE_CONSUMER_DESC,
     AGE_GENERIC_PATH_PRIVATE_COUNT
 } AgeGenericPathPrivateField;
 
@@ -340,6 +341,9 @@ static int generic_ghd_separator_kind_count(
 static List *make_generic_semijoin_step_desc(
     int id, AgeGenericSemijoinStepPhase phase, int provider_index,
     int from_variable, int to_variable, int key_variable, bool key_is_key1);
+static bool make_generic_ghd_semijoin_plan(
+    List *ghd_separators, int variable_count, int provider_count,
+    int tail_separator_count, List **semijoin_steps);
 static bool make_generic_ghd_metadata(
     const AgeGenericHypergraph *hypergraph, const bool *core_variables,
     List **ghd_bags, List **ghd_separators);
@@ -469,9 +473,15 @@ static List *build_wcoj_count_custom_scan_tlist(PathTarget *target,
                                                 List *provider_tlist);
 static List *build_wcoj_distinct_key_custom_scan_tlist(
     PathTarget *target, List *provider_tlist);
+static List *build_generic_distinct_key_custom_scan_tlist(
+    PathTarget *target, List *provider_tlist);
+static List *build_generic_group_count_custom_scan_tlist(
+    PathTarget *target, List *provider_tlist);
 static List *build_wcoj_group_count_custom_scan_tlist(PathTarget *target,
                                                       List *provider_tlist);
 static List *build_wcoj_sum_property_custom_scan_tlist(
+    PathTarget *target, List *provider_tlist);
+static List *build_generic_group_sum_property_custom_scan_tlist(
     PathTarget *target, List *provider_tlist);
 static List *build_wcoj_group_sum_property_custom_scan_tlist(
     PathTarget *target, List *provider_tlist);
@@ -495,6 +505,8 @@ static void add_generic_count_paths(PlannerInfo *root,
                                     RelOptInfo *output_rel);
 static void add_wcoj_distinct_key_paths(PlannerInfo *root,
                                         RelOptInfo *output_rel);
+static void add_generic_distinct_key_paths(PlannerInfo *root,
+                                           RelOptInfo *output_rel);
 static void add_wcoj_limit_row_goal_paths(PlannerInfo *root,
                                           RelOptInfo *input_rel,
                                           RelOptInfo *output_rel,
@@ -520,9 +532,15 @@ static CustomPath *make_wcoj_count_path(PlannerInfo *root,
 static CustomPath *make_generic_count_path(PlannerInfo *root,
                                            RelOptInfo *output_rel,
                                            AggPath *agg_path);
+static CustomPath *make_generic_sum_property_path(PlannerInfo *root,
+                                                  RelOptInfo *output_rel,
+                                                  AggPath *agg_path);
 static CustomPath *make_wcoj_distinct_key_path(PlannerInfo *root,
                                                RelOptInfo *output_rel,
                                                Path *distinct_path);
+static CustomPath *make_generic_distinct_key_path(PlannerInfo *root,
+                                                  RelOptInfo *output_rel,
+                                                  Path *distinct_path);
 static Path *make_wcoj_limit_row_goal_path(PlannerInfo *root,
                                            RelOptInfo *output_rel,
                                            LimitPath *limit_path);
@@ -577,6 +595,20 @@ static bool wcoj_distinct_arg_matches_key(CustomPath *wcoj_path,
 static bool is_wcoj_distinct_key_target(PathTarget *target,
                                         CustomPath *wcoj_path,
                                         Oid *output_type);
+static bool is_generic_distinct_key_target(PathTarget *target,
+                                           CustomPath *generic_path,
+                                           Oid *output_type,
+                                           int *variable);
+static bool is_generic_group_count_key_target(PathTarget *target,
+                                              AggPath *agg_path,
+                                              CustomPath *generic_path,
+                                              Oid *output_type,
+                                              int *variable);
+static bool is_generic_group_count_distinct_key_target(PathTarget *target,
+                                                       AggPath *agg_path,
+                                                       CustomPath *generic_path,
+                                                       Oid *output_type,
+                                                       int *variable);
 static Node *wcoj_unwrap_distinct_key_arg(Node *node);
 static bool extract_adjacency_count_input(AggPath *agg_path,
                                           Path **source_path,
@@ -612,8 +644,19 @@ static bool is_group_sum_property_key_target(PathTarget *target,
                                              Aggref **aggref);
 static int wcoj_property_aggregate_consumer_kind(Aggref *aggref,
                                                  bool grouped);
+static int generic_property_aggregate_consumer_kind(Aggref *aggref,
+                                                    bool grouped);
+static bool is_generic_group_sum_property_key_target(PathTarget *target,
+                                                     AggPath *agg_path,
+                                                     CustomPath *generic_path,
+                                                     Oid *output_type,
+                                                     Aggref **aggref,
+                                                     int *variable);
 static bool wcoj_sum_property_arg(Aggref *aggref, Index *edge_rti,
                                   Const **property_key);
+static bool generic_sum_property_prepare_provider(
+    PlannerInfo *root, CustomPath *generic_path, Index edge_rti,
+    List **paths, List **provider_descs, int *provider_index);
 static bool wcoj_sum_property_prepare_direct(
     PlannerInfo *root, CustomPath *wcoj_path, Index edge_rti,
     List **paths, List **provider_descs, int *provider_index);
@@ -3278,6 +3321,15 @@ make_generic_match_component(const AgeGenericHypergraph *hypergraph,
         }
         tail_separators = generic_ghd_separator_kind_count(
             ghd_separators, AGE_GENERIC_GHD_SEPARATOR_LEAF_TAIL);
+        if (tail_separators < 0 ||
+            !make_generic_ghd_semijoin_plan(
+                ghd_separators, hypergraph->variable_count,
+                hypergraph->variable_count + hypergraph->edge_count,
+                tail_separators, &semijoin_steps) ||
+            list_length(semijoin_steps) != tail_separators * 2)
+        {
+            return NULL;
+        }
     }
     else
     {
@@ -3508,7 +3560,7 @@ generic_ghd_separator_kind_count(List *ghd_separators,
         if (desc == NIL || !IsA(desc, List) ||
             list_length(desc) != AGE_GENERIC_GHD_SEPARATOR_DESC_COUNT)
         {
-            continue;
+            return -1;
         }
         if ((AgeGenericGHDSeparatorKind)intVal(list_nth(
                 desc, AGE_GENERIC_GHD_SEPARATOR_DESC_KIND)) == kind)
@@ -3533,6 +3585,142 @@ make_generic_semijoin_step_desc(int id, AgeGenericSemijoinStepPhase phase,
     desc = lappend(desc, makeInteger(key_variable));
     desc = lappend(desc, makeInteger(key_is_key1 ? 1 : 0));
     return desc;
+}
+
+static bool
+make_generic_ghd_semijoin_plan(List *ghd_separators,
+                               int variable_count, int provider_count,
+                               int tail_separator_count,
+                               List **semijoin_steps)
+{
+    List *steps = NIL;
+    ListCell *lc;
+    int step_id = 0;
+    int leaf_tail_count = 0;
+
+    Assert(semijoin_steps != NULL);
+    *semijoin_steps = NIL;
+    if (variable_count <= 0 ||
+        provider_count < variable_count ||
+        tail_separator_count < 0)
+    {
+        return false;
+    }
+    if (tail_separator_count == 0)
+        return true;
+
+    foreach(lc, ghd_separators)
+    {
+        List *desc = lfirst(lc);
+        AgeGenericGHDSeparatorKind kind;
+        int separator_variable;
+        int tail_variable;
+        int provider_index;
+        bool separator_is_key1;
+        Node *separator_variables_node;
+        List *separator_variables;
+        List *step;
+
+        if (desc == NIL || !IsA(desc, List) ||
+            list_length(desc) != AGE_GENERIC_GHD_SEPARATOR_DESC_COUNT)
+        {
+            return false;
+        }
+
+        kind = (AgeGenericGHDSeparatorKind)intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_KIND));
+        if (kind == AGE_GENERIC_GHD_SEPARATOR_PAIR)
+            continue;
+        if (kind != AGE_GENERIC_GHD_SEPARATOR_LEAF_TAIL)
+            return false;
+
+        separator_variable = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_SEPARATOR_VARIABLE));
+        tail_variable = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_TAIL_VARIABLE));
+        provider_index = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_PROVIDER_INDEX));
+        separator_is_key1 = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_SEPARATOR_IS_KEY1)) != 0;
+        separator_variables_node = list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_SEPARATOR_VARIABLES);
+        if (separator_variables_node == NULL ||
+            !IsA(separator_variables_node, List))
+        {
+            return false;
+        }
+        separator_variables = (List *)separator_variables_node;
+        if (list_length(separator_variables) != 1 ||
+            intVal(linitial(separator_variables)) != separator_variable ||
+            separator_variable < 0 ||
+            separator_variable >= variable_count ||
+            tail_variable < 0 ||
+            tail_variable >= variable_count ||
+            separator_variable == tail_variable ||
+            provider_index < variable_count ||
+            provider_index >= provider_count)
+        {
+            return false;
+        }
+
+        step = make_generic_semijoin_step_desc(
+            step_id++, AGE_GENERIC_SEMIJOIN_STEP_BOTTOM_UP,
+            provider_index, tail_variable, separator_variable,
+            separator_variable, separator_is_key1);
+        if (list_length(step) != AGE_GENERIC_SEMIJOIN_STEP_DESC_COUNT)
+            return false;
+        steps = lappend(steps, step);
+        leaf_tail_count++;
+    }
+
+    if (leaf_tail_count != tail_separator_count)
+        return false;
+
+    foreach(lc, ghd_separators)
+    {
+        List *desc = lfirst(lc);
+        AgeGenericGHDSeparatorKind kind;
+        int separator_variable;
+        int tail_variable;
+        int provider_index;
+        bool separator_is_key1;
+        List *step;
+
+        if (desc == NIL || !IsA(desc, List) ||
+            list_length(desc) != AGE_GENERIC_GHD_SEPARATOR_DESC_COUNT)
+        {
+            return false;
+        }
+
+        kind = (AgeGenericGHDSeparatorKind)intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_KIND));
+        if (kind == AGE_GENERIC_GHD_SEPARATOR_PAIR)
+            continue;
+        if (kind != AGE_GENERIC_GHD_SEPARATOR_LEAF_TAIL)
+            return false;
+
+        separator_variable = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_SEPARATOR_VARIABLE));
+        tail_variable = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_TAIL_VARIABLE));
+        provider_index = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_PROVIDER_INDEX));
+        separator_is_key1 = intVal(list_nth(
+            desc, AGE_GENERIC_GHD_SEPARATOR_DESC_SEPARATOR_IS_KEY1)) != 0;
+
+        step = make_generic_semijoin_step_desc(
+            step_id++, AGE_GENERIC_SEMIJOIN_STEP_TOP_DOWN,
+            provider_index, separator_variable, tail_variable,
+            tail_variable, !separator_is_key1);
+        if (list_length(step) != AGE_GENERIC_SEMIJOIN_STEP_DESC_COUNT)
+            return false;
+        steps = lappend(steps, step);
+    }
+    if (list_length(steps) != tail_separator_count * 2)
+        return false;
+
+    *semijoin_steps = steps;
+    return true;
 }
 
 static bool
@@ -4017,7 +4205,30 @@ make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph,
         component_ids = copyObject(component->component_ids);
         ghd_bags = copyObject(component->ghd_bags);
         ghd_separators = copyObject(component->ghd_separators);
-        if (!hypergraph->cyclic)
+        if (ghd_bag_count != list_length(component->ghd_bags) ||
+            ghd_separator_count != list_length(component->ghd_separators) ||
+            tail_separators != generic_ghd_separator_kind_count(
+                component->ghd_separators,
+                AGE_GENERIC_GHD_SEPARATOR_LEAF_TAIL))
+        {
+            return NIL;
+        }
+        if (hypergraph->cyclic)
+        {
+            int expected_steps = tail_separators * 2;
+
+            if (component->reduction_order_kind !=
+                AGE_GRAPH_JOIN_MATCH_REDUCTION_ORDER_NONE ||
+                component->reduction_order_edge_count != 0 ||
+                list_length(component->reduction_order_edges) != 0 ||
+                component->semijoin_step_count != expected_steps ||
+                list_length(component->semijoin_steps) != expected_steps)
+            {
+                return NIL;
+            }
+            semijoin_steps = copyObject(component->semijoin_steps);
+        }
+        else
         {
             if (component->reduction_order_kind !=
                 AGE_GRAPH_JOIN_MATCH_REDUCTION_ORDER_LEAF_PEEL ||
@@ -4114,6 +4325,8 @@ make_generic_reduction_desc(const AgeGenericHypergraph *hypergraph,
     desc = lappend(desc, makeInteger(ghd_separator_count));
     desc = lappend(desc, ghd_separators);
     desc = lappend(desc, semijoin_steps);
+    if (list_length(desc) != AGE_GENERIC_REDUCTION_DESC_COUNT)
+        return NIL;
     return desc;
 }
 
@@ -4816,6 +5029,7 @@ add_generic_join_path(PlannerInfo *root, RelOptInfo *joinrel,
         custom_path->custom_private, makeInteger(AGE_GENERIC_ROW_GOAL_NONE));
     custom_path->custom_private = lappend(custom_path->custom_private,
                                           makeInteger(-1));
+    custom_path->custom_private = lappend(custom_path->custom_private, NIL);
     custom_path->methods = &age_generic_join_path_methods;
 
     add_path(joinrel, (Path *)custom_path);
@@ -5098,6 +5312,7 @@ static void create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
     if (stage == UPPERREL_DISTINCT)
     {
         add_wcoj_distinct_key_paths(root, output_rel);
+        add_generic_distinct_key_paths(root, output_rel);
         return;
     }
 
@@ -5223,6 +5438,9 @@ add_generic_count_paths(PlannerInfo *root, RelOptInfo *output_rel)
 
         count_path = make_generic_count_path(root, output_rel,
                                              (AggPath *)path);
+        if (count_path == NULL)
+            count_path = make_generic_sum_property_path(root, output_rel,
+                                                        (AggPath *)path);
         if (count_path != NULL)
             new_paths = lappend(new_paths, count_path);
     }
@@ -5249,6 +5467,32 @@ add_wcoj_distinct_key_paths(PlannerInfo *root, RelOptInfo *output_rel)
             continue;
 
         distinct_path = make_wcoj_distinct_key_path(root, output_rel, path);
+        if (distinct_path != NULL)
+            new_paths = lappend(new_paths, distinct_path);
+    }
+
+    foreach(lc, new_paths)
+        add_path(output_rel, lfirst(lc));
+}
+
+static void
+add_generic_distinct_key_paths(PlannerInfo *root, RelOptInfo *output_rel)
+{
+    List *new_paths = NIL;
+    ListCell *lc;
+
+    if (root == NULL || output_rel == NULL || output_rel->pathlist == NIL)
+        return;
+
+    foreach(lc, output_rel->pathlist)
+    {
+        Path *path = (Path *)lfirst(lc);
+        CustomPath *distinct_path;
+
+        if (!IsA(path, UpperUniquePath) && !IsA(path, AggPath))
+            continue;
+
+        distinct_path = make_generic_distinct_key_path(root, output_rel, path);
         if (distinct_path != NULL)
             new_paths = lappend(new_paths, distinct_path);
     }
@@ -6004,6 +6248,8 @@ copy_generic_path_with_row_goal(CustomPath *generic_path, int64 row_goal,
                                             makeInteger(row_goal_source));
     row_goal_path->custom_private = lappend(row_goal_path->custom_private,
                                             makeInteger(-1));
+    row_goal_path->custom_private = lappend(row_goal_path->custom_private,
+                                            NIL);
 
     return row_goal_path;
 }
@@ -6158,6 +6404,199 @@ is_group_count_distinct_key_target(PathTarget *target, AggPath *agg_path,
     return true;
 }
 
+static bool
+is_generic_group_count_key_target(PathTarget *target, AggPath *agg_path,
+                                  CustomPath *generic_path, Oid *output_type,
+                                  int *variable)
+{
+    SortGroupClause *group_clause;
+    Node *group_expr;
+    Node *count_expr;
+    Aggref *aggref;
+    Oid count_type = InvalidOid;
+    int group_variable;
+
+    if (output_type != NULL)
+        *output_type = InvalidOid;
+    if (variable != NULL)
+        *variable = -1;
+    if (target == NULL || agg_path == NULL || generic_path == NULL ||
+        target->sortgrouprefs == NULL ||
+        list_length(target->exprs) != 2 ||
+        list_length(agg_path->groupClause) != 1)
+    {
+        return false;
+    }
+
+    group_clause = linitial_node(SortGroupClause, agg_path->groupClause);
+    if (target->sortgrouprefs[0] != group_clause->tleSortGroupRef ||
+        target->sortgrouprefs[1] != 0)
+    {
+        return false;
+    }
+
+    group_expr = linitial(target->exprs);
+    count_expr = lsecond(target->exprs);
+    group_variable = generic_distinct_arg_variable(generic_path, group_expr);
+    if (group_variable != 0)
+        return false;
+
+    aggref = wcoj_count_expr_aggref(count_expr, &count_type);
+    if (is_plain_count_star_aggref(aggref))
+    {
+        /* accepted */
+    }
+    else
+    {
+        TargetEntry *arg_tle;
+        int count_variable;
+
+        if (!is_count_aggref(aggref) || aggref->aggstar ||
+            list_length(aggref->args) != 1 ||
+            aggref->aggdistinct != NIL)
+        {
+            return false;
+        }
+
+        arg_tle = linitial_node(TargetEntry, aggref->args);
+        if (arg_tle == NULL || arg_tle->expr == NULL)
+            return false;
+        count_variable = generic_distinct_arg_variable(
+            generic_path, (Node *)arg_tle->expr);
+        if (count_variable != group_variable)
+            return false;
+    }
+    if (count_type != INT8OID && count_type != AGTYPEOID)
+        return false;
+
+    if (output_type != NULL)
+        *output_type = count_type;
+    if (variable != NULL)
+        *variable = group_variable;
+    return true;
+}
+
+static bool
+is_generic_group_count_distinct_key_target(PathTarget *target,
+                                           AggPath *agg_path,
+                                           CustomPath *generic_path,
+                                           Oid *output_type,
+                                           int *variable)
+{
+    SortGroupClause *group_clause;
+    Node *group_expr;
+    Node *count_expr;
+    Aggref *aggref;
+    Oid count_type = InvalidOid;
+    int group_variable;
+    int distinct_variable;
+
+    if (output_type != NULL)
+        *output_type = InvalidOid;
+    if (variable != NULL)
+        *variable = -1;
+    if (target == NULL || agg_path == NULL || generic_path == NULL ||
+        target->sortgrouprefs == NULL ||
+        list_length(target->exprs) != 2 ||
+        list_length(agg_path->groupClause) != 1)
+    {
+        return false;
+    }
+
+    group_clause = linitial_node(SortGroupClause, agg_path->groupClause);
+    if (target->sortgrouprefs[0] != group_clause->tleSortGroupRef ||
+        target->sortgrouprefs[1] != 0)
+    {
+        return false;
+    }
+
+    group_expr = linitial(target->exprs);
+    count_expr = lsecond(target->exprs);
+    group_variable = generic_distinct_arg_variable(generic_path, group_expr);
+    if (group_variable != 0)
+        return false;
+
+    aggref = wcoj_count_expr_aggref(count_expr, &count_type);
+    if (!is_count_distinct_generic_key_aggref(aggref, generic_path,
+                                              &distinct_variable) ||
+        distinct_variable != group_variable ||
+        (count_type != INT8OID && count_type != AGTYPEOID))
+    {
+        return false;
+    }
+
+    if (output_type != NULL)
+        *output_type = count_type;
+    if (variable != NULL)
+        *variable = group_variable;
+    return true;
+}
+
+static bool
+is_generic_group_sum_property_key_target(PathTarget *target,
+                                         AggPath *agg_path,
+                                         CustomPath *generic_path,
+                                         Oid *output_type,
+                                         Aggref **aggref,
+                                         int *variable)
+{
+    SortGroupClause *group_clause;
+    Node *group_expr;
+    Node *sum_expr;
+    Aggref *sum_aggref;
+    Oid sum_type = InvalidOid;
+    int consumer_kind;
+    int group_variable;
+
+    if (output_type != NULL)
+        *output_type = InvalidOid;
+    if (aggref != NULL)
+        *aggref = NULL;
+    if (variable != NULL)
+        *variable = -1;
+    if (target == NULL || agg_path == NULL || generic_path == NULL ||
+        target->sortgrouprefs == NULL ||
+        list_length(target->exprs) != 2 ||
+        list_length(agg_path->groupClause) != 1)
+    {
+        return false;
+    }
+
+    group_clause = linitial_node(SortGroupClause, agg_path->groupClause);
+    if (target->sortgrouprefs[0] != group_clause->tleSortGroupRef ||
+        target->sortgrouprefs[1] != 0)
+    {
+        return false;
+    }
+
+    group_expr = linitial(target->exprs);
+    sum_expr = lsecond(target->exprs);
+    group_variable = generic_distinct_arg_variable(generic_path,
+                                                   group_expr);
+    if (group_variable != 0)
+        return false;
+
+    sum_aggref = wcoj_sum_property_expr_aggref(sum_expr, &sum_type);
+    consumer_kind = generic_property_aggregate_consumer_kind(sum_aggref,
+                                                            true);
+    if (consumer_kind < 0 ||
+        ((consumer_kind != AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY &&
+          sum_type != AGTYPEOID) ||
+         (consumer_kind == AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY &&
+          sum_type != AGTYPEOID && sum_type != FLOAT8OID)))
+    {
+        return false;
+    }
+
+    if (output_type != NULL)
+        *output_type = sum_type;
+    if (aggref != NULL)
+        *aggref = sum_aggref;
+    if (variable != NULL)
+        *variable = group_variable;
+    return true;
+}
+
 static Aggref *
 wcoj_count_target_aggref(PathTarget *target, Oid *output_type)
 {
@@ -6298,6 +6737,42 @@ is_wcoj_distinct_key_target(PathTarget *target, CustomPath *wcoj_path,
     }
     if (output_type != NULL)
         *output_type = expr_type;
+    return true;
+}
+
+static bool
+is_generic_distinct_key_target(PathTarget *target, CustomPath *generic_path,
+                               Oid *output_type, int *variable)
+{
+    Node *expr;
+    Oid expr_type;
+    int key_variable;
+
+    if (output_type != NULL)
+        *output_type = InvalidOid;
+    if (variable != NULL)
+        *variable = -1;
+    if (target == NULL || generic_path == NULL ||
+        list_length(target->exprs) != 1)
+    {
+        return false;
+    }
+
+    expr = linitial(target->exprs);
+    key_variable = generic_distinct_arg_variable(generic_path, expr);
+    if (key_variable < 0)
+        return false;
+
+    expr_type = exprType(expr);
+    if (expr_type != GRAPHIDOID && expr_type != INT8OID &&
+        expr_type != AGTYPEOID)
+    {
+        return false;
+    }
+    if (output_type != NULL)
+        *output_type = expr_type;
+    if (variable != NULL)
+        *variable = key_variable;
     return true;
 }
 
@@ -6552,6 +7027,159 @@ make_wcoj_distinct_key_path(PlannerInfo *root, RelOptInfo *output_rel,
 }
 
 static CustomPath *
+make_generic_distinct_key_path(PlannerInfo *root, RelOptInfo *output_rel,
+                               Path *distinct_path)
+{
+    Path *generic_input_path;
+    CustomPath *generic_path;
+    CustomPath *key_path;
+    PathTarget *target;
+    Oid output_type;
+    int distinct_variable = -1;
+    List *key_variable_rtis;
+    List *key_provider_descs;
+    List *key_reduction_desc;
+
+    if (root == NULL || output_rel == NULL || distinct_path == NULL)
+        return NULL;
+
+    if (IsA(distinct_path, UpperUniquePath))
+    {
+        UpperUniquePath *unique_path = (UpperUniquePath *)distinct_path;
+
+        if (unique_path->numkeys != 1 || unique_path->subpath == NULL)
+            return NULL;
+        target = unique_path->path.pathtarget;
+        generic_input_path = unique_path->subpath;
+    }
+    else if (IsA(distinct_path, AggPath))
+    {
+        AggPath *agg_path = (AggPath *)distinct_path;
+
+        if (agg_path->aggsplit != AGGSPLIT_SIMPLE ||
+            agg_path->qual != NIL ||
+            agg_path->subpath == NULL ||
+            list_length(agg_path->groupClause) != 1)
+        {
+            return NULL;
+        }
+        target = agg_path->path.pathtarget;
+        generic_input_path = agg_path->subpath;
+    }
+    else
+    {
+        return NULL;
+    }
+
+    for (;;)
+    {
+        if (IsA(generic_input_path, SortPath))
+        {
+            SortPath *sort_path = (SortPath *)generic_input_path;
+
+            generic_input_path = sort_path->subpath;
+            continue;
+        }
+        if (IsA(generic_input_path, ProjectionPath))
+        {
+            ProjectionPath *projection_path =
+                (ProjectionPath *)generic_input_path;
+
+            generic_input_path = projection_path->subpath;
+            continue;
+        }
+        break;
+    }
+    if (generic_input_path == NULL || !IsA(generic_input_path, CustomPath))
+        return NULL;
+
+    generic_path = (CustomPath *)generic_input_path;
+    if (generic_path->methods != &age_generic_join_path_methods ||
+        generic_path->path.param_info != NULL ||
+        list_length(generic_path->custom_private) !=
+            AGE_GENERIC_PATH_PRIVATE_COUNT ||
+        intVal(list_nth(generic_path->custom_private,
+                        AGE_GENERIC_PATH_PRIVATE_CONSUMER)) !=
+            AGE_GENERIC_CONSUMER_ROWS ||
+        !generic_count_restrictinfos_supported(generic_path) ||
+        !is_generic_distinct_key_target(target, generic_path, &output_type,
+                                        &distinct_variable))
+    {
+        return NULL;
+    }
+
+    key_path = makeNode(CustomPath);
+    key_path->path.pathtype = T_CustomScan;
+    key_path->path.parent = output_rel;
+    key_path->path.pathtarget = target;
+    key_path->path.param_info = NULL;
+    key_path->path.parallel_aware = false;
+    key_path->path.parallel_safe = false;
+    key_path->path.parallel_workers = 0;
+    key_path->path.pathkeys = NIL;
+    key_path->path.rows = Max(1.0, distinct_path->rows);
+    key_path->path.disabled_nodes = generic_path->path.disabled_nodes;
+    key_path->path.startup_cost = generic_path->path.startup_cost;
+    key_path->path.total_cost = generic_path->path.total_cost +
+        cpu_operator_cost + cpu_tuple_cost * key_path->path.rows;
+    if (key_path->path.total_cost >= distinct_path->total_cost)
+    {
+        key_path->path.total_cost = Max(
+            key_path->path.startup_cost,
+            distinct_path->total_cost - cpu_operator_cost);
+    }
+    key_path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+    key_path->custom_paths = list_copy(generic_path->custom_paths);
+    key_path->custom_restrictinfo = generic_path->custom_restrictinfo;
+    key_path->custom_private = list_make4(
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_VARIABLE_RTIS)),
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_PROVIDER_DESCS)),
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_RISK_ADJUSTED)),
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_REDUCTION_DESC)));
+    key_path->custom_private = lappend(
+        key_path->custom_private,
+        makeInteger(AGE_GENERIC_CONSUMER_DISTINCT_KEY));
+    key_path->custom_private = lappend(
+        key_path->custom_private, make_wcoj_oid_const(output_type));
+    key_path->custom_private = lappend(
+        key_path->custom_private, make_int8_const(0));
+    key_path->custom_private = lappend(
+        key_path->custom_private, makeInteger(AGE_GENERIC_ROW_GOAL_NONE));
+    key_path->custom_private = lappend(key_path->custom_private,
+                                       makeInteger(distinct_variable));
+    key_path->custom_private = lappend(key_path->custom_private, NIL);
+    key_variable_rtis = list_nth(
+        key_path->custom_private, AGE_GENERIC_PATH_PRIVATE_VARIABLE_RTIS);
+    key_provider_descs = list_nth(
+        key_path->custom_private, AGE_GENERIC_PATH_PRIVATE_PROVIDER_DESCS);
+    key_reduction_desc = list_nth(
+        key_path->custom_private, AGE_GENERIC_PATH_PRIVATE_REDUCTION_DESC);
+    if (!generic_reduction_has_ghd_separators(key_reduction_desc))
+    {
+        mark_generic_lazy_physical_provider_descs(root, key_variable_rtis,
+                                                  key_path->custom_paths,
+                                                  key_provider_descs);
+    }
+    key_path->methods = &age_generic_join_path_methods;
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE Generic Join distinct-key path added: "
+                             "providers=%d source_cost=%.2f "
+                             "distinct_cost=%.2f output_type=%u "
+                             "variable=%d",
+                             list_length(generic_path->custom_paths),
+                             generic_path->path.total_cost,
+                             key_path->path.total_cost, output_type,
+                             distinct_variable + 1)));
+
+    return key_path;
+}
+
+static CustomPath *
 make_wcoj_count_path(PlannerInfo *root, RelOptInfo *output_rel,
                      AggPath *agg_path)
 {
@@ -6723,17 +7351,19 @@ make_generic_count_path(PlannerInfo *root, RelOptInfo *output_rel,
 
     if (output_rel == NULL || agg_path == NULL ||
         agg_path->aggsplit != AGGSPLIT_SIMPLE ||
-        agg_path->qual != NIL || agg_path->subpath == NULL ||
-        agg_path->groupClause != NIL ||
-        agg_path->aggstrategy != AGG_PLAIN)
+        agg_path->qual != NIL || agg_path->subpath == NULL)
     {
         return NULL;
     }
-
-    aggref = wcoj_count_target_aggref(agg_path->path.pathtarget,
-                                      &output_type);
-    if (output_type != INT8OID && output_type != AGTYPEOID)
+    if (agg_path->groupClause == NIL)
+    {
+        if (agg_path->aggstrategy != AGG_PLAIN)
+            return NULL;
+    }
+    else if (list_length(agg_path->groupClause) != 1)
+    {
         return NULL;
+    }
 
     generic_input_path = agg_path->subpath;
     for (;;)
@@ -6770,18 +7400,47 @@ make_generic_count_path(PlannerInfo *root, RelOptInfo *output_rel,
     {
         return NULL;
     }
-    if (is_plain_count_star_aggref(aggref))
+
+    if (agg_path->groupClause != NIL)
     {
-        consumer_kind = AGE_GENERIC_CONSUMER_COUNT;
-    }
-    else if (is_count_distinct_generic_key_aggref(
-                 aggref, generic_path, &distinct_variable))
-    {
-        consumer_kind = AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY;
+        if (is_generic_group_count_key_target(agg_path->path.pathtarget,
+                                              agg_path, generic_path,
+                                              &output_type,
+                                              &distinct_variable))
+        {
+            consumer_kind = AGE_GENERIC_CONSUMER_GROUP_COUNT;
+        }
+        else if (is_generic_group_count_distinct_key_target(
+                     agg_path->path.pathtarget, agg_path, generic_path,
+                     &output_type, &distinct_variable))
+        {
+            consumer_kind =
+                AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY;
+        }
+        else
+        {
+            return NULL;
+        }
     }
     else
     {
-        return NULL;
+        aggref = wcoj_count_target_aggref(agg_path->path.pathtarget,
+                                          &output_type);
+        if (output_type != INT8OID && output_type != AGTYPEOID)
+            return NULL;
+        if (is_plain_count_star_aggref(aggref))
+        {
+            consumer_kind = AGE_GENERIC_CONSUMER_COUNT;
+        }
+        else if (is_count_distinct_generic_key_aggref(
+                     aggref, generic_path, &distinct_variable))
+        {
+            consumer_kind = AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY;
+        }
+        else
+        {
+            return NULL;
+        }
     }
 
     count_path = makeNode(CustomPath);
@@ -6793,7 +7452,10 @@ make_generic_count_path(PlannerInfo *root, RelOptInfo *output_rel,
     count_path->path.parallel_safe = false;
     count_path->path.parallel_workers = 0;
     count_path->path.pathkeys = NIL;
-    count_path->path.rows = 1.0;
+    count_path->path.rows =
+        (consumer_kind == AGE_GENERIC_CONSUMER_GROUP_COUNT ||
+         consumer_kind == AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY) ?
+        Max(1.0, agg_path->path.rows) : 1.0;
     count_path->path.disabled_nodes = generic_path->path.disabled_nodes;
     count_path->path.startup_cost = generic_path->path.startup_cost;
     count_path->path.total_cost = generic_path->path.total_cost +
@@ -6826,6 +7488,7 @@ make_generic_count_path(PlannerInfo *root, RelOptInfo *output_rel,
         count_path->custom_private, makeInteger(AGE_GENERIC_ROW_GOAL_NONE));
     count_path->custom_private = lappend(count_path->custom_private,
                                          makeInteger(distinct_variable));
+    count_path->custom_private = lappend(count_path->custom_private, NIL);
     count_variable_rtis = list_nth(
         count_path->custom_private, AGE_GENERIC_PATH_PRIVATE_VARIABLE_RTIS);
     count_provider_descs = list_nth(
@@ -6849,6 +7512,177 @@ make_generic_count_path(PlannerInfo *root, RelOptInfo *output_rel,
                              count_path->path.total_cost, consumer_kind)));
 
     return count_path;
+}
+
+static CustomPath *
+make_generic_sum_property_path(PlannerInfo *root, RelOptInfo *output_rel,
+                               AggPath *agg_path)
+{
+    Path *generic_input_path;
+    CustomPath *generic_path;
+    CustomPath *sum_path;
+    Aggref *aggref;
+    Oid output_type = InvalidOid;
+    Index edge_rti;
+    Const *property_key;
+    List *sum_paths;
+    List *sum_provider_descs;
+    List *sum_desc;
+    int provider_index;
+    int consumer_kind;
+    int distinct_variable = -1;
+    bool grouped;
+
+    if (root == NULL || output_rel == NULL || agg_path == NULL ||
+        agg_path->aggsplit != AGGSPLIT_SIMPLE ||
+        agg_path->qual != NIL || agg_path->subpath == NULL)
+    {
+        return NULL;
+    }
+    if (agg_path->groupClause == NIL)
+    {
+        if (agg_path->aggstrategy != AGG_PLAIN)
+            return NULL;
+    }
+    else if (list_length(agg_path->groupClause) != 1)
+    {
+        return NULL;
+    }
+    grouped = agg_path->groupClause != NIL;
+
+    aggref = NULL;
+    if (grouped)
+    {
+        if (!is_group_sum_property_key_target(
+                agg_path->path.pathtarget, agg_path, NULL, &output_type,
+                &aggref))
+        {
+            return NULL;
+        }
+    }
+    else
+    {
+        aggref = wcoj_sum_property_target_aggref(agg_path->path.pathtarget,
+                                                 &output_type);
+    }
+    consumer_kind = generic_property_aggregate_consumer_kind(aggref,
+                                                            grouped);
+    if (consumer_kind < 0 ||
+        ((consumer_kind != AGE_GENERIC_CONSUMER_AVG_PROPERTY &&
+          consumer_kind != AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY &&
+          output_type != AGTYPEOID) ||
+         ((consumer_kind == AGE_GENERIC_CONSUMER_AVG_PROPERTY ||
+           consumer_kind == AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY) &&
+          output_type != AGTYPEOID && output_type != FLOAT8OID)) ||
+        !wcoj_sum_property_arg(aggref, &edge_rti, &property_key))
+    {
+        return NULL;
+    }
+
+    generic_input_path = agg_path->subpath;
+    for (;;)
+    {
+        if (IsA(generic_input_path, SortPath))
+        {
+            SortPath *sort_path = (SortPath *)generic_input_path;
+
+            generic_input_path = sort_path->subpath;
+            continue;
+        }
+        if (IsA(generic_input_path, ProjectionPath))
+        {
+            ProjectionPath *projection_path =
+                (ProjectionPath *)generic_input_path;
+
+            generic_input_path = projection_path->subpath;
+            continue;
+        }
+        break;
+    }
+    if (generic_input_path == NULL || !IsA(generic_input_path, CustomPath))
+        return NULL;
+
+    generic_path = (CustomPath *)generic_input_path;
+    if (grouped &&
+        !is_generic_group_sum_property_key_target(
+            agg_path->path.pathtarget, agg_path, generic_path, &output_type,
+            &aggref, &distinct_variable))
+    {
+        return NULL;
+    }
+    if (generic_path->methods != &age_generic_join_path_methods ||
+        generic_path->path.param_info != NULL ||
+        list_length(generic_path->custom_private) !=
+            AGE_GENERIC_PATH_PRIVATE_COUNT ||
+        intVal(list_nth(generic_path->custom_private,
+                        AGE_GENERIC_PATH_PRIVATE_CONSUMER)) !=
+            AGE_GENERIC_CONSUMER_ROWS ||
+        !generic_count_restrictinfos_supported(generic_path) ||
+        !generic_sum_property_prepare_provider(root, generic_path, edge_rti,
+                                               &sum_paths,
+                                               &sum_provider_descs,
+                                               &provider_index))
+    {
+        return NULL;
+    }
+
+    sum_path = makeNode(CustomPath);
+    sum_path->path.pathtype = T_CustomScan;
+    sum_path->path.parent = output_rel;
+    sum_path->path.pathtarget = agg_path->path.pathtarget;
+    sum_path->path.param_info = NULL;
+    sum_path->path.parallel_aware = false;
+    sum_path->path.parallel_safe = false;
+    sum_path->path.parallel_workers = 0;
+    sum_path->path.pathkeys = NIL;
+    sum_path->path.rows = grouped ? Max(1.0, agg_path->path.rows) : 1.0;
+    sum_path->path.disabled_nodes = generic_path->path.disabled_nodes;
+    sum_path->path.startup_cost = generic_path->path.startup_cost;
+    sum_path->path.total_cost = generic_path->path.total_cost +
+        cpu_operator_cost + cpu_tuple_cost;
+    if (sum_path->path.total_cost >= agg_path->path.total_cost)
+    {
+        sum_path->path.total_cost = Max(
+            sum_path->path.startup_cost,
+            agg_path->path.total_cost - cpu_operator_cost);
+    }
+    sum_path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+    sum_path->custom_paths = sum_paths;
+    sum_path->custom_restrictinfo = generic_path->custom_restrictinfo;
+    sum_path->custom_private = list_make4(
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_VARIABLE_RTIS)),
+        sum_provider_descs,
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_RISK_ADJUSTED)),
+        copyObject(list_nth(generic_path->custom_private,
+                            AGE_GENERIC_PATH_PRIVATE_REDUCTION_DESC)));
+    sum_path->custom_private = lappend(sum_path->custom_private,
+                                       makeInteger(consumer_kind));
+    sum_path->custom_private = lappend(
+        sum_path->custom_private, make_wcoj_oid_const(output_type));
+    sum_path->custom_private = lappend(sum_path->custom_private,
+                                       make_int8_const(0));
+    sum_path->custom_private = lappend(
+        sum_path->custom_private, makeInteger(AGE_GENERIC_ROW_GOAL_NONE));
+    sum_path->custom_private = lappend(sum_path->custom_private,
+                                       makeInteger(distinct_variable));
+    sum_desc = list_make3(makeInteger(provider_index),
+                          copyObject(property_key),
+                          makeInteger(0));
+    sum_path->custom_private = lappend(sum_path->custom_private, sum_desc);
+    sum_path->methods = &age_generic_join_path_methods;
+
+    ereport(DEBUG2,
+            (errmsg_internal("AGE Generic Join property aggregate path added: "
+                             "providers=%d provider=%d source_cost=%.2f "
+                             "aggregate_cost=%.2f consumer=%d",
+                             list_length(generic_path->custom_paths),
+                             provider_index + 1,
+                             generic_path->path.total_cost,
+                             sum_path->path.total_cost, consumer_kind)));
+
+    return sum_path;
 }
 
 static CustomPath *
@@ -7175,6 +8009,33 @@ wcoj_property_aggregate_consumer_kind(Aggref *aggref, bool grouped)
     return result;
 }
 
+static int
+generic_property_aggregate_consumer_kind(Aggref *aggref, bool grouped)
+{
+    switch (wcoj_property_aggregate_consumer_kind(aggref, grouped))
+    {
+    case AGE_WCOJ_CONSUMER_SUM_PROPERTY:
+        return AGE_GENERIC_CONSUMER_SUM_PROPERTY;
+    case AGE_WCOJ_CONSUMER_MIN_PROPERTY:
+        return AGE_GENERIC_CONSUMER_MIN_PROPERTY;
+    case AGE_WCOJ_CONSUMER_MAX_PROPERTY:
+        return AGE_GENERIC_CONSUMER_MAX_PROPERTY;
+    case AGE_WCOJ_CONSUMER_AVG_PROPERTY:
+        return AGE_GENERIC_CONSUMER_AVG_PROPERTY;
+    case AGE_WCOJ_CONSUMER_GROUP_SUM_PROPERTY:
+        return AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY;
+    case AGE_WCOJ_CONSUMER_GROUP_MIN_PROPERTY:
+        return AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY;
+    case AGE_WCOJ_CONSUMER_GROUP_MAX_PROPERTY:
+        return AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY;
+    case AGE_WCOJ_CONSUMER_GROUP_AVG_PROPERTY:
+        return AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY;
+    default:
+        break;
+    }
+    return -1;
+}
+
 static bool
 wcoj_sum_property_arg(Aggref *aggref, Index *edge_rti, Const **property_key)
 {
@@ -7224,6 +8085,100 @@ wcoj_sum_property_arg(Aggref *aggref, Index *edge_rti, Const **property_key)
     if (property_key != NULL)
         *property_key = key_const;
     return true;
+}
+
+static bool
+generic_sum_property_prepare_provider(PlannerInfo *root,
+                                      CustomPath *generic_path,
+                                      Index edge_rti, List **paths,
+                                      List **provider_descs,
+                                      int *provider_index)
+{
+    ListCell *desc_cell;
+    int index = 0;
+
+    if (paths != NULL)
+        *paths = NIL;
+    if (provider_descs != NULL)
+        *provider_descs = NIL;
+    if (provider_index != NULL)
+        *provider_index = -1;
+    if (root == NULL || generic_path == NULL || edge_rti == 0 ||
+        generic_path->path.parent == NULL ||
+        list_length(generic_path->custom_private) !=
+            AGE_GENERIC_PATH_PRIVATE_COUNT)
+    {
+        return false;
+    }
+
+    *paths = list_copy(generic_path->custom_paths);
+    *provider_descs = copyObject(list_nth(
+        generic_path->custom_private,
+        AGE_GENERIC_PATH_PRIVATE_PROVIDER_DESCS));
+    if (list_length(*paths) != list_length(*provider_descs))
+        return false;
+
+    foreach(desc_cell, *provider_descs)
+    {
+        List *provider_desc = lfirst_node(List, desc_cell);
+        int provider_kind;
+        Index provider_rti;
+
+        if (list_length(provider_desc) != AGE_GENERIC_PATH_PROVIDER_COUNT)
+            return false;
+
+        provider_kind = intVal(list_nth(provider_desc,
+                                        AGE_GENERIC_PATH_PROVIDER_KIND));
+        provider_rti = (Index)intVal(list_nth(
+            provider_desc, AGE_GENERIC_PATH_PROVIDER_REL_RTI));
+        if (provider_rti == edge_rti)
+        {
+            Expr *properties_expr = (Expr *)make_wcoj_edge_properties_var(
+                edge_rti);
+            List *required_exprs = copyObject(list_nth(
+                provider_desc, AGE_GENERIC_PATH_PROVIDER_OUTPUT_EXPRS));
+            Path *provider_path;
+
+            if (provider_index == NULL || *provider_index >= 0 ||
+                provider_kind != AGE_GENERIC_PROVIDER_EDGE)
+            {
+                return false;
+            }
+            if (!list_member(required_exprs, properties_expr))
+                required_exprs = lappend(required_exprs, properties_expr);
+
+            provider_path = prepare_generic_provider_path(
+                root, generic_path->path.parent, edge_rti, required_exprs,
+                generic_path->custom_restrictinfo);
+            if (provider_path == NULL)
+                return false;
+
+            lfirst(list_nth_cell(*paths, index)) = provider_path;
+            lfirst(list_nth_cell(
+                provider_desc, AGE_GENERIC_PATH_PROVIDER_OUTPUT_EXPRS)) =
+                copyObject(provider_path->pathtarget->exprs);
+            lfirst(list_nth_cell(
+                provider_desc, AGE_GENERIC_PATH_PROVIDER_PHYSICAL_KIND)) =
+                makeInteger(AGE_GENERIC_PROVIDER_PHYSICAL_EAGER_SORTED_ARRAY);
+            lfirst(list_nth_cell(
+                provider_desc, AGE_GENERIC_PATH_PROVIDER_ADJ_INDEX_OID)) =
+                make_wcoj_oid_const(InvalidOid);
+            lfirst(list_nth_cell(
+                provider_desc,
+                AGE_GENERIC_PATH_PROVIDER_ADJ_TERMINAL_LABEL_ID)) =
+                makeInteger(0);
+            *provider_index = index;
+        }
+        else if (provider_kind != AGE_GENERIC_PROVIDER_VERTEX &&
+                 provider_kind != AGE_GENERIC_PROVIDER_EDGE)
+        {
+            return false;
+        }
+
+        index++;
+    }
+
+    return provider_index != NULL && *provider_index >= 0;
 }
 
 static bool
@@ -17590,6 +18545,50 @@ build_wcoj_distinct_key_custom_scan_tlist(PathTarget *target,
 }
 
 static List *
+build_generic_distinct_key_custom_scan_tlist(PathTarget *target,
+                                             List *provider_tlist)
+{
+    List *key_tlist;
+    TargetEntry *key_tle;
+
+    if (target == NULL || list_length(target->exprs) != 1)
+        elog(ERROR, "invalid AGE Generic Join distinct-key target");
+
+    key_tle = makeTargetEntry((Expr *)copyObject(linitial(target->exprs)),
+                              1, pstrdup("generic_distinct_key"), false);
+    if (target->sortgrouprefs != NULL)
+        key_tle->ressortgroupref = target->sortgrouprefs[0];
+    key_tlist = list_make1(key_tle);
+
+    return list_concat(key_tlist, provider_tlist);
+}
+
+static List *
+build_generic_group_count_custom_scan_tlist(PathTarget *target,
+                                            List *provider_tlist)
+{
+    List *scan_tlist;
+    TargetEntry *group_tle;
+    TargetEntry *count_tle;
+
+    if (target == NULL || list_length(target->exprs) != 2)
+        elog(ERROR, "invalid AGE Generic Join group count target");
+
+    group_tle = makeTargetEntry((Expr *)copyObject(linitial(target->exprs)),
+                                1, pstrdup("generic_group_key"), false);
+    count_tle = makeTargetEntry(wcoj_count_scan_expr(target), 2,
+                                pstrdup("generic_group_count"), false);
+    if (target->sortgrouprefs != NULL)
+    {
+        group_tle->ressortgroupref = target->sortgrouprefs[0];
+        count_tle->ressortgroupref = target->sortgrouprefs[1];
+    }
+    scan_tlist = list_make2(group_tle, count_tle);
+
+    return list_concat(scan_tlist, provider_tlist);
+}
+
+static List *
 build_wcoj_group_count_custom_scan_tlist(PathTarget *target,
                                          List *provider_tlist)
 {
@@ -17648,6 +18647,31 @@ build_wcoj_group_sum_property_custom_scan_tlist(PathTarget *target,
                                 1, pstrdup("wcoj_group_key"), false);
     sum_tle = makeTargetEntry(wcoj_sum_property_scan_expr(target), 2,
                               pstrdup("wcoj_group_sum_property"), false);
+    if (target->sortgrouprefs != NULL)
+    {
+        group_tle->ressortgroupref = target->sortgrouprefs[0];
+        sum_tle->ressortgroupref = target->sortgrouprefs[1];
+    }
+    scan_tlist = list_make2(group_tle, sum_tle);
+
+    return list_concat(scan_tlist, provider_tlist);
+}
+
+static List *
+build_generic_group_sum_property_custom_scan_tlist(PathTarget *target,
+                                                   List *provider_tlist)
+{
+    List *scan_tlist;
+    TargetEntry *group_tle;
+    TargetEntry *sum_tle;
+
+    if (target == NULL || list_length(target->exprs) != 2)
+        elog(ERROR, "invalid AGE Generic Join group property target");
+
+    group_tle = makeTargetEntry((Expr *)copyObject(linitial(target->exprs)),
+                                1, pstrdup("generic_group_key"), false);
+    sum_tle = makeTargetEntry(wcoj_sum_property_scan_expr(target), 2,
+                              pstrdup("generic_group_sum_property"), false);
     if (target->sortgrouprefs != NULL)
     {
         group_tle->ressortgroupref = target->sortgrouprefs[0];
@@ -17773,8 +18797,20 @@ generic_consumer_first_scan_resno(int consumer_kind)
         return 1;
     case AGE_GENERIC_CONSUMER_COUNT:
     case AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY:
+    case AGE_GENERIC_CONSUMER_DISTINCT_KEY:
     case AGE_GENERIC_CONSUMER_EXISTS:
+    case AGE_GENERIC_CONSUMER_SUM_PROPERTY:
+    case AGE_GENERIC_CONSUMER_MIN_PROPERTY:
+    case AGE_GENERIC_CONSUMER_MAX_PROPERTY:
+    case AGE_GENERIC_CONSUMER_AVG_PROPERTY:
         return 2;
+    case AGE_GENERIC_CONSUMER_GROUP_COUNT:
+    case AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY:
+    case AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY:
+    case AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY:
+    case AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY:
+    case AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY:
+        return 3;
     case AGE_GENERIC_CONSUMER_LIMIT:
         return 1;
     }
@@ -17804,6 +18840,7 @@ build_generic_custom_scan_tlist(List *custom_plans, List *provider_descs,
         int key1_attno;
         int key2_attno = 0;
         int edge_id_attno = 0;
+        int properties_attno = 0;
         List *exec_desc;
         ListCell *tle_cell;
 
@@ -17826,6 +18863,11 @@ build_generic_custom_scan_tlist(List *custom_plans, List *provider_descs,
                 child_plan,
                 list_nth(path_desc,
                          AGE_GENERIC_PATH_PROVIDER_EDGE_ID_EXPR));
+            properties_attno = find_wcoj_plan_expr_attno(
+                child_plan,
+                (Node *)make_wcoj_edge_properties_var(
+                    intVal(list_nth(path_desc,
+                                    AGE_GENERIC_PATH_PROVIDER_REL_RTI))));
             if (key2_attno <= 0 || edge_id_attno <= 0)
             {
                 elog(ERROR,
@@ -17870,6 +18912,7 @@ build_generic_custom_scan_tlist(List *custom_plans, List *provider_descs,
                             copyObject(list_nth(
                                 path_desc,
                                 AGE_GENERIC_PATH_PROVIDER_ADJ_TERMINAL_LABEL_ID)));
+        exec_desc = lappend(exec_desc, makeInteger(properties_attno));
         Assert(list_length(exec_desc) == AGE_GENERIC_PROVIDER_DESC_COUNT);
         *exec_provider_descs = lappend(*exec_provider_descs, exec_desc);
     }
@@ -17892,6 +18935,7 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
     List *reduction_desc;
     Const *output_type_const;
     Const *row_goal_const;
+    List *consumer_desc;
     Oid output_type;
     int64 row_goal;
     int row_goal_source;
@@ -17926,12 +18970,25 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
         best_path->custom_private, AGE_GENERIC_PATH_PRIVATE_ROW_GOAL_SOURCE));
     distinct_variable = intVal(list_nth(
         best_path->custom_private, AGE_GENERIC_PATH_PRIVATE_DISTINCT_VARIABLE));
+    consumer_desc = list_nth(
+        best_path->custom_private, AGE_GENERIC_PATH_PRIVATE_CONSUMER_DESC);
     if (list_length(variable_rtis) < 3 ||
         list_length(provider_descs) != list_length(custom_plans) ||
         list_length(reduction_desc) != AGE_GENERIC_REDUCTION_DESC_COUNT ||
         (consumer_kind != AGE_GENERIC_CONSUMER_ROWS &&
          consumer_kind != AGE_GENERIC_CONSUMER_COUNT &&
          consumer_kind != AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_DISTINCT_KEY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_COUNT &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_SUM_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_MIN_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_MAX_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_AVG_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY &&
          consumer_kind != AGE_GENERIC_CONSUMER_EXISTS &&
          consumer_kind != AGE_GENERIC_CONSUMER_LIMIT) ||
         output_type_const->constisnull ||
@@ -17947,8 +19004,23 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
           consumer_kind == AGE_GENERIC_CONSUMER_LIMIT) &&
          OidIsValid(output_type)) ||
         ((consumer_kind == AGE_GENERIC_CONSUMER_COUNT ||
-          consumer_kind == AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY) &&
+          consumer_kind == AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_GROUP_COUNT ||
+          consumer_kind == AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY) &&
          output_type != INT8OID && output_type != AGTYPEOID) ||
+        ((consumer_kind == AGE_GENERIC_CONSUMER_SUM_PROPERTY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_MIN_PROPERTY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_MAX_PROPERTY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY) &&
+         output_type != AGTYPEOID) ||
+        ((consumer_kind == AGE_GENERIC_CONSUMER_AVG_PROPERTY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY) &&
+         output_type != AGTYPEOID && output_type != FLOAT8OID) ||
+        (consumer_kind == AGE_GENERIC_CONSUMER_DISTINCT_KEY &&
+         output_type != GRAPHIDOID && output_type != INT8OID &&
+         output_type != AGTYPEOID) ||
         (consumer_kind == AGE_GENERIC_CONSUMER_EXISTS &&
          output_type != AGTYPEOID))
     {
@@ -17968,24 +19040,115 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
     {
         elog(ERROR, "invalid AGE Generic Join row goal descriptor");
     }
-    if ((consumer_kind == AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY &&
+    if (((consumer_kind == AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_DISTINCT_KEY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_GROUP_COUNT ||
+          consumer_kind ==
+          AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY ||
+          consumer_kind == AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY) &&
          (distinct_variable < 0 ||
           distinct_variable >= list_length(variable_rtis))) ||
         (consumer_kind != AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_DISTINCT_KEY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_COUNT &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY &&
+         consumer_kind != AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY &&
          distinct_variable != -1))
     {
         elog(ERROR, "invalid AGE Generic Join distinct variable descriptor");
+    }
+    if ((consumer_kind == AGE_GENERIC_CONSUMER_SUM_PROPERTY ||
+         consumer_kind == AGE_GENERIC_CONSUMER_MIN_PROPERTY ||
+         consumer_kind == AGE_GENERIC_CONSUMER_MAX_PROPERTY ||
+         consumer_kind == AGE_GENERIC_CONSUMER_AVG_PROPERTY ||
+         consumer_kind == AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY ||
+         consumer_kind == AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY ||
+         consumer_kind == AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY ||
+         consumer_kind == AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY) &&
+        list_length(consumer_desc) != AGE_GENERIC_SUM_PROPERTY_COUNT)
+    {
+        elog(ERROR, "invalid AGE Generic Join property aggregate descriptor");
     }
 
     custom_scan_tlist = build_generic_custom_scan_tlist(
         custom_plans, provider_descs,
         generic_consumer_first_scan_resno(consumer_kind),
         &exec_provider_descs);
+    if (consumer_kind == AGE_GENERIC_CONSUMER_SUM_PROPERTY ||
+        consumer_kind == AGE_GENERIC_CONSUMER_MIN_PROPERTY ||
+        consumer_kind == AGE_GENERIC_CONSUMER_MAX_PROPERTY ||
+        consumer_kind == AGE_GENERIC_CONSUMER_AVG_PROPERTY ||
+        consumer_kind == AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY ||
+        consumer_kind == AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY ||
+        consumer_kind == AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY ||
+        consumer_kind == AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY)
+    {
+        int provider_index = intVal(list_nth(
+            consumer_desc, AGE_GENERIC_SUM_PROPERTY_PROVIDER_INDEX));
+        List *exec_desc;
+        int properties_attno;
+
+        if (provider_index < 0 ||
+            provider_index >= list_length(exec_provider_descs))
+        {
+            elog(ERROR,
+                 "invalid AGE Generic Join property aggregate provider");
+        }
+        exec_desc = list_nth_node(List, exec_provider_descs, provider_index);
+        properties_attno = intVal(list_nth(
+            exec_desc, AGE_GENERIC_PROVIDER_DESC_PROPERTIES_ATTNO));
+        if (properties_attno <= 0)
+        {
+            elog(ERROR,
+                 "AGE Generic Join property aggregate provider does not "
+                 "expose properties");
+        }
+
+        consumer_desc = copyObject(consumer_desc);
+        lfirst(list_nth_cell(
+            consumer_desc, AGE_GENERIC_SUM_PROPERTY_PROPERTIES_ATTNO)) =
+            makeInteger(properties_attno);
+    }
     if (consumer_kind == AGE_GENERIC_CONSUMER_COUNT ||
         consumer_kind == AGE_GENERIC_CONSUMER_COUNT_DISTINCT_KEY)
     {
         custom_scan_tlist = build_wcoj_count_custom_scan_tlist(
             best_path->path.pathtarget, custom_scan_tlist);
+    }
+    else if (consumer_kind == AGE_GENERIC_CONSUMER_GROUP_COUNT ||
+             consumer_kind ==
+             AGE_GENERIC_CONSUMER_GROUP_COUNT_DISTINCT_KEY)
+    {
+        custom_scan_tlist = build_generic_group_count_custom_scan_tlist(
+            best_path->path.pathtarget, custom_scan_tlist);
+    }
+    else if (consumer_kind == AGE_GENERIC_CONSUMER_DISTINCT_KEY)
+    {
+        custom_scan_tlist = build_generic_distinct_key_custom_scan_tlist(
+            best_path->path.pathtarget, custom_scan_tlist);
+    }
+    else if (consumer_kind == AGE_GENERIC_CONSUMER_SUM_PROPERTY ||
+             consumer_kind == AGE_GENERIC_CONSUMER_MIN_PROPERTY ||
+             consumer_kind == AGE_GENERIC_CONSUMER_MAX_PROPERTY ||
+             consumer_kind == AGE_GENERIC_CONSUMER_AVG_PROPERTY)
+    {
+        custom_scan_tlist = build_wcoj_sum_property_custom_scan_tlist(
+            best_path->path.pathtarget, custom_scan_tlist);
+    }
+    else if (consumer_kind == AGE_GENERIC_CONSUMER_GROUP_SUM_PROPERTY ||
+             consumer_kind == AGE_GENERIC_CONSUMER_GROUP_MIN_PROPERTY ||
+             consumer_kind == AGE_GENERIC_CONSUMER_GROUP_MAX_PROPERTY ||
+             consumer_kind == AGE_GENERIC_CONSUMER_GROUP_AVG_PROPERTY)
+    {
+        custom_scan_tlist =
+            build_generic_group_sum_property_custom_scan_tlist(
+                best_path->path.pathtarget, custom_scan_tlist);
     }
     else if (consumer_kind == AGE_GENERIC_CONSUMER_EXISTS)
     {
@@ -18029,6 +19192,8 @@ plan_age_generic_join_path(PlannerInfo *root, RelOptInfo *rel,
                                  makeInteger(row_goal_source));
     cs->custom_private = lappend(cs->custom_private,
                                  makeInteger(distinct_variable));
+    cs->custom_private = lappend(cs->custom_private,
+                                 copyObject(consumer_desc));
     cs->custom_scan_tlist = custom_scan_tlist;
     cs->custom_relids = NULL;
     cs->methods = &age_generic_join_scan_methods;

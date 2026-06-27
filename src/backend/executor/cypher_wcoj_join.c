@@ -259,6 +259,9 @@ struct AgeWCOJJoinScanState
     int64 seek_calls;
     int64 posting_rows_scanned;
     int64 payload_rows_scanned;
+    int64 payload_main_rows_scanned;
+    int64 payload_delta_rows_scanned;
+    int64 payload_rows_after_survivor_filter;
     int64 payload_rows_matched;
     int64 payload_rows_fetched;
     int64 payload_scan_batches;
@@ -1591,6 +1594,7 @@ age_wcoj_payload_run_filter(int64 run_postings, int64 active_postings,
 
     state = filter_state->state;
     filter_state->run_postings = run_postings;
+    add_wcoj_counter(&state->payload_main_rows_scanned, run_postings);
     add_wcoj_counter(&state->payload_rows_scanned, run_postings);
     *known_empty = state->survivor_block_count <= 0;
     if (*known_empty)
@@ -1658,8 +1662,16 @@ prefetch_age_wcoj_adjacency_payloads(AgeWCOJPostingProvider *provider)
         AgeSourceBag *bag = tag;
         int survivor_index;
 
-        if (filter_state.run_postings <= 0 || !batch.payload_from_main)
+        if (!batch.payload_from_main)
+        {
+            increment_wcoj_counter(&state->payload_delta_rows_scanned);
             increment_wcoj_counter(&state->payload_rows_scanned);
+        }
+        else if (filter_state.run_postings <= 0)
+        {
+            increment_wcoj_counter(&state->payload_main_rows_scanned);
+            increment_wcoj_counter(&state->payload_rows_scanned);
+        }
         bag_index = age_binding_find_source_bag_index(
             provider->source_bags, provider->source_bag_count, bag);
         if (bag_index < 0)
@@ -1669,6 +1681,8 @@ prefetch_age_wcoj_adjacency_payloads(AgeWCOJPostingProvider *provider)
         if (survivor_index < 0)
             continue;
 
+        increment_wcoj_counter(
+            &state->payload_rows_after_survivor_filter);
         increment_wcoj_counter(&state->payload_rows_matched);
         increment_wcoj_counter(&state->payload_rows_fetched);
         if (!age_wcoj_adjacency_payload_passes_local_qual(
@@ -5357,6 +5371,13 @@ explain_age_wcoj_join_scan(CustomScanState *node, List *ancestors,
                                state->payload_scan_restarts_avoided, es);
         ExplainPropertyInteger("Payload Rows Scanned", NULL,
                                state->payload_rows_scanned, es);
+        ExplainPropertyInteger("Payload Main Rows Scanned", NULL,
+                               state->payload_main_rows_scanned, es);
+        ExplainPropertyInteger("Payload Delta Rows Scanned", NULL,
+                               state->payload_delta_rows_scanned, es);
+        ExplainPropertyInteger("Payload Rows After Survivor Filter", NULL,
+                               state->payload_rows_after_survivor_filter,
+                               es);
         ExplainPropertyInteger("Payload Rows Matched", NULL,
                                state->payload_rows_matched, es);
         ExplainPropertyInteger("Payload Rows Fetched", NULL,
