@@ -200,3 +200,78 @@ pre-batching baseline from `wcoj_survivor_batch_results.md`.  Override
 `WCOJ_ROADMAP_DENSE_BASELINE_MS` when measuring a fresh baseline on the same
 hardware.  Use `WCOJ_ROADMAP_SKIP_COMPLETION_SETUP=1` or
 `WCOJ_ROADMAP_SKIP_SEMIJOIN_SETUP=1` to reuse existing benchmark graphs.
+
+## WCOJ/Generic Join roadmap gate umbrella
+
+`verify_wcoj_generic_join_roadmap_gates.sh` runs the bounded roadmap gate set
+with one command: WCOJ roadmap gates, WCOJ semiring consumers, Generic Join
+preservation, and the Generic reduction matrix.  It delegates to the individual
+scripts in that order, prints short start/ok lines with each gate's final
+summary, and fails fast at the first missed gate.
+
+```sh
+PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
+PGHOST=/tmp PGPORT=55432 PGDATABASE=agebench \
+  tools/perf/verify_wcoj_generic_join_roadmap_gates.sh
+```
+
+The umbrella does not replace the existing knobs.  Keep using the individual
+environment overrides for `PG_CONFIG`, `PGPORT`, fanout/size values, skip-setup
+flags, and debug-PG allow flags such as `WCOJ_ROADMAP_ALLOW_DEBUG_PG=1`,
+`WCOJ_SEMIRING_ALLOW_DEBUG_PG=1`, `GENERIC_JOIN_PRESERVE_ALLOW_DEBUG_PG=1`, and
+`GENERIC_REDUCTION_ALLOW_DEBUG_PG=1`.  Full per-gate output is captured under
+`ROADMAP_GATES_LOG_DIR` when set; otherwise the temporary log directory is
+cleaned up after success and retained on failure.
+
+## WCOJ semiring consumer gates
+
+`verify_wcoj_semiring_gates.sh` builds a compact direct-WCOJ graph whose three
+edge bags imply `fanout^3` flat rows.  The default `fanout=500` creates
+125,000,000 candidate combinations from only 1,500 edge rows, then verifies
+that count, count-distinct, sum, grouped sum, LIMIT, and EXISTS use consumer
+arithmetic or row goals instead of materializing the flat product.  The gate
+also checks source-bag and factor-memory telemetry.
+
+```sh
+PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
+PGHOST=/tmp PGPORT=55432 PGDATABASE=agebench \
+  tools/perf/verify_wcoj_semiring_gates.sh
+```
+
+Override `WCOJ_SEMIRING_FANOUT` to scale the implied flat cardinality, and use
+`WCOJ_SEMIRING_SKIP_SETUP=1` to reuse an existing `wcoj_bench_semiring` graph.
+
+## Generic Join preservation gates
+
+`verify_generic_join_preservation.sh` builds a four-cycle plus two independent
+leaf tails and verifies that cyclic components still choose Generic Join,
+preserve key-only output materialization, reuse prefix ranges, and apply
+multi-tail separator pruning.
+
+```sh
+PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
+PGHOST=/tmp PGPORT=55432 PGDATABASE=agebench \
+  tools/perf/verify_generic_join_preservation.sh
+```
+
+Set `GENERIC_JOIN_PRESERVE_CYCLE_SIZE` to scale the cyclic core, or
+`GENERIC_JOIN_PRESERVE_SKIP_SETUP=1` to reuse an existing
+`generic_join_preserve` graph.
+
+## Generic reduction matrix gate
+
+`verify_generic_reduction_matrix.sh` builds an acyclic chain with a selective
+leaf on the A side.  The B endpoint remains a one-row separator, so the planner
+admits Generic Join for the high-pressure chain, and the leaf-peel semijoin
+order should reduce retained provider rows to at most 1% of the original
+provider rows before enumeration.
+
+```sh
+PG_CONFIG=/Users/emotionbug/IdeaProjects/postgres_proj/pg18release/bin/pg_config \
+PGHOST=/tmp PGPORT=55432 PGDATABASE=agebench \
+  tools/perf/verify_generic_reduction_matrix.sh
+```
+
+Set `GENERIC_REDUCTION_FANOUT` to scale the rejected domains, or
+`GENERIC_REDUCTION_SKIP_SETUP=1` to reuse an existing
+`generic_reduction_matrix` graph.

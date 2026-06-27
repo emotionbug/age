@@ -105,14 +105,15 @@ SELECT * FROM cypher('wcoj_lowering', $$
            (:H {tag: 101, source_id: 1}),
            (:H {tag: 102, source_id: 1}),
            (:H {tag: 103, source_id: 1}),
-           (s1)-[:E {keep: true}]->(t10), (s1)-[:E]->(t10),
-           (s2)-[:E {keep: true}]->(t10),
-           (s2)-[:E {keep: true}]->(t10),
-           (s2)-[:E {keep: false}]->(t10),
-           (s3)-[:E {keep: true}]->(t10),
-           (s3)-[:E {keep: true}]->(t10),
-           (s3)-[:E {keep: true}]->(t10),
-           (s3)-[:E {keep: false}]->(t10)
+           (s1)-[:E {keep: true, score: 10}]->(t10),
+           (s1)-[:E {score: 10}]->(t10),
+           (s2)-[:E {keep: true, score: 20}]->(t10),
+           (s2)-[:E {keep: true, score: 20}]->(t10),
+           (s2)-[:E {keep: false, score: 20}]->(t10),
+           (s3)-[:E {keep: true, score: 30}]->(t10),
+           (s3)-[:E {keep: true, score: 30}]->(t10),
+           (s3)-[:E {keep: true, score: 30}]->(t10),
+           (s3)-[:E {keep: false, score: 30}]->(t10)
 $$) AS (z agtype);
 CREATE INDEX wcoj_lowering_adj
 ON wcoj_lowering."E" USING age_adjacency(start_id, id, end_id);
@@ -278,7 +279,12 @@ DECLARE
     property_flat_rows_avoided boolean := false;
     factorized_source_rows boolean := false;
     factorized_keys boolean := false;
+    factorized_source_bag_rows boolean := false;
+    factorized_source_bag_keys boolean := false;
+    factorized_source_bag_bytes boolean := false;
+    factorized_source_bag_reserve boolean := false;
     factorized_builds boolean := false;
+    factorized_peak_factor_memory boolean := false;
     factorized_candidate_flat_rows boolean := false;
     factorized_combinations boolean := false;
     factorized_flat_rows_avoided boolean := false;
@@ -339,8 +345,18 @@ BEGIN
             plan_text LIKE '%Source Rows Scanned: 5%';
         factorized_keys := factorized_keys OR
             plan_text LIKE '%Distinct Source Keys: 3%';
+        factorized_source_bag_rows := factorized_source_bag_rows OR
+            plan_text LIKE '%Source Bag Rows: 5%';
+        factorized_source_bag_keys := factorized_source_bag_keys OR
+            plan_text LIKE '%Source Bag Keys: 3%';
+        factorized_source_bag_bytes := factorized_source_bag_bytes OR
+            plan_text ~ 'Source Bag Bytes: [1-9][0-9]* bytes';
+        factorized_source_bag_reserve := factorized_source_bag_reserve OR
+            plan_text ~ 'Source Bag Memory Reserve: [1-9][0-9]* bytes';
         factorized_builds := factorized_builds OR
             plan_text LIKE '%Intersection Builds: 3%';
+        factorized_peak_factor_memory := factorized_peak_factor_memory OR
+            plan_text ~ 'Peak Factor Memory: [1-9][0-9]* bytes';
         factorized_candidate_flat_rows := factorized_candidate_flat_rows OR
             plan_text LIKE '%Candidate Flat Rows: 72%';
         factorized_combinations := factorized_combinations OR
@@ -357,7 +373,11 @@ BEGIN
         RAISE EXCEPTION 'direct provider did not filter edge payloads early';
     END IF;
     IF NOT factorized_source_rows OR NOT factorized_keys OR
-       NOT factorized_builds OR NOT factorized_candidate_flat_rows OR
+       NOT factorized_source_bag_rows OR NOT factorized_source_bag_keys OR
+       NOT factorized_source_bag_bytes OR
+       NOT factorized_source_bag_reserve OR NOT factorized_builds OR
+       NOT factorized_peak_factor_memory OR
+       NOT factorized_candidate_flat_rows OR
        NOT factorized_combinations OR NOT factorized_flat_rows_avoided THEN
         RAISE EXCEPTION 'duplicate source-key factorization was not observed';
     END IF;
@@ -577,6 +597,235 @@ BEGIN
     RAISE NOTICE 'wcoj count consumer telemetry verified';
 END
 $wcoj_count_consumer_telemetry$;
+
+SELECT total FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+
+DO $wcoj_sum_property_consumer_telemetry$
+DECLARE
+    plan_text text;
+    has_wcoj boolean := false;
+    has_sum_consumer boolean := false;
+    has_batched_payload boolean := false;
+    has_flat_rows_avoided boolean := false;
+    has_sum_input_rows boolean := false;
+    has_one_row_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN
+        SELECT plan::text
+        FROM cypher('wcoj_lowering', $$
+            EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+                  (s2:S {id: 2})-[e2:E]->(t),
+                  (s3:S {id: 3})-[e3:E]->(t)
+            RETURN sum(e1.score) AS total
+        $$) AS (plan agtype)
+    LOOP
+        has_wcoj := has_wcoj OR
+            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
+        has_sum_consumer := has_sum_consumer OR
+            plan_text LIKE '%WCOJ Consumer: sum(property)%';
+        has_batched_payload := has_batched_payload OR
+            plan_text LIKE '%Batched Payload Materialization: true%';
+        has_flat_rows_avoided := has_flat_rows_avoided OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 24%';
+        has_sum_input_rows := has_sum_input_rows OR
+            plan_text LIKE '%Sum Property Input Rows: 24%';
+        has_one_row_emitted := has_one_row_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_wcoj OR NOT has_sum_consumer OR
+       NOT has_batched_payload OR NOT has_flat_rows_avoided OR
+       NOT has_sum_input_rows OR NOT has_one_row_emitted THEN
+        RAISE EXCEPTION
+            'WCOJ sum-property consumer telemetry was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj sum-property consumer telemetry verified';
+END
+$wcoj_sum_property_consumer_telemetry$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_sum_property_binary ON COMMIT DROP AS
+SELECT total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_sum_property_direct ON COMMIT DROP AS
+SELECT total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN sum(e1.score) AS total
+$$) AS (total agtype);
+
+SELECT (SELECT total FROM wcoj_sum_property_binary) AS binary_total,
+       (SELECT total FROM wcoj_sum_property_direct) AS direct_total,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_sum_property_binary
+             EXCEPT ALL TABLE wcoj_sum_property_direct)
+            UNION ALL
+            (TABLE wcoj_sum_property_direct
+             EXCEPT ALL TABLE wcoj_sum_property_binary)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+SELECT key, total FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype)
+ORDER BY key;
+
+DO $wcoj_group_sum_property_consumer_telemetry$
+DECLARE
+    plan_text text;
+    has_wcoj boolean := false;
+    has_group_sum_consumer boolean := false;
+    has_batched_payload boolean := false;
+    has_flat_rows_avoided boolean := false;
+    has_sum_provider boolean := false;
+    has_sum_input_rows boolean := false;
+    has_one_row_emitted boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('wcoj_lowering', $cypher$
+            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+                  (s2:S {id: 2})-[e2:E]->(t),
+                  (s3:S {id: 3})-[e3:E]->(t)
+            RETURN id(t) AS key, sum(e1.score) AS total
+        $cypher$) AS (key agtype, total agtype)
+    $plan$
+    LOOP
+        has_wcoj := has_wcoj OR
+            plan_text LIKE '%Custom Scan (AGE WCOJ Multiway Join)%';
+        has_group_sum_consumer := has_group_sum_consumer OR
+            plan_text LIKE '%WCOJ Consumer: group sum(property)%';
+        has_batched_payload := has_batched_payload OR
+            plan_text LIKE '%Batched Payload Materialization: true%';
+        has_flat_rows_avoided := has_flat_rows_avoided OR
+            plan_text LIKE '%Consumer Flat Rows Avoided: 24%';
+        has_sum_provider := has_sum_provider OR
+            plan_text LIKE '%Sum Property Provider: 1%';
+        has_sum_input_rows := has_sum_input_rows OR
+            plan_text LIKE '%Sum Property Input Rows: 24%';
+        has_one_row_emitted := has_one_row_emitted OR
+            plan_text LIKE '%Rows Emitted: 1%';
+    END LOOP;
+
+    IF NOT has_wcoj OR NOT has_group_sum_consumer OR
+       NOT has_batched_payload OR NOT has_flat_rows_avoided OR
+       NOT has_sum_provider OR NOT has_sum_input_rows OR
+       NOT has_one_row_emitted THEN
+        RAISE EXCEPTION
+            'WCOJ group sum-property consumer telemetry was not observed';
+    END IF;
+    RAISE NOTICE 'wcoj group sum-property consumer telemetry verified';
+END
+$wcoj_group_sum_property_consumer_telemetry$;
+
+BEGIN;
+SET LOCAL age.enable_wcoj = off;
+CREATE TEMP TABLE wcoj_group_sum_property_binary ON COMMIT DROP AS
+SELECT key, total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+
+SET LOCAL age.enable_wcoj = on;
+SET LOCAL age.wcoj_engine = 'merge';
+SET LOCAL enable_nestloop = off;
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_mergejoin = off;
+CREATE TEMP TABLE wcoj_group_sum_property_direct ON COMMIT DROP AS
+SELECT key, total
+FROM cypher('wcoj_lowering', $$
+    MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+          (s2:S {id: 2})-[e2:E]->(t),
+          (s3:S {id: 3})-[e3:E]->(t)
+    RETURN id(t) AS key, sum(e1.score) AS total
+$$) AS (key agtype, total agtype);
+
+SELECT (SELECT count(*) FROM wcoj_group_sum_property_binary) AS binary_rows,
+       (SELECT count(*) FROM wcoj_group_sum_property_direct) AS direct_rows,
+       (SELECT count(*)
+        FROM (
+            (TABLE wcoj_group_sum_property_binary
+             EXCEPT ALL TABLE wcoj_group_sum_property_direct)
+            UNION ALL
+            (TABLE wcoj_group_sum_property_direct
+             EXCEPT ALL TABLE wcoj_group_sum_property_binary)
+        ) diff) AS diff_rows;
+ROLLBACK;
+
+DO $wcoj_group_sum_property_filter_fallback$
+DECLARE
+    plan_text text;
+    has_group_sum_consumer boolean := false;
+BEGIN
+    PERFORM set_config('age.enable_wcoj', 'on', true);
+    PERFORM set_config('age.wcoj_engine', 'merge', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_mergejoin', 'off', true);
+
+    FOR plan_text IN EXECUTE $plan$
+        EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+        SELECT *
+        FROM cypher('wcoj_lowering', $cypher$
+            MATCH (s1:S {id: 1})-[e1:E]->(t:T),
+                  (s2:S {id: 2})-[e2:E]->(t),
+                  (s3:S {id: 3})-[e3:E]->(t)
+            WHERE e1.score >= 10
+            RETURN id(t) AS key, sum(e1.score) AS total
+        $cypher$) AS (key agtype, total agtype)
+    $plan$
+    LOOP
+        has_group_sum_consumer := has_group_sum_consumer OR
+            plan_text LIKE '%WCOJ Consumer: group sum(property)%';
+    END LOOP;
+
+    IF has_group_sum_consumer THEN
+        RAISE EXCEPTION
+            'WCOJ group sum-property consumer was selected for filtered input';
+    END IF;
+    RAISE NOTICE 'wcoj group sum-property filtered fallback verified';
+END
+$wcoj_group_sum_property_filter_fallback$;
 
 SELECT total FROM cypher('wcoj_lowering', $$
     MATCH (s1:S {id: 1})-[e1:E]->(t:T),
@@ -1873,7 +2122,11 @@ DO $wcoj_acyclic_semijoin_plan$
 DECLARE
     plan_text text;
     has_generic boolean := false;
+    has_reduction_shape boolean := false;
+    has_reduction_order boolean := false;
+    has_reduction_order_edges boolean := false;
     has_semijoin_passes boolean := false;
+    has_reduction_order_applied boolean := false;
     has_rows_removed boolean := false;
     has_provider_rows_after boolean := false;
     has_final_domain_keys boolean := false;
@@ -1897,8 +2150,16 @@ BEGIN
     LOOP
         has_generic := has_generic OR
             plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_reduction_shape := has_reduction_shape OR
+            plan_text LIKE '%Reduction Shape: alpha-acyclic%';
+        has_reduction_order := has_reduction_order OR
+            plan_text LIKE '%Reduction Order: leaf-peel%';
+        has_reduction_order_edges := has_reduction_order_edges OR
+            plan_text LIKE '%Reduction Order Edges: 3%';
         has_semijoin_passes := has_semijoin_passes OR
             plan_text LIKE '%Semijoin Reduction Passes: 2%';
+        has_reduction_order_applied := has_reduction_order_applied OR
+            plan_text LIKE '%Reduction Order Applied: true%';
         has_rows_removed := has_rows_removed OR
             plan_text LIKE '%Semijoin Rows Removed: 508%';
         has_provider_rows_after := has_provider_rows_after OR
@@ -1911,7 +2172,9 @@ BEGIN
             plan_text LIKE '%Spill Bytes: 0 bytes%';
     END LOOP;
 
-    IF NOT has_generic OR NOT has_semijoin_passes OR
+    IF NOT has_generic OR NOT has_reduction_shape OR
+       NOT has_reduction_order OR NOT has_reduction_order_edges OR
+       NOT has_semijoin_passes OR NOT has_reduction_order_applied OR
        NOT has_rows_removed OR NOT has_provider_rows_after OR
        NOT has_final_domain_keys OR NOT has_rows_emitted OR
        NOT has_spill_bytes THEN
@@ -2003,7 +2266,11 @@ DO $wcoj_tree_semijoin_plan$
 DECLARE
     plan_text text;
     has_generic boolean := false;
+    has_reduction_shape boolean := false;
+    has_reduction_order boolean := false;
+    has_reduction_order_edges boolean := false;
     has_semijoin_passes boolean := false;
+    has_reduction_order_applied boolean := false;
     has_rows_removed boolean := false;
     has_provider_rows_after boolean := false;
     has_final_domain_keys boolean := false;
@@ -2028,8 +2295,16 @@ BEGIN
     LOOP
         has_generic := has_generic OR
             plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_reduction_shape := has_reduction_shape OR
+            plan_text LIKE '%Reduction Shape: alpha-acyclic%';
+        has_reduction_order := has_reduction_order OR
+            plan_text LIKE '%Reduction Order: leaf-peel%';
+        has_reduction_order_edges := has_reduction_order_edges OR
+            plan_text LIKE '%Reduction Order Edges: 4%';
         has_semijoin_passes := has_semijoin_passes OR
             plan_text LIKE '%Semijoin Reduction Passes: 2%';
+        has_reduction_order_applied := has_reduction_order_applied OR
+            plan_text LIKE '%Reduction Order Applied: true%';
         has_rows_removed := has_rows_removed OR
             plan_text LIKE '%Semijoin Rows Removed: 508%';
         has_provider_rows_after := has_provider_rows_after OR
@@ -2040,7 +2315,9 @@ BEGIN
             plan_text LIKE '%Rows Emitted: 128%';
     END LOOP;
 
-    IF NOT has_generic OR NOT has_semijoin_passes OR
+    IF NOT has_generic OR NOT has_reduction_shape OR
+       NOT has_reduction_order OR NOT has_reduction_order_edges OR
+       NOT has_semijoin_passes OR NOT has_reduction_order_applied OR
        NOT has_rows_removed OR NOT has_provider_rows_after OR
        NOT has_final_domain_keys OR NOT has_rows_emitted THEN
         RAISE EXCEPTION 'branching Generic Join semijoin reduction was not observed';
@@ -2157,7 +2434,11 @@ DO $wcoj_snowflake_semijoin_plan$
 DECLARE
     plan_text text;
     has_generic boolean := false;
+    has_reduction_shape boolean := false;
+    has_reduction_order boolean := false;
+    has_reduction_order_edges boolean := false;
     has_semijoin_passes boolean := false;
+    has_reduction_order_applied boolean := false;
     has_rows_removed boolean := false;
     has_provider_rows_after boolean := false;
     has_final_domain_keys boolean := false;
@@ -2185,8 +2466,16 @@ BEGIN
     LOOP
         has_generic := has_generic OR
             plan_text LIKE '%Custom Scan (AGE Generic Multiway Join)%';
+        has_reduction_shape := has_reduction_shape OR
+            plan_text LIKE '%Reduction Shape: alpha-acyclic%';
+        has_reduction_order := has_reduction_order OR
+            plan_text LIKE '%Reduction Order: leaf-peel%';
+        has_reduction_order_edges := has_reduction_order_edges OR
+            plan_text LIKE '%Reduction Order Edges: 6%';
         has_semijoin_passes := has_semijoin_passes OR
             plan_text LIKE '%Semijoin Reduction Passes: 2%';
+        has_reduction_order_applied := has_reduction_order_applied OR
+            plan_text LIKE '%Reduction Order Applied: true%';
         has_rows_removed := has_rows_removed OR
             plan_text LIKE '%Semijoin Rows Removed: 508%';
         has_provider_rows_after := has_provider_rows_after OR
@@ -2197,7 +2486,9 @@ BEGIN
             plan_text LIKE '%Rows Emitted: 128%';
     END LOOP;
 
-    IF NOT has_generic OR NOT has_semijoin_passes OR
+    IF NOT has_generic OR NOT has_reduction_shape OR
+       NOT has_reduction_order OR NOT has_reduction_order_edges OR
+       NOT has_semijoin_passes OR NOT has_reduction_order_applied OR
        NOT has_rows_removed OR NOT has_provider_rows_after OR
        NOT has_final_domain_keys OR NOT has_rows_emitted THEN
         RAISE EXCEPTION 'snowflake Generic Join semijoin reduction was not observed';
